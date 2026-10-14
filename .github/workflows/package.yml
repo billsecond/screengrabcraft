@@ -122,7 +122,8 @@ jobs:
           if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').'ScreenGrabCraft Editor') { throw 'the editor is not offered in Default apps' }
           $sgcraft = (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\.sgcraft').'(default)'
           if ($sgcraft -ne 'ScreenGrabCraft.Project') { throw ".sgcraft is '$sgcraft', expected ScreenGrabCraft.Project" }
-          if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\.png\OpenWithProgids').'ScreenGrabCraft.Png') { throw 'the editor is not in Open with for .png' }
+          # An Open with entry is a value whose data is empty: test that the value is there.
+          if ($null -eq (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\.png\OpenWithProgids').PSObject.Properties['ScreenGrabCraft.Png']) { throw 'the editor is not in Open with for .png' }
 
           $env:SCREENGRABCRAFT_NO_PREFS = '1'
           Start-Process (Join-Path $dir 'screengrabcraft.exe') -ArgumentList '--background'
