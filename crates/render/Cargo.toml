@@ -1,0 +1,26 @@
+[package]
+name = "screengrabcraft-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Drawing ScreenGrabCraft's annotations onto the picture, the picture effects, and reading and writing pictures and projects"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+tiny-skia = { workspace = true }
+ab_glyph = { workspace = true }
+image = { workspace = true }
+gif = { workspace = true }
+flate2 = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

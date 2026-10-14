@@ -1,0 +1,76 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*", "xtask"]
+default-members = ["crates/*", "apps/screengrabcraft", "apps/screengrabcraft-editor", "apps/screengrabcraft-cli", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.90"
+repository = "https://github.com/billsecond/screengrabcraft"
+
+[workspace.dependencies]
+# internal
+screengrabcraft-model = { path = "crates/model" }
+screengrabcraft-render = { path = "crates/render" }
+screengrabcraft-capture = { path = "crates/capture" }
+screengrabcraft-engine = { path = "crates/engine" }
+screengrabcraft-ui = { path = "crates/ui" }
+screengrabcraft-desktop = { path = "crates/desktop" }
+
+# foundation
+thiserror = "2"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+log = "0.4"
+proptest = "1"
+base64 = "0.22"
+getrandom = "0.3"
+
+# Pictures: decoding what is opened or pasted, encoding what is saved. Rust all the way down.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+gif = "0.14"
+# Drawing the annotations onto the picture (paths, strokes, gradients, anti-aliasing): a
+# port of a subset of Skia, Rust only, the browser build included.
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
+# Glyph outlines from the bundled fonts, for text the annotations carry.
+ab_glyph = "0.2.32"
+# Deflate for the PDF writer (the backend written in Rust).
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# ui
+egui = "0.36"
+egui_extras = { version = "0.36", default-features = false }
+eframe = { version = "0.36", default-features = false }
+egui_kittest = "0.36"
+
+# desktop only
+rfd = "0.17"
+pollster = "0.4"
+arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
+global-hotkey = "0.8.0"
+dirs = "7"
+webbrowser = "1.2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 0

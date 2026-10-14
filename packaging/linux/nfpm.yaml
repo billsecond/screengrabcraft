@@ -1,0 +1,96 @@
+# .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh, which stages
+# the file tree, substitutes its path for ${STAGE} (nfpm doesn't expand env vars in `src`) and
+# exports VERSION, NFPM_ARCH and SCREENGRABCRAFT_MAINTAINER.
+#
+#   nfpm package -f packaging/linux/nfpm.yaml -p deb -t dist/release/
+name: screengrabcraft
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${VERSION}
+# semver: 0.2.0-rc.1 becomes 0.2.0~rc.1 in deb/rpm, so pre-releases sort before the release.
+version_schema: semver
+release: 1
+section: graphics
+priority: optional
+maintainer: ${SCREENGRABCRAFT_MAINTAINER}
+vendor: ScreenGrabCraft contributors
+homepage: https://github.com/billsecond/screengrabcraft
+license: MIT OR Apache-2.0
+description: |-
+  Open-source screen capture and annotation suite
+  A capture service waits in the system tray from sign-in: Print Screen and the
+  other capture shortcuts take a region, a window, the whole screen, a scrolling
+  page or an animated GIF, and ScreenGrabCraft Editor marks the capture up with
+  arrows, callouts, highlights, blur and text. Includes screengrabcraft-cli.
+
+  The capture service starts at sign-in through /etc/xdg/autostart; a systemd
+  user unit (screengrabcraft.service) is installed as an alternative, not
+  enabled. The tray icon uses the D-Bus StatusNotifierItem protocol: KDE Plasma,
+  Xfce, Cinnamon and MATE show it; GNOME needs the AppIndicator extension. On
+  Wayland, captures go through xdg-desktop-portal.
+
+# The binaries link only glibc and libgcc_s directly. Windowing (X11/Wayland, xkbcommon) and the
+# GPU (Vulkan, EGL/GL) are loaded at runtime, so they are dependencies/recommendations here
+# rather than ELF NEEDED entries. libxkbcommon-x11 is a dependency, not a recommendation: on an
+# X11 session a window can't start without it (found with MailCraft, whose window is built the
+# same way). xdg-desktop-portal (and the desktop's portal backend) takes screenshots on Wayland
+# and shows the file dialogs.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.35)
+      - libgcc-s1
+      - libxkbcommon0
+      - libxkbcommon-x11-0
+      - libvulkan1 | libegl1
+    recommends:
+      - libwayland-client0
+      - libx11-6
+      - libx11-xcb1
+      - libxcursor1
+      - libxi6
+      - libxrandr2
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+  rpm:
+    depends:
+      - libxkbcommon
+      - libxkbcommon-x11
+      - (vulkan-loader or libglvnd-egl)
+    recommends:
+      - libwayland-client
+      - libX11
+      - libXcursor
+      - libXi
+      - libXrandr
+      - mesa-vulkan-drivers
+      - xdg-desktop-portal
+
+contents:
+  - src: ${STAGE}/usr/bin/screengrabcraft
+    dst: /usr/bin/screengrabcraft
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/bin/screengrabcraft-editor
+    dst: /usr/bin/screengrabcraft-editor
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/bin/screengrabcraft-cli
+    dst: /usr/bin/screengrabcraft-cli
+    file_info: { mode: 0755 }
+  - src: ${STAGE}/usr/share/
+    dst: /usr/share/
+    type: tree
+  # The systemd user unit: installed, not enabled.
+  - src: ${STAGE}/usr/lib/systemd/user/screengrabcraft.service
+    dst: /usr/lib/systemd/user/screengrabcraft.service
+    file_info: { mode: 0644 }
+  # Started at every sign-in. A file in /etc, so a conffile (deb) / %config(noreplace) (rpm): an
+  # administrator's edit survives upgrades. TryExec makes desktops skip it once the program is
+  # gone. Each person turns it off with an entry of the same name in ~/.config/autostart.
+  - src: ${STAGE}/etc/xdg/autostart/io.github.billsecond.screengrabcraft.desktop
+    dst: /etc/xdg/autostart/io.github.billsecond.screengrabcraft.desktop
+    type: config|noreplace
+    file_info: { mode: 0644 }
+
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  postremove: packaging/linux/postinst.sh

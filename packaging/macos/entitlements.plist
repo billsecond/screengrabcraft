@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for both ScreenGrabCraft apps. Deliberately empty: the apps are
+     pure Rust, load no unsigned code, need no JIT, and are not sandboxed (they save captures in
+     Pictures/ScreenGrabCraft and open files by path, from the command line and drag-and-drop).
+     Capturing the screen needs the owner's Screen Recording permission (System Settings › Privacy
+     & Security), which is not an entitlement. Add exceptions here only with a reason in a
+     comment. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

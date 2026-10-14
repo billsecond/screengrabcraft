@@ -1,0 +1,22 @@
+[package]
+name = "screengrabcraft-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ScreenGrabCraft from the command line: captures, projects, editing commands, the service"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+screengrabcraft-engine = { workspace = true }
+screengrabcraft-capture = { workspace = true }
+screengrabcraft-desktop = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+# Icon, VERSIONINFO and a manifest (per-monitor DPI awareness, so captures are in real pixels).
+winresource = "0.1"

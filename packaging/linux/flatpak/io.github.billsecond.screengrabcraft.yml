@@ -1,0 +1,75 @@
+# Flatpak manifest for ScreenGrabCraft, ready for a Flathub submission.
+#
+# Flatpak builds run offline, so the crate sources must be vendored first. From the repo root:
+#
+#   curl -fsSLO https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
+#   python3 flatpak-cargo-generator.py Cargo.lock -o packaging/linux/flatpak/cargo-sources.json
+#   flatpak-builder --user --install --force-clean build-flatpak packaging/linux/flatpak/io.github.billsecond.screengrabcraft.yml
+#   flatpak run io.github.billsecond.screengrabcraft
+#
+# One Flatpak holds the three programs: `flatpak run io.github.billsecond.screengrabcraft` starts
+# the capture service; the editor's desktop entry (io.github.billsecond.screengrabcraft.editor,
+# exported because its name starts with the app id) runs screengrabcraft-editor in the same
+# sandbox. Starting at sign-in goes through the Background portal (the app asks for it), not an
+# autostart file installed here.
+#
+# For Flathub, replace the `dir` source with a `git` source pinned to a release tag and commit.
+# The release's .flatpak bundles come from io.github.billsecond.screengrabcraft.bundle.yml instead (see there);
+# keep runtime, runtime-version, sdk and finish-args identical in both (packaging-lint checks this).
+id: io.github.billsecond.screengrabcraft
+runtime: org.freedesktop.Platform
+runtime-version: '25.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: screengrabcraft
+finish-args:
+  # Display: Wayland first; X11 only when no Wayland compositor is running.
+  - --socket=wayland
+  - --socket=fallback-x11
+  # X11 shared memory (MIT-SHM). Without it the X11 fallback is slow or fails.
+  - --share=ipc
+  # GPU access for the renderer.
+  - --device=dri
+  # Captures are saved in Pictures/ScreenGrabCraft. Documents is granted so pictures and
+  # projects passed by path (the command line, Open Recent, "Save" next to the original) work in
+  # the usual places; Open/Save dialogs go through the file-chooser portal.
+  - --filesystem=xdg-pictures
+  - --filesystem=xdg-documents
+  # The tray icon (D-Bus StatusNotifierItem): talk to the desktop's StatusNotifierWatcher.
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Deliberately not granted: network, home/host filesystem access. On Wayland, screenshots and
+  # the global capture shortcuts go through the desktop's portals, which need no permission here.
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+modules:
+  - name: screengrabcraft
+    buildsystem: simple
+    build-options:
+      env:
+        CARGO_HOME: /run/build/screengrabcraft/cargo
+        CARGO_NET_OFFLINE: 'true'
+    build-commands:
+      - cargo --offline build --release --locked -p screengrabcraft -p screengrabcraft-editor -p screengrabcraft-cli
+      - install -Dm755 target/release/screengrabcraft /app/bin/screengrabcraft
+      - install -Dm755 target/release/screengrabcraft-editor /app/bin/screengrabcraft-editor
+      - install -Dm755 target/release/screengrabcraft-cli /app/bin/screengrabcraft-cli
+      - install -Dm644 packaging/linux/io.github.billsecond.screengrabcraft.desktop /app/share/applications/io.github.billsecond.screengrabcraft.desktop
+      - install -Dm644 packaging/linux/io.github.billsecond.screengrabcraft.editor.desktop /app/share/applications/io.github.billsecond.screengrabcraft.editor.desktop
+      - install -Dm644 packaging/linux/io.github.billsecond.screengrabcraft.mime.xml /app/share/mime/packages/io.github.billsecond.screengrabcraft.xml
+      - mkdir -p /app/share/icons && cp -R assets/app-icon/hicolor /app/share/icons/
+      # The Flatpak is one app (the capture service's id), so only its metainfo goes in.
+      - >-
+        version=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml);
+        install -d /app/share/metainfo;
+        sed -e "s/@VERSION@/$version/" -e "s/@DATE@/$(date -u +%Y-%m-%d)/"
+        packaging/linux/io.github.billsecond.screengrabcraft.metainfo.xml.in > /app/share/metainfo/io.github.billsecond.screengrabcraft.metainfo.xml
+    sources:
+      - type: dir
+        path: ../../..
+        skip:
+          - target
+          - dist
+          - build-flatpak
+          - .flatpak-builder
+      - cargo-sources.json

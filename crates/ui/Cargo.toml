@@ -1,0 +1,21 @@
+[package]
+name = "screengrabcraft-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ScreenGrabCraft's egui interface: the annotation editor and the capture overlay"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+screengrabcraft-engine = { workspace = true }
+egui = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+egui_kittest = { workspace = true }

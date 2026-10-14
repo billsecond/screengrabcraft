@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenGrabCraft
+Comment=Capture service: the tray icon and the capture shortcuts (Print Screen)
+Exec=screengrabcraft --background
+TryExec=screengrabcraft
+Icon=io.github.billsecond.screengrabcraft
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

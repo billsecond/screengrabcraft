@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata of the capture service (software centres, Flathub). Template: package.sh
+     and the Flatpak manifests substitute @VERSION@ and @DATE@ from Cargo.toml and the build
+     date. The editor has its own: io.github.billsecond.screengrabcraft.editor.metainfo.xml.in. -->
+<component type="desktop-application">
+  <id>io.github.billsecond.screengrabcraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>ScreenGrabCraft</name>
+  <summary>Capture the screen, a window or a region and mark it up</summary>
+  <developer id="io.github.billsecond">
+    <name>ScreenGrabCraft contributors</name>
+  </developer>
+  <description>
+    <p>
+      ScreenGrabCraft is an open-source screen capture and annotation suite. It waits in the system tray from the moment you sign in: Print Screen and the other capture shortcuts take a region, a window, the whole screen, a scrolling page or an animated GIF, and the capture opens in ScreenGrabCraft Editor to be marked up with arrows, callouts, highlights, blur and text.
+    </p>
+    <p>
+      Captures are saved in Pictures/ScreenGrabCraft. On Wayland the desktop's screenshot portal takes the picture. The tray icon uses the StatusNotifierItem protocol, which KDE Plasma, Xfce, Cinnamon, MATE and most other desktops show; GNOME shows it with the AppIndicator extension.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.billsecond.screengrabcraft.desktop</launchable>
+  <icon type="stock">io.github.billsecond.screengrabcraft</icon>
+  <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
+  <url type="homepage">https://github.com/billsecond/screengrabcraft</url>
+  <url type="bugtracker">https://github.com/billsecond/screengrabcraft/issues</url>
+  <url type="help">https://github.com/billsecond/screengrabcraft</url>
+  <url type="contact">https://github.com/billsecond/screengrabcraft/issues</url>
+  <categories>
+    <category>Graphics</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>screenshot</keyword>
+    <keyword>capture</keyword>
+    <keyword>screen</keyword>
+    <keyword>grab</keyword>
+    <keyword>snip</keyword>
+    <keyword>record</keyword>
+    <keyword>gif</keyword>
+  </keywords>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <provides>
+    <binary>screengrabcraft</binary>
+    <binary>screengrabcraft-cli</binary>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

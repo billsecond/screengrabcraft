@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenGrabCraft Editor
+GenericName=Screenshot Editor
+Comment=Mark up screenshots and pictures with arrows, callouts, highlights, blur and text
+Exec=screengrabcraft-editor %F
+TryExec=screengrabcraft-editor
+Icon=io.github.billsecond.screengrabcraft.editor
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.billsecond.screengrabcraft.editor
+Categories=Graphics;2DGraphics;RasterGraphics;
+Keywords=screenshot;annotate;markup;arrow;callout;highlight;blur;image;editor;
+MimeType=image/png;image/jpeg;image/gif;image/bmp;image/webp;application/x-screengrabcraft-project;

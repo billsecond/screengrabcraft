@@ -1,0 +1,365 @@
+name: Package
+
+# Builds every release file with the scripts in packaging/ and uploads them as workflow artifacts
+# named release-* (release.yml gathers them into one GitHub release). Called by release.yml; it
+# doesn't run on its own. Everything here runs on GitHub's standard runners, so it works in any
+# repository, a fork included.
+#
+# File names follow the Craft apps' releases, which is what lets ArtCraft Launcher find them:
+#   screengrabcraft-<ver>-windows-{x64,x86,arm64}.msi, screengrabcraft-<ver>-windows-{x64,x86,arm64}-portable.zip
+#   screengrabcraft-<ver>-macos-universal.dmg, screengrabcraft-cli-<ver>-macos-universal.zip
+#   screengrabcraft-<ver>-linux-{x86_64,aarch64}.{AppImage,AppImage.zsync,deb,rpm,tar.gz,flatpak}
+#   screengrabcraft-<ver>-freebsd-x86_64.tar.gz, screengrabcraft-web-<ver>.zip
+
+on:
+  workflow_call:
+    inputs:
+      freebsd:
+        description: "Also build the FreeBSD tarball (in a VM; slow)"
+        type: boolean
+        required: false
+        default: true
+    secrets:
+      APPLE_CERTIFICATE:
+        required: false
+      APPLE_CERTIFICATE_PASSWORD:
+        required: false
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      WINDOWS_CERTIFICATE:
+        required: false
+      WINDOWS_CERTIFICATE_PASSWORD:
+        required: false
+      AZURE_TENANT_ID:
+        required: false
+      AZURE_CLIENT_ID:
+        required: false
+      AZURE_CLIENT_SECRET:
+        required: false
+      AZURE_SIGNING_ENDPOINT:
+        required: false
+      AZURE_SIGNING_ACCOUNT:
+        required: false
+      AZURE_CERT_PROFILE:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  WIX_VERSION: "5.0.2"
+  NFPM_VERSION: "2.47.0"
+
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, target: x86_64-pc-windows-msvc }
+          - { arch: x86, target: i686-pc-windows-msvc }
+          - { arch: arm64, target: aarch64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-windows-${{ matrix.arch }}
+      - name: Install WiX and its dialog and utility extensions
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version $env:WIX_VERSION
+          wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION" "WixToolset.Util.wixext/$env:WIX_VERSION"
+      - name: Build, sign and package (MSI and portable zip)
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
+      # The installer for real, on the one architecture this runner is: files in place, the
+      # program listed, the sign-in entry and the file types registered, the command-line program
+      # answering; then the capture service started the way a sign-in starts it, and an uninstall
+      # that must close it (supervisor included) and leave nothing behind.
+      - name: Install, check and uninstall the MSI (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $msi = (Get-Item dist/release/*.msi).FullName
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\install.log") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\install.log" -Tail 60; throw "install failed ($($p.ExitCode))" }
+          $dir = Join-Path $env:ProgramFiles 'ScreenGrabCraft'
+          foreach ($f in 'screengrabcraft.exe', 'screengrabcraft-editor.exe', 'screengrabcraft-cli.exe') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing in $dir" }
+          }
+          & (Join-Path $dir 'screengrabcraft-cli.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "screengrabcraft-cli --version exited $LASTEXITCODE" }
+          $entry = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }
+          if (-not $entry) { throw 'no installed-programs entry named ScreenGrabCraft' }
+          $entry | Format-List DisplayName, DisplayVersion, Publisher, PSChildName
+          $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+          $expected = "`"$dir\screengrabcraft.exe`" --background"
+          $run = (Get-ItemProperty $runKey).ScreenGrabCraft
+          if ($run -ne $expected) { throw "sign-in entry is '$run', expected '$expected'" }
+          if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').'ScreenGrabCraft Editor') { throw 'the editor is not offered in Default apps' }
+          $sgcraft = (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\.sgcraft').'(default)'
+          if ($sgcraft -ne 'ScreenGrabCraft.Project') { throw ".sgcraft is '$sgcraft', expected ScreenGrabCraft.Project" }
+          if (-not (Get-ItemProperty 'HKLM:\SOFTWARE\Classes\.png\OpenWithProgids').'ScreenGrabCraft.Png') { throw 'the editor is not in Open with for .png' }
+
+          $env:SCREENGRABCRAFT_NO_PREFS = '1'
+          Start-Process (Join-Path $dir 'screengrabcraft.exe') -ArgumentList '--background'
+          Start-Sleep -Seconds 5
+          Get-Process screengrabcraft -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', $entry.PSChildName, '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\uninstall.log") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\uninstall.log" -Tail 60; throw "uninstall failed ($($p.ExitCode))" }
+          if (Get-Process screengrabcraft -ErrorAction SilentlyContinue) { throw 'the capture service is still running after uninstall' }
+          if (Test-Path (Join-Path $dir 'screengrabcraft.exe')) { throw 'uninstall left screengrabcraft.exe behind' }
+          if ((Get-ItemProperty $runKey).ScreenGrabCraft) { throw 'uninstall left the sign-in entry behind' }
+          if ((Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').'ScreenGrabCraft Editor') { throw 'uninstall left the editor in Default apps' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-macos-universal
+      # With the signing secrets set, the apps are signed with the Developer ID and notarized;
+      # without them they are ad-hoc signed and the script says so.
+      - name: Import the signing certificate
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then bash packaging/macos/import-cert.sh; else echo "no signing certificate: ad-hoc signing"; fi
+      - name: Build, sign and package (both .apps in a .dmg, CLI zip)
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: bash packaging/macos/package.sh --arch universal
+      - name: Check the .dmg
+        run: |
+          dmg=$(ls dist/release/*-macos-universal.dmg)
+          mnt=$(mktemp -d)
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mnt"
+          [ -L "$mnt/Applications" ] || { echo "::error::no Applications link in the image"; hdiutil detach "$mnt"; exit 1; }
+          for name in "ScreenGrabCraft" "ScreenGrabCraft Editor"; do
+            app="$mnt/$name.app"
+            # The app as somebody gets it: the signature holds for the copy in the image too.
+            # When it doesn't, say what the image attached to which file.
+            if ! codesign --verify --deep --strict --verbose=4 "$app"; then
+              echo "::group::What is attached to the files in the image"
+              xattr -lr "$app" || true
+              ls -laO@ "$mnt" "$app" "$app/Contents" "$app/Contents/MacOS" "$app/Contents/Resources" || true
+              echo "::endgroup::"
+              hdiutil detach "$mnt" || true
+              exit 1
+            fi
+            plutil -p "$app/Contents/Info.plist" | grep -E "CFBundleIdentifier|CFBundleIconFile|CFBundleShortVersionString|LSUIElement"
+            lipo -info "$app/Contents/MacOS/$name"
+            "$app/Contents/MacOS/$name" --version
+          done
+          # The capture service is a menu-bar app: no Dock icon.
+          [ "$(plutil -extract LSUIElement raw -o - "$mnt/ScreenGrabCraft.app/Contents/Info.plist")" = true ] || { echo "::error::ScreenGrabCraft.app is not LSUIElement"; hdiutil detach "$mnt"; exit 1; }
+          hdiutil detach "$mnt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    # The oldest supported Ubuntu image: binaries built against its glibc (2.35) run on newer ones.
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-22.04, deb: amd64 }
+          - { arch: aarch64, runner: ubuntu-22.04-arm, deb: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system libraries and packaging tools
+        env:
+          DEB_ARCH: ${{ matrix.deb }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libgtk-3-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev \
+            desktop-file-utils appstream zsync file xvfb libxkbcommon-x11-0 libegl1 mesa-vulkan-drivers
+          curl -fsSL -o "$RUNNER_TEMP/nfpm.deb" \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${DEB_ARCH}.deb"
+          case "${NFPM_VERSION}:${DEB_ARCH}" in
+            2.47.0:amd64) expected=3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97 ;;
+            2.47.0:arm64) expected=27419eb382695a7942be8ad52259f3ec1854fad001b3ae4baed34ce39a223b97 ;;
+            *) echo "::error::no checksum for nfpm ${NFPM_VERSION} ${DEB_ARCH}"; exit 1 ;;
+          esac
+          echo "$expected  $RUNNER_TEMP/nfpm.deb" | sha256sum -c -
+          sudo dpkg -i "$RUNNER_TEMP/nfpm.deb"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-linux-${{ matrix.arch }}
+      - name: Build and package (AppImage, deb, rpm, tar.gz)
+        run: bash packaging/linux/package.sh
+      # The .deb for real: installed with its dependencies, the entries checked, the editor and
+      # the capture service (its tray process, with no tray host and no D-Bus session here)
+      # started on a virtual display, and removed again.
+      - name: Install, start and remove the .deb
+        run: |
+          dpkg-deb --info dist/release/*.deb
+          dpkg-deb --contents dist/release/*.deb
+          sudo apt-get install -y ./dist/release/*.deb
+          screengrabcraft-cli --version
+          desktop-file-validate /usr/share/applications/io.github.billsecond.screengrabcraft*.desktop \
+            /etc/xdg/autostart/io.github.billsecond.screengrabcraft.desktop
+          test -f /usr/lib/systemd/user/screengrabcraft.service
+          # Still running when the time was up (124) is what a program that started looks like.
+          stays_up() {
+            local what="$1" code=0
+            shift
+            SCREENGRABCRAFT_NO_PREFS=1 timeout 20 xvfb-run -a "$@" >"$RUNNER_TEMP/$what.log" 2>&1 || code=$?
+            if [ "$code" != 124 ]; then
+              cat "$RUNNER_TEMP/$what.log"
+              echo "::error::$* did not stay up (exit $code)"
+              exit 1
+            fi
+            echo "ok: $* stayed up"
+          }
+          stays_up editor screengrabcraft-editor
+          stays_up tray screengrabcraft --tray
+          sudo apt-get purge -y screengrabcraft
+          for f in /usr/bin/screengrabcraft /etc/xdg/autostart/io.github.billsecond.screengrabcraft.desktop; do
+            if [ -e "$f" ]; then echo "::error::removing the package left $f behind"; exit 1; fi
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  flatpak:
+    name: Flatpak ${{ matrix.arch }}
+    needs: [linux]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/linux
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder librsvg2-common
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build the Flatpak bundle
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -- dist/linux/screengrabcraft-*-linux-"$ARCH".tar.gz
+          if [ ! -f "$1" ]; then echo "::error::no tar.gz for $ARCH in dist/linux"; exit 1; fi
+          bash packaging/linux/flatpak-bundle.sh "$1"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak-${{ matrix.arch }}
+          path: dist/release/*.flatpak
+          if-no-files-found: error
+          retention-days: 30
+
+  freebsd:
+    name: FreeBSD x86_64
+    if: inputs.freebsd
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package in a FreeBSD VM
+        # A FreeBSD build that fails doesn't hold back the other platforms: the release then has
+        # no FreeBSD tarball, and this step shows as failed.
+        continue-on-error: true
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
+        with:
+          release: "15.1"
+          usesh: true
+          cpu: 4
+          mem: 12288
+          prepare: |
+            pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader fontconfig freetype2
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            git config --global --add safe.directory "*"
+            export CARGO_TARGET_DIR=/var/tmp/screengrabcraft-target CARGO_BUILD_JOBS=4
+            bash packaging/freebsd/package.sh
+            rm -rf /var/tmp/screengrabcraft-target
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-freebsd-x86_64
+          path: dist/release/*
+          if-no-files-found: warn
+          retention-days: 30
+
+  web:
+    name: Web (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-web
+      # A pinned trunk release (prebuilt); trunk fetches the matching wasm-bindgen itself.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - name: Build and zip the web editor
+        run: bash packaging/web/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-web
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30

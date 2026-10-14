@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- shared-mime-info: ScreenGrabCraft's project files. Installed as
+     share/mime/packages/io.github.billsecond.screengrabcraft.xml; the editor's desktop entry
+     opens the type. A project is JSON, so programs for JSON are offered for it too. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-screengrabcraft-project">
+    <comment>ScreenGrabCraft project</comment>
+    <sub-class-of type="application/json"/>
+    <generic-icon name="image-x-generic"/>
+    <glob pattern="*.sgcraft"/>
+  </mime-type>
+</mime-info>

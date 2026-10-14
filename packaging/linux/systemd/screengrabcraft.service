@@ -1,0 +1,23 @@
+# systemd user unit for the ScreenGrabCraft capture service: the alternative to the XDG autostart
+# entry (/etc/xdg/autostart/io.github.billsecond.screengrabcraft.desktop) for sessions managed by
+# systemd. Installed but not enabled by the .deb and .rpm. To use it instead of the autostart
+# entry, turn "Start at sign-in" off in ScreenGrabCraft's settings, then:
+#
+#   systemctl --user enable --now screengrabcraft.service
+#
+# systemd supervises here, so it runs the tray process directly (--tray), not the supervisor that
+# the autostart entry starts (--background).
+[Unit]
+Description=ScreenGrabCraft capture service (tray icon and capture shortcuts)
+Documentation=https://github.com/billsecond/screengrabcraft
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/screengrabcraft --tray
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

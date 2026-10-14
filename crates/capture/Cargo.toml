@@ -1,0 +1,40 @@
+[package]
+name = "screengrabcraft-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Pictures of the screen: monitors, windows and their pixels, on Windows, macOS, X11 and Wayland"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+xcap = "0.9.8"
+image = { workspace = true }
+# Where the pointer is, for "the monitor under the pointer".
+mouse_position = "0.1.4"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+# X11: the protocol spoken in Rust (no libxcb), RandR and Xinerama for the monitors.
+x11rb = { version = "0.13", default-features = false, features = ["randr", "xinerama"] }
+# Wayland: the desktop's screenshot portal over D-Bus (Rust only, no libdbus). Its answer is
+# awaited under `async_io::block_on` with a timer, which the blocking signal iterator lacks.
+zbus = { version = "5", default-features = false, features = ["async-io"] }
+async-io = "2.6"
+futures-lite = { version = "2.6", default-features = false, features = ["std"] }
+# Wayland: the outputs (with xdg-output's logical layout), to cut the portal's picture of the
+# whole desktop into monitors. The backend written in Rust, no libwayland.
+wayland-client = { version = "0.31", default-features = false }
+wayland-protocols = { version = "0.32", default-features = false, features = ["client", "unstable"] }
+# Reading the portal's PNG.
+image = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Whether the owner has allowed Screen Recording (`CGPreflightScreenCaptureAccess`), and asking.
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGWindow"] }

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <title>ScreenGrabCraft Editor</title>
+  <link data-trunk rel="rust" data-bin="screengrabcraft-web" data-wasm-opt="z" data-weak-refs />
+  <link data-trunk rel="icon" href="../../assets/app-icon/hicolor/64x64/apps/io.github.billsecond.screengrabcraft.editor.png" />
+  <style>
+    :root { color-scheme: light dark; }
+    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #f7f7f9; }
+    #screengrabcraft_canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    #screengrabcraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+      color: #555; font: 14px system-ui, sans-serif; pointer-events: none; }
+    @media (prefers-color-scheme: dark) {
+      html, body { background: #1e1e22; }
+      #screengrabcraft_loading { color: #aaa; }
+    }
+  </style>
+</head>
+<body>
+  <canvas id="screengrabcraft_canvas"></canvas>
+  <div id="screengrabcraft_loading">Loading ScreenGrabCraft Editor&hellip;</div>
+</body>
+</html>

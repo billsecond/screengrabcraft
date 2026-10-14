@@ -1,0 +1,25 @@
+[package]
+name = "screengrabcraft-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ScreenGrabCraft Editor: annotate, mark up and share screenshots"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+screengrabcraft-ui = { workspace = true }
+screengrabcraft-desktop = { workspace = true }
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
+egui = { workspace = true }
+log = { workspace = true }
+rfd = { workspace = true }
+pollster = { workspace = true }
+
+[build-dependencies]
+# Icon + VERSIONINFO for the .exe; build.rs only uses it when the target is Windows.
+winresource = "0.1"

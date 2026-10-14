@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=ScreenGrabCraft
+GenericName=Screen Capture
+Comment=Capture the screen, a window or a region and mark it up
+Exec=screengrabcraft
+TryExec=screengrabcraft
+Icon=io.github.billsecond.screengrabcraft
+Terminal=false
+StartupNotify=false
+StartupWMClass=io.github.billsecond.screengrabcraft
+Categories=Graphics;Utility;
+Keywords=screenshot;capture;screen;grab;snip;record;gif;

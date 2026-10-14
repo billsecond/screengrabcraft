@@ -1,0 +1,30 @@
+[package]
+name = "screengrabcraft-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "What ScreenGrabCraft's two desktop programs share: settings files, logging, one instance at a time, the clipboard, starting at sign-in, the supervisor that keeps the capture service running, and opening the other program"
+build = "build.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+log = { workspace = true }
+getrandom = { workspace = true }
+dirs = { workspace = true }
+arboard = { workspace = true }
+webbrowser = { workspace = true }
+# Local time, for naming captures (the system's time zone; the zone database is bundled where the
+# system has none, Windows and the browser).
+jiff = "0.2.38"
+eframe = { workspace = true, features = ["wgpu"] }
+pollster = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# The sign-in entries (Run, StartupApproved) are in the registry.
+winreg = "0.56"

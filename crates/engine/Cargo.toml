@@ -1,0 +1,21 @@
+[package]
+name = "screengrabcraft-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ScreenGrabCraft's editing engine: the session with undo and redo, and every editing action as a command"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,28 @@
+ScreenGrabCraft
+Copyright (c) 2026 the ScreenGrabCraft contributors.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+ScreenGrabCraft is a clean-room screen capture and annotation suite. It is not affiliated with,
+endorsed by or derived from TechSmith Snagit or any other screen capture product. Product names
+mentioned in the documentation (to say what a feature corresponds to) are trademarks of their
+owners.
+
+Portions adapted from MailCraft
+
+ScreenGrabCraft follows the architecture and conventions of MailCraft
+(https://github.com/billsecond/mailcraft), itself following WordCraft
+(https://github.com/storytold/wordcraft). These parts started from MailCraft's source, which is
+Copyright (c) 2026 the MailCraft contributors and licensed under the MIT License or the Apache
+License, Version 2.0:
+
+- workspace tooling: xtask (layers, assets, wasm, ci, version, ico), rustfmt and clippy settings,
+  the lint set;
+- packaging scripts and metadata for macOS, Windows, Linux, FreeBSD and the web (packaging/), and
+  the release workflows (.github/workflows/);
+- desktop plumbing: the Windows graphics-backend choice (crates/desktop/src/graphics.rs) and the
+  shape of the logger and the one-instance hand-over;
+- the app icon pipeline's tile geometry (xtask/src/icon.rs).
+
+Bundled fonts: Inter (Rasmus Andersson and the Inter Project Authors) and JetBrains Mono (the
+JetBrains Mono Project Authors), under the SIL Open Font License 1.1 (assets/fonts/).

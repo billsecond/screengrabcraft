@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata of the editor (software centres). Template: package.sh substitutes
+     @VERSION@ and @DATE@ from Cargo.toml and the build date. The capture service has its own:
+     io.github.billsecond.screengrabcraft.metainfo.xml.in. -->
+<component type="desktop-application">
+  <id>io.github.billsecond.screengrabcraft.editor</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>ScreenGrabCraft Editor</name>
+  <summary>Mark up screenshots and pictures</summary>
+  <developer id="io.github.billsecond">
+    <name>ScreenGrabCraft contributors</name>
+  </developer>
+  <description>
+    <p>
+      ScreenGrabCraft Editor marks up screenshots and other pictures with arrows, shapes, callouts, highlights, blur and text. It opens what the ScreenGrabCraft capture service takes, and PNG, JPEG, GIF, BMP and WebP pictures.
+    </p>
+    <p>
+      Work in progress is kept as a ScreenGrabCraft project (.sgcraft), which keeps every mark editable.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.billsecond.screengrabcraft.editor.desktop</launchable>
+  <icon type="stock">io.github.billsecond.screengrabcraft.editor</icon>
+  <!-- Only url types known to appstream 0.15 (Ubuntu 22.04, where CI validates): no vcs-browser. -->
+  <url type="homepage">https://github.com/billsecond/screengrabcraft</url>
+  <url type="bugtracker">https://github.com/billsecond/screengrabcraft/issues</url>
+  <url type="help">https://github.com/billsecond/screengrabcraft</url>
+  <url type="contact">https://github.com/billsecond/screengrabcraft/issues</url>
+  <categories>
+    <category>Graphics</category>
+    <category>RasterGraphics</category>
+  </categories>
+  <keywords>
+    <keyword>screenshot</keyword>
+    <keyword>annotate</keyword>
+    <keyword>markup</keyword>
+    <keyword>arrow</keyword>
+    <keyword>callout</keyword>
+    <keyword>blur</keyword>
+  </keywords>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+    <control>tablet</control>
+  </supports>
+  <provides>
+    <binary>screengrabcraft-editor</binary>
+    <mediatype>image/png</mediatype>
+    <mediatype>image/jpeg</mediatype>
+    <mediatype>image/gif</mediatype>
+    <mediatype>image/bmp</mediatype>
+    <mediatype>image/webp</mediatype>
+    <mediatype>application/x-screengrabcraft-project</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ScreenGrabCraft.app, the capture service. Template: packaging/macos/package.sh substitutes
+     @VERSION@ (full, e.g. 0.2.0-rc.1), @SHORT_VERSION@ (numeric X.Y.Z) and @BUILD_SHA@.
+     The editor has its own: Editor-Info.plist.in. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleDisplayName</key>
+  <string>ScreenGrabCraft</string>
+  <key>CFBundleName</key>
+  <string>ScreenGrabCraft</string>
+  <key>CFBundleExecutable</key>
+  <string>ScreenGrabCraft</string>
+  <key>CFBundleIdentifier</key>
+  <string>io.github.billsecond.screengrabcraft</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleSignature</key>
+  <string>????</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@SHORT_VERSION@</string>
+  <key>CFBundleVersion</key>
+  <string>@SHORT_VERSION@</string>
+  <key>ScreenGrabCraftVersion</key>
+  <string>@VERSION@</string>
+  <key>ScreenGrabCraftBuildCommit</key>
+  <string>@BUILD_SHA@</string>
+  <key>CFBundleIconFile</key>
+  <string>ScreenGrabCraft</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.productivity</string>
+  <!-- A menu-bar app: no Dock icon and no main menu of its own. It keeps running (a LaunchAgent
+       it registers on first run starts it at sign-in and restarts it), and its capture windows
+       come forward over the other apps. -->
+  <key>LSUIElement</key>
+  <true/>
+  <!-- Must match MACOSX_DEPLOYMENT_TARGET in package.sh. -->
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key>
+  <true/>
+  <key>NSRequiresAquaSystemAppearance</key>
+  <false/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Copyright © the ScreenGrabCraft contributors. MIT OR Apache-2.0.</string>
+</dict>
+</plist>

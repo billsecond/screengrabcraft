@@ -1,0 +1,172 @@
+//! The editor driven headless, the way a person uses it: tools, drags, typing, crop, undo.
+
+use egui::{Pos2, pos2};
+use egui_kittest::Harness;
+use screengrabcraft_model::{Color, Document, EditorSettings, Kind, Raster, Shape};
+
+use crate::editor::{Editor, Tool};
+use crate::services::NoServices;
+
+fn editor() -> Editor {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::WHITE).unwrap()));
+    ed.view.fit_pending = true;
+    ed
+}
+
+fn harness(ed: Editor) -> Harness<'static, Editor> {
+    Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    )
+}
+
+/// Where a picture point is on the screen.
+fn at(h: &Harness<'_, Editor>, x: f32, y: f32) -> Pos2 {
+    h.state().view.to_screen(screengrabcraft_model::Pt::new(x, y))
+}
+
+fn drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
+    h.hover_at(from);
+    h.run_steps(2);
+    h.drag_at(from);
+    h.run_steps(2);
+    for i in 1..=6 {
+        let t = i as f32 / 6.0;
+        h.hover_at(pos2(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t));
+        h.run_steps(1);
+    }
+    h.drop_at(to);
+    h.run_steps(3);
+}
+
+#[test]
+fn draws_an_arrow_and_undoes_it() {
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let (a, b) = (at(&h, 50.0, 50.0), at(&h, 250.0, 150.0));
+    drag(&mut h, a, b);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.objects.len(), 1, "one arrow");
+    let Some(Shape::Arrow { from, to, .. }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("not an arrow") };
+    assert!(from.distance(screengrabcraft_model::Pt::new(50.0, 50.0)) < 3.0, "{from:?}");
+    assert!(to.distance(screengrabcraft_model::Pt::new(250.0, 150.0)) < 3.0, "{to:?}");
+    assert_eq!(ed.session.undo_label(), Some("Draw Arrow"));
+    assert!(h.state_mut().session.undo());
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn every_drawing_tool_draws_something() {
+    for (tool, _, _, _) in Tool::BAR {
+        let Tool::Draw(kind) = tool else { continue };
+        let mut h = harness(editor());
+        h.run_steps(4);
+        h.state_mut().set_tool(tool);
+        let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 160.0));
+        drag(&mut h, a, b);
+        let n = h.state().session.doc.objects.len();
+        assert_eq!(n, 1, "{kind:?} drew {n} annotations");
+        assert_eq!(h.state().session.doc.objects.first().map(|o| o.shape.kind()), Some(kind));
+    }
+}
+
+#[test]
+fn typing_into_a_new_text_box() {
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Draw(Kind::Text));
+    let p = at(&h, 80.0, 80.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    h.drag_at(p);
+    h.run_steps(1);
+    h.drop_at(p);
+    h.run_steps(3);
+    assert!(h.state().editing.is_some(), "a click with the text tool starts typing");
+    h.event(egui::Event::Text("Hello".to_string()));
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.editing.is_none());
+    assert_eq!(ed.session.doc.objects.first().and_then(|o| o.shape.text()), Some("Hello"));
+}
+
+#[test]
+fn crop_with_the_tool() {
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Crop);
+    let (a, b) = (at(&h, 100.0, 50.0), at(&h, 300.0, 250.0));
+    drag(&mut h, a, b);
+    let c = h.state().crop.expect("a crop frame");
+    assert!((c.w - 200.0).abs() < 3.0 && (c.h - 200.0).abs() < 3.0, "{c:?}");
+    let ctx = h.ctx.clone();
+    h.state_mut().apply_crop(&ctx);
+    h.run_steps(2);
+    let doc = &h.state().session.doc;
+    assert!((i64::from(doc.width()) - 200).abs() <= 3 && (i64::from(doc.height()) - 200).abs() <= 3);
+}
+
+#[test]
+fn select_move_and_delete() {
+    let mut ed = editor();
+    let id = ed
+        .session
+        .doc
+        .add(
+            Shape::Rect { rect: screengrabcraft_model::Rect::new(100.0, 100.0, 80.0, 60.0), radius: 0.0 },
+            screengrabcraft_model::Style { fill: Color::RED, ..Kind::Rect.default_style() },
+        )
+        .unwrap();
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Select);
+    let (a, b) = (at(&h, 140.0, 130.0), at(&h, 190.0, 160.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.x - 150.0).abs() < 3.0 && (r.y - 130.0).abs() < 3.0, "moved: {r:?}");
+    assert_eq!(h.state().session.selected(), vec![id]);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn the_overlay_chooses_an_area() {
+    use crate::overlay::{Action, Outcome, Overlay, OverlayMonitor, Purpose};
+    use screengrabcraft_model::IRect;
+    let m = OverlayMonitor { rect: IRect::new(0, 0, 800, 600), picture: Raster::filled(800, 600, Color::WHITE).unwrap(), name: "Main".into() };
+    let mut o = Overlay::new(vec![m], Vec::new(), Purpose::Picture);
+    o.preview = false;
+    let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+        |ui, o: &mut Overlay| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+        },
+        o,
+    );
+    h.run_steps(2);
+    h.hover_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    h.drag_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    for i in 1..=5 {
+        h.hover_at(pos2(100.0 + i as f32 * 40.0, 100.0 + i as f32 * 30.0));
+        h.run_steps(1);
+    }
+    h.drop_at(pos2(300.0, 250.0));
+    h.run_steps(2);
+    match h.state().outcome() {
+        Outcome::Chosen { area, action, .. } => {
+            assert_eq!(*action, Action::Default);
+            assert!((area.x - 100).abs() <= 1 && (area.y - 100).abs() <= 1 && (i64::from(area.w) - 200).abs() <= 2, "{area:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
