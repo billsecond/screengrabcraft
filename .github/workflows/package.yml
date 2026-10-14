@@ -322,8 +322,9 @@ jobs:
         with:
           release: "15.1"
           usesh: true
-          cpu: 4
-          mem: 12288
+          # A private repository's runner has 2 processors and 7 GB: a bigger VM doesn't start.
+          cpu: 2
+          mem: 5120
           prepare: |
             pkg install -y bash git curl pkgconf cmake python3 libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader fontconfig freetype2
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
@@ -331,7 +332,7 @@ jobs:
             set -e
             . "$HOME/.cargo/env"
             git config --global --add safe.directory "*"
-            export CARGO_TARGET_DIR=/var/tmp/screengrabcraft-target CARGO_BUILD_JOBS=4
+            export CARGO_TARGET_DIR=/var/tmp/screengrabcraft-target CARGO_BUILD_JOBS=2
             bash packaging/freebsd/package.sh
             rm -rf /var/tmp/screengrabcraft-target
       - uses: actions/upload-artifact@v4
