@@ -436,7 +436,8 @@ impl Overlay {
             return;
         }
         if self.sel.is_some() && self.phase == Phase::Adjusting {
-            let copy = ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::C)));
+            // egui turns Ctrl+C into a Copy event rather than a key press.
+            let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
             let save = ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S)));
             if copy {
                 self.choose(Action::Copy);

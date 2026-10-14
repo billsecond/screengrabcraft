@@ -59,7 +59,7 @@ impl eframe::App for App {
 fn development_build() -> bool {
     std::env::current_exe().is_ok_and(|p| {
         let s = p.to_string_lossy().replace('\\', "/");
-        s.contains("/target/debug/") || s.contains("/target/release/") || s.contains("/target-")
+        s.contains("/target/") || s.contains("/target-")
     })
 }
 
@@ -141,7 +141,8 @@ fn main() -> ExitCode {
         .with_transparent(true)
         .with_inner_size([1.0, 1.0])
         .with_min_inner_size([1.0, 1.0])
-        .with_position([0.0, 0.0])
+        // Out of sight where the system allows it (a 1-pixel window that may not be see-through).
+        .with_position(if cfg!(target_os = "windows") { [-32000.0, -32000.0] } else { [0.0, 0.0] })
         .with_taskbar(false)
         .with_mouse_passthrough(true)
         .with_resizable(false)
@@ -152,7 +153,7 @@ fn main() -> ExitCode {
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
     #[cfg(target_os = "macos")]
     {
-        use eframe::winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+        use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
         // A menu-bar program: no Dock icon.
         options.event_loop_builder = Some(Box::new(|b| {
             b.with_activation_policy(ActivationPolicy::Accessory);

@@ -21,6 +21,8 @@ use crate::record::{self, Recording};
 use crate::tray::{Item, Tray};
 
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
+/// Whether the anchor window stays shown once shown (see `logic`).
+const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 pub static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.png");
 
 /// Things that happen elsewhere and are handled on the window's thread.
@@ -571,11 +573,15 @@ impl Service {
         if self.overlay.is_none() {
             self.screens.clear();
         }
-        // The anchor window is shown while anything else is.
-        let need = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
+        // The anchor window is shown while anything else is. On Windows and macOS it stays shown
+        // once it has been: Windows shows a window without activating it only the first time, so
+        // showing it again would take the keyboard from the program the owner is typing in.
+        let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
+        let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(need));
             self.root_shown = need;
+            ctx.request_repaint();
         }
         // Timers: countdown seconds, notices and recordings tick without input.
         if self.countdown.is_some() || self.recording.is_some() || self.after_countdown.is_some() || self.freezing.is_some() {

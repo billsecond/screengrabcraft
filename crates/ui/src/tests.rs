@@ -170,3 +170,28 @@ fn the_overlay_chooses_an_area() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A host whose clipboard holds a picture.
+struct PictureOnClipboard;
+
+impl crate::services::Services for PictureOnClipboard {
+    fn paste_image(&self) -> Option<Raster> {
+        Raster::filled(40, 30, Color::RED).ok()
+    }
+}
+
+#[test]
+fn ctrl_v_pastes_a_picture_from_its_key_release() {
+    // With a picture (and no text) on the clipboard, egui sends no Paste event, only the release
+    // of V with the command key held.
+    let mut ed = Editor::new(Box::new(PictureOnClipboard), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::WHITE).unwrap()));
+    let mut h = harness(ed);
+    h.run_steps(3);
+    h.event(egui::Event::Key { key: egui::Key::V, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND });
+    h.run_steps(2);
+    let doc = &h.state().session.doc;
+    assert_eq!(doc.objects.len(), 1, "the picture was placed");
+    assert_eq!(doc.objects.first().map(|o| o.shape.kind()), Some(Kind::Image));
+    assert_eq!(doc.images.len(), 1);
+}

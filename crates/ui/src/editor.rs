@@ -75,6 +75,8 @@ pub struct Editor {
     pub spot_ellipse: bool,
     /// A change made in the properties panel is under way (one undo step until let go).
     pub(crate) props_editing: bool,
+    /// The last Ctrl+V was handled when it was pressed (its release is not a second paste).
+    pasted_on_press: bool,
     pub view: View,
     pub(crate) renderer: Renderer,
     pub(crate) tiles: Vec<crate::canvas::Tile>,
@@ -123,6 +125,7 @@ impl Editor {
             rect_radius: 0.0,
             spot_ellipse: false,
             props_editing: false,
+            pasted_on_press: false,
             view: View::default(),
             renderer: Renderer::new(),
             tiles: Vec::new(),
@@ -561,12 +564,27 @@ impl Editor {
         if pressed(cmd(Key::D)) && !self.session.selected().is_empty() {
             self.run(ctx, "edit.duplicate", json!({}));
         }
-        if pressed(cmd_shift(Key::V)) {
-            self.paste(ctx, true);
-        } else if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)))) || pressed(cmd(Key::V)) {
-            self.paste(ctx, false);
+        // egui hands Ctrl+V over as a Paste event only when the clipboard holds text; with a
+        // picture alone there is nothing but the V key's release, so that is the cue then.
+        let (paste_event, v_release, shift) = ctx.input(|i| {
+            let p = i.events.iter().any(|e| matches!(e, egui::Event::Paste(_)));
+            let r = i.events.iter().find_map(|e| match e {
+                egui::Event::Key { key: Key::V, pressed: false, modifiers, .. } if modifiers.command => Some(modifiers.shift),
+                _ => None,
+            });
+            (p, r, i.modifiers.shift)
+        });
+        if paste_event {
+            self.pasted_on_press = true;
+            self.paste(ctx, shift);
+        } else if let Some(shift) = v_release {
+            if self.pasted_on_press {
+                self.pasted_on_press = false;
+            } else {
+                self.paste(ctx, shift);
+            }
         }
-        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) || pressed(cmd(Key::C)) {
+        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy))) {
             self.copy(ctx);
         }
         if pressed(cmd(Key::Num0)) {

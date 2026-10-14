@@ -18,4 +18,7 @@ serde_json = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
-egui_kittest = { workspace = true }
+# `wgpu` draws the examples' pictures of the interface (`examples/shots.rs`); the tests themselves
+# need no graphics card.
+egui_kittest = { workspace = true, features = ["wgpu"] }
+image = { workspace = true }

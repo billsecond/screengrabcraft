@@ -23,7 +23,10 @@ further on openness, privacy and scripting.
 ## Next
 
 1. Use it daily on macOS and on Linux (GNOME with the AppIndicator extension, KDE) and fix what
-   that turns up, especially the overlay's placement on mixed-DPI desktops.
+   that turns up, especially the overlay's placement on mixed-DPI desktops. On macOS the overlay
+   is a floating window, so the menu bar and the Dock stay above it (an area under them can't be
+   dragged from there); on Wayland, where programs can't list windows, a click picks the whole
+   screen rather than a window.
 2. Video recording (MP4) next to GIF; a GIF editor (trim, speed).
 3. Automatic scrolling for scrolling captures (scroll the window under the area for the owner).
 4. Text recognition (copy the text in a capture), without a network service.
@@ -31,6 +34,9 @@ further on openness, privacy and scripting.
    search and tags.
 6. Global shortcuts on Wayland through the GlobalShortcuts portal.
 7. Signed builds (Windows Authenticode, Apple Developer ID and notarisation).
+8. A lighter idle service: on Windows it holds about 200 MB (DirectX 12) or 145 MB (OpenGL) of
+   working set while waiting in the tray, nearly all of it the graphics driver; release the GPU
+   while nothing is on screen.
 
 ## Progress log
 

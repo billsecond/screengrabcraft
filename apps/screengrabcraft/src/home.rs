@@ -54,7 +54,13 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
         }
         contents(svc, &mut home, ui, &mut close);
     });
-    if !close {
+    if close {
+        // Seen once is enough: the welcome doesn't come back at the next sign-in.
+        if !svc.settings.welcomed {
+            svc.settings.welcomed = true;
+            svc.apply_settings();
+        }
+    } else {
         svc.home = Some(home);
     }
 }

@@ -19,6 +19,10 @@ beside them for scripts and agents.
 > **Status: early alpha (0.1).** Capturing, the editor and the packaging are in place and tested;
 > see [ROADMAP.md](ROADMAP.md) for what's next and what has only been checked by the build machines.
 
+| | |
+|---|---|
+| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the bar with Edit, Copy, Save and Cancel](docs/images/overlay.png) |
+
 ![Annotations drawn by ScreenGrabCraft: steps, a rectangle and an ellipse, a highlight, a blur and a pixelated area, a magnifier, stamps, a callout and arrows](docs/images/annotations.png)
 
 ## Capturing
