@@ -26,7 +26,7 @@ mod tray;
 
 use std::process::ExitCode;
 
-use screengrabcraft_desktop::{instance, logging, paths, service, store, version};
+use screengrabcraft_desktop::{graphics, instance, logging, paths, service, store, version};
 
 const USAGE: &str = "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif] [--delay <s>] [--settings] [--quit]
        screengrabcraft --background | --tray
@@ -159,13 +159,15 @@ fn main() -> ExitCode {
             b.with_activation_policy(ActivationPolicy::Accessory);
         }));
     }
-    screengrabcraft_desktop::graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
+    let backends = eframe::wgpu::Backends::from_env().or_else(graphics::fallback_backends);
+    graphics::configure(&mut options, backends);
     let theme = settings.theme;
     let welcomed = settings.welcomed;
     let result = eframe::run_native(
         "ScreenGrabCraft",
         options,
         Box::new(move |cc| {
+            graphics::log_errors(cc);
             screengrabcraft_ui::setup(&cc.egui_ctx, theme);
             let mut svc = app::Service::new(cc.egui_ctx.clone(), guard, settings);
             let tray_missing = svc.tray.as_ref().is_none_or(|t| !t.available());

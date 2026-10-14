@@ -89,6 +89,7 @@ fn main() -> std::process::ExitCode {
         screengrabcraft_model::EDITOR_NAME,
         options,
         Box::new(move |cc| {
+            screengrabcraft_desktop::graphics::log_errors(cc);
             let ctx = cc.egui_ctx.clone();
             let settings = store::load_editor_settings();
             let mut editor = Editor::new(Box::new(services::DesktopServices::new(ctx.clone())), settings);

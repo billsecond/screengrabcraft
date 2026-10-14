@@ -63,7 +63,7 @@ pub fn configure_backends(options: &mut NativeOptions, backends: Backends) {
 pub fn configure(options: &mut NativeOptions, backend_override: Option<Backends>) {
     let backends = match backend_override {
         Some(backends) => {
-            log::info!("graphics: WGPU_BACKEND override, backends {backends:?}");
+            log::info!("graphics: backends {backends:?} (WGPU_BACKEND, or OpenGL after a failure)");
             backends
         }
         None => {
@@ -79,6 +79,83 @@ pub fn configure(options: &mut NativeOptions, backend_override: Option<Backends>
 /// Elsewhere wgpu's own choice stands.
 #[cfg(not(target_os = "windows"))]
 pub fn configure(_options: &mut NativeOptions, _backend_override: Option<Backends>) {}
+
+/// While a window is being opened, this file in the settings folder says so.
+const OPENING: &str = "graphics.opening";
+/// When this file is in the settings folder, ScreenGrabCraft draws with OpenGL. Deleting it
+/// tries DirectX 12 again.
+const OPENGL: &str = "graphics.opengl";
+
+/// A record of a window being opened, so that the start after a crash there draws another way.
+///
+/// Graphics drivers differ, and a window the driver can't make a drawing surface for takes the
+/// whole program down inside wgpu (the capture overlay did this under DirectX 12, see
+/// `overlay_builder` in the capture service). While a window is being opened `graphics.opening`
+/// exists in the settings folder. Should the program die before [`Opening::opened`], the next
+/// start finds it ([`fallback_backends`]) and draws with OpenGL from then on. Only on Windows,
+/// the one system with a second way to draw; nothing is written elsewhere or without settings.
+#[derive(Debug)]
+pub struct Opening {
+    marker: Option<std::path::PathBuf>,
+}
+
+impl Opening {
+    pub fn start() -> Opening {
+        let dir = if cfg!(target_os = "windows") && !crate::paths::no_prefs() { crate::paths::ensure_settings_dir() } else { None };
+        Opening::start_in(dir.as_deref())
+    }
+
+    fn start_in(dir: Option<&std::path::Path>) -> Opening {
+        let marker = dir.map(|d| d.join(OPENING)).filter(|m| match std::fs::write(m, b"") {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("graphics: could not write {}: {e}", m.display());
+                false
+            }
+        });
+        Opening { marker }
+    }
+
+    /// The window has been drawn (or is gone without trouble). Deliberately not done on drop:
+    /// a panic unwinds through the window's owner, and the marker must outlive it.
+    pub fn opened(&mut self) {
+        if let Some(m) = self.marker.take() {
+            let _ = std::fs::remove_file(m);
+        }
+    }
+}
+
+/// Logs the graphics errors wgpu would otherwise end the program with (its default handler
+/// panics). A frame drawn wrong is better than a lost capture. wgpu still ends the program when
+/// a window's surface can't be made at all; [`Opening`] covers that.
+pub fn log_errors(cc: &eframe::CreationContext<'_>) {
+    if let Some(rs) = cc.wgpu_render_state.as_ref() {
+        rs.device.on_uncaptured_error(std::sync::Arc::new(|e| log::error!("graphics: {e}")));
+    }
+}
+
+/// The backends to use instead of the usual choice, after a crash while a window was being opened
+/// (see [`Opening`]), or `None`.
+pub fn fallback_backends() -> Option<Backends> {
+    if !cfg!(target_os = "windows") || crate::paths::no_prefs() {
+        return None;
+    }
+    fallback_in(&crate::paths::settings_dir()?)
+}
+
+fn fallback_in(dir: &std::path::Path) -> Option<Backends> {
+    let opengl = dir.join(OPENGL);
+    let opening = dir.join(OPENING);
+    if opening.exists() {
+        log::warn!("graphics: the last run ended while opening a window; drawing with OpenGL from now on (delete {} to undo)", opengl.display());
+        if let Err(e) = std::fs::write(&opengl, b"DirectX 12 failed to open a window; ScreenGrabCraft draws with OpenGL while this file exists.\n") {
+            log::warn!("graphics: could not write {}: {e}", opengl.display());
+        }
+        let _ = std::fs::remove_file(&opening);
+        return Some(Backends::GL);
+    }
+    opengl.exists().then_some(Backends::GL)
+}
 
 /// Lists the DirectX 12 adapters, checking each against the limits eframe's device descriptor
 /// will require. Empty when this build has no DirectX 12 backend.
@@ -156,5 +233,29 @@ mod tests {
         // Any usable GPU keeps DirectX 12 only, next to WARP or a weaker GPU.
         let mixed = [adapter(DeviceType::Cpu, true), adapter(DeviceType::IntegratedGpu, false), adapter(DeviceType::DiscreteGpu, true)];
         assert_eq!(choose_backends(None, &mixed), Backends::DX12);
+    }
+
+    #[test]
+    fn a_crash_while_opening_a_window_switches_to_opengl() {
+        let dir = std::env::temp_dir().join(format!("screengrabcraft-graphics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(fallback_in(&dir), None);
+        // A window that opens leaves nothing behind.
+        let mut ok = Opening::start_in(Some(&dir));
+        assert!(dir.join(OPENING).exists());
+        ok.opened();
+        assert_eq!(fallback_in(&dir), None);
+        // A run that dies first: dropping the record (unwinding) doesn't count as opened.
+        drop(Opening::start_in(Some(&dir)));
+        assert_eq!(fallback_in(&dir), Some(Backends::GL));
+        assert!(!dir.join(OPENING).exists());
+        // And it stays OpenGL until the file is deleted.
+        assert_eq!(fallback_in(&dir), Some(Backends::GL));
+        std::fs::remove_file(dir.join(OPENGL)).unwrap();
+        assert_eq!(fallback_in(&dir), None);
+        // Without a settings folder nothing is written.
+        let mut none = Opening::start_in(None);
+        none.opened();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

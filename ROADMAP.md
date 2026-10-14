@@ -43,3 +43,4 @@ further on openness, privacy and scripting.
 | Date | What landed |
 |---|---|
 | 2026-10-14 | First version: the six crates and four programs, Craft-style icons drawn in Rust (a falcon for the capture service, an owl with a pencil for the editor), packaging and release workflows for Windows, macOS, Linux, FreeBSD and the web |
+| 2026-10-14 | 0.1.1: the capture overlay no longer takes the service down on Windows (DirectX 12 can't make a surface for a window created full screen and always-on-top at once, so it's raised after its first frame); a service that dies while opening a window draws with OpenGL from its next start; graphics errors are logged instead of ending the program |

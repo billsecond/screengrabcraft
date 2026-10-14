@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
-use screengrabcraft_desktop::{clipboard, instance, launch, paths, store};
+use screengrabcraft_desktop::{clipboard, graphics, instance, launch, paths, store};
 use screengrabcraft_model::{CaptureMode, IRect, ImageFormat, Raster, Settings};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
@@ -50,6 +50,10 @@ pub struct OverlayRun {
     pub monitors: Vec<Monitor>,
     /// Where the frozen pointer was (desktop units).
     pub pointer: Option<(i32, i32)>,
+    /// The frames the overlay's windows have been drawn in (see [`overlay_builder`]).
+    pub frames: u32,
+    /// Kept until the windows have been drawn, so a crash in opening them switches to OpenGL.
+    pub opening: graphics::Opening,
 }
 
 pub struct Countdown {
@@ -422,7 +426,8 @@ impl Service {
                 overlay.preview = self.settings.after_capture.preview;
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
-                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer });
+                let opening = graphics::Opening::start();
+                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, opening });
             }
         }
     }
@@ -445,7 +450,8 @@ impl Service {
 
     /// The overlay has an answer.
     fn overlay_done(&mut self) {
-        let Some(run) = self.overlay.take() else { return };
+        let Some(mut run) = self.overlay.take() else { return };
+        run.opening.opened();
         let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else { return };
         let Some(m) = run.monitors.get(monitor).cloned() else { return };
         match run.mode {
@@ -607,8 +613,13 @@ impl Service {
         if let Some(run) = self.overlay.as_mut() {
             for i in 0..run.monitors.len() {
                 let Some(m) = run.monitors.get(i) else { continue };
-                let builder = overlay_builder(m, &self.screens);
+                let builder = overlay_builder(m, &self.screens, run.frames > 0);
                 ctx.show_viewport_immediate(ViewportId::from_hash_of(("overlay", i)), builder, |ui, _| run.overlay.show_monitor(ui, i));
+            }
+            run.frames = run.frames.saturating_add(1);
+            if run.frames >= 3 {
+                // Drawn, and drawn again after being raised.
+                run.opening.opened();
             }
         }
         crate::popups::countdown(self, &ctx);
@@ -624,16 +635,23 @@ fn winit_screens(frame: &eframe::Frame) -> Vec<((i32, i32), (u32, u32), String)>
     w.available_monitors().map(|m| ((m.position().x, m.position().y), (m.size().width, m.size().height), m.name().unwrap_or_default())).collect()
 }
 
-/// A window covering one monitor exactly, above everything.
-fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)]) -> ViewportBuilder {
-    let b = ViewportBuilder::default()
+/// A window covering one monitor exactly, above everything once `raised`.
+///
+/// On Windows the window is made always-on-top only after its first frame: DirectX 12 can't
+/// make the drawing surface of a window that is created full screen and always-on-top at once
+/// (`CreateSwapChainForHwnd` answers `DXGI_ERROR_INVALID_CALL`, and wgpu treats that as fatal),
+/// while raising the window once the surface exists works.
+fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], raised: bool) -> ViewportBuilder {
+    let mut b = ViewportBuilder::default()
         .with_title("ScreenGrabCraft capture")
         .with_app_id(APP_ID)
         .with_decorations(false)
         .with_resizable(false)
         .with_taskbar(false)
-        .with_window_level(egui::WindowLevel::AlwaysOnTop)
         .with_active(true);
+    if raised || !cfg!(target_os = "windows") {
+        b = b.with_window_level(egui::WindowLevel::AlwaysOnTop);
+    }
     if cfg!(target_os = "macos") {
         // Desktop units are points there, as egui's are; full screen would slide to a Space.
         return b.with_position(pos2(m.rect.x as f32, m.rect.y as f32)).with_inner_size(vec2(m.rect.w as f32, m.rect.h as f32));
@@ -711,4 +729,30 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
         screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
     };
     Ok(Done { saved, copied, edited, thumb })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_overlay_is_raised_after_its_first_frame_on_windows() {
+        // Created full screen and always-on-top at once, its DirectX 12 surface can't be made and
+        // the service went down with the frozen screen (0.1.0).
+        let m = Monitor { id: 1, name: "DISPLAY1".into(), rect: IRect { x: 0, y: 0, w: 2560, h: 1440 }, scale: 1.0, primary: true };
+        let screens = vec![((0, 0), (2560, 1440), "DISPLAY1".to_string())];
+        let first = overlay_builder(&m, &screens, false);
+        let later = overlay_builder(&m, &screens, true);
+        assert_eq!(later.window_level, Some(egui::WindowLevel::AlwaysOnTop));
+        if cfg!(target_os = "windows") {
+            assert_eq!(first.window_level, None);
+            assert_eq!(first.monitor, Some(0));
+        } else {
+            assert_eq!(first.window_level, Some(egui::WindowLevel::AlwaysOnTop));
+        }
+        // Raising it changes nothing else, so egui raises the same window rather than making another.
+        let mut patched = first.clone();
+        let (_, recreate) = patched.patch(later);
+        assert!(!recreate);
+    }
 }
