@@ -7,6 +7,5 @@ publish = false
 
 [dependencies]
 serde_json = { workspace = true }
-# `cargo xtask icon` draws the icons' artwork and writes their PNGs.
+# `cargo xtask icon` writes the icons' PNGs.
 image = { workspace = true }
-tiny-skia = { workspace = true }
