@@ -423,7 +423,9 @@ impl Service {
                     .map(|w| OverlayWindow { rect: w.rect, title: if w.title.is_empty() { w.app } else { w.title } })
                     .collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
-                overlay.preview = self.settings.after_capture.preview;
+                let after = &self.settings.after_capture;
+                overlay.preview = after.preview;
+                overlay.enter_edits = after.open_editor || (!after.copy && !after.save);
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
                 let opening = graphics::Opening::start();

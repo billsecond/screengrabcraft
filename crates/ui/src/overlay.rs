@@ -3,7 +3,7 @@
 //! The capture service takes a picture of each monitor first and shows it full screen, so what
 //! is chosen is exactly what was on screen when the shortcut was pressed (menus and tooltips
 //! included). Drag out an area, or click a window; adjust it with its handles; then pick what to
-//! do with it from the small bar beside it, or press Enter for the default.
+//! do with it from the bar under it, or press Enter for the default.
 //!
 //! One [`Overlay`] is shared by all the monitors' windows: [`Overlay::show_monitor`] draws one
 //! monitor's window and takes its input. Areas are in the pixels of a monitor's picture.
@@ -81,6 +81,8 @@ pub struct Overlay {
     pub purpose: Purpose,
     /// Keep the area adjustable with a bar of actions after it is chosen.
     pub preview: bool,
+    /// Whether Enter opens the editor, so the bar's Edit button may say so.
+    pub enter_edits: bool,
     pub magnifier: bool,
     pub crosshair: bool,
     textures: Vec<Option<egui::TextureHandle>>,
@@ -95,6 +97,62 @@ pub struct Overlay {
 }
 
 const HANDLE: f32 = 9.0;
+/// The overlay's colour: the chosen area's edge and the capture bar's main buttons. Bright, to
+/// be seen on any picture.
+const ACCENT: Color32 = Color32::from_rgb(0x2E, 0xC4, 0xC0);
+/// The height of a button of the capture bar.
+const BAR_BUTTON: f32 = 56.0;
+/// Where a button's words start, after its icon.
+const BAR_TEXT: f32 = 46.0;
+
+/// How much a button of the capture bar stands out.
+#[derive(Clone, Copy, PartialEq)]
+enum Weight {
+    Main,
+    Plain,
+    Quiet,
+}
+
+/// A button of the capture bar.
+struct BarButton {
+    icon: Icon,
+    label: &'static str,
+    /// The key that does the same, if any.
+    keys: &'static str,
+    weight: Weight,
+    /// What it chooses; none cancels.
+    action: Option<Action>,
+}
+
+/// The bar's heavy type, or the plain one where the fonts aren't installed (egui panics on a
+/// family it doesn't know).
+fn heavy(ctx: &egui::Context, size: f32) -> FontId {
+    let family = egui::FontFamily::Name("inter-bold".into());
+    if ctx.fonts(|f| f.definitions().families.contains_key(&family)) { FontId::new(size, family) } else { FontId::proportional(size) }
+}
+
+fn bar_button(ui: &mut Ui, b: &BarButton, width: f32, font: &FontId) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(width, BAR_BUTTON), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, b.label));
+    let hot = resp.hovered();
+    let (fill, ink) = match b.weight {
+        Weight::Main => (if hot { Color32::from_rgb(0x62, 0xE3, 0xDF) } else { ACCENT }, Color32::from_rgb(0x06, 0x24, 0x24)),
+        Weight::Plain => (if hot { Color32::from_rgb(0x4A, 0x52, 0x60) } else { Color32::from_rgb(0x34, 0x3A, 0x46) }, Color32::WHITE),
+        Weight::Quiet => (if hot { Color32::from_rgb(0x2C, 0x30, 0x3A) } else { Color32::TRANSPARENT }, Color32::from_rgb(0xD5, 0xD9, 0xE0)),
+    };
+    let p = ui.painter();
+    p.rect_filled(rect, 9.0, fill);
+    let icon = egui::Rect::from_center_size(pos2(rect.min.x + 25.0, rect.center().y), vec2(24.0, 24.0));
+    icons::paint(p, icon, b.icon, ink);
+    let x = rect.min.x + BAR_TEXT;
+    if b.keys.is_empty() {
+        p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, b.label, font.clone(), ink);
+    } else {
+        p.text(pos2(x, rect.center().y - 9.0), Align2::LEFT_CENTER, b.label, font.clone(), ink);
+        p.text(pos2(x, rect.center().y + 12.0), Align2::LEFT_CENTER, b.keys, FontId::proportional(12.0), ink.gamma_multiply(0.75));
+    }
+    resp.on_hover_cursor(CursorIcon::PointingHand)
+}
 
 /// A desktop rectangle in a monitor's picture's pixels.
 fn desk_to_px(m: &OverlayMonitor, r: IRect) -> Option<Rect> {
@@ -140,6 +198,7 @@ impl Overlay {
             windows,
             purpose,
             preview: true,
+            enter_edits: true,
             magnifier: true,
             crosshair: true,
             textures: (0..n).map(|_| None).collect(),
@@ -267,14 +326,13 @@ impl Overlay {
                         painter.rect_filled(part, 0.0, dim);
                     }
                 }
-                let accent = Color32::from_rgb(0x2E, 0xC4, 0xC0);
                 let chosen = self.sel.is_some();
-                painter.rect_stroke(rs, 0.0, Stroke::new(if chosen { 1.5 } else { 3.0 }, accent), StrokeKind::Outside);
+                painter.rect_stroke(rs, 0.0, Stroke::new(if chosen { 1.5 } else { 3.0 }, ACCENT), StrokeKind::Outside);
                 if chosen && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. }) {
                     for (x, y) in handles(r) {
                         let hr = egui::Rect::from_center_size(to_screen(x, y), vec2(HANDLE, HANDLE));
                         painter.rect_filled(hr, 2.0, Color32::WHITE);
-                        painter.rect_stroke(hr, 2.0, Stroke::new(1.5, accent), StrokeKind::Middle);
+                        painter.rect_stroke(hr, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
                     }
                 }
                 // The size, outside the top left corner (inside if there's no room).
@@ -366,50 +424,73 @@ impl Overlay {
         painter.text(label.center(), Align2::CENTER_CENTER, info, FontId::monospace(12.0), Color32::WHITE);
     }
 
+    /// The bar beside the chosen area. Choosing from it is the capture's last step, so it must
+    /// not be missed on any picture: words on big buttons in a solid, outlined panel, with what
+    /// people come for in the overlay's bright colour.
     fn action_bar(&mut self, ui: &mut Ui, mi: usize, sel: egui::Rect, screen: egui::Rect) {
-        let actions: Vec<(Icon, &str, Action)> = match self.purpose {
-            Purpose::Gif => vec![(Icon::Gif, "Record GIF (Enter)", Action::Start)],
-            Purpose::Scrolling => vec![(Icon::Scrolling, "Start scrolling capture (Enter)", Action::Start)],
+        const GAP: f32 = 8.0;
+        const PAD: i8 = 10;
+        /// Clear of the area's handles.
+        const OFFSET: f32 = 16.0;
+        const COPY_KEYS: &str = if cfg!(target_os = "macos") { "Cmd+C" } else { "Ctrl+C" };
+        const SAVE_KEYS: &str = if cfg!(target_os = "macos") { "Cmd+S" } else { "Ctrl+S" };
+        let button = |icon, label, keys, weight, action| BarButton { icon, label, keys, weight, action };
+        let cancel = button(Icon::Close, "Cancel", "Esc", Weight::Quiet, None);
+        let buttons = match self.purpose {
+            Purpose::Gif => vec![button(Icon::Gif, "Record GIF", "Enter", Weight::Main, Some(Action::Start)), cancel],
+            Purpose::Scrolling => vec![button(Icon::Scrolling, "Start scrolling capture", "Enter", Weight::Main, Some(Action::Start)), cancel],
             _ => vec![
-                (Icon::Edit, "Edit (Enter)", Action::Edit),
-                (Icon::Copy, "Copy (Ctrl+C)", Action::Copy),
-                (Icon::Save, "Save (Ctrl+S)", Action::Save),
+                button(Icon::Edit, "Edit", if self.enter_edits { "Enter" } else { "" }, Weight::Main, Some(Action::Edit)),
+                button(Icon::Copy, "Copy", COPY_KEYS, Weight::Main, Some(Action::Copy)),
+                button(Icon::Save, "Save", SAVE_KEYS, Weight::Plain, Some(Action::Save)),
+                cancel,
             ],
         };
-        let w = 40.0 * (actions.len() as f32 + 1.0) + 12.0;
-        let h = 44.0;
-        let mut at = pos2(sel.max.x - w, sel.max.y + 10.0);
+        let font = heavy(ui.ctx(), 17.0);
+        let widths: Vec<f32> = buttons
+            .iter()
+            .map(|b| {
+                let words = ui.painter().layout_no_wrap(b.label.to_string(), font.clone(), Color32::WHITE).size().x;
+                (BAR_TEXT + words + 18.0).max(112.0)
+            })
+            .collect();
+        let pad = f32::from(PAD);
+        let w = widths.iter().sum::<f32>() + GAP * buttons.len().saturating_sub(1) as f32 + pad * 2.0;
+        let h = BAR_BUTTON + pad * 2.0;
+        // Centred under the area; above it, or inside it, where there's no room.
+        let mut at = pos2(sel.center().x - w / 2.0, sel.max.y + OFFSET);
         if at.y + h > screen.max.y - 4.0 {
-            at.y = (sel.min.y - h - 10.0).max(screen.min.y + 4.0);
-            if at.y + h > sel.min.y {
-                at.y = sel.max.y - h - 10.0;
+            at.y = sel.min.y - h - OFFSET;
+            if at.y < screen.min.y + 4.0 {
+                at.y = sel.max.y - h - OFFSET;
             }
         }
-        at.x = at.x.clamp(screen.min.x + 4.0, screen.max.x - w - 4.0);
-        let bar = egui::Rect::from_min_size(at, vec2(w, h));
-        let mut picked: Option<Action> = None;
-        let mut cancel = false;
-        egui::Area::new(egui::Id::new(("overlay-bar", mi))).fixed_pos(bar.min).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-            egui::Frame::NONE.fill(Color32::from_rgb(0x20, 0x20, 0x26)).corner_radius(10).inner_margin(egui::Margin::same(6)).show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.style_mut().visuals = egui::Visuals::dark();
-                    for (icon, tip, action) in &actions {
-                        if icons::button(ui, *icon, tip, false, true).clicked() {
-                            picked = Some(*action);
+        // Not `clamp`: it panics on a screen smaller than the bar.
+        at.x = at.x.min(screen.max.x - w - 4.0).max(screen.min.x + 4.0);
+        at.y = at.y.min(screen.max.y - h - 4.0).max(screen.min.y + 4.0);
+        let mut picked: Option<Option<Action>> = None;
+        egui::Area::new(egui::Id::new(("overlay-bar", mi))).fixed_pos(at).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+            egui::Frame::NONE
+                .fill(Color32::from_rgb(0x14, 0x16, 0x1C))
+                .stroke(Stroke::new(2.0, ACCENT))
+                .corner_radius(14)
+                .inner_margin(egui::Margin::same(PAD))
+                .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 2, color: Color32::from_black_alpha(170) })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = GAP;
+                        for (b, width) in buttons.iter().zip(&widths) {
+                            if bar_button(ui, b, *width, &font).clicked() {
+                                picked = Some(b.action);
+                            }
                         }
-                        ui.add_space(4.0);
-                    }
-                    if icons::button(ui, Icon::Close, "Cancel (Esc)", false, true).clicked() {
-                        cancel = true;
-                    }
+                    });
                 });
-            });
         });
-        if let Some(a) = picked {
-            self.choose(a);
-        }
-        if cancel {
-            self.outcome = Outcome::Cancelled;
+        match picked {
+            Some(Some(a)) => self.choose(a),
+            Some(None) => self.outcome = Outcome::Cancelled,
+            None => {}
         }
     }
 

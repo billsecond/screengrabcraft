@@ -2,6 +2,7 @@
 
 use egui::{Pos2, pos2};
 use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable as _;
 use screengrabcraft_model::{Color, Document, EditorSettings, Kind, Raster, Shape};
 
 use crate::editor::{Editor, Tool};
@@ -168,6 +169,70 @@ fn the_overlay_chooses_an_area() {
             assert!((area.x - 100).abs() <= 1 && (area.y - 100).abs() <= 1 && (i64::from(area.w) - 200).abs() <= 2, "{area:?}");
         }
         other => panic!("{other:?}"),
+    }
+}
+
+/// The overlay on a `w`×`h` screen with `area` chosen, and its bar showing.
+fn overlay_with_bar(
+    w: u32,
+    h: u32,
+    area: screengrabcraft_model::IRect,
+    purpose: crate::overlay::Purpose,
+) -> Harness<'static, crate::overlay::Overlay> {
+    use crate::overlay::{Overlay, OverlayMonitor};
+    use screengrabcraft_model::IRect;
+    let m = OverlayMonitor { rect: IRect::new(0, 0, w, h), picture: Raster::filled(w, h, Color::WHITE).unwrap(), name: "Main".into() };
+    let mut o = Overlay::new(vec![m], Vec::new(), purpose);
+    o.preselect(0, area);
+    let mut h = Harness::builder().with_size(egui::vec2(w as f32, h as f32)).build_ui_state(
+        |ui, o: &mut Overlay| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+        },
+        o,
+    );
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn the_capture_bar_buttons_say_what_they_do_and_do_it() {
+    use crate::overlay::{Action, Outcome, Purpose};
+    use screengrabcraft_model::IRect;
+    for (label, wanted) in [("Edit", Some(Action::Edit)), ("Copy", Some(Action::Copy)), ("Save", Some(Action::Save)), ("Cancel", None)] {
+        let mut h = overlay_with_bar(800, 600, IRect::new(100, 100, 300, 200), Purpose::Picture);
+        h.get_by_label(label).click();
+        h.run_steps(3);
+        match (h.state().outcome(), wanted) {
+            (Outcome::Chosen { action, .. }, Some(a)) => assert_eq!(*action, a, "{label}"),
+            (Outcome::Cancelled, None) => {}
+            (other, _) => panic!("{label}: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_capture_bar_stays_big_and_on_screen() {
+    use crate::overlay::Purpose;
+    use screengrabcraft_model::IRect;
+    // Under the area, over the area's own bottom, and with the whole screen chosen.
+    for area in [IRect::new(100, 100, 300, 200), IRect::new(500, 560, 280, 40), IRect::new(0, 0, 800, 600)] {
+        let h = overlay_with_bar(800, 600, area, Purpose::Picture);
+        for label in ["Edit", "Copy", "Save", "Cancel"] {
+            let r = h.get_by_label(label).rect();
+            assert!(r.height() >= 48.0 && r.width() >= 100.0, "{label} {r:?}");
+            assert!(r.min.x >= 0.0 && r.min.y >= 0.0 && r.max.x <= 800.0 && r.max.y <= 600.0, "{label} {area:?} {r:?}");
+        }
+    }
+}
+
+#[test]
+fn a_screen_narrower_than_the_capture_bar_is_no_trouble() {
+    use crate::overlay::{Outcome, Purpose};
+    use screengrabcraft_model::IRect;
+    // Placing the bar with `clamp` would panic here, losing the frozen screen.
+    for purpose in [Purpose::Picture, Purpose::Gif, Purpose::Scrolling] {
+        let h = overlay_with_bar(200, 90, IRect::new(10, 10, 100, 40), purpose);
+        assert!(matches!(h.state().outcome(), Outcome::Pending));
     }
 }
 
