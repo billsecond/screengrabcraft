@@ -1,6 +1,6 @@
 # ScreenGrabCraft
 
-<img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.png" width="96" alt="The ScreenGrabCraft icon: a peregrine falcon framed by the corners of a capture selection"> <img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.editor.png" width="96" alt="The ScreenGrabCraft Editor icon: a barn owl with a pencil in its beak">
+<img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.png" width="96" alt="The ScreenGrabCraft icon: a selection being dragged out, with a cursor at its corner"> <img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.editor.png" width="96" alt="The ScreenGrabCraft Editor icon: a barn owl with a pencil in its beak">
 
 **An open-source screen capture and annotation suite, written from scratch in Rust.**
 

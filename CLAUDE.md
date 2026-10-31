@@ -24,9 +24,9 @@ A screen capture tool runs all the time; a crash loses a capture the owner can't
 ## Assets: absolutely no TechSmith (or Microsoft/Apple/Google) iconography or images
 **This rule is non-negotiable.**
 - Never copy, trace, screenshot-crop or recreate icons, images, stamps, themes, sounds, fonts or any other asset from Snagit or any other vendor's product. Not even "temporarily".
-- Every asset must be **original** (drawn in code — prefer this: `crates/ui/src/icons.rs`, `crates/render/src/stamp.rs`, `crates/desktop/src/tray_icon.rs`, `xtask/src/art/`), **public domain / CC0**, **OSI open source**, or **Creative Commons that allows redistribution**.
+- Every asset must be **original** (drawn in code — prefer this: `crates/ui/src/icons.rs`, `crates/render/src/stamp.rs`, `crates/desktop/src/tray_icon.rs`, `xtask/src/art.rs`), **public domain / CC0**, **OSI open source**, or **Creative Commons that allows redistribution**.
 - **Every asset file has a row in [`ATTRIBUTION.md`](ATTRIBUTION.md)** (author, source, licence). `cargo xtask assets` (part of `cargo xtask ci`) fails otherwise.
-- The app icons are Craft-style engravings drawn in Rust (`xtask/src/art/`, `cargo xtask icon`): a falcon for the capture service, an owl with a pencil for the editor. See `assets/app-icon/README.md`.
+- The app icons are flat pictures drawn in Rust (`xtask/src/art.rs`, `cargo xtask icon`): a selection and a cursor for the capture service, a selection and a pencil for the editor. See `assets/app-icon/README.md`.
 
 ## Clean room
 Snagit may be **observed** black-box: run it, use it, note how it behaves. Never commit screenshots of it, never read, disassemble or copy anything inside it, never copy its wording beyond feature names. File formats come from public specs (PNG, JPEG, GIF89a, WebP, BMP, PDF 1.4).
