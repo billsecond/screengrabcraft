@@ -321,6 +321,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         }
         ed.upload(&ctx);
         input(ed, ui, &resp);
+        crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
         text_editor(ed, ui);
     });
@@ -690,6 +691,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let r = ed.view.rect_to_screen(tile.area);
         painter.image(tile.texture.id(), r, egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
     }
+    crate::playback::paint(ed, &painter, img);
     let scale = ed.view.scale();
 
     // Hover outline in the select tool.
