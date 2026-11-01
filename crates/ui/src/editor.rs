@@ -4,6 +4,7 @@
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Ui, vec2};
 use screengrabcraft_engine::Session;
 use screengrabcraft_model::{CaptureMode, Document, EditorSettings, ImageFormat, Kind, ObjectId, PROJECT_EXT, Raster, Rect, StampKind, Style};
+use screengrabcraft_render::anim::Player;
 use screengrabcraft_render::{Renderer, project};
 use serde_json::{Value, json};
 
@@ -83,6 +84,8 @@ pub struct Editor {
     pub(crate) texture_key: (u64, Option<ObjectId>),
     pub(crate) checker: Option<egui::TextureHandle>,
     pub(crate) drag: Option<Drag>,
+    /// The animated GIF the document came from, to play.
+    pub playback: Option<crate::playback::Playback>,
     /// The text annotation being typed into, and its text as typed.
     pub(crate) editing: Option<ObjectId>,
     pub(crate) edit_buffer: String,
@@ -132,6 +135,7 @@ impl Editor {
             texture_key: (0, None),
             checker: None,
             drag: None,
+            playback: None,
             editing: None,
             edit_buffer: String::new(),
             last_dark: None,
@@ -192,6 +196,7 @@ impl Editor {
         self.project_path = project;
         self.picture_path = picture;
         self.drag = None;
+        self.playback = None;
         self.editing = None;
         self.crop = None;
         self.view.fit_pending = true;
@@ -209,7 +214,12 @@ impl Editor {
         self.open_now(ctx, file);
     }
 
-    fn open_now(&mut self, ctx: &egui::Context, file: OpenedFile) {
+    /// Offers to play the document's file, if it's an animated GIF.
+    fn offer_playback(&mut self, player: Option<Player>) {
+        self.playback = player.map(|p| crate::playback::Playback::new(p, self.session.revision()));
+    }
+
+    fn open_now(&mut self, ctx: &egui::Context, mut file: OpenedFile) {
         let stem = std::path::Path::new(&file.name).file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string();
         if project::sniff(&file.bytes) {
             match project::load(&file.bytes) {
@@ -224,6 +234,7 @@ impl Editor {
         } else {
             match screengrabcraft_render::decode(&file.bytes) {
                 Ok(r) => {
+                    let player = Player::open(std::mem::take(&mut file.bytes));
                     let mut doc = Document::new(r);
                     doc.meta.source = Some(file.name.clone());
                     // A capture's annotations are kept beside it, if they were saved before.
@@ -233,10 +244,12 @@ impl Editor {
                         && let Ok((saved, _)) = project::load(&bytes)
                     {
                         self.replace_document(saved, stem, project.clone(), file.path.clone());
+                        self.offer_playback(player);
                         self.toast(ctx, "Opened with the annotations saved for it");
                         return;
                     }
                     self.replace_document(doc, stem, None, file.path.clone());
+                    self.offer_playback(player);
                 }
                 Err(e) => self.error(ctx, format!("{}: {e}", file.name)),
             }
@@ -280,6 +293,7 @@ impl Editor {
         self.session.begin("Paste Text");
         match self.session.doc.add(screengrabcraft_model::Shape::Text { rect, text }, style) {
             Ok(id) => {
+                self.session.doc.bring_inside(id);
                 self.session.selection = vec![id];
                 self.session.commit();
                 self.tool = Tool::Select;

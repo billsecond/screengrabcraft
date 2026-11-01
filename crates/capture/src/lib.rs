@@ -194,6 +194,18 @@ pub fn grab_on_monitor(id: u32, pixels: IRect) -> Result<Raster, CaptureError> {
     pic.crop(x, y, pixels.w, pixels.h).ok_or(CaptureError::Failed("the area is not on that monitor any more".to_string()))
 }
 
+/// The same part of one monitor, grabbed anew at each call: the frames of a recording.
+pub type Grabber = Box<dyn FnMut() -> Result<Raster, CaptureError>>;
+
+/// A grabber for part of one monitor, in that monitor's own pixels. On Windows a frame costs only
+/// the area; elsewhere it's the whole monitor, cut down.
+pub fn grabber(id: u32, pixels: IRect) -> Result<Grabber, CaptureError> {
+    #[cfg(target_os = "windows")]
+    return backend::grabber(id, pixels);
+    #[cfg(not(target_os = "windows"))]
+    Ok(Box::new(move || grab_on_monitor(id, pixels)))
+}
+
 /// A picture of an area of the desktop, now, put together from the monitors it lies on (in
 /// desktop units: a Retina monitor's part is reduced to its points).
 pub fn grab_area(area: IRect) -> Result<Raster, CaptureError> {

@@ -189,7 +189,7 @@ fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
             ui.add_space(6.0);
             ui.hyperlink_to("github.com/billsecond/screengrabcraft", screengrabcraft_model::HOMEPAGE);
             ui.add_space(6.0);
-            ui.label(egui::RichText::new("MIT OR Apache-2.0. Fonts: Inter and JetBrains Mono (SIL Open Font Licence).").small());
+            ui.label(egui::RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").small());
             None
         }
     }

@@ -365,13 +365,15 @@ impl ImageFormat {
     }
 }
 
-/// What happens once a picture is captured. Several may be on; with none, the editor opens.
+/// What happens once a picture is captured: the default action, of which several parts may be
+/// on; with none, the editor opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AfterCapture {
-    /// Keep the capture's handles and its bar of actions on screen, so the area can be adjusted
-    /// and an action picked (Edit, Copy, Save); Enter takes the default.
-    pub preview: bool,
+    /// Stop with the capture's handles and its bar of actions on screen, so the area can be
+    /// adjusted and an action picked (Edit, Copy, Save); Enter takes the default. Off, the default
+    /// runs as soon as the area is chosen.
+    pub show_bar: bool,
     pub open_editor: bool,
     pub copy: bool,
     pub save: bool,
@@ -379,7 +381,7 @@ pub struct AfterCapture {
 
 impl Default for AfterCapture {
     fn default() -> AfterCapture {
-        AfterCapture { preview: true, open_editor: true, copy: true, save: true }
+        AfterCapture { show_bar: false, open_editor: true, copy: true, save: true }
     }
 }
 
@@ -415,7 +417,9 @@ pub struct Settings {
     /// Start the capture service when the owner signs in (and restart it if it stops). `None`
     /// until the first run has decided (it turns it on and says so).
     pub start_at_login: Option<bool>,
-    pub gif_fps: u32,
+    /// Frames a second of a GIF recording. It's `gifFrameRate` in the file: the old `gifFps` was
+    /// written at every save, so it says nothing of what the owner chose, and is left behind.
+    pub gif_frame_rate: u32,
     pub gif_max_secs: u32,
     pub theme: Theme,
     /// The area of the last region capture, for Repeat Last Capture.
@@ -424,6 +428,8 @@ pub struct Settings {
     pub welcomed: bool,
     /// Play a short sound when a capture is taken.
     pub sound: bool,
+    /// Take an open editor out of the picture before a capture.
+    pub hide_editor: bool,
 }
 
 impl Default for Settings {
@@ -440,12 +446,13 @@ impl Default for Settings {
             magnifier: true,
             crosshair: true,
             start_at_login: None,
-            gif_fps: 12,
+            gif_frame_rate: 30,
             gif_max_secs: 60,
             theme: Theme::System,
             last_region: None,
             welcomed: false,
             sound: false,
+            hide_editor: true,
         }
     }
 }
@@ -474,7 +481,7 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
         self.delay_secs = self.delay_secs.min(60);
-        self.gif_fps = self.gif_fps.clamp(1, 30);
+        self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
@@ -603,6 +610,36 @@ mod tests {
         assert_eq!(s.hotkeys, Hotkeys::default(), "unreadable: the default");
         let round = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(round, s);
+    }
+
+    #[test]
+    fn the_default_copies_and_opens_the_editor_without_stopping() {
+        let s = Settings::default();
+        assert!(s.after_capture.copy && s.after_capture.open_editor);
+        assert!(!s.after_capture.show_bar);
+        assert!(s.hide_editor);
+    }
+
+    #[test]
+    fn a_file_from_before_the_default_ran_at_once_gets_it() {
+        // Every start used to write `preview: true`, the old default, so it says nothing of what
+        // the owner chose.
+        let s = Settings::from_json(r#"{"afterCapture":{"preview":true,"openEditor":true,"copy":false,"save":true}}"#);
+        assert!(!s.after_capture.show_bar);
+        assert!(!s.after_capture.copy, "the rest stays as chosen");
+        let s = Settings::from_json(r#"{"afterCapture":{"showBar":true}}"#);
+        assert!(s.after_capture.show_bar);
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+    }
+
+    #[test]
+    fn a_file_from_before_smooth_recordings_gets_them() {
+        assert_eq!(Settings::default().gif_frame_rate, 30);
+        assert_eq!(Settings::from_json(r#"{"gifFps":12}"#).gif_frame_rate, 30);
+        let s = Settings::from_json(r#"{"gifFrameRate":15}"#);
+        assert_eq!(s.gif_frame_rate, 15, "a rate of its own is kept");
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+        assert_eq!(Settings::from_json(r#"{"gifFrameRate":500}"#).gif_frame_rate, 30);
     }
 
     #[test]

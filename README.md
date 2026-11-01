@@ -21,7 +21,7 @@ beside them for scripts and agents.
 
 | | |
 |---|---|
-| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the bar with Edit, Copy, Save and Cancel](docs/images/overlay.png) |
+| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) |
 
 ![Annotations drawn by ScreenGrabCraft: steps, a rectangle and an ellipse, a highlight, a blur and a pixelated area, a magnifier, stamps, a callout and arrows](docs/images/annotations.png)
 
@@ -43,9 +43,15 @@ an area the screen is frozen as it was when the key was pressed (open menus and 
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
 
-After a capture ScreenGrabCraft does what its settings say: open it in the editor, copy it to the
-clipboard, and/or save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP or PDF, with a file
-name pattern of your own). With the capture bar on, Edit, Copy and Save are a click away.
+As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
+clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
+or PDF, with a file name pattern of your own). The default is yours to change in the service's
+settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
+or Save. An open editor is hidden while you capture, which you can turn off too.
+
+A GIF recording runs at 30 frames a second unless you set it lower, is always saved, and opens in
+the editor like any capture, with a **Play** button under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
+not on the animation, and the GIF file itself is never changed.
 
 ## Editing
 
@@ -53,8 +59,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 
 - **Arrow** (one or two heads, any thickness), **line**, **rectangle** (rounded corners),
   **ellipse**, **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
-- **Text** and **callouts** (speech balloons with a tail you drag), in Inter or JetBrains Mono,
-  bold, italic, left, centred or right.
+- **Text** and **callouts** (speech balloons with a tail you drag), in PatroneOS Sans or
+  PatroneOS Mono, bold, italic, left, centred or right.
 - **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
   information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
@@ -63,6 +69,7 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
 - **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
   contrast.
+- Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Undo and redo for everything, copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
@@ -132,6 +139,7 @@ code at all: no accounts, no telemetry, no update checks. See [PRIVACY.md](PRIVA
 
 ## Licence
 
-MIT OR Apache-2.0, at your option. The bundled fonts (Inter, JetBrains Mono) are under the SIL Open
+MIT OR Apache-2.0, at your option. The bundled fonts are the
+[PatroneOS fonts](https://patroneos.com/fonts) (PatroneOS Sans, PatroneOS Mono), under the SIL Open
 Font Licence. Every asset is listed in [ATTRIBUTION.md](ATTRIBUTION.md); ScreenGrabCraft contains no
 other vendor's icons or artwork, and is not affiliated with TechSmith or Snagit.
