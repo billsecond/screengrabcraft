@@ -129,7 +129,7 @@ struct BarButton {
 /// The bar's heavy type, or the plain one where the fonts aren't installed (egui panics on a
 /// family it doesn't know).
 fn heavy(ctx: &egui::Context, size: f32) -> FontId {
-    let family = egui::FontFamily::Name("inter-bold".into());
+    let family = egui::FontFamily::Name("sans-bold".into());
     if ctx.fonts(|f| f.definitions().families.contains_key(&family)) { FontId::new(size, family) } else { FontId::proportional(size) }
 }
 

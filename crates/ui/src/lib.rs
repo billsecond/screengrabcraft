@@ -31,17 +31,19 @@ pub fn from_color32(c: egui::Color32) -> Color {
     Color::rgba(r, g, b, a)
 }
 
-/// The interface font (Inter) and the annotation fonts as named families, so text being typed
-/// looks as it will be drawn.
+/// The interface font (PatroneOS Sans) and the annotation fonts as named families, so text being
+/// typed looks as it will be drawn.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in screengrabcraft_render::text::font_files() {
         fonts.font_data.insert(name.to_string(), Arc::new(egui::FontData::from_static(bytes)));
         fonts.families.insert(egui::FontFamily::Name(name.into()), vec![name.to_string()]);
     }
-    // Inter for the interface too, egui's own fonts after it for what Inter lacks.
-    if let Some(list) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-        list.insert(0, "inter".to_string());
+    // The PatroneOS fonts for the interface too, egui's own fonts after them for what they lack.
+    for (family, name) in [(egui::FontFamily::Proportional, "sans"), (egui::FontFamily::Monospace, "mono")] {
+        if let Some(list) = fonts.families.get_mut(&family) {
+            list.insert(0, name.to_string());
+        }
     }
     ctx.set_fonts(fonts);
 }

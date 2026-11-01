@@ -8,11 +8,10 @@ Generated-in-code art is original and has no file to list: the tool icons of the
 
 | Asset | Author | Source | Licence | Notes |
 |---|---|---|---|---|
-| `assets/fonts/Inter-Regular.ttf` | Rasmus Andersson / The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) | Text in annotations (carried over from MailCraft) |
-| `assets/fonts/Inter-SemiBold.ttf` | Rasmus Andersson / The Inter Project Authors | https://github.com/rsms/inter | OFL-1.1 (`assets/fonts/OFL-Inter.txt`) | Bold text in annotations (carried over from MailCraft) |
-| `assets/fonts/JetBrainsMono-Regular.ttf` | The JetBrains Mono Project Authors | https://github.com/JetBrains/JetBrainsMono | OFL-1.1 (`assets/fonts/OFL-JetBrainsMono.txt`) | Monospace text in annotations (carried over from MailCraft) |
-| `assets/fonts/OFL-Inter.txt` | (licence text) | upstream project | — |  |
-| `assets/fonts/OFL-JetBrainsMono.txt` | (licence text) | upstream project | — |  |
+| `assets/fonts/PatroneOSSans-Regular.ttf` | William Daugherty | PatroneOS Fonts 1.1.0, https://patroneos.com/fonts (https://github.com/billsecond/patroneos-fonts) | OFL-1.1 (`assets/fonts/OFL-PatroneOS.txt`) | The interface and text in annotations |
+| `assets/fonts/PatroneOSSans-SemiBold.ttf` | William Daugherty | PatroneOS Fonts 1.1.0, https://patroneos.com/fonts (https://github.com/billsecond/patroneos-fonts) | OFL-1.1 (`assets/fonts/OFL-PatroneOS.txt`) | Heavy interface text and bold text in annotations |
+| `assets/fonts/PatroneOSMono-Regular.ttf` | William Daugherty | PatroneOS Fonts 1.1.0, https://patroneos.com/fonts (https://github.com/billsecond/patroneos-fonts) | OFL-1.1 (`assets/fonts/OFL-PatroneOS.txt`) | Monospace text in annotations |
+| `assets/fonts/OFL-PatroneOS.txt` | (licence text) | PatroneOS Fonts 1.1.0, https://patroneos.com/fonts | — |  |
 | `assets/app-icon/README.md` | ScreenGrabCraft contributors | written for this project | MIT OR Apache-2.0 | What the app icons are and how they are made |
 | `assets/app-icon/screengrabcraft-1024.png` | ScreenGrabCraft contributors | original artwork drawn in code by `xtask/src/art.rs` and fitted to the tile by `cargo xtask icon` | MIT OR Apache-2.0 | ScreenGrabCraft app icon: a peregrine falcon framed by the corners of a capture selection, in ink, paper and teal |
 | `assets/app-icon/screengrabcraft-macos-512.png` | ScreenGrabCraft contributors | original artwork drawn in code by `xtask/src/art.rs` and fitted to the tile by `cargo xtask icon` | MIT OR Apache-2.0 | ScreenGrabCraft app icon, with the margin macOS icons keep |

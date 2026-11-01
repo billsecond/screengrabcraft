@@ -55,8 +55,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 
 - **Arrow** (one or two heads, any thickness), **line**, **rectangle** (rounded corners),
   **ellipse**, **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
-- **Text** and **callouts** (speech balloons with a tail you drag), in Inter or JetBrains Mono,
-  bold, italic, left, centred or right.
+- **Text** and **callouts** (speech balloons with a tail you drag), in PatroneOS Sans or
+  PatroneOS Mono, bold, italic, left, centred or right.
 - **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
   information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
@@ -134,6 +134,7 @@ code at all: no accounts, no telemetry, no update checks. See [PRIVACY.md](PRIVA
 
 ## Licence
 
-MIT OR Apache-2.0, at your option. The bundled fonts (Inter, JetBrains Mono) are under the SIL Open
+MIT OR Apache-2.0, at your option. The bundled fonts are the
+[PatroneOS fonts](https://patroneos.com/fonts) (PatroneOS Sans, PatroneOS Mono), under the SIL Open
 Font Licence. Every asset is listed in [ATTRIBUTION.md](ATTRIBUTION.md); ScreenGrabCraft contains no
 other vendor's icons or artwork, and is not affiliated with TechSmith or Snagit.

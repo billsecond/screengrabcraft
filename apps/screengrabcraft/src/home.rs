@@ -438,5 +438,5 @@ fn about_tab(_svc: &mut Service, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.hyperlink_to("github.com/billsecond/screengrabcraft", screengrabcraft_model::HOMEPAGE);
     ui.add_space(8.0);
-    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: Inter and JetBrains Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
+    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
 }
