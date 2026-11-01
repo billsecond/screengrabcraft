@@ -552,6 +552,10 @@ impl Service {
                 let name =
                     screengrabcraft_model::settings::expand_name(&self.settings.file_name, screengrabcraft_desktop::time::now(), "Recording", 1);
                 match place(&tmp, &dir, &name, "gif") {
+                    // Like any capture it goes to the editor, where it plays. That brings the editor back.
+                    Ok(path) if self.settings.after_capture.open_editor && launch::open_editor(&[path.to_string_lossy().to_string()]).is_ok() => {
+                        self.editor_aside = false;
+                    }
                     Ok(path) => self.notify("GIF saved", format!("{frames} frames — {}", file_name(&path)), Some(path), None, false),
                     Err(e) => self.notify("The GIF could not be saved", e, None, None, true),
                 }

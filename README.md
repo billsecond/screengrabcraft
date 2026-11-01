@@ -49,6 +49,10 @@ or PDF, with a file name pattern of your own). The default is yours to change in
 settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
 or Save. An open editor is hidden while you capture, which you can turn off too.
 
+A GIF recording is always saved, and opens in the editor like any capture, with a **Play** button
+under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
+not on the animation, and the GIF file itself is never changed.
+
 ## Editing
 
 Annotations stay editable (move them, resize them, restyle them) until you flatten or export:

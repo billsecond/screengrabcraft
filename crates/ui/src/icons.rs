@@ -44,6 +44,8 @@ pub enum Icon {
     Close,
     Check,
     Timer,
+    Play,
+    Pause,
 }
 
 /// Draws `icon` in `rect` (square-ish) in `color`.
@@ -257,6 +259,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(at(10.0, 11.0), at(10.0, 6.5));
             line(at(10.0, 11.0), at(13.0, 13.0));
             line(at(8.0, 2.5), at(12.0, 2.5));
+        }
+        Icon::Play => fill_poly(vec![at(5.5, 3.0), at(16.5, 10.0), at(5.5, 17.0)], color),
+        Icon::Pause => {
+            p.rect_filled(rect_at(5.0, 3.5, 8.5, 16.5), 0.8 * u, color);
+            p.rect_filled(rect_at(11.5, 3.5, 15.0, 16.5), 0.8 * u, color);
         }
     }
 }
