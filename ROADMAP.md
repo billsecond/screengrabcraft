@@ -2,7 +2,7 @@
 
 **Stage: early alpha** · next: alpha that has been used every day on all three desktop systems
 
-> **Last updated:** 2026-10-14 · **Target:** TechSmith Snagit (capture and editor), cross-platform
+> **Last updated:** 2026-10-31 · **Target:** TechSmith Snagit (capture and editor), cross-platform
 
 ScreenGrabCraft aims at the parts of Snagit people use every day, everywhere, and then goes
 further on openness, privacy and scripting.
@@ -43,5 +43,6 @@ further on openness, privacy and scripting.
 | Date | What landed |
 |---|---|
 | 2026-10-14 | First version: the six crates and four programs, Craft-style icons drawn in Rust (a falcon for the capture service, an owl with a pencil for the editor), packaging and release workflows for Windows, macOS, Linux, FreeBSD and the web |
-| 2026-10-14 | 0.1.1: the capture overlay no longer takes the service down on Windows (DirectX 12 can't make a surface for a window created full screen and always-on-top at once, so it's raised after its first frame); a service that dies while opening a window draws with OpenGL from its next start; graphics errors are logged instead of ending the program |
+| 2026-10-14 | 0.1.1: the capture overlay no longer takes the service down on Windows (DirectX 12 can't make a surface for a window created full screen and always-on-top at once, so it's raised after its first frame); a service that dies while opening a window draws with OpenGL from its next start; graphics errors are logged instead of ending the program |
 | 2026-10-31 | New app icons, flat pictures that read at every size: a selection and a cursor for the capture service, a selection and a pencil for the editor, in place of the engraved falcon and owl. |
+| 2026-10-31 | The capture bar is hard to miss: big buttons with words and their keys, Edit and Copy in the overlay's bright colour, in an outlined panel centred under the area; it no longer panics on a screen narrower than it |

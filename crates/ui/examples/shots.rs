@@ -93,6 +93,7 @@ fn main() -> Result<(), String> {
     let mut o = Overlay::new(vec![m], Vec::new(), Purpose::Picture);
     o.preselect(0, IRect::new(320, 70, 560, 300));
     let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).build_ui_state(|ui, o: &mut Overlay| o.show_monitor(ui, 0), o);
+    screengrabcraft_ui::install_fonts(&h.ctx);
     h.run_steps(4);
     save(&mut h, &dir.join("overlay-adjusting.png"))?;
     Ok(())

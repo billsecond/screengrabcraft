@@ -369,7 +369,7 @@ impl ImageFormat {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AfterCapture {
-    /// Keep the capture's handles and its small toolbar on screen, so the area can be adjusted
+    /// Keep the capture's handles and its bar of actions on screen, so the area can be adjusted
     /// and an action picked (Edit, Copy, Save); Enter takes the default.
     pub preview: bool,
     pub open_editor: bool,
