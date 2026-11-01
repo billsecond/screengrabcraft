@@ -3,7 +3,7 @@
 //! The first copy takes a lock in the settings folder and listens on a loopback port. A copy
 //! started later (a shortcut clicked again, `screengrabcraft --capture region` from a desktop
 //! shortcut, a file opened in the editor from the file manager) finds the lock taken, hands its
-//! arguments to the first, and exits.
+//! arguments to the first, and exits. The other program can reach it the same way ([`tell`]).
 //!
 //! - `<name>.lock`: held locked while the first copy runs (the system lets go of it however the
 //!   program ends, so a crash leaves nothing to clean up).
@@ -121,6 +121,34 @@ pub fn start(name: &str, args: &[String]) -> Start {
             Start::First(Guard::none())
         }
     }
+}
+
+/// Tells the running copy of program `name` something, without starting one: `true` if it took
+/// it. May take seconds if that copy is stuck, so not on a window's thread.
+pub fn tell(name: &str, args: &[String]) -> bool {
+    if crate::paths::no_prefs() {
+        return false;
+    }
+    crate::paths::settings_dir().is_some_and(|dir| tell_in(&dir, name, args))
+}
+
+/// Whether a copy of program `name` is running.
+pub fn running(name: &str) -> bool {
+    !crate::paths::no_prefs() && crate::paths::settings_dir().is_some_and(|dir| running_in(&dir, name))
+}
+
+fn running_in(dir: &std::path::Path, name: &str) -> bool {
+    if !dir.join(format!("{name}.instance")).exists() {
+        return false;
+    }
+    // A crash leaves the info behind, and Windows takes seconds to give up on its dead port, so
+    // the lock says whether anyone is there.
+    let Ok(lock) = OpenOptions::new().read(true).write(true).open(dir.join(format!("{name}.lock"))) else { return false };
+    matches!(lock.try_lock(), Err(TryLockError::WouldBlock))
+}
+
+fn tell_in(dir: &std::path::Path, name: &str, args: &[String]) -> bool {
+    running_in(dir, name) && try_hand(&dir.join(format!("{name}.instance")), args).is_ok()
 }
 
 fn first(lock: File, info_path: PathBuf) -> Start {
@@ -247,6 +275,38 @@ mod tests {
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), vec!["--capture", "region"]);
         std::fs::write(&info, json!({"port": port, "key": "wrong"}).to_string()).unwrap();
         assert!(try_hand(&info, &[]).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn telling_reaches_a_running_copy_and_nobody_else() {
+        let dir = std::env::temp_dir().join(format!("sgc-instance-tell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (lock, info) = (dir.join("t.lock"), dir.join("t.instance"));
+        let word = ["--word".to_string()];
+        assert!(!tell_in(&dir, "t", &word), "nothing there");
+
+        // What a crash leaves: the info of a port nobody listens on, and a free lock.
+        std::fs::write(&info, json!({"port": 1, "key": "secret"}).to_string()).unwrap();
+        std::fs::write(&lock, "").unwrap();
+        let asked = Instant::now();
+        assert!(!tell_in(&dir, "t", &word));
+        assert!(asked.elapsed() < Duration::from_millis(500), "the dead port isn't tried");
+        assert!(!running_in(&dir, "t"));
+
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = channel();
+        let waker: Waker = Arc::new(Mutex::new(None));
+        std::thread::spawn(move || serve(listener, "secret".into(), tx, waker));
+        std::fs::write(&info, json!({"port": port, "key": "secret"}).to_string()).unwrap();
+        let held = OpenOptions::new().read(true).write(true).open(&lock).unwrap();
+        held.try_lock().unwrap();
+        assert!(running_in(&dir, "t"));
+        assert!(tell_in(&dir, "t", &word));
+        assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), word);
+        drop(held);
+        assert!(!running_in(&dir, "t"), "the copy has gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
