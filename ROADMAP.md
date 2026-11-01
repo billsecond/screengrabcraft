@@ -2,7 +2,7 @@
 
 **Stage: early alpha** · next: alpha that has been used every day on all three desktop systems
 
-> **Last updated:** 2026-10-31 · **Target:** TechSmith Snagit (capture and editor), cross-platform
+> **Last updated:** 2026-11-01 · **Target:** TechSmith Snagit (capture and editor), cross-platform
 
 ScreenGrabCraft aims at the parts of Snagit people use every day, everywhere, and then goes
 further on openness, privacy and scripting.
@@ -46,3 +46,7 @@ further on openness, privacy and scripting.
 | 2026-10-14 | 0.1.1: the capture overlay no longer takes the service down on Windows (DirectX 12 can't make a surface for a window created full screen and always-on-top at once, so it's raised after its first frame); a service that dies while opening a window draws with OpenGL from its next start; graphics errors are logged instead of ending the program |
 | 2026-10-31 | New app icons, flat pictures that read at every size: a selection and a cursor for the capture service, a selection and a pencil for the editor, in place of the engraved falcon and owl. |
 | 2026-10-31 | The capture bar is hard to miss: big buttons with words and their keys, Edit and Copy in the overlay's bright colour, in an outlined panel centred under the area; it no longer panics on a screen narrower than it |
+| 2026-11-01 | The default runs at once: choosing an area copies the capture, opens it in the editor and saves it, all of it set in the settings, and the capture bar is now the setting that stops first (with the default as a button of its own). An open editor is hidden before any capture and comes back after it, however it ends, even if the service goes down |
+| 2026-11-01 | The PatroneOS fonts (1.1.0) replace Inter and JetBrains Mono, in the interface and in annotations. They cover the Latin letters of most European languages; annotation text in anything else (Greek, Cyrillic, Vietnamese, symbols like ✓) draws as empty boxes, as there's no fallback font |
+| 2026-11-01 | GIFs play: a recording opens in the editor like any capture, and any animated GIF there has a Play button. It's read a frame at a time, so a long recording holds one frame in memory; the GIF file is never changed |
+| 2026-11-01 | Everything in the editor stays on the picture: nothing starts on the gray around it, drawing, moving, resizing and the arrow keys stop at its edge, and what a click, a paste or a duplicate places, or typing grows, is kept on it. Panning and zooming work anywhere |
