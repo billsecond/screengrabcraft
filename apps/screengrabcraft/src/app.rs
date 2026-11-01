@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
 use screengrabcraft_desktop::{clipboard, graphics, instance, launch, paths, store};
-use screengrabcraft_model::{CaptureMode, IRect, ImageFormat, Raster, Settings};
+use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, Settings};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
 use crate::hotkeys::{Registered, Target};
@@ -23,6 +23,8 @@ use crate::tray::{Item, Tray};
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
 /// Whether the anchor window stays shown once shown (see `logic`).
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
+/// How long the editor's window takes to leave the screen (Windows animates it).
+const EDITOR_ASIDE: Duration = Duration::from_millis(450);
 pub static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.png");
 
 /// Things that happen elsewhere and are handled on the window's thread.
@@ -87,6 +89,10 @@ pub struct Service {
     /// A countdown just ended: the capture starts once its window has gone.
     pub after_countdown: Option<(CaptureMode, Instant)>,
     pub freezing: Option<CaptureMode>,
+    /// A worker is on a picture: repeating the last area, or keeping a capture.
+    keeping: bool,
+    /// The editor has been asked out of the picture, and not yet back.
+    editor_aside: bool,
     pub notice: Option<Notice>,
     pub recording: Option<Recording>,
     /// The winit monitors, for placing the overlay on each: position, size and name.
@@ -143,6 +149,8 @@ impl Service {
             countdown: None,
             after_countdown: None,
             freezing: None,
+            keeping: false,
+            editor_aside: false,
             notice: None,
             recording: None,
             screens: Vec::new(),
@@ -192,24 +200,16 @@ impl Service {
 
     /// Arguments handed over by a later start (`--capture region`, `--settings`…).
     fn handle_args(&mut self, args: &[String]) {
-        // `--wait <ms>`: the program asking hides itself first (the editor), so wait for it.
-        let wait = args.iter().position(|a| a == "--wait").and_then(|i| args.get(i + 1)).and_then(|v| v.parse::<u64>().ok()).map(|ms| ms.min(5_000));
         let mut it = args.iter();
         let mut acted = false;
         while let Some(a) = it.next() {
             match a.as_str() {
                 "--capture" => {
                     acted = true;
-                    match (it.next().and_then(|m| CaptureMode::from_arg(m)), wait) {
-                        (Some(m), Some(ms)) if self.overlay.is_none() && self.after_countdown.is_none() => {
-                            self.after_countdown = Some((m, Instant::now() + Duration::from_millis(ms)));
-                        }
-                        (Some(m), _) => self.start(m, 0),
-                        (None, _) => self.notify("Unknown capture", "Use region, window, screen, all, repeat, scrolling or gif.", None, None, true),
+                    match it.next().and_then(|m| CaptureMode::from_arg(m)) {
+                        Some(m) => self.start(m, 0),
+                        None => self.notify("Unknown capture", "Use region, window, screen, all, repeat, scrolling or gif.", None, None, true),
                     }
-                }
-                "--wait" => {
-                    let _ = it.next();
                 }
                 "--delay" => {
                     acted = true;
@@ -282,9 +282,12 @@ impl Service {
                 }
             }
             Msg::Picture(pic, source) => self.finish(pic, &source, Action::Default),
-            Msg::Saved(result) => match result {
-                Ok(done) => {
-                    if !done.edited {
+            Msg::Saved(result) => {
+                self.keeping = false;
+                match result {
+                    // The picture brings the editor back.
+                    Ok(done) if done.edited => self.editor_aside = false,
+                    Ok(done) => {
                         let text = match (&done.saved, done.copied) {
                             (Some(_), true) => "Saved and copied",
                             (Some(_), false) => "Saved",
@@ -294,9 +297,9 @@ impl Service {
                         let detail = done.saved.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                         self.notify(text, detail, done.saved.clone(), done.thumb, false);
                     }
+                    Err(e) => self.notify("The capture could not be kept", e, None, None, true),
                 }
-                Err(e) => self.notify("The capture could not be kept", e, None, None, true),
-            },
+            }
         }
     }
 
@@ -347,10 +350,18 @@ impl Service {
         self.freeze(mode);
     }
 
+    /// Whether a capture starting now is to take the editor out of the picture first.
+    fn editor_goes_aside(&mut self) -> bool {
+        self.editor_aside = self.settings.hide_editor;
+        self.editor_aside
+    }
+
     fn freeze(&mut self, mode: CaptureMode) {
         self.freezing = Some(mode);
+        let hide = self.editor_goes_aside();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let spawned = std::thread::Builder::new().name("freeze".into()).spawn(move || {
+            step_aside(hide);
             let r = screengrabcraft_capture::freeze().map_err(|e| e.to_string());
             let _ = tx.send(Msg::Frozen(mode, r));
             ctx.request_repaint();
@@ -362,8 +373,11 @@ impl Service {
     }
 
     fn repeat(&mut self, desktop: IRect) {
+        self.keeping = true;
+        let hide = self.editor_goes_aside();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        let _ = std::thread::Builder::new().name("repeat".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("repeat".into()).spawn(move || {
+            step_aside(hide);
             let result = (|| -> Result<Raster, String> {
                 let monitors = screengrabcraft_capture::monitors().map_err(|e| e.to_string())?;
                 let cx = i64::from(desktop.x) + i64::from(desktop.w / 2);
@@ -383,6 +397,10 @@ impl Service {
             }
             ctx.request_repaint();
         });
+        if let Err(e) = spawned {
+            self.keeping = false;
+            self.notify("The screen could not be captured", e.to_string(), None, None, true);
+        }
     }
 
     /// The screen is frozen: show the overlay, or keep a whole screen at once.
@@ -424,8 +442,8 @@ impl Service {
                     .collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
                 let after = &self.settings.after_capture;
-                overlay.preview = after.preview;
-                overlay.enter_edits = after.open_editor || (!after.copy && !after.save);
+                overlay.preview = after.show_bar;
+                overlay.enter = enter_button(after);
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
                 let opening = graphics::Opening::start();
@@ -484,16 +502,8 @@ impl Service {
     /// Keeps a capture: saved, copied and/or opened in the editor, as the action and the
     /// settings say. The file work is done on a worker thread.
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
-        let a = self.settings.after_capture;
-        let (save, copy, edit) = match action {
-            Action::Default | Action::Start => {
-                let none = !a.save && !a.copy && !a.open_editor;
-                (a.save, a.copy, a.open_editor || none)
-            }
-            Action::Edit => (a.save, false, true),
-            Action::Copy => (a.save, true, false),
-            Action::Save => (true, false, false),
-        };
+        let (save, copy, edit) = what_to_keep(action, &self.settings.after_capture);
+        self.keeping = true;
         let settings = self.settings.clone();
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
@@ -506,11 +516,15 @@ impl Service {
                     false
                 }
             };
-        let _ = std::thread::Builder::new().name("keep".into()).spawn(move || {
+        let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
             let r = keep(&pic, &source, &settings, save, edit, copied);
             let _ = tx.send(Msg::Saved(r));
             ctx.request_repaint();
         });
+        if let Err(e) = spawned {
+            self.keeping = false;
+            self.notify("The capture could not be kept", e.to_string(), None, None, true);
+        }
     }
 
     pub fn stop_recording(&mut self, cancel: bool) {
@@ -572,6 +586,11 @@ impl Service {
             self.overlay_done();
         }
         self.poll_recording();
+        // However the capture ended, the editor doesn't stay aside.
+        if self.editor_aside && self.freezing.is_none() && self.overlay.is_none() && self.recording.is_none() && !self.keeping {
+            self.editor_aside = false;
+            let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_SHOW));
+        }
         if self.notice.as_ref().is_some_and(|n| Instant::now() >= n.until) {
             self.notice = None;
         }
@@ -699,6 +718,35 @@ fn place(tmp: &Path, dir: &Path, name: &str, ext: &str) -> Result<PathBuf, Strin
     Ok(dest)
 }
 
+/// Takes the editor out of the picture, if it's there (on a capture's worker thread).
+fn step_aside(hide: bool) {
+    if hide && launch::tell_editor(launch::EDITOR_HIDE) {
+        std::thread::sleep(EDITOR_ASIDE);
+    }
+}
+
+/// What a capture comes to: whether it's saved, copied and opened in the editor.
+fn what_to_keep(action: Action, a: &AfterCapture) -> (bool, bool, bool) {
+    match action {
+        Action::Default | Action::Start => {
+            let none = !a.save && !a.copy && !a.open_editor;
+            (a.save, a.copy, a.open_editor || none)
+        }
+        Action::Edit => (a.save, false, true),
+        Action::Copy => (a.save, true, false),
+        Action::Save => (true, false, false),
+    }
+}
+
+/// The capture bar's button that comes to the same as the default, or [`Action::Default`] when
+/// none does and the default needs a button of its own.
+fn enter_button(a: &AfterCapture) -> Action {
+    [Action::Edit, Action::Copy, Action::Save]
+        .into_iter()
+        .find(|b| what_to_keep(*b, a) == what_to_keep(Action::Default, a))
+        .unwrap_or(Action::Default)
+}
+
 /// The file work of keeping a capture (on a worker thread).
 fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool) -> Result<Done, String> {
     let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
@@ -736,6 +784,35 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_capture_is_copied_and_opened_in_the_editor_unless_told_otherwise() {
+        let (save, copy, edit) = what_to_keep(Action::Default, &AfterCapture::default());
+        assert!(copy && edit);
+        assert!(save, "a capture can't be taken again, so it's kept on disk too");
+    }
+
+    #[test]
+    fn the_default_can_be_anything_and_nothing_at_all_still_opens_the_editor() {
+        let a = |open_editor, copy, save| AfterCapture { show_bar: false, open_editor, copy, save };
+        assert_eq!(what_to_keep(Action::Default, &a(false, true, false)), (false, true, false));
+        assert_eq!(what_to_keep(Action::Default, &a(false, false, true)), (true, false, false));
+        assert_eq!(what_to_keep(Action::Default, &a(false, false, false)), (false, false, true));
+        // The bar's buttons don't change with the default, only with where captures are kept.
+        assert_eq!(what_to_keep(Action::Copy, &a(true, false, true)), (true, true, false));
+        assert_eq!(what_to_keep(Action::Edit, &a(false, true, false)), (false, false, true));
+    }
+
+    #[test]
+    fn enter_is_shown_on_the_button_that_does_the_same() {
+        let a = |open_editor, copy, save| AfterCapture { show_bar: true, open_editor, copy, save };
+        assert_eq!(enter_button(&AfterCapture::default()), Action::Default, "Copy & Edit, a button of its own");
+        assert_eq!(enter_button(&a(true, true, false)), Action::Default);
+        assert_eq!(enter_button(&a(true, false, true)), Action::Edit);
+        assert_eq!(enter_button(&a(false, true, true)), Action::Copy);
+        assert_eq!(enter_button(&a(false, false, true)), Action::Save);
+        assert_eq!(enter_button(&a(false, false, false)), Action::Edit);
+    }
 
     #[test]
     fn the_overlay_is_raised_after_its_first_frame_on_windows() {

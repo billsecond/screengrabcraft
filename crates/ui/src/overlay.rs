@@ -2,8 +2,9 @@
 //!
 //! The capture service takes a picture of each monitor first and shows it full screen, so what
 //! is chosen is exactly what was on screen when the shortcut was pressed (menus and tooltips
-//! included). Drag out an area, or click a window; adjust it with its handles; then pick what to
-//! do with it from the bar under it, or press Enter for the default.
+//! included). Drag out an area, or click a window, and the owner's default runs; or, when the
+//! settings ask for the bar, adjust the area with its handles and pick what to do with it from the
+//! bar under it, or press Enter for the default.
 //!
 //! One [`Overlay`] is shared by all the monitors' windows: [`Overlay::show_monitor`] draws one
 //! monitor's window and takes its input. Areas are in the pixels of a monitor's picture.
@@ -81,8 +82,9 @@ pub struct Overlay {
     pub purpose: Purpose,
     /// Keep the area adjustable with a bar of actions after it is chosen.
     pub preview: bool,
-    /// Whether Enter opens the editor, so the bar's Edit button may say so.
-    pub enter_edits: bool,
+    /// The bar's button that does what Enter does, or [`Action::Default`] when none of them does
+    /// all of it and the default gets a button of its own.
+    pub enter: Action,
     pub magnifier: bool,
     pub crosshair: bool,
     textures: Vec<Option<egui::TextureHandle>>,
@@ -198,7 +200,7 @@ impl Overlay {
             windows,
             purpose,
             preview: true,
-            enter_edits: true,
+            enter: Action::Default,
             magnifier: true,
             crosshair: true,
             textures: (0..n).map(|_| None).collect(),
@@ -436,15 +438,24 @@ impl Overlay {
         const SAVE_KEYS: &str = if cfg!(target_os = "macos") { "Cmd+S" } else { "Ctrl+S" };
         let button = |icon, label, keys, weight, action| BarButton { icon, label, keys, weight, action };
         let cancel = button(Icon::Close, "Cancel", "Esc", Weight::Quiet, None);
+        let enter = self.enter;
+        let keys = |action, own: &'static str| if enter == action { "Enter" } else { own };
         let buttons = match self.purpose {
             Purpose::Gif => vec![button(Icon::Gif, "Record GIF", "Enter", Weight::Main, Some(Action::Start)), cancel],
             Purpose::Scrolling => vec![button(Icon::Scrolling, "Start scrolling capture", "Enter", Weight::Main, Some(Action::Start)), cancel],
-            _ => vec![
-                button(Icon::Edit, "Edit", if self.enter_edits { "Enter" } else { "" }, Weight::Main, Some(Action::Edit)),
-                button(Icon::Copy, "Copy", COPY_KEYS, Weight::Main, Some(Action::Copy)),
-                button(Icon::Save, "Save", SAVE_KEYS, Weight::Plain, Some(Action::Save)),
-                cancel,
-            ],
+            _ => {
+                let mut bar = Vec::with_capacity(5);
+                if enter == Action::Default {
+                    bar.push(button(Icon::Edit, "Copy & Edit", "Enter", Weight::Main, Some(Action::Default)));
+                }
+                bar.extend([
+                    button(Icon::Edit, "Edit", keys(Action::Edit, ""), Weight::Main, Some(Action::Edit)),
+                    button(Icon::Copy, "Copy", keys(Action::Copy, COPY_KEYS), Weight::Main, Some(Action::Copy)),
+                    button(Icon::Save, "Save", keys(Action::Save, SAVE_KEYS), Weight::Plain, Some(Action::Save)),
+                    cancel,
+                ]);
+                bar
+            }
         };
         let font = heavy(ui.ctx(), 17.0);
         let widths: Vec<f32> = buttons

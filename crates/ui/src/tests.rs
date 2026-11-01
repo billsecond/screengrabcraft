@@ -139,6 +139,20 @@ fn select_move_and_delete() {
     assert!(h.state().session.doc.objects.is_empty());
 }
 
+/// Drags out the area from (100, 100) to (300, 250).
+fn drag_out_area(h: &mut Harness<'_, crate::overlay::Overlay>) {
+    h.hover_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    h.drag_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    for i in 1..=5 {
+        h.hover_at(pos2(100.0 + i as f32 * 40.0, 100.0 + i as f32 * 30.0));
+        h.run_steps(1);
+    }
+    h.drop_at(pos2(300.0, 250.0));
+    h.run_steps(2);
+}
+
 #[test]
 fn the_overlay_chooses_an_area() {
     use crate::overlay::{Action, Outcome, Overlay, OverlayMonitor, Purpose};
@@ -153,16 +167,7 @@ fn the_overlay_chooses_an_area() {
         o,
     );
     h.run_steps(2);
-    h.hover_at(pos2(100.0, 100.0));
-    h.run_steps(1);
-    h.drag_at(pos2(100.0, 100.0));
-    h.run_steps(1);
-    for i in 1..=5 {
-        h.hover_at(pos2(100.0 + i as f32 * 40.0, 100.0 + i as f32 * 30.0));
-        h.run_steps(1);
-    }
-    h.drop_at(pos2(300.0, 250.0));
-    h.run_steps(2);
+    drag_out_area(&mut h);
     match h.state().outcome() {
         Outcome::Chosen { area, action, .. } => {
             assert_eq!(*action, Action::Default);
@@ -195,10 +200,38 @@ fn overlay_with_bar(
 }
 
 #[test]
+fn a_recording_still_waits_to_be_started() {
+    use crate::overlay::{Outcome, Overlay, OverlayMonitor, Purpose};
+    use screengrabcraft_model::IRect;
+    // Going straight to the default is for pictures; a recording would start before the owner is ready.
+    for (purpose, label) in [(Purpose::Gif, "Record GIF"), (Purpose::Scrolling, "Start scrolling capture")] {
+        let m = OverlayMonitor { rect: IRect::new(0, 0, 800, 600), picture: Raster::filled(800, 600, Color::WHITE).unwrap(), name: "Main".into() };
+        let mut o = Overlay::new(vec![m], Vec::new(), purpose);
+        o.preview = false;
+        let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+            |ui, o: &mut Overlay| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+            },
+            o,
+        );
+        h.run_steps(2);
+        drag_out_area(&mut h);
+        assert_eq!(*h.state().outcome(), Outcome::Pending);
+        h.get_by_label(label);
+    }
+}
+
+#[test]
 fn the_capture_bar_buttons_say_what_they_do_and_do_it() {
     use crate::overlay::{Action, Outcome, Purpose};
     use screengrabcraft_model::IRect;
-    for (label, wanted) in [("Edit", Some(Action::Edit)), ("Copy", Some(Action::Copy)), ("Save", Some(Action::Save)), ("Cancel", None)] {
+    for (label, wanted) in [
+        ("Copy & Edit", Some(Action::Default)),
+        ("Edit", Some(Action::Edit)),
+        ("Copy", Some(Action::Copy)),
+        ("Save", Some(Action::Save)),
+        ("Cancel", None),
+    ] {
         let mut h = overlay_with_bar(800, 600, IRect::new(100, 100, 300, 200), Purpose::Picture);
         h.get_by_label(label).click();
         h.run_steps(3);
@@ -217,12 +250,23 @@ fn the_capture_bar_stays_big_and_on_screen() {
     // Under the area, over the area's own bottom, and with the whole screen chosen.
     for area in [IRect::new(100, 100, 300, 200), IRect::new(500, 560, 280, 40), IRect::new(0, 0, 800, 600)] {
         let h = overlay_with_bar(800, 600, area, Purpose::Picture);
-        for label in ["Edit", "Copy", "Save", "Cancel"] {
+        for label in ["Copy & Edit", "Edit", "Copy", "Save", "Cancel"] {
             let r = h.get_by_label(label).rect();
             assert!(r.height() >= 48.0 && r.width() >= 100.0, "{label} {r:?}");
             assert!(r.min.x >= 0.0 && r.min.y >= 0.0 && r.max.x <= 800.0 && r.max.y <= 600.0, "{label} {area:?} {r:?}");
         }
     }
+}
+
+#[test]
+fn the_default_has_a_button_only_when_no_other_does_the_same() {
+    use crate::overlay::{Action, Purpose};
+    use screengrabcraft_model::IRect;
+    let mut h = overlay_with_bar(800, 600, IRect::new(100, 100, 300, 200), Purpose::Picture);
+    h.state_mut().enter = Action::Copy;
+    h.run_steps(2);
+    assert!(h.query_by_label("Copy & Edit").is_none());
+    h.get_by_label("Copy");
 }
 
 #[test]
