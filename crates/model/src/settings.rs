@@ -365,13 +365,15 @@ impl ImageFormat {
     }
 }
 
-/// What happens once a picture is captured. Several may be on; with none, the editor opens.
+/// What happens once a picture is captured: the default action, of which several parts may be
+/// on; with none, the editor opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AfterCapture {
-    /// Keep the capture's handles and its bar of actions on screen, so the area can be adjusted
-    /// and an action picked (Edit, Copy, Save); Enter takes the default.
-    pub preview: bool,
+    /// Stop with the capture's handles and its bar of actions on screen, so the area can be
+    /// adjusted and an action picked (Edit, Copy, Save); Enter takes the default. Off, the default
+    /// runs as soon as the area is chosen.
+    pub show_bar: bool,
     pub open_editor: bool,
     pub copy: bool,
     pub save: bool,
@@ -379,7 +381,7 @@ pub struct AfterCapture {
 
 impl Default for AfterCapture {
     fn default() -> AfterCapture {
-        AfterCapture { preview: true, open_editor: true, copy: true, save: true }
+        AfterCapture { show_bar: false, open_editor: true, copy: true, save: true }
     }
 }
 
@@ -424,6 +426,8 @@ pub struct Settings {
     pub welcomed: bool,
     /// Play a short sound when a capture is taken.
     pub sound: bool,
+    /// Take an open editor out of the picture before a capture.
+    pub hide_editor: bool,
 }
 
 impl Default for Settings {
@@ -446,6 +450,7 @@ impl Default for Settings {
             last_region: None,
             welcomed: false,
             sound: false,
+            hide_editor: true,
         }
     }
 }
@@ -603,6 +608,26 @@ mod tests {
         assert_eq!(s.hotkeys, Hotkeys::default(), "unreadable: the default");
         let round = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(round, s);
+    }
+
+    #[test]
+    fn the_default_copies_and_opens_the_editor_without_stopping() {
+        let s = Settings::default();
+        assert!(s.after_capture.copy && s.after_capture.open_editor);
+        assert!(!s.after_capture.show_bar);
+        assert!(s.hide_editor);
+    }
+
+    #[test]
+    fn a_file_from_before_the_default_ran_at_once_gets_it() {
+        // Every start used to write `preview: true`, the old default, so it says nothing of what
+        // the owner chose.
+        let s = Settings::from_json(r#"{"afterCapture":{"preview":true,"openEditor":true,"copy":false,"save":true}}"#);
+        assert!(!s.after_capture.show_bar);
+        assert!(!s.after_capture.copy, "the rest stays as chosen");
+        let s = Settings::from_json(r#"{"afterCapture":{"showBar":true}}"#);
+        assert!(s.after_capture.show_bar);
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
     }
 
     #[test]
