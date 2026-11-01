@@ -5,12 +5,15 @@
 //! One editor window at a time: started again (a capture handed over by the capture service, a
 //! file opened from the file manager), it hands the files to the window already open and exits.
 //!
-//! The capture service also takes the window out of the picture before a capture ([`Aside`]). It's
-//! minimized, never hidden: whatever happens to the service, it's still in the taskbar.
+//! The capture service also hides the window before a capture ([`Aside`]). A hidden window has no
+//! taskbar button to be found by, so it never outlasts the service that hid it, and a program
+//! asking for the editor (the Start menu, the tray) brings it back too.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod services;
+
+use std::time::Duration;
 
 use screengrabcraft_desktop::{instance, launch, logging, store, version};
 use screengrabcraft_ui::Editor;
@@ -18,33 +21,59 @@ use screengrabcraft_ui::Editor;
 const APP_ID: &str = "io.github.billsecond.screengrabcraft.editor";
 static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.editor.png");
 
-/// What to do with the window at the capture service's word.
+/// How often a hidden window looks for the service that hid it.
+const WATCH: Duration = Duration::from_secs(1);
+
+/// What to do with the window.
 #[derive(Debug, PartialEq)]
 enum Move {
-    Minimize,
-    Restore,
+    Hide,
+    Show { focus: bool },
     Stay,
 }
 
-/// Whether the window went down for a capture and comes back up after it: only if the owner was
-/// working in it. Coming back over another program would take the keyboard from it, just as the
-/// capture is about to be pasted there, and a window the owner minimized stays that way.
+impl Move {
+    fn apply(self, ctx: &egui::Context) {
+        match self {
+            Move::Hide => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
+            Move::Show { focus } => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                if focus {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
+            Move::Stay => {}
+        }
+    }
+}
+
+/// The window hidden for a capture, and whether the owner was working in it. A window the owner
+/// minimized isn't in the picture, and stays minimized.
 #[derive(Default)]
-struct Aside(bool);
+struct Aside {
+    hidden: bool,
+    focused: bool,
+}
 
 impl Aside {
+    /// The capture service's word.
     fn hear(&mut self, word: &str, minimized: bool, focused: bool) -> Move {
         match word {
-            launch::EDITOR_HIDE if !minimized => {
-                self.0 = focused;
-                Move::Minimize
+            launch::EDITOR_HIDE if !minimized && !self.hidden => {
+                *self = Aside { hidden: true, focused };
+                Move::Hide
             }
-            launch::EDITOR_SHOW if self.0 => {
-                self.0 = false;
-                Move::Restore
-            }
+            launch::EDITOR_SHOW if self.hidden => self.back(),
             _ => Move::Stay,
         }
+    }
+
+    /// Back on screen, with the keyboard only if it had it: over another program it would take
+    /// it just as the capture is about to be pasted there.
+    fn back(&mut self) -> Move {
+        let focus = self.focused;
+        *self = Aside::default();
+        Move::Show { focus }
     }
 }
 
@@ -61,22 +90,23 @@ impl eframe::App for App {
                 && word.starts_with("--")
             {
                 let (minimized, focused) = ctx.input(|i| (i.viewport().minimized.unwrap_or(false), i.viewport().focused.unwrap_or(false)));
-                match self.aside.hear(word, minimized, focused) {
-                    Move::Minimize => ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
-                    Move::Restore => {
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                    }
-                    Move::Stay => {}
-                }
+                self.aside.hear(word, minimized, focused).apply(ctx);
                 continue;
             }
             self.aside = Aside::default();
             for a in args.iter().filter(|a| !a.starts_with("--")) {
                 self.editor.open_path(ctx, a);
             }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.aside.hidden {
+            if instance::running("service") {
+                ctx.request_repaint_after(WATCH);
+            } else {
+                self.aside.back().apply(ctx);
+            }
         }
         self.editor.logic(ctx);
         if ctx.input(|i| i.viewport().close_requested()) && !self.editor.close_requested() {
@@ -170,18 +200,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_window_in_use_goes_down_for_a_capture_and_comes_back() {
+    fn a_window_in_use_hides_for_a_capture_and_comes_back_with_the_keyboard() {
         let mut a = Aside::default();
-        assert_eq!(a.hear(launch::EDITOR_HIDE, false, true), Move::Minimize);
-        assert_eq!(a.hear(launch::EDITOR_SHOW, true, false), Move::Restore);
+        assert_eq!(a.hear(launch::EDITOR_HIDE, false, true), Move::Hide);
+        assert!(a.hidden);
+        assert_eq!(a.hear(launch::EDITOR_SHOW, false, false), Move::Show { focus: true });
         assert_eq!(a.hear(launch::EDITOR_SHOW, false, true), Move::Stay, "once");
     }
 
     #[test]
-    fn a_window_behind_another_program_leaves_the_keyboard_alone() {
+    fn a_window_behind_another_program_comes_back_and_leaves_the_keyboard_alone() {
         let mut a = Aside::default();
-        assert_eq!(a.hear(launch::EDITOR_HIDE, false, false), Move::Minimize, "still out of the picture");
-        assert_eq!(a.hear(launch::EDITOR_SHOW, true, false), Move::Stay);
+        assert_eq!(a.hear(launch::EDITOR_HIDE, false, false), Move::Hide, "still out of the picture");
+        assert_eq!(a.hear(launch::EDITOR_SHOW, false, false), Move::Show { focus: false }, "it has no taskbar button to come back by");
+    }
+
+    #[test]
+    fn a_second_capture_while_hidden_remembers_the_first() {
+        let mut a = Aside::default();
+        assert_eq!(a.hear(launch::EDITOR_HIDE, false, true), Move::Hide);
+        assert_eq!(a.hear(launch::EDITOR_HIDE, false, false), Move::Stay);
+        assert_eq!(a.hear(launch::EDITOR_SHOW, false, false), Move::Show { focus: true });
+    }
+
+    #[test]
+    fn a_hidden_window_can_come_back_without_a_word() {
+        // What the window does when the service that hid it has gone.
+        let mut a = Aside::default();
+        a.hear(launch::EDITOR_HIDE, false, true);
+        assert_eq!(a.back(), Move::Show { focus: true });
+        assert!(!a.hidden);
     }
 
     #[test]

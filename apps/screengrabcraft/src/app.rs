@@ -23,8 +23,8 @@ use crate::tray::{Item, Tray};
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
 /// Whether the anchor window stays shown once shown (see `logic`).
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
-/// How long the editor's window takes to leave the screen (Windows animates it).
-const EDITOR_ASIDE: Duration = Duration::from_millis(450);
+/// How long the editor's window takes to leave the screen (Windows fades it out).
+const EDITOR_ASIDE: Duration = Duration::from_millis(200);
 pub static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.png");
 
 /// Things that happen elsewhere and are handled on the window's thread.
@@ -136,6 +136,8 @@ impl Service {
         }));
         let wake = ctx.clone();
         guard.set_waker(Box::new(move || wake.request_repaint()));
+        // A service that went down during a capture left the editor hidden.
+        editor_back();
         Service {
             settings,
             keys,
@@ -589,7 +591,7 @@ impl Service {
         // However the capture ended, the editor doesn't stay aside.
         if self.editor_aside && self.freezing.is_none() && self.overlay.is_none() && self.recording.is_none() && !self.keeping {
             self.editor_aside = false;
-            let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_SHOW));
+            editor_back();
         }
         if self.notice.as_ref().is_some_and(|n| Instant::now() >= n.until) {
             self.notice = None;
@@ -723,6 +725,11 @@ fn step_aside(hide: bool) {
     if hide && launch::tell_editor(launch::EDITOR_HIDE) {
         std::thread::sleep(EDITOR_ASIDE);
     }
+}
+
+/// Puts the editor back if it's aside (from a thread of its own: it may not answer at once).
+fn editor_back() {
+    let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_SHOW));
 }
 
 /// What a capture comes to: whether it's saved, copied and opened in the editor.

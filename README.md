@@ -47,7 +47,7 @@ As soon as you've chosen the area ScreenGrabCraft does its default: copy the cap
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
 or PDF, with a file name pattern of your own). The default is yours to change in the service's
 settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
-or Save. An open editor steps out of the picture while you capture, which you can turn off too.
+or Save. An open editor is hidden while you capture, which you can turn off too.
 
 ## Editing
 

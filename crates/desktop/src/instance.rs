@@ -132,15 +132,23 @@ pub fn tell(name: &str, args: &[String]) -> bool {
     crate::paths::settings_dir().is_some_and(|dir| tell_in(&dir, name, args))
 }
 
-fn tell_in(dir: &std::path::Path, name: &str, args: &[String]) -> bool {
-    let info_path = dir.join(format!("{name}.instance"));
-    if !info_path.exists() {
+/// Whether a copy of program `name` is running.
+pub fn running(name: &str) -> bool {
+    !crate::paths::no_prefs() && crate::paths::settings_dir().is_some_and(|dir| running_in(&dir, name))
+}
+
+fn running_in(dir: &std::path::Path, name: &str) -> bool {
+    if !dir.join(format!("{name}.instance")).exists() {
         return false;
     }
     // A crash leaves the info behind, and Windows takes seconds to give up on its dead port, so
-    // the lock says first whether anyone is there.
+    // the lock says whether anyone is there.
     let Ok(lock) = OpenOptions::new().read(true).write(true).open(dir.join(format!("{name}.lock"))) else { return false };
-    matches!(lock.try_lock(), Err(TryLockError::WouldBlock)) && try_hand(&info_path, args).is_ok()
+    matches!(lock.try_lock(), Err(TryLockError::WouldBlock))
+}
+
+fn tell_in(dir: &std::path::Path, name: &str, args: &[String]) -> bool {
+    running_in(dir, name) && try_hand(&dir.join(format!("{name}.instance")), args).is_ok()
 }
 
 fn first(lock: File, info_path: PathBuf) -> Start {
@@ -284,6 +292,7 @@ mod tests {
         let asked = Instant::now();
         assert!(!tell_in(&dir, "t", &word));
         assert!(asked.elapsed() < Duration::from_millis(500), "the dead port isn't tried");
+        assert!(!running_in(&dir, "t"));
 
         let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -293,9 +302,11 @@ mod tests {
         std::fs::write(&info, json!({"port": port, "key": "secret"}).to_string()).unwrap();
         let held = OpenOptions::new().read(true).write(true).open(&lock).unwrap();
         held.try_lock().unwrap();
+        assert!(running_in(&dir, "t"));
         assert!(tell_in(&dir, "t", &word));
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), word);
         drop(held);
+        assert!(!running_in(&dir, "t"), "the copy has gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
