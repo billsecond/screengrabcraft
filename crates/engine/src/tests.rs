@@ -169,3 +169,76 @@ fn text_order_flatten_and_info() {
     assert!(s.execute("object.text", &json!({"id": 1, "text": "x"})).is_err());
     assert!(s.execute("no.such", &json!({})).is_err());
 }
+
+fn area(s: &Session, id: ObjectId) -> Rect {
+    s.doc.get(id).map(|o| o.shape.bounds(&o.style)).unwrap()
+}
+
+#[test]
+fn a_nudge_stops_at_the_edge_of_the_picture() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 10, "w": 40, "h": 30}}));
+    s.select(vec![a]);
+    s.execute("edit.nudge", &json!({"dx": 500, "dy": 500})).unwrap();
+    assert!(s.doc.bounds().encloses(area(&s, a)), "{:?}", area(&s, a));
+    assert!(area(&s, a).right() > 199.9 && area(&s, a).bottom() > 99.9, "it went as far as it could");
+    s.execute("edit.nudge", &json!({"dx": 1})).unwrap();
+    assert!(s.doc.bounds().encloses(area(&s, a)), "and no further");
+    s.execute("edit.nudge", &json!({"dx": -5, "dy": -5})).unwrap();
+    assert!(area(&s, a).right() < 196.0 && area(&s, a).bottom() < 96.0, "the way back is open");
+}
+
+#[test]
+fn a_nudged_group_keeps_its_shape_at_the_edge() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 10, "w": 20, "h": 20}}));
+    let b = add(&mut s, json!({"type": "rect", "rect": {"x": 100, "y": 10, "w": 20, "h": 20}}));
+    s.select(vec![a, b]);
+    let gap = area(&s, a).x - area(&s, b).x;
+    s.execute("edit.nudge", &json!({"dx": 500})).unwrap();
+    assert!(s.doc.bounds().encloses(area(&s, a)));
+    assert!((area(&s, a).x - area(&s, b).x - gap).abs() < 0.01, "both moved the same");
+}
+
+#[test]
+fn an_annotation_outside_is_nudged_in_without_a_jump() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": -50, "y": 10, "w": 40, "h": 30}}));
+    s.select(vec![a]);
+    let before = area(&s, a);
+    s.execute("edit.nudge", &json!({"dx": -5})).unwrap();
+    assert_eq!(area(&s, a), before, "no further out");
+    s.execute("edit.nudge", &json!({"dx": 5})).unwrap();
+    assert!((area(&s, a).x - before.x - 5.0).abs() < 0.01, "and just as far in as asked");
+}
+
+#[test]
+fn a_duplicate_stays_on_the_picture_and_off_its_original() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 60, "w": 45, "h": 35}}));
+    s.select(vec![a]);
+    s.execute("edit.duplicate", &json!({})).unwrap();
+    let copy = *s.selection.first().unwrap();
+    assert_ne!(copy, a);
+    assert!(s.doc.bounds().encloses(area(&s, copy)), "{:?}", area(&s, copy));
+    assert!((area(&s, copy).x - area(&s, a).x).abs() >= 16.0, "against the edge it goes the other way");
+    assert!((area(&s, copy).y - area(&s, a).y).abs() >= 16.0);
+}
+
+#[test]
+fn a_duplicate_with_room_is_where_it_always_was() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 20, "h": 20}}));
+    s.select(vec![a]);
+    s.execute("edit.duplicate", &json!({})).unwrap();
+    let copy = *s.selection.first().unwrap();
+    assert!((area(&s, copy).x - area(&s, a).x - 16.0).abs() < 0.01);
+    assert!((area(&s, copy).y - area(&s, a).y - 16.0).abs() < 0.01);
+}
+
+#[test]
+fn a_script_places_an_annotation_where_it_says() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 500, "y": 500, "w": 20, "h": 20}}));
+    assert_eq!(s.doc.get(a).and_then(|o| o.shape.rect()), Some(Rect::new(500.0, 500.0, 20.0, 20.0)));
+}

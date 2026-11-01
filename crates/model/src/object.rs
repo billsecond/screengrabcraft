@@ -503,6 +503,17 @@ impl Shape {
         }
     }
 
+    /// The area its own points cover, without its line width or arrow heads.
+    pub fn extent(&self) -> Rect {
+        match self {
+            Shape::Arrow { from, to, .. } | Shape::Line { from, to } => Rect::from_points(*from, *to),
+            Shape::Pen { points } | Shape::Highlight { points } => Rect::bounding(points),
+            Shape::Step { center, .. } => Rect::new(center.x, center.y, 0.0, 0.0),
+            Shape::Callout { rect, tail, .. } => rect.union(Rect::new(tail.x, tail.y, 0.0, 0.0)),
+            _ => self.rect().unwrap_or_default(),
+        }
+    }
+
     /// Whether `p` touches it, within `tol` pixels.
     pub fn hit(&self, style: &Style, p: Pt, tol: f32) -> bool {
         let reach = style.width.max(0.0) / 2.0 + tol;

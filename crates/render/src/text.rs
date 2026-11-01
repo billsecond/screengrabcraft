@@ -1,8 +1,8 @@
 //! Text for annotations: the bundled fonts, line breaking, and glyph outlines as paths (so
 //! text is filled, outlined and shadowed like any other shape, at any size).
 //!
-//! The fonts are Inter (regular and semibold) and JetBrains Mono, under the SIL Open Font
-//! Licence (`assets/fonts/`, listed in ATTRIBUTION.md). Italic is the upright face slanted.
+//! The fonts are PatroneOS Sans (regular and semibold) and PatroneOS Mono, under the SIL Open
+//! Font Licence (`assets/fonts/`, listed in ATTRIBUTION.md). Italic is the upright face slanted.
 
 use std::sync::OnceLock;
 
@@ -10,13 +10,13 @@ use ab_glyph::{Font, FontRef, GlyphId, OutlineCurve, PxScale, ScaleFont};
 use screengrabcraft_model::{Pt, Rect, Style, TextAlign};
 use tiny_skia::{Path, PathBuilder, Transform};
 
-static INTER: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-static INTER_BOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
-static MONO: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+static SANS: &[u8] = include_bytes!("../../../assets/fonts/PatroneOSSans-Regular.ttf");
+static SANS_BOLD: &[u8] = include_bytes!("../../../assets/fonts/PatroneOSSans-SemiBold.ttf");
+static MONO: &[u8] = include_bytes!("../../../assets/fonts/PatroneOSMono-Regular.ttf");
 
 /// The bundled fonts, by name (for showing text as it will be drawn while it is typed).
 pub fn font_files() -> [(&'static str, &'static [u8]); 3] {
-    [("inter", INTER), ("inter-bold", INTER_BOLD), ("mono", MONO)]
+    [("sans", SANS), ("sans-bold", SANS_BOLD), ("mono", MONO)]
 }
 
 struct Fonts {
@@ -28,8 +28,8 @@ struct Fonts {
 fn fonts() -> &'static Fonts {
     static FONTS: OnceLock<Fonts> = OnceLock::new();
     FONTS.get_or_init(|| Fonts {
-        regular: FontRef::try_from_slice(INTER).ok(),
-        bold: FontRef::try_from_slice(INTER_BOLD).ok(),
+        regular: FontRef::try_from_slice(SANS).ok(),
+        bold: FontRef::try_from_slice(SANS_BOLD).ok(),
         mono: FontRef::try_from_slice(MONO).ok(),
     })
 }

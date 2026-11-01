@@ -212,12 +212,18 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     let mut s = svc.settings.clone();
     ui.heading("After a capture");
     ui.add_space(8.0);
-    ui.checkbox(&mut s.after_capture.preview, "Keep the area adjustable, with a bar to choose Edit, Copy or Save");
-    ui.label(RichText::new("Enter (or a double-click) then does what is ticked below.").size(12.0).color(t.muted));
-    ui.add_space(6.0);
-    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Editor");
+    ui.label(RichText::new("The default").strong());
+    ui.label(RichText::new("What happens to a capture once you have chosen the area.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
     ui.checkbox(&mut s.after_capture.copy, "Copy it to the clipboard");
+    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Editor");
     ui.checkbox(&mut s.after_capture.save, "Save it in the captures folder");
+    ui.add_space(12.0);
+    ui.checkbox(&mut s.after_capture.show_bar, "Stop first, with a bar to adjust the area or choose Edit, Copy or Save");
+    ui.label(RichText::new("Enter (or a double-click) then does the default. Off, the default happens at once.").size(12.0).color(t.muted));
+    ui.add_space(6.0);
+    ui.checkbox(&mut s.hide_editor, "Hide the Editor while capturing");
+    ui.label(RichText::new("So it isn't in the picture. It comes back with the new capture.").size(12.0).color(t.muted));
     ui.add_space(12.0);
     ui.label(RichText::new("Captures folder").strong());
     let dir = paths::captures_dir(&s);
@@ -392,7 +398,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.label(RichText::new("GIF recordings").strong());
     egui::Grid::new("gif").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Frames a second");
-        ui.add(egui::Slider::new(&mut s.gif_fps, 1..=30));
+        ui.add(egui::Slider::new(&mut s.gif_frame_rate, 1..=30));
         ui.end_row();
         ui.label("Longest recording");
         ui.add(egui::Slider::new(&mut s.gif_max_secs, 5..=600).suffix(" s"));
@@ -432,5 +438,5 @@ fn about_tab(_svc: &mut Service, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.hyperlink_to("github.com/billsecond/screengrabcraft", screengrabcraft_model::HOMEPAGE);
     ui.add_space(8.0);
-    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: Inter and JetBrains Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
+    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
 }

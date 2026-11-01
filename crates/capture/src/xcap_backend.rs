@@ -99,6 +99,14 @@ pub fn grab_monitor(id: u32) -> Result<(Monitor, Raster), CaptureError> {
     Err(CaptureError::NoMonitor)
 }
 
+/// Keeps the monitor, so a frame neither lists the monitors nor copies more than the area.
+#[cfg(target_os = "windows")]
+pub fn grabber(id: u32, pixels: IRect) -> Result<crate::Grabber, CaptureError> {
+    let monitor = xcap::Monitor::all().map_err(failed)?.into_iter().find(|m| m.id().ok() == Some(id)).ok_or(CaptureError::NoMonitor)?;
+    let (x, y) = (u32::try_from(pixels.x.max(0)).unwrap_or(0), u32::try_from(pixels.y.max(0)).unwrap_or(0));
+    Ok(Box::new(move || raster_of(monitor.capture_region(x, y, pixels.w, pixels.h).map_err(failed)?)))
+}
+
 pub fn pointer() -> Option<(i32, i32)> {
     match mouse_position::mouse_position::Mouse::get_mouse_position() {
         mouse_position::mouse_position::Mouse::Position { x, y } => Some((x, y)),

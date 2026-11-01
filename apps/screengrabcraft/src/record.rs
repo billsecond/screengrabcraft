@@ -108,28 +108,32 @@ fn gif(
     let path = dir.join(format!("recording-{}.gif", std::process::id()));
     let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     let mut writer = GifWriter::new(BufWriter::new(file), area.w, area.h).map_err(|e| e.to_string())?;
-    let tick = Duration::from_millis(1000 / u64::from(fps.clamp(1, 30)));
+    let mut grab = screengrabcraft_capture::grabber(monitor, area).map_err(|e| e.to_string())?;
+    let tick = Duration::from_secs_f64(1.0 / f64::from(fps.clamp(1, 30)));
     let started = Instant::now();
     let mut last = Instant::now();
+    let mut due = Instant::now();
     let mut frames = 0u32;
     let limit = Duration::from_secs(u64::from(max_secs.clamp(1, 600)));
     while !stop.load(Ordering::SeqCst) && started.elapsed() < limit {
         let at = Instant::now();
-        match screengrabcraft_capture::grab_on_monitor(monitor, area) {
+        match grab() {
             Ok(frame) if frame.width() == area.w && frame.height() == area.h => {
                 let delay = at.duration_since(last).as_millis().min(u128::from(u32::MAX)) as u32;
-                writer.push(frame, if frames == 0 { 0 } else { delay }).map_err(|e| e.to_string())?;
-                last = at;
-                frames += 1;
-                progress.store(frames, Ordering::SeqCst);
-                wake.request_repaint();
+                // A frame left out only makes the one before last longer.
+                if writer.offer(frame, if frames == 0 { 0 } else { delay }).map_err(|e| e.to_string())? {
+                    last = at;
+                    frames += 1;
+                    progress.store(frames, Ordering::SeqCst);
+                    wake.request_repaint();
+                }
             }
             Ok(_) => log::warn!("a frame of the wrong size was left out"),
             Err(e) => log::warn!("a frame could not be captured: {e}"),
         }
-        if let Some(rest) = tick.checked_sub(at.elapsed()) {
-            std::thread::sleep(rest);
-        }
+        // On a steady beat: what a frame took comes off the wait for the next.
+        due = (due + tick).max(Instant::now());
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
     }
     let (_, n) = writer.finish(at_least(last.elapsed()).as_millis().min(u128::from(u32::MAX)) as u32).map_err(|e| e.to_string())?;
     if cancel.load(Ordering::SeqCst) || n == 0 {

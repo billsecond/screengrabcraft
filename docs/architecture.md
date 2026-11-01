@@ -22,7 +22,7 @@ L1                              model (document, shapes, styles, geometry, setti
 |---|---|---|
 | `model` | yes | `Document` (a `Raster` plus `Object`s in drawing order), `Shape` (15 kinds), `Style`, hit testing and handles, `Settings`/`EditorSettings`, hotkeys, file naming |
 | `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
-| `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grab_area`, permission |
+| `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
 | `desktop` | no | paths, settings files, logging, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend |
