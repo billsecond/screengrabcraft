@@ -398,7 +398,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.label(RichText::new("GIF recordings").strong());
     egui::Grid::new("gif").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Frames a second");
-        ui.add(egui::Slider::new(&mut s.gif_fps, 1..=30));
+        ui.add(egui::Slider::new(&mut s.gif_frame_rate, 1..=30));
         ui.end_row();
         ui.label("Longest recording");
         ui.add(egui::Slider::new(&mut s.gif_max_secs, 5..=600).suffix(" s"));

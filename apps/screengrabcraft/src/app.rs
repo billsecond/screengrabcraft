@@ -479,7 +479,7 @@ impl Service {
         match run.mode {
             CaptureMode::Gif | CaptureMode::Scrolling => {
                 let kind = if run.mode == CaptureMode::Gif { record::Kind::Gif } else { record::Kind::Scrolling };
-                match record::start(kind, m.id, area, desktop, self.settings.gif_fps, self.settings.gif_max_secs, self.ctx.clone()) {
+                match record::start(kind, m.id, area, desktop, self.settings.gif_frame_rate, self.settings.gif_max_secs, self.ctx.clone()) {
                     Ok(r) => {
                         self.recording = Some(r);
                         if let Some(t) = &mut self.tray {

@@ -15,6 +15,8 @@ use crate::theme::Tokens;
 const BUTTON: egui::Vec2 = vec2(104.0, 38.0);
 /// How far the bar stays above the canvas's lower edge.
 const LIFT: f32 = 14.0;
+/// How late the frames may run and still catch up.
+const CATCH_UP_SECS: f64 = 0.25;
 
 pub struct Playback {
     player: Player,
@@ -78,8 +80,10 @@ impl Playback {
                 Some(frame) => frame.set(image, options),
                 None => self.frame = Some(ctx.load_texture("gif-frame", image, options)),
             }
-            // A slow frame makes the next one later rather than rushing to catch up.
-            self.due = now + f64::from(next.delay_ms) / 1000.0;
+            // On the GIF's own clock, so a repaint a little late doesn't make every frame late. A
+            // long way behind it starts again from now, rather than rushing to catch up.
+            let start = if now - self.due > CATCH_UP_SECS { now } else { self.due };
+            self.due = start + f64::from(next.delay_ms) / 1000.0;
         }
         ctx.request_repaint_after(Duration::from_millis(((self.due - now) * 1000.0).max(0.0) as u64));
     }

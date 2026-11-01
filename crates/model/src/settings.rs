@@ -417,7 +417,9 @@ pub struct Settings {
     /// Start the capture service when the owner signs in (and restart it if it stops). `None`
     /// until the first run has decided (it turns it on and says so).
     pub start_at_login: Option<bool>,
-    pub gif_fps: u32,
+    /// Frames a second of a GIF recording. It's `gifFrameRate` in the file: the old `gifFps` was
+    /// written at every save, so it says nothing of what the owner chose, and is left behind.
+    pub gif_frame_rate: u32,
     pub gif_max_secs: u32,
     pub theme: Theme,
     /// The area of the last region capture, for Repeat Last Capture.
@@ -444,7 +446,7 @@ impl Default for Settings {
             magnifier: true,
             crosshair: true,
             start_at_login: None,
-            gif_fps: 12,
+            gif_frame_rate: 30,
             gif_max_secs: 60,
             theme: Theme::System,
             last_region: None,
@@ -479,7 +481,7 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
         self.delay_secs = self.delay_secs.min(60);
-        self.gif_fps = self.gif_fps.clamp(1, 30);
+        self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
@@ -628,6 +630,16 @@ mod tests {
         let s = Settings::from_json(r#"{"afterCapture":{"showBar":true}}"#);
         assert!(s.after_capture.show_bar);
         assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+    }
+
+    #[test]
+    fn a_file_from_before_smooth_recordings_gets_them() {
+        assert_eq!(Settings::default().gif_frame_rate, 30);
+        assert_eq!(Settings::from_json(r#"{"gifFps":12}"#).gif_frame_rate, 30);
+        let s = Settings::from_json(r#"{"gifFrameRate":15}"#);
+        assert_eq!(s.gif_frame_rate, 15, "a rate of its own is kept");
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+        assert_eq!(Settings::from_json(r#"{"gifFrameRate":500}"#).gif_frame_rate, 30);
     }
 
     #[test]
