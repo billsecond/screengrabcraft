@@ -258,7 +258,7 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     }
 }
 
-fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
+pub(crate) fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
     // The tool keeps the look for the next one, too.
     let mut remembered = ed.tool_style(kind);
     apply_changes(old, new, &mut remembered);
@@ -268,10 +268,15 @@ fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_select
             ed.session.begin("Change Style");
             ed.props_editing = true;
         }
+        let picture = ed.session.doc.bounds();
         for id in ed.session.selected() {
-            if let Some(o) = ed.session.doc.get_mut(id) {
-                apply_changes(old, new, &mut o.style);
-                o.style = o.style.clamped();
+            let Some(o) = ed.session.doc.get_mut(id) else { continue };
+            let was_inside = picture.encloses(o.shape.bounds(&o.style));
+            apply_changes(old, new, &mut o.style);
+            o.style = o.style.clamped();
+            // A thicker line or a bigger badge doesn't push it over the edge.
+            if was_inside {
+                ed.session.doc.bring_inside(id);
             }
         }
         ed.session.touch();

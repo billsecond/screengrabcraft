@@ -65,6 +65,7 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
 - **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
   contrast.
+- Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Undo and redo for everything, copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
