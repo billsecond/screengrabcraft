@@ -795,9 +795,9 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     let family = if o.style.mono {
         egui::FontFamily::Name("mono".into())
     } else if o.style.bold {
-        egui::FontFamily::Name("inter-bold".into())
+        egui::FontFamily::Name("sans-bold".into())
     } else {
-        egui::FontFamily::Name("inter".into())
+        egui::FontFamily::Name("sans".into())
     };
     let font = egui::FontId::new((o.style.font_size * scale).max(4.0), family);
     let screen = ed.view.rect_to_screen(rect);

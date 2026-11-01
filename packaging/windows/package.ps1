@@ -119,7 +119,7 @@ function ConvertTo-RtfText([string] $Text) {
 }
 $paragraphs = [System.Collections.Generic.List[string]]::new()
 $paragraphs.Add('\b ScreenGrabCraft\b0')
-$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (Inter and JetBrains Mono) are under the SIL Open Font License 1.1, which follows them; every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
+$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (PatroneOS Sans and PatroneOS Mono, https://patroneos.com/fonts) are under the SIL Open Font License 1.1, which follows them; every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
 $LicenseFiles = @((Join-Path $Root 'LICENSE-MIT'), (Join-Path $Root 'LICENSE-APACHE')) +
   @(Get-ChildItem -Path (Join-Path $Root 'assets\fonts\OFL-*.txt') -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
 foreach ($file in $LicenseFiles) {
