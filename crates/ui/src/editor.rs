@@ -293,6 +293,7 @@ impl Editor {
         self.session.begin("Paste Text");
         match self.session.doc.add(screengrabcraft_model::Shape::Text { rect, text }, style) {
             Ok(id) => {
+                self.session.doc.bring_inside(id);
                 self.session.selection = vec![id];
                 self.session.commit();
                 self.tool = Tool::Select;

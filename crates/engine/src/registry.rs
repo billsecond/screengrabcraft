@@ -282,6 +282,10 @@ fn delete(s: &mut Session, p: &Value) -> Result<Value> {
 fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = ids_param(s, p, true)?;
     let d = Pt::new(num(p, "dx").unwrap_or(16.0), num(p, "dy").unwrap_or(16.0));
+    // Against an edge the copies go the other way, not out of sight on top of the originals.
+    let (on, back) = (s.doc.limit_move(&ids, d), s.doc.limit_move(&ids, d.scale(-1.0)));
+    let further = |a: f32, b: f32| if a.abs() >= b.abs() { a } else { b };
+    let d = Pt::new(further(on.x, back.x), further(on.y, back.y));
     let mut new_ids = Vec::new();
     for id in ids {
         if let Some(o) = s.doc.get(id).cloned() {
@@ -299,7 +303,7 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn nudge(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = ids_param(s, p, true)?;
-    let d = Pt::new(num(p, "dx").unwrap_or(0.0), num(p, "dy").unwrap_or(0.0));
+    let d = s.doc.limit_move(&ids, Pt::new(num(p, "dx").unwrap_or(0.0), num(p, "dy").unwrap_or(0.0)));
     for id in ids {
         if let Some(o) = s.doc.get_mut(id) {
             o.shape.translate(d);
