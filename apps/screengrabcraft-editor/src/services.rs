@@ -176,9 +176,8 @@ impl Services for DesktopServices {
     }
 
     fn new_capture(&self, mode: CaptureMode) -> Result<(), String> {
-        // Out of the way first, so the editor isn't in the picture; the capture comes back here.
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
-        launch::ask_service(&["--capture".to_string(), mode.arg().to_string(), "--wait".to_string(), "450".to_string()])
+        // The service takes this window out of the picture first, as for any capture.
+        launch::ask_service(&["--capture".to_string(), mode.arg().to_string()])
     }
 
     fn save_settings(&self, settings: &EditorSettings) {

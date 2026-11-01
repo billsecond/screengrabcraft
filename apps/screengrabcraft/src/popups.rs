@@ -130,6 +130,18 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     }
 }
 
+/// The button that takes a saved file to the editor: a GIF plays there, and a PDF doesn't open.
+fn editor_button(path: &std::path::Path) -> Option<&'static str> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default();
+    if ext.eq_ignore_ascii_case("gif") {
+        Some("Play")
+    } else if ext.eq_ignore_ascii_case("pdf") {
+        None
+    } else {
+        Some("Edit")
+    }
+}
+
 pub fn notice(svc: &mut Service, ctx: &egui::Context) {
     let Some(n) = svc.notice.as_mut() else { return };
     if n.texture.is_none()
@@ -165,11 +177,9 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
                     }
                     ui.horizontal(|ui| {
                         if let Some(p) = &path {
-                            let picture = p
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .is_some_and(|e| !e.eq_ignore_ascii_case("gif") && !e.eq_ignore_ascii_case("pdf"));
-                            if picture && ui.small_button("Edit").clicked() {
+                            if let Some(label) = editor_button(p)
+                                && ui.small_button(label).clicked()
+                            {
                                 let _ = launch::open_editor(&[p.to_string_lossy().to_string()]);
                                 close = true;
                             }
@@ -194,5 +204,20 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
     } else if hold && let Some(n) = svc.notice.as_mut() {
         // Kept while the pointer is on it.
         n.until = n.until.max(Instant::now() + std::time::Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn a_gif_is_played_a_picture_is_edited_and_a_pdf_stays_out() {
+        assert_eq!(editor_button(Path::new("Recording.gif")), Some("Play"));
+        assert_eq!(editor_button(Path::new("RECORDING.GIF")), Some("Play"));
+        assert_eq!(editor_button(Path::new("Capture.png")), Some("Edit"));
+        assert_eq!(editor_button(Path::new("Capture.pdf")), None);
     }
 }

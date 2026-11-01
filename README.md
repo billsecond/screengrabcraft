@@ -21,7 +21,7 @@ beside them for scripts and agents.
 
 | | |
 |---|---|
-| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the bar with Edit, Copy, Save and Cancel](docs/images/overlay.png) |
+| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) |
 
 ![Annotations drawn by ScreenGrabCraft: steps, a rectangle and an ellipse, a highlight, a blur and a pixelated area, a magnifier, stamps, a callout and arrows](docs/images/annotations.png)
 
@@ -43,9 +43,15 @@ an area the screen is frozen as it was when the key was pressed (open menus and 
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
 
-After a capture ScreenGrabCraft does what its settings say: open it in the editor, copy it to the
-clipboard, and/or save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP or PDF, with a file
-name pattern of your own). With the capture bar on, Edit, Copy and Save are a click away.
+As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
+clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
+or PDF, with a file name pattern of your own). The default is yours to change in the service's
+settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
+or Save. An open editor is hidden while you capture, which you can turn off too.
+
+A GIF recording is always saved, and opens in the editor like any capture, with a **Play** button
+under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
+not on the animation, and the GIF file itself is never changed.
 
 ## Editing
 

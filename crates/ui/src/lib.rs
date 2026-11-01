@@ -10,6 +10,7 @@ pub mod dialogs;
 pub mod editor;
 pub mod icons;
 pub mod overlay;
+pub mod playback;
 pub mod props;
 pub mod services;
 pub mod strip;
