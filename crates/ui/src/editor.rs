@@ -8,6 +8,7 @@ use screengrabcraft_render::anim::Player;
 use screengrabcraft_render::{Renderer, project};
 use serde_json::{Value, json};
 
+use crate::autosave::Status;
 use crate::canvas::{Drag, View};
 use crate::dialogs::Dialog;
 use crate::icons::{self, Icon};
@@ -51,7 +52,8 @@ impl Tool {
     }
 }
 
-/// A question waiting for an answer before something replaces unsaved work.
+/// What waits for the document to be saved (or, in a browser, for the owner to answer)
+/// before it goes ahead.
 #[derive(Clone, Debug)]
 pub enum Pending {
     Open(OpenedFile),
@@ -66,6 +68,14 @@ pub struct Editor {
     pub project_path: Option<String>,
     /// The picture file it was opened from (a capture), if any.
     pub picture_path: Option<String>,
+    /// The picture as first captured or opened, before any change; none when it isn't known.
+    pub original: Option<Raster>,
+    /// When the files are written as the owner works.
+    pub saver: crate::autosave::Saver,
+    /// Captures waiting to go to the Recycle Bin once nothing is being written.
+    pub(crate) trashing: Vec<String>,
+    /// Why a save something waited on failed (the owner is asked what to do).
+    pub(crate) save_problem: Option<String>,
     /// The name shown in the title.
     pub name: String,
     pub tool: Tool,
@@ -97,13 +107,14 @@ pub struct Editor {
     pub(crate) saving: Option<ImageFormat>,
     pub(crate) saving_project: bool,
     toast: Option<(String, f64, bool)>,
-    pub(crate) thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    /// The strip's thumbnails, with the time of the picture each was made from.
+    pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
     pub(crate) recent: Vec<crate::services::RecentItem>,
-    recent_at: f64,
+    pub(crate) recent_at: f64,
     pub services: Box<dyn Services>,
     /// Set when the window should close (the host closes it).
     pub quit_requested: bool,
-    /// Whether the window may close now (no unsaved work, or the owner said so).
+    /// Whether the window may close now (everything saved, or the owner said so).
     pub close_confirmed: bool,
     fonts_installed: bool,
     theme_applied: Option<screengrabcraft_model::Theme>,
@@ -114,16 +125,22 @@ const TOAST_SECS: f64 = 3.5;
 
 impl Editor {
     pub fn new(services: Box<dyn Services>, settings: EditorSettings) -> Editor {
-        let blank =
-            Raster::filled(800, 500, screengrabcraft_model::Color::WHITE).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::WHITE));
+        let blank = blank_picture();
+        // The drawing tool and stamp last picked, if they are still on the tool bar.
+        let tool = settings.tool.map(Tool::Draw).filter(|t| Tool::BAR.iter().any(|(b, ..)| b == t)).unwrap_or(Tool::Draw(Kind::Arrow));
+        let stamp = settings.stamp.unwrap_or(StampKind::Check);
         Editor {
-            session: Session::new(Document::new(blank)),
+            session: Session::new(Document::new(blank.clone())),
             settings,
             project_path: None,
             picture_path: None,
+            original: Some(blank),
+            saver: crate::autosave::Saver::default(),
+            trashing: Vec::new(),
+            save_problem: None,
             name: "Untitled".to_string(),
-            tool: Tool::Draw(Kind::Arrow),
-            stamp: StampKind::Check,
+            tool,
+            stamp,
             arrow_heads: screengrabcraft_model::ArrowHeads::End,
             rect_radius: 0.0,
             spot_ellipse: false,
@@ -190,14 +207,18 @@ impl Editor {
         }
     }
 
-    fn replace_document(&mut self, doc: Document, name: String, project: Option<String>, picture: Option<String>) {
+    fn replace_document(&mut self, doc: Document, name: String, project: Option<String>, picture: Option<String>, original: Option<Raster>) {
         self.session.replace(doc);
         self.name = name;
         self.project_path = project;
         self.picture_path = picture;
+        self.original = original;
+        self.saver.reset();
+        self.save_problem = None;
         self.drag = None;
         self.playback = None;
         self.editing = None;
+        self.props_editing = false;
         self.crop = None;
         self.view.fit_pending = true;
         if self.tool == Tool::Crop {
@@ -205,13 +226,19 @@ impl Editor {
         }
     }
 
-    /// Opens a picture or project from its bytes (asks first if there is unsaved work).
+    /// An empty picture with no file (it gets one on its first change).
+    pub(crate) fn blank_document(&mut self) {
+        let blank = blank_picture();
+        self.replace_document(Document::new(blank.clone()), "Untitled".to_string(), None, None, Some(blank));
+    }
+
+    /// Opens a picture or project from its bytes, once the document open now is saved.
     pub fn open_file(&mut self, ctx: &egui::Context, file: OpenedFile) {
-        if self.session.dirty {
+        if self.ready_to_leave() {
+            self.open_now(ctx, file);
+        } else {
             self.pending = Some(Pending::Open(file));
-            return;
         }
-        self.open_now(ctx, file);
     }
 
     /// Offers to play the document's file, if it's an animated GIF.
@@ -219,14 +246,14 @@ impl Editor {
         self.playback = player.map(|p| crate::playback::Playback::new(p, self.session.revision()));
     }
 
-    fn open_now(&mut self, ctx: &egui::Context, mut file: OpenedFile) {
+    pub(crate) fn open_now(&mut self, ctx: &egui::Context, mut file: OpenedFile) {
         let stem = std::path::Path::new(&file.name).file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string();
         if project::sniff(&file.bytes) {
-            match project::load(&file.bytes) {
-                Ok((doc, skipped)) => {
-                    self.replace_document(doc, stem, file.path.clone(), None);
-                    if skipped > 0 {
-                        self.error(ctx, format!("{skipped} annotation(s) in the file could not be read and were left out"));
+            match project::read(&file.bytes) {
+                Ok(p) => {
+                    self.replace_document(p.doc, stem, file.path.clone(), None, p.original);
+                    if p.skipped > 0 {
+                        self.error(ctx, format!("{} annotation(s) in the file could not be read and were left out", p.skipped));
                     }
                 }
                 Err(e) => self.error(ctx, format!("{}: {e}", file.name)),
@@ -235,21 +262,35 @@ impl Editor {
             match screengrabcraft_render::decode(&file.bytes) {
                 Ok(r) => {
                     let player = Player::open(std::mem::take(&mut file.bytes));
-                    let mut doc = Document::new(r);
-                    doc.meta.source = Some(file.name.clone());
                     // A capture's annotations are kept beside it, if they were saved before.
-                    let project = file.path.as_ref().map(|p| sibling_project(p));
-                    if let Some(pp) = &project
-                        && let Ok(bytes) = self.services.read_file(pp)
-                        && let Ok((saved, _)) = project::load(&bytes)
-                    {
-                        self.replace_document(saved, stem, project.clone(), file.path.clone());
-                        self.offer_playback(player);
-                        self.toast(ctx, "Opened with the annotations saved for it");
-                        return;
+                    let side = file.path.as_ref().map(|p| sibling_project(p));
+                    let saved = match side.as_ref().map(|s| self.services.read_file(s)) {
+                        Some(Ok(bytes)) => match project::read(&bytes) {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                let side = side.as_deref().map(file_name).unwrap_or_default();
+                                self.error(ctx, format!("{side} could not be read, so the annotations in it were left out: {e}"));
+                                None
+                            }
+                        },
+                        _ => None,
+                    };
+                    match saved {
+                        Some(p) => {
+                            // A side file from before the original was kept in it: the picture
+                            // beside it was never written again, so it still is the original.
+                            let original = if p.tells_original { p.original } else { Some(r) };
+                            self.replace_document(p.doc, stem, side, file.path.clone(), original);
+                            self.offer_playback(player);
+                            self.toast(ctx, "Opened with the annotations saved for it");
+                        }
+                        None => {
+                            let mut doc = Document::new(r.clone());
+                            doc.meta.source = Some(file.name.clone());
+                            self.replace_document(doc, stem, None, file.path.clone(), Some(r));
+                            self.offer_playback(player);
+                        }
                     }
-                    self.replace_document(doc, stem, None, file.path.clone());
-                    self.offer_playback(player);
                 }
                 Err(e) => self.error(ctx, format!("{}: {e}", file.name)),
             }
@@ -271,14 +312,19 @@ impl Editor {
         }
     }
 
-    /// Starts editing a fresh picture (a paste, or a capture handed over without a file).
+    /// Starts editing a fresh picture (a paste, or a capture handed over without a file), once
+    /// the document open now is saved. It gets a file of its own on its first change.
     pub fn open_picture(&mut self, raster: Raster, name: Option<String>) {
-        if self.session.dirty {
+        if self.ready_to_leave() {
+            self.open_picture_now(raster, name);
+        } else {
             self.pending = Some(Pending::Picture(raster, name));
-            return;
         }
+    }
+
+    fn open_picture_now(&mut self, raster: Raster, name: Option<String>) {
         let n = name.unwrap_or_else(|| "Pasted picture".to_string());
-        self.replace_document(Document::new(raster), n, None, None);
+        self.replace_document(Document::new(raster.clone()), n, None, None, Some(raster));
     }
 
     /// Pasted text becomes a text box in the middle of the view.
@@ -364,22 +410,14 @@ impl Editor {
         }
     }
 
-    /// Ctrl+S: the project file it has, else ask.
-    pub fn save(&mut self, ctx: &egui::Context) {
-        let path = self.project_path.clone().or_else(|| self.picture_path.as_ref().map(|p| sibling_project(p)));
-        match path {
-            Some(p) if self.services.has_paths() => self.write_project(ctx, &p),
-            _ => self.save_as(),
-        }
-    }
-
+    /// Save As…: asks where (in a browser, downloads the project).
     pub fn save_as(&mut self) {
         self.saving = None;
-        self.saving_project = true;
         let name = format!("{}.{PROJECT_EXT}", self.name);
         if self.services.has_paths() {
+            self.saving_project = true;
             self.services.request_save(&name, &[("ScreenGrabCraft project", &[PROJECT_EXT])]);
-        } else if let Ok(bytes) = project::save(&self.session.doc) {
+        } else if let Ok(bytes) = project::save_with_original(&self.session.doc, self.original.as_ref()) {
             let _ = self.services.download(&name, &bytes);
             self.session.dirty = false;
         }
@@ -406,12 +444,19 @@ impl Editor {
         }
     }
 
+    /// Save As… to a project: from now on the document is that project, saved as it changes.
     fn write_project(&mut self, ctx: &egui::Context, path: &str) {
-        match project::save(&self.session.doc) {
+        match project::save_with_original(&self.session.doc, self.original.as_ref()) {
             Ok(bytes) => match self.services.write_file(path, &bytes) {
                 Ok(()) => {
+                    // Saved somewhere else, it leaves the picture it came from as it is.
+                    if self.picture_path.as_deref().map(sibling_project).as_deref() != Some(path) {
+                        self.picture_path = None;
+                        self.name = crate::autosave::stem(path);
+                    }
                     self.project_path = Some(path.to_string());
                     self.session.dirty = false;
+                    self.saver.saved_elsewhere();
                     self.settings.remember(path);
                     self.services.save_settings(&self.settings);
                     self.toast(ctx, format!("Saved {}", file_name(path)));
@@ -462,11 +507,6 @@ impl Editor {
                 }
                 self.saving = None;
                 self.saving_project = false;
-                if matches!(self.pending, Some(Pending::Quit)) && !self.session.dirty {
-                    self.close_confirmed = true;
-                    self.quit_requested = true;
-                    self.pending = None;
-                }
             }
             DialogResult::Cancelled => {
                 self.saving = None;
@@ -475,9 +515,10 @@ impl Editor {
         }
     }
 
-    /// Asked to close the window: true when it may close now.
+    /// Asked to close the window: true when it may close now. Otherwise the last changes are
+    /// being saved, and the window closes once they are (`quit_requested`).
     pub fn close_requested(&mut self) -> bool {
-        if self.close_confirmed || !self.session.dirty {
+        if self.close_confirmed || self.ready_to_leave() {
             return true;
         }
         self.pending = Some(Pending::Quit);
@@ -515,12 +556,15 @@ impl Editor {
                 self.services.read_dropped(f);
             }
         }
+        self.autosave(ctx);
         let now = ctx.input(|i| i.time);
         if now - self.recent_at > 3.0 {
             self.recent = self.services.recent();
             self.recent_at = now;
         }
-        let title = format!("{}{} — {}", if self.session.dirty { "• " } else { "" }, self.name, screengrabcraft_model::EDITOR_NAME);
+        // The dot while changes are still to be written.
+        let unsaved = self.session.dirty || self.saver.writing();
+        let title = format!("{}{} — {}", if unsaved { "• " } else { "" }, self.name, screengrabcraft_model::EDITOR_NAME);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
@@ -538,11 +582,12 @@ impl Editor {
         crate::canvas::show(self, ui);
         crate::dialogs::show(self, &ctx);
         self.confirm(&ctx);
+        self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || self.pending.is_some() {
+        if self.dialog.is_some() || self.save_problem.is_some() || (self.pending.is_some() && !self.autosaves()) {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input() || self.editing.is_some();
@@ -650,6 +695,13 @@ impl Editor {
             self.crop = None;
         }
         self.tool = tool;
+        // A drawing tool picked is the one the editor starts with next time.
+        if let Tool::Draw(kind) = tool
+            && self.settings.tool != Some(kind)
+        {
+            self.settings.tool = Some(kind);
+            self.services.save_settings(&self.settings);
+        }
         if tool == Tool::Crop {
             self.crop = Some(self.session.doc.bounds());
             self.session.select(Vec::new());
@@ -706,6 +758,14 @@ impl Editor {
                     }
                     if ui.add(egui::Button::new("Save As…").shortcut_text("Ctrl+Shift+S")).clicked() {
                         self.save_as();
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.can_revert(), egui::Button::new("Revert to Original"))
+                        .on_hover_text("The picture as it was captured, with no annotations (Undo brings the changes back)")
+                        .clicked()
+                    {
+                        self.revert_to_original();
                         ui.close();
                     }
                     ui.menu_button("Export As", |ui| {
@@ -899,18 +959,18 @@ impl Editor {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    if icons::button(ui, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
+                    if bar_button(ui, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
                         && let Err(e) = self.services.new_capture(CaptureMode::Region)
                     {
                         self.error(&ctx, e);
                     }
-                    if icons::button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                    if bar_button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
                         self.services.request_open();
                     }
-                    if icons::button(ui, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
+                    if bar_button(ui, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
                         self.save(&ctx);
                     }
-                    if icons::button(ui, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
+                    if bar_button(ui, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
                         self.copy(&ctx);
                     }
                     ui.add_space(6.0);
@@ -918,7 +978,7 @@ impl Editor {
                     ui.add_space(6.0);
                     for (tool, icon, label, key) in Tool::BAR {
                         let tip = format!("{label} ({})", key.name());
-                        if icons::button(ui, icon, &tip, self.tool == tool, true).clicked() {
+                        if bar_button(ui, icon, &tip, self.tool == tool, true).clicked() {
                             self.set_tool(tool);
                         }
                     }
@@ -926,39 +986,33 @@ impl Editor {
                     ui.separator();
                     ui.add_space(6.0);
                     let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                    if icons::button(ui, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
+                    if bar_button(ui, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
                         self.run(&ctx, "edit.undo", json!({}));
                     }
                     let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                    if icons::button(ui, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
+                    if bar_button(ui, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
                         self.run(&ctx, "edit.redo", json!({}));
                     }
                     let any = !self.session.selected().is_empty();
-                    if icons::button(ui, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
+                    if bar_button(ui, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
                         self.run(&ctx, "edit.delete", json!({}));
                     }
-                    if self.tool == Tool::Crop {
-                        ui.add_space(10.0);
-                        if ui.button("Apply Crop").clicked() {
-                            self.apply_crop(&ctx);
-                        }
-                        if ui.button("Cancel").clicked() {
-                            self.crop = None;
-                            self.tool = Tool::Select;
-                        }
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if icons::button(ui, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
+                        if bar_button(ui, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
                             self.view.fit_pending = true;
                         }
-                        if icons::button(ui, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
+                        if bar_button(ui, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
                             self.view.zoom_by(1.25, None);
                         }
                         let pct = format!("{:.0}%", self.view.zoom * 100.0);
-                        if ui.add(egui::Button::new(pct).frame(false).min_size(vec2(48.0, 26.0))).on_hover_text("Actual size (Ctrl+1)").clicked() {
+                        if ui
+                            .add(egui::Button::new(pct).frame(false).min_size(vec2(52.0, BAR_BUTTON)))
+                            .on_hover_text("Actual size (Ctrl+1)")
+                            .clicked()
+                        {
                             self.view.set_zoom(1.0, None);
                         }
-                        if icons::button(ui, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
+                        if bar_button(ui, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
                             self.view.zoom_by(0.8, None);
                         }
                     });
@@ -989,11 +1043,26 @@ impl Editor {
                     if let Some(c) = self.crop {
                         ui.label(small(format!("Crop to {:.0} × {:.0} — Enter to apply, Esc to cancel", c.w, c.h)));
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let said = match &self.saver.status {
+                            Status::Idle => None,
+                            Status::Saving => Some(small("Saving…".to_string())),
+                            Status::Saved => Some(small(self.saver.note.clone().unwrap_or_else(|| "Saved".to_string()))),
+                            Status::Failed(e) => Some(egui::RichText::new(format!("Not saved: {e}")).size(12.0).color(t.danger)),
+                        };
+                        if let Some(text) = said {
+                            ui.add(egui::Label::new(text).truncate());
+                        }
+                    });
                 });
             });
     }
 
+    /// In a browser, where nothing is saved by itself: asks before unsaved work is replaced.
     fn confirm(&mut self, ctx: &egui::Context) {
+        if self.autosaves() {
+            return;
+        }
         let Some(pending) = self.pending.clone() else { return };
         let what = match &pending {
             Pending::Quit => "before closing",
@@ -1018,16 +1087,13 @@ impl Editor {
                 }
             });
         });
-        let quitting = matches!(pending, Pending::Quit);
         match choice {
             Some(0) => {
-                self.save(ctx);
+                // A download: done at once.
+                self.save_as();
+                self.pending = None;
                 if !self.session.dirty {
-                    self.pending = None;
                     self.go_on(ctx, pending);
-                } else if !quitting {
-                    // A save dialog is open; a quit goes on once it saved (`poll_dialogs`).
-                    self.pending = None;
                 }
             }
             Some(1) => {
@@ -1040,13 +1106,11 @@ impl Editor {
         }
     }
 
-    fn go_on(&mut self, ctx: &egui::Context, pending: Pending) {
+    /// Does what waited for the document to be saved.
+    pub(crate) fn go_on(&mut self, ctx: &egui::Context, pending: Pending) {
         match pending {
             Pending::Open(f) => self.open_now(ctx, f),
-            Pending::Picture(r, n) => {
-                self.session.dirty = false;
-                self.open_picture(r, n);
-            }
+            Pending::Picture(r, n) => self.open_picture_now(r, n),
             Pending::Quit => {
                 self.close_confirmed = true;
                 self.quit_requested = true;
@@ -1078,6 +1142,21 @@ impl Editor {
         }
         s
     }
+}
+
+/// How big the tool bar's buttons are, in points.
+pub const BAR_BUTTON: f32 = 40.0;
+
+/// A button on the tool bar, named by its tooltip.
+fn bar_button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
+    let resp = icons::button_sized(ui, icon, tip, on, enabled, BAR_BUTTON);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
+    resp
+}
+
+/// The empty picture a new window starts with.
+fn blank_picture() -> Raster {
+    Raster::filled(800, 500, screengrabcraft_model::Color::WHITE).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::WHITE))
 }
 
 /// `capture.png` → `capture.sgcraft`, beside it.

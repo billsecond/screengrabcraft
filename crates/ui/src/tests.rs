@@ -818,6 +818,638 @@ fn the_cursor_says_nothing_can_be_drawn_outside_the_picture() {
     assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
 }
 
+// ---- saving as the owner works, and deleting from the strip ----
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use crate::autosave::{SaveJob, Saved, Status, TRASH};
+use crate::services::{RecentItem, Services};
+
+/// What a fake disk holds and what was done to it.
+#[derive(Default)]
+struct DiskState {
+    files: BTreeMap<String, Vec<u8>>,
+    /// How many times each file was written (its "modified" time).
+    stamps: BTreeMap<String, u64>,
+    writes: Vec<String>,
+    trashed: Vec<String>,
+    /// Saves are kept until `finish_saves` (a save under way on another thread).
+    hold: bool,
+    held: Vec<SaveJob>,
+    done: Vec<Saved>,
+    fail_writes: bool,
+    fail_trash: bool,
+    made: u32,
+    thumbs_asked: Vec<(String, u64)>,
+}
+
+/// A host with a fake disk, shared with the test.
+#[derive(Clone, Default)]
+struct Disk(Rc<RefCell<DiskState>>);
+
+impl Disk {
+    fn with(files: &[(&str, Vec<u8>)]) -> Disk {
+        let d = Disk::default();
+        for (p, b) in files {
+            d.put(p, b.clone());
+        }
+        d.0.borrow_mut().writes.clear();
+        d
+    }
+
+    fn put(&self, path: &str, bytes: Vec<u8>) {
+        let mut s = self.0.borrow_mut();
+        s.files.insert(path.to_string(), bytes);
+        *s.stamps.entry(path.to_string()).or_default() += 1;
+        s.writes.push(path.to_string());
+    }
+
+    fn get(&self, path: &str) -> Option<Vec<u8>> {
+        self.0.borrow().files.get(path).cloned()
+    }
+
+    fn writes(&self) -> Vec<String> {
+        self.0.borrow().writes.clone()
+    }
+
+    /// The saves held back are written now.
+    fn finish_saves(&self) {
+        let jobs = std::mem::take(&mut self.0.borrow_mut().held);
+        for job in jobs {
+            let done = job.run(&|p, b| self.write_file(p, b));
+            self.0.borrow_mut().done.push(done);
+        }
+    }
+}
+
+impl Services for Disk {
+    fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.get(path).ok_or_else(|| "no such file".to_string())
+    }
+
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.0.borrow().fail_writes {
+            return Err("the disk is full".to_string());
+        }
+        self.put(path, bytes.to_vec());
+        Ok(())
+    }
+
+    fn start_save(&self, job: SaveJob) -> Option<Saved> {
+        if self.0.borrow().hold {
+            self.0.borrow_mut().held.push(job);
+            return None;
+        }
+        Some(job.run(&|p, b| self.write_file(p, b)))
+    }
+
+    fn poll_saved(&self) -> Option<Saved> {
+        let mut s = self.0.borrow_mut();
+        (!s.done.is_empty()).then(|| s.done.remove(0))
+    }
+
+    fn new_picture_path(&self, _source: &str) -> Result<String, String> {
+        let mut s = self.0.borrow_mut();
+        s.made += 1;
+        Ok(format!("captures/Capture {}.png", s.made))
+    }
+
+    fn trash(&self, path: &str) -> Result<(), String> {
+        let mut s = self.0.borrow_mut();
+        if s.fail_trash {
+            return Err("the bin is not there".to_string());
+        }
+        if s.files.remove(path).is_some() {
+            s.trashed.push(path.to_string());
+        }
+        Ok(())
+    }
+
+    fn recent(&self) -> Vec<RecentItem> {
+        let s = self.0.borrow();
+        s.files
+            .keys()
+            .filter(|p| !p.ends_with(".sgcraft"))
+            .map(|p| RecentItem { path: p.clone(), name: crate::editor::file_name(p), modified: s.stamps.get(p).copied().unwrap_or_default() })
+            .collect()
+    }
+
+    fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {
+        self.0.borrow_mut().thumbs_asked.push((path.to_string(), modified));
+        Raster::filled(20, 10, Color::rgb(0, 0, 255)).ok()
+    }
+}
+
+fn png(w: u32, h: u32, color: Color) -> Vec<u8> {
+    screengrabcraft_render::encode(&Raster::filled(w, h, color).unwrap(), ImageFormat::Png, 100).unwrap()
+}
+
+/// The editor on a fake disk, the strip showing, with `path` open.
+fn on_disk(disk: &Disk, path: Option<&str>) -> Harness<'static, Editor> {
+    let settings = EditorSettings { show_tray: true, ..EditorSettings::default() };
+    let mut h = harness(Editor::new(Box::new(disk.clone()), settings));
+    h.run_steps(2);
+    if let Some(p) = path {
+        let ctx = h.ctx.clone();
+        h.state_mut().open_path(&ctx, p);
+        h.run_steps(2);
+    }
+    disk.0.borrow_mut().writes.clear();
+    h
+}
+
+/// Draws an arrow across the middle of the picture.
+fn draw_arrow(h: &mut Harness<'_, Editor>) {
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let (w, ht) = (h.state().session.doc.width() as f32, h.state().session.doc.height() as f32);
+    let (a, b) = (at(h, w * 0.2, ht * 0.3), at(h, w * 0.7, ht * 0.6));
+    drag(h, a, b);
+}
+
+/// The side file as written.
+fn side(disk: &Disk, path: &str) -> screengrabcraft_render::project::Project {
+    screengrabcraft_render::project::read(&disk.get(path).expect("a side file")).unwrap()
+}
+
+#[test]
+fn a_change_is_saved_a_second_later_with_no_prompt() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    assert!(disk.writes().is_empty(), "nothing yet: {:?}", disk.writes());
+    h.run_steps(5);
+    assert_eq!(disk.writes(), vec!["captures/a.sgcraft".to_string(), "captures/a.png".to_string()]);
+    // Each step is a quarter of a second: the save comes a second after the change, not before.
+    disk.0.borrow_mut().writes.clear();
+    h.state_mut().session.execute("image.flip", &serde_json::json!({"horizontal": true})).unwrap();
+    h.run_steps(4);
+    assert!(disk.writes().is_empty(), "three quarters of a second later, still nothing");
+    h.run_steps(1);
+    assert_eq!(disk.writes().len(), 2);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1);
+    // The picture itself has the arrow drawn in.
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_ne!(flat, Raster::filled(400, 300, Color::WHITE).unwrap());
+    assert_eq!(h.state().saver.status, Status::Saved);
+    assert!(!h.state().session.dirty);
+    h.run_steps(8);
+    assert_eq!(disk.writes().len(), 2, "written once");
+    // The side file says what the picture was before the flip.
+    assert_eq!(side(&disk, "captures/a.sgcraft").original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()));
+}
+
+#[test]
+fn nothing_is_saved_in_the_middle_of_a_drag() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    disk.0.borrow_mut().writes.clear();
+    // A slow drag, seconds long.
+    let (a, b) = (at(&h, 100.0, 100.0), at(&h, 300.0, 200.0));
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    h.hover_at(a);
+    h.run_steps(1);
+    h.drag_at(a);
+    h.run_steps(1);
+    for i in 1..=12 {
+        let t = i as f32 / 12.0;
+        h.hover_at(pos2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+        h.run_steps(1);
+    }
+    assert!(disk.writes().is_empty(), "three seconds of dragging, nothing written");
+    h.drop_at(b);
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 2);
+}
+
+#[test]
+fn nothing_is_saved_while_text_is_typed() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    h.state_mut().set_tool(Tool::Draw(Kind::Text));
+    let p = at(&h, 80.0, 80.0);
+    click_at(&mut h, p);
+    h.event(egui::Event::Text("Hello".to_string()));
+    h.run_steps(8);
+    assert!(h.state().editing.is_some());
+    assert!(disk.writes().is_empty(), "{:?}", disk.writes());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.first().and_then(|o| o.shape.text().map(str::to_string)), Some("Hello".into()));
+}
+
+#[test]
+fn the_original_is_kept_through_a_crop_and_reverting_is_one_undo_step() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.state_mut().session.execute("image.crop", &serde_json::json!({"x": 0, "y": 0, "w": 200, "h": 150})).unwrap();
+    h.run_steps(6);
+    let p = side(&disk, "captures/a.sgcraft");
+    assert_eq!((p.doc.width(), p.doc.height()), (200, 150));
+    assert_eq!(p.original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()), "the picture as captured");
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_eq!((flat.width(), flat.height()), (200, 150), "the picture is the cropped one");
+
+    // Opened again, it still knows its original.
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert_eq!(h.state().session.doc.width(), 200);
+    assert!(h.state().can_revert());
+    h.state_mut().revert_to_original();
+    h.run_steps(1);
+    let ed = h.state();
+    assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (400, 300));
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.session.undo_label(), Some("Revert to Original"));
+    assert!(!ed.can_revert());
+    h.run_steps(6);
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_eq!(flat, Raster::filled(400, 300, Color::WHITE).unwrap(), "the picture as captured again");
+    // Undo brings the changes back, in one step.
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.width(), 200);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert!(!h.state().session.can_undo());
+}
+
+#[test]
+fn a_side_file_from_before_still_opens_and_the_picture_is_its_original() {
+    // Saved by an older version: no original in it, and the picture beside it never rewritten.
+    let mut doc = Document::new(Raster::filled(200, 100, Color::WHITE).unwrap());
+    doc.add(
+        Shape::Arrow { from: screengrabcraft_model::Pt::new(5.0, 5.0), to: screengrabcraft_model::Pt::new(50.0, 50.0), heads: Default::default() },
+        Kind::Arrow.default_style(),
+    )
+    .unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&screengrabcraft_render::project::save(&doc).unwrap()).unwrap();
+    v["version"] = serde_json::json!(1);
+    let disk = Disk::with(&[("captures/old.png", png(400, 300, Color::WHITE)), ("captures/old.sgcraft", serde_json::to_vec(&v).unwrap())]);
+    let h = on_disk(&disk, Some("captures/old.png"));
+    let ed = h.state();
+    assert_eq!(ed.session.doc.objects.len(), 1);
+    assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (200, 100));
+    assert_eq!(ed.original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()));
+    assert!(ed.can_revert());
+}
+
+#[test]
+fn an_animated_gif_is_never_written_again() {
+    let mut w = screengrabcraft_render::anim::GifWriter::new(Vec::new(), 40, 30).unwrap();
+    for color in [Color::RED, Color::rgb(0, 0, 255)] {
+        w.push(Raster::filled(40, 30, color).unwrap(), 100).unwrap();
+    }
+    let gif = w.finish(100).unwrap().0;
+    let disk = Disk::with(&[("captures/rec.gif", gif.clone())]);
+    let mut h = on_disk(&disk, Some("captures/rec.gif"));
+    h.get_by_label("Play");
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(disk.writes(), vec!["captures/rec.sgcraft".to_string()]);
+    assert_eq!(disk.get("captures/rec.gif"), Some(gif.clone()), "the recording is as it was");
+    let note = h.state().saver.note.clone().unwrap_or_default();
+    assert!(note.contains("rec.gif is kept as it is"), "{note}");
+    h.get_by_label(&note);
+    // Said once: the next save is just "Saved".
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert!(h.state().saver.note.is_none());
+    h.get_by_label("Saved");
+    assert_eq!(disk.get("captures/rec.gif"), Some(gif));
+}
+
+#[test]
+fn a_pasted_picture_gets_a_file_on_its_first_change() {
+    let disk = Disk::default();
+    let mut h = on_disk(&disk, None);
+    h.state_mut().open_picture(Raster::filled(300, 200, Color::WHITE).unwrap(), None);
+    h.run_steps(6);
+    assert!(disk.writes().is_empty(), "not until it changes");
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 1.png"));
+    assert_eq!(h.state().name, "Capture 1");
+    assert!(disk.get("captures/Capture 1.png").is_some());
+    assert_eq!(side(&disk, "captures/Capture 1.sgcraft").original, Some(Raster::filled(300, 200, Color::WHITE).unwrap()));
+}
+
+#[test]
+fn ctrl_s_saves_at_once_without_a_dialog() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    h.run_steps(1);
+    assert!(disk.writes().contains(&"captures/a.sgcraft".to_string()), "{:?}", disk.writes());
+    assert!(!h.state().saving_project, "no dialog");
+}
+
+#[test]
+fn closing_finishes_the_save_first_and_asks_nothing() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    disk.0.borrow_mut().hold = true;
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    assert!(!h.state_mut().close_requested(), "the change isn't written yet");
+    h.run_steps(2);
+    assert!(h.query_by_label("Save your changes?").is_none());
+    assert!(!h.state().quit_requested, "still being written");
+    disk.finish_saves();
+    h.run_steps(2);
+    assert!(h.state().quit_requested && h.state().close_confirmed);
+    assert!(h.state_mut().close_requested());
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1);
+}
+
+#[test]
+fn a_failed_save_keeps_the_window_open_and_offers_save_as() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    disk.0.borrow_mut().fail_writes = true;
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert!(matches!(h.state().saver.status, Status::Failed(_)));
+    assert!(!h.state_mut().close_requested());
+    h.run_steps(3);
+    assert!(!h.state().quit_requested, "the window stays open");
+    h.get_by_label("Save As…");
+    h.get_by_label("Discard Changes").click();
+    h.run_steps(3);
+    assert!(h.state().quit_requested, "let go on the owner's word");
+}
+
+#[test]
+fn opening_another_picture_saves_this_one_first() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().open_path(&ctx, "captures/b.png");
+    h.run_steps(2);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/b.png"));
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1, "a's arrow was saved on the way");
+}
+
+/// Hovers the thumbnail of `name` in the strip and clicks its delete button.
+fn delete_from_strip(h: &mut Harness<'_, Editor>, name: &str) {
+    let thumb = h.get_by_label(name).rect().center();
+    h.hover_at(thumb);
+    h.run_steps(2);
+    h.get_by_label(&crate::strip::delete_label(name)).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn a_capture_is_deleted_from_the_strip_with_its_side_file() {
+    let disk = Disk::with(&[
+        ("captures/a.png", png(400, 300, Color::WHITE)),
+        ("captures/b.png", png(100, 80, Color::RED)),
+        ("captures/b.sgcraft", screengrabcraft_render::project::save(&Document::new(Raster::filled(100, 80, Color::RED).unwrap())).unwrap()),
+    ]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert!(h.query_by_label(&crate::strip::delete_label("b.png")).is_none(), "only on the one under the pointer");
+    delete_from_strip(&mut h, "b.png");
+    assert_eq!(disk.0.borrow().trashed, vec!["captures/b.png".to_string(), "captures/b.sgcraft".to_string()]);
+    assert!(h.state().recent.iter().all(|r| r.path != "captures/b.png"));
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/a.png"), "the open one stays open");
+    h.get_by_label(&format!("Moved b.png to the {TRASH}"));
+}
+
+#[test]
+fn deleting_the_open_capture_opens_the_next_and_never_writes_it_back() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    // Another change, its save under way on another thread when the delete comes.
+    disk.0.borrow_mut().hold = true;
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    assert_eq!(disk.0.borrow().held.len(), 1);
+    delete_from_strip(&mut h, "a.png");
+    assert!(disk.0.borrow().trashed.is_empty(), "not while a save could write it back");
+    disk.finish_saves();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().trashed, vec!["captures/a.png".to_string(), "captures/a.sgcraft".to_string()]);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/b.png"), "the next one opens");
+    disk.0.borrow_mut().hold = false;
+    h.run_steps(12);
+    assert!(disk.get("captures/a.png").is_none() && disk.get("captures/a.sgcraft").is_none(), "nothing written back");
+}
+
+#[test]
+fn deleting_the_last_capture_leaves_an_empty_document() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    delete_from_strip(&mut h, "a.png");
+    let ed = h.state();
+    assert!(ed.picture_path.is_none() && ed.project_path.is_none());
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.name, "Untitled");
+}
+
+#[test]
+fn a_capture_the_bin_refuses_stays_where_it_is() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    disk.0.borrow_mut().fail_trash = true;
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    delete_from_strip(&mut h, "a.png");
+    assert!(disk.get("captures/a.png").is_some());
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/a.png"));
+    h.get_by_label(&format!("a.png couldn't be moved to the {TRASH}: the bin is not there"));
+}
+
+#[test]
+fn a_picture_written_again_gets_a_new_thumbnail() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    let asked = |d: &Disk| d.0.borrow().thumbs_asked.iter().filter(|(p, _)| p == "captures/a.png").map(|(_, m)| *m).collect::<Vec<_>>();
+    assert_eq!(asked(&disk), vec![1]);
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(asked(&disk), vec![1, 2], "asked again once rewritten");
+}
+
+// ---- the tool remembered, the bigger tool bar and strip ----
+
+/// A host that keeps the settings it's given, as the settings file would.
+struct KeepsSettings(Rc<RefCell<Option<EditorSettings>>>);
+
+impl Services for KeepsSettings {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn save_settings(&self, settings: &EditorSettings) {
+        *self.0.borrow_mut() = Some(settings.clone());
+    }
+}
+
+#[test]
+fn the_last_drawing_tool_and_stamp_are_there_after_a_restart() {
+    let kept = Rc::new(RefCell::new(None));
+    let ed = Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default());
+    assert_eq!(ed.tool, Tool::Draw(Kind::Arrow), "the first time, the arrow");
+    let mut h = ready(ed, Tool::Draw(Kind::Callout));
+    // Picking the stamp, and one of the stamps, in the properties.
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.get_by_label("Cross").click();
+    h.run_steps(2);
+    // Selecting isn't drawing: the stamp tool stays the one remembered.
+    h.state_mut().set_tool(Tool::Select);
+    let saved = kept.borrow().clone().expect("settings saved");
+    assert_eq!(saved.tool, Some(Kind::Stamp));
+    assert_eq!(saved.stamp, Some(screengrabcraft_model::StampKind::Cross));
+
+    // Closed and opened again: through the settings file's text, as on the disk.
+    let reread = EditorSettings::from_json(&serde_json::to_string(&saved).unwrap());
+    let ed = Editor::new(Box::new(NoServices), reread);
+    assert_eq!(ed.tool, Tool::Draw(Kind::Stamp));
+    assert_eq!(ed.stamp, screengrabcraft_model::StampKind::Cross);
+
+    // A rectangle picked with its key.
+    let mut h = ready(Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default()), Tool::Select);
+    h.key_press(egui::Key::R);
+    h.run_steps(1);
+    assert_eq!(kept.borrow().as_ref().and_then(|s| s.tool), Some(Kind::Rect));
+}
+
+#[test]
+fn a_tool_no_longer_on_the_bar_starts_as_the_arrow() {
+    let settings = EditorSettings { tool: Some(Kind::Image), ..EditorSettings::default() };
+    assert_eq!(Editor::new(Box::new(NoServices), settings).tool, Tool::Draw(Kind::Arrow));
+}
+
+#[test]
+fn the_bigger_tool_bar_fits_a_1280_window_even_while_cropping() {
+    let mut ed = editor();
+    ed.tool = Tool::Crop;
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(4);
+    let last = h.get_by_label("Delete the selection (Del)").rect();
+    let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
+    assert!(last.max.x + 8.0 <= zoom_out.min.x, "{last:?} runs into {zoom_out:?}");
+    let arrow = h.get_by_label("Arrow (A)").rect();
+    assert!(arrow.width() >= 30.0 * 1.25 && arrow.height() >= 30.0 * 1.25, "{arrow:?}");
+    // The crop's own buttons are in its panel, clear of the canvas and the tool bar.
+    let apply = h.get_by_label("Apply Crop").rect();
+    assert!(apply.min.y > last.max.y && apply.min.x >= h.state().view.canvas.max.x, "{apply:?}");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Select);
+    assert!(h.query_by_label("Apply Crop").is_none());
+}
+
+#[test]
+fn the_strip_has_bigger_thumbnails_with_room_between_them() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let h = on_disk(&disk, None);
+    let (a, b) = (h.get_by_label("a.png").rect(), h.get_by_label("b.png").rect());
+    assert!(a.height() >= crate::strip::THUMB - 0.5 && a.height() >= 72.0 * 1.25 - 0.5, "{a:?}");
+    assert!((b.min.x - a.max.x).abs() >= 12.0, "room between: {a:?} {b:?}");
+}
+
+// ---- fitting the picture to the window ----
+
+/// Where the picture's middle is on the screen, against the canvas's middle.
+fn off_centre(h: &Harness<'_, Editor>) -> f32 {
+    let ed = h.state();
+    let (w, ht) = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
+    ed.view.to_screen(screengrabcraft_model::Pt::new(w / 2.0, ht / 2.0)).distance(ed.view.canvas.center())
+}
+
+/// Whether the whole picture is in the canvas.
+fn all_in_view(h: &Harness<'_, Editor>) -> bool {
+    let ed = h.state();
+    ed.view.canvas.expand(0.5).contains_rect(ed.view.rect_to_screen(ed.session.doc.bounds()))
+}
+
+fn with_picture(w: u32, h: u32) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(w, h, Color::WHITE).unwrap()));
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h
+}
+
+#[test]
+fn a_small_picture_shows_at_actual_size_in_the_middle() {
+    let mut h = with_picture(200, 100);
+    assert_eq!(h.state().view.zoom, 1.0, "never zoomed in past 100%");
+    assert!(off_centre(&h) < 1.0, "{}", off_centre(&h));
+    // Zoom to Fit keeps to the same rule.
+    h.state_mut().view.zoom_by(3.0, None);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0);
+    assert!(off_centre(&h) < 1.0);
+}
+
+#[test]
+fn a_big_picture_fits_the_window_and_fits_again_when_it_is_resized() {
+    let mut h = with_picture(3000, 2000);
+    assert!(h.state().view.zoom < 1.0 && all_in_view(&h));
+    let before = h.state().view.zoom;
+    // The owner's own zoom holds, until the window changes.
+    h.state_mut().view.zoom_by(2.0, None);
+    h.run_steps(2);
+    assert!((h.state().view.zoom - before * 2.0).abs() < 1e-4);
+    h.set_size(egui::vec2(900.0, 650.0));
+    h.run_steps(3);
+    assert!(h.state().view.zoom < before, "zoomed out for the smaller window");
+    assert!(all_in_view(&h) && off_centre(&h) < 1.0);
+    h.set_size(egui::vec2(1600.0, 1000.0));
+    h.run_steps(3);
+    assert!(h.state().view.zoom > before && all_in_view(&h) && off_centre(&h) < 1.0);
+}
+
+#[test]
+fn a_cropped_picture_is_centred_and_fitted_again_and_so_is_its_undo() {
+    let mut h = with_picture(3000, 2000);
+    let fitted = h.state().view.zoom;
+    // Moved aside and zoomed in by the owner.
+    h.state_mut().view.zoom_by(4.0, None);
+    h.state_mut().view.center = screengrabcraft_model::Pt::new(100.0, 100.0);
+    h.state_mut().session.execute("image.crop", &serde_json::json!({"x": 0, "y": 0, "w": 300, "h": 200})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0, "small now: actual size, no more");
+    assert!(off_centre(&h) < 1.0);
+    assert!(h.state_mut().session.undo());
+    h.run_steps(2);
+    assert!((h.state().view.zoom - fitted).abs() < 1e-4 && off_centre(&h) < 1.0 && all_in_view(&h));
+    // A rotation and a resize are fitted too.
+    h.state_mut().session.execute("image.rotate", &serde_json::json!({"degrees": 90})).unwrap();
+    h.run_steps(2);
+    assert!(all_in_view(&h) && off_centre(&h) < 1.0);
+    h.state_mut().view.zoom_by(5.0, None);
+    h.state_mut().session.execute("image.resize", &serde_json::json!({"width": 150, "height": 225})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0);
+    assert!(off_centre(&h) < 1.0);
+}
+
+#[test]
+fn drawing_leaves_the_owners_zoom_alone() {
+    let mut h = with_picture(400, 300);
+    h.state_mut().view.zoom_by(1.5, None);
+    h.run_steps(1);
+    let (zoom, centre) = (h.state().view.zoom, h.state().view.center);
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    let (a, b) = (at(&h, 150.0, 120.0), at(&h, 250.0, 180.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert_eq!((h.state().view.zoom, h.state().view.center), (zoom, centre));
+}
+
 #[test]
 fn the_view_still_pans_from_outside_the_picture() {
     let mut h = ready(editor(), Tool::Draw(Kind::Rect));

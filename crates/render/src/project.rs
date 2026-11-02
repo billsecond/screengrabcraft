@@ -4,11 +4,17 @@
 //! placed pictures as base64 PNG, the annotations as the model writes them.
 //!
 //! ```json
-//! {"format":"screengrabcraft","version":1,"width":800,"height":600,
+//! {"format":"screengrabcraft","version":2,"width":800,"height":600,
 //!  "base":"iVBORw0…","images":{"1":"iVBORw0…"},
 //!  "objects":[{"id":1,"type":"arrow","from":{"x":10,"y":10},"to":{"x":90,"y":40},"style":{…}}],
-//!  "meta":{"captured":"2026-10-14T09:30:00","source":"Notepad"}}
+//!  "meta":{"captured":"2026-10-14T09:30:00","source":"Notepad"},
+//!  "original":"iVBORw0…"}
 //! ```
+//!
+//! Version 2 keeps the picture as first captured, so the owner can always go back to it:
+//! `original` once the picture itself has been changed (cropped, resized…), or
+//! `"baseIsOriginal":true` while `base` still is it. Neither means it isn't known. Version 1
+//! files have neither, and a version 1 reader passes over both.
 //!
 //! A project file can come from anywhere: everything in it is checked (sizes, ids, numbers)
 //! as it is read, and an annotation that doesn't make sense is left out rather than refusing
@@ -25,7 +31,9 @@ use crate::codec::{self, CodecError};
 /// The format's name in the file.
 pub const FORMAT: &str = "screengrabcraft";
 /// The version written; files of later versions are read as far as they can be.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+/// The first version that says what the original picture is.
+pub const ORIGINAL_SINCE: u32 = 2;
 /// The largest project file read.
 pub const MAX_PROJECT: usize = 1024 * 1024 * 1024;
 
@@ -54,6 +62,26 @@ struct File {
     objects: Vec<serde_json::Value>,
     #[serde(default)]
     meta: Meta,
+    /// The picture as first captured, when `base` is no longer it. Raw JSON, so a bad one is
+    /// left out rather than refusing the file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    original: Option<serde_json::Value>,
+    /// `base` is still the picture as first captured.
+    #[serde(default, rename = "baseIsOriginal", skip_serializing_if = "Option::is_none")]
+    base_is_original: Option<serde_json::Value>,
+}
+
+/// A project file as read.
+#[derive(Clone, Debug)]
+pub struct Project {
+    pub doc: Document,
+    /// The picture as first captured, if the file knows it.
+    pub original: Option<Raster>,
+    /// Whether the file is of a version that says what the original is. An older one doesn't,
+    /// and the picture it was saved beside is still the original.
+    pub tells_original: bool,
+    /// Annotations that couldn't be read and were left out.
+    pub skipped: usize,
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -70,13 +98,24 @@ fn png(r: &Raster) -> Result<String, ProjectError> {
     Ok(b64(&codec::encode(r, ImageFormat::Png, 100)?))
 }
 
-/// The document as project-file bytes.
+/// The document as project-file bytes (the original picture not known).
 pub fn save(doc: &Document) -> Result<Vec<u8>, ProjectError> {
+    save_with_original(doc, None)
+}
+
+/// The document as project-file bytes, with the picture as first captured.
+pub fn save_with_original(doc: &Document, original: Option<&Raster>) -> Result<Vec<u8>, ProjectError> {
     let mut images = BTreeMap::new();
     for (k, r) in &doc.images {
         images.insert(k.to_string(), png(r)?);
     }
     let objects = doc.objects.iter().filter_map(|o| serde_json::to_value(o).ok()).collect();
+    let same = original.is_some_and(|o| *o == doc.base);
+    let base_is_original = same.then_some(serde_json::Value::Bool(true));
+    let original = match original {
+        Some(o) if !same => Some(serde_json::Value::String(png(o)?)),
+        _ => None,
+    };
     let file = File {
         format: FORMAT.to_string(),
         version: VERSION,
@@ -86,6 +125,8 @@ pub fn save(doc: &Document) -> Result<Vec<u8>, ProjectError> {
         images,
         objects,
         meta: doc.meta.clone(),
+        original,
+        base_is_original,
     };
     serde_json::to_vec(&file).map_err(|e| ProjectError::NotAProject(e.to_string()))
 }
@@ -93,6 +134,12 @@ pub fn save(doc: &Document) -> Result<Vec<u8>, ProjectError> {
 /// Reads a project file. Annotations that can't be read are skipped (and counted in the
 /// returned number).
 pub fn load(bytes: &[u8]) -> Result<(Document, usize), ProjectError> {
+    read(bytes).map(|p| (p.doc, p.skipped))
+}
+
+/// Reads a project file with what it knows of the original picture. An original that can't be
+/// read is left out (the document still opens).
+pub fn read(bytes: &[u8]) -> Result<Project, ProjectError> {
     if bytes.len() > MAX_PROJECT {
         return Err(ProjectError::NotAProject("the file is too large".to_string()));
     }
@@ -107,6 +154,21 @@ pub fn load(bytes: &[u8]) -> Result<(Document, usize), ProjectError> {
     if (file.width, file.height) != (0, 0) && (file.width, file.height) != (base.width(), base.height()) {
         log::warn!("project says {}x{} but its picture is {}x{}", file.width, file.height, base.width(), base.height());
     }
+    let original = match &file.original {
+        Some(data) => {
+            let text = data.as_str().ok_or_else(|| "it is not text".to_string());
+            match text.and_then(|t| unb64(t).map_err(|e| e.to_string())).and_then(|b| codec::decode(&b).map_err(|e| e.to_string())) {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    log::warn!("the original picture could not be read: {e}");
+                    None
+                }
+            }
+        }
+        None if file.base_is_original.as_ref().and_then(serde_json::Value::as_bool) == Some(true) => Some(base.clone()),
+        None => None,
+    };
+    let tells_original = file.version >= ORIGINAL_SINCE;
     let mut doc = Document::new(base);
     doc.meta = file.meta;
     // Placed pictures keep their keys, so the annotations' references still hold.
@@ -134,7 +196,7 @@ pub fn load(bytes: &[u8]) -> Result<(Document, usize), ProjectError> {
         }
     }
     doc.prune_images();
-    Ok((doc, skipped))
+    Ok(Project { doc, original, tells_original, skipped })
 }
 
 /// Whether bytes look like a project file (rather than a picture).
@@ -187,5 +249,83 @@ mod tests {
         assert!(load(br#"{"format":"other","base":""}"#).is_err());
         assert!(load(br#"{"format":"screengrabcraft","base":"!!!"}"#).is_err());
         assert!(!sniff(b"\x89PNG"));
+    }
+
+    #[test]
+    fn the_original_picture_is_kept_beside_a_changed_one() {
+        let mut d = doc();
+        let original = Raster::filled(60, 40, Color::RED).unwrap();
+        d.base = Raster::filled(30, 20, Color::WHITE).unwrap();
+        let bytes = save_with_original(&d, Some(&original)).unwrap();
+        let p = read(&bytes).unwrap();
+        assert!(p.tells_original);
+        assert_eq!(p.original, Some(original));
+        assert_eq!(p.doc.base, d.base);
+        assert_eq!(p.doc.objects, d.objects);
+    }
+
+    #[test]
+    fn an_unchanged_picture_is_written_once() {
+        let d = doc();
+        let once = save(&d).unwrap();
+        let bytes = save_with_original(&d, Some(&d.base)).unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["baseIsOriginal"], serde_json::json!(true));
+        assert!(v.get("original").is_none());
+        assert!(bytes.len() < once.len() + 40, "no second copy of the picture");
+        assert_eq!(read(&bytes).unwrap().original, Some(d.base.clone()));
+        // Not known: neither is written, and a reader knows it isn't.
+        let p = read(&once).unwrap();
+        assert!(p.tells_original && p.original.is_none());
+    }
+
+    #[test]
+    fn a_version_1_file_still_opens() {
+        let v1 = br#"{"format":"screengrabcraft","version":1,"width":30,"height":20,"base":"BASE","objects":[]}"#;
+        let base = b64(&codec::encode(&Raster::filled(30, 20, Color::WHITE).unwrap(), ImageFormat::Png, 100).unwrap());
+        let text = String::from_utf8_lossy(v1).replace("BASE", &base);
+        let p = read(text.as_bytes()).unwrap();
+        assert_eq!((p.doc.width(), p.doc.height()), (30, 20));
+        assert!(!p.tells_original, "a version 1 file says nothing of the original");
+        assert!(p.original.is_none());
+    }
+
+    #[test]
+    fn a_version_1_reader_reads_a_version_2_file() {
+        // The file as version 1 read it: no `original`, no `baseIsOriginal`, nothing refused.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct V1 {
+            format: String,
+            #[serde(default)]
+            version: u32,
+            base: String,
+            #[serde(default)]
+            images: BTreeMap<String, String>,
+            #[serde(default)]
+            objects: Vec<serde_json::Value>,
+            #[serde(default)]
+            meta: Meta,
+        }
+        let mut d = doc();
+        let original = Raster::filled(60, 40, Color::RED).unwrap();
+        d.base = Raster::filled(30, 20, Color::WHITE).unwrap();
+        let old: V1 = serde_json::from_slice(&save_with_original(&d, Some(&original)).unwrap()).unwrap();
+        assert_eq!(old.objects.len(), d.objects.len());
+        assert_eq!(codec::decode(&unb64(&old.base).unwrap()).unwrap(), d.base);
+    }
+
+    #[test]
+    fn a_bad_original_is_left_out_and_the_rest_still_opens() {
+        let mut v: serde_json::Value = serde_json::from_slice(&save(&doc()).unwrap()).unwrap();
+        v["original"] = serde_json::json!("!!! not a picture");
+        let p = read(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(p.original.is_none());
+        assert_eq!(p.doc.objects.len(), 3);
+        v["original"] = serde_json::json!(42);
+        v["baseIsOriginal"] = serde_json::json!("yes");
+        let p = read(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(p.original.is_none());
+        assert_eq!(p.doc.objects.len(), 3);
     }
 }

@@ -19,6 +19,9 @@ pub struct View {
     pub fit_pending: bool,
     pub canvas: egui::Rect,
     pub ppp: f32,
+    /// The picture as last shown. Another one (cropped, rotated, resized, undone…) is fitted
+    /// and centred again, as it is when the window changes size.
+    shown: Option<screengrabcraft_model::Raster>,
 }
 
 impl Default for View {
@@ -29,6 +32,7 @@ impl Default for View {
             fit_pending: true,
             canvas: egui::Rect::from_min_size(Pos2::ZERO, vec2(800.0, 500.0)),
             ppp: 1.0,
+            shown: None,
         }
     }
 }
@@ -71,7 +75,22 @@ impl View {
         self.set_zoom(self.zoom * factor, anchor);
     }
 
-    /// The whole picture in view (never larger than actual size).
+    /// Notes the canvas and the picture of this frame: a new size of canvas (the window
+    /// resized) or a new picture fits the picture to the view again, centred. The owner's own
+    /// zoom stays until then.
+    pub fn follow(&mut self, canvas: egui::Rect, picture: &screengrabcraft_model::Raster) {
+        let resized = (canvas.size() - self.canvas.size()).length() > 0.5;
+        let replaced = self.shown.as_ref().is_none_or(|s| !s.same_pixels(picture));
+        if resized || replaced {
+            self.fit_pending = true;
+        }
+        if replaced {
+            self.shown = Some(picture.clone());
+        }
+        self.canvas = canvas;
+    }
+
+    /// The whole picture in view, centred: as far out as it takes, but never past actual size.
     pub fn fit(&mut self, w: u32, h: u32) {
         let (cw, ch) = (self.canvas.width().max(50.0) * self.ppp, self.canvas.height().max(50.0) * self.ppp);
         let z = ((cw - 48.0) / w.max(1) as f32).min((ch - 48.0) / h.max(1) as f32).min(1.0);
@@ -321,7 +340,11 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
         let rect = ui.max_rect();
         let resp = ui.interact(rect, ui.id().with("canvas"), Sense::click_and_drag());
-        ed.view.canvas = rect;
+        ed.view.follow(rect, &ed.session.doc.base);
+        // Moved to a screen of another density: fitted again too.
+        if (ctx.pixels_per_point() - ed.view.ppp).abs() > 0.001 {
+            ed.view.fit_pending = true;
+        }
         ed.view.ppp = ctx.pixels_per_point();
         // Fitted once the canvas has its real size (a browser lays the page out after the first frame).
         if ed.view.fit_pending && rect.width() >= 120.0 && rect.height() >= 120.0 {
