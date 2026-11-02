@@ -4,7 +4,8 @@
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    screengrabcraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
+    screengrabcraft-<version>-windows-<arch>.msi            installer (WiX v5): for everyone on this PC
+                                                            (the default) or just for one person
     screengrabcraft-<version>-windows-<arch>-portable.zip   the three programs + docs
 
   The three programs:

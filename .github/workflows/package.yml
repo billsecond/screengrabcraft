@@ -135,6 +135,61 @@ jobs:
           if (Test-Path (Join-Path $dir 'screengrabcraft.exe')) { throw 'uninstall left screengrabcraft.exe behind' }
           if ((Get-ItemProperty $runKey).ScreenGrabCraft) { throw 'uninstall left the sign-in entry behind' }
           if ((Get-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications').'ScreenGrabCraft Editor') { throw 'uninstall left the editor in Default apps' }
+      # The same installer just for one person (ALLUSERS=2 MSIINSTALLPERUSER=1, what "Just for me"
+      # and the updater of such a copy pass): everything in the runner user's LocalAppData, Start
+      # menu and HKCU, nothing in Program Files or HKLM, and Windows Installer running it with the
+      # user's privileges, not elevated; then the capture service started and closed again by the
+      # uninstall, which leaves nothing behind. (The runner is an administrator, so a UAC prompt
+      # can't be seen here: what is checked is that the install used nothing only an
+      # administrator has.)
+      - name: Install, check and uninstall the MSI just for one user (x64 only)
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $msi = (Get-Item dist/release/*.msi).FullName
+          $log = "$env:RUNNER_TEMP\install-user.log"
+          $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", 'ALLUSERS=2', 'MSIINSTALLPERUSER=1', '/qn', '/norestart', '/l*v', $log) -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content $log -Tail 60; throw "per-user install failed ($($p.ExitCode))" }
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\ScreenGrabCraft'
+          foreach ($f in 'screengrabcraft.exe', 'screengrabcraft-editor.exe', 'screengrabcraft-cli.exe', 'models\isnet-general-use-int8.onnx') {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing in $dir" }
+          }
+          if (Test-Path (Join-Path $env:ProgramFiles 'ScreenGrabCraft')) { throw 'the per-user install wrote to Program Files' }
+          & (Join-Path $dir 'screengrabcraft-cli.exe') --version
+          if ($LASTEXITCODE -ne 0) { throw "screengrabcraft-cli --version exited $LASTEXITCODE" }
+          foreach ($l in 'ScreenGrabCraft.lnk', 'ScreenGrabCraft Editor.lnk') {
+            $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) $l
+            if (-not (Test-Path $lnk)) { throw "no Start menu shortcut $lnk" }
+          }
+          $entry = Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }
+          if (-not $entry) { throw 'no per-user installed-programs entry named ScreenGrabCraft' }
+          $entry | Format-List DisplayName, DisplayVersion, InstallLocation, PSChildName
+          if (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }) { throw 'the per-user install is listed for everyone' }
+          $expected = "`"$dir\screengrabcraft.exe`" --background"
+          $run = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').ScreenGrabCraft
+          if ($run -ne $expected) { throw "per-user sign-in entry is '$run', expected '$expected'" }
+          if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').ScreenGrabCraft) { throw 'the per-user install wrote the sign-in entry for everyone' }
+          $app = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe').'(default)'
+          if ($app -ne "$dir\screengrabcraft.exe") { throw "per-user App Paths entry is '$app', expected '$dir\screengrabcraft.exe'" }
+          if (Test-Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe') { throw 'the per-user install wrote App Paths for everyone' }
+          $sgcraft = (Get-ItemProperty 'HKCU:\SOFTWARE\Classes\.sgcraft').'(default)'
+          if ($sgcraft -ne 'ScreenGrabCraft.Project') { throw ".sgcraft is '$sgcraft' in HKCU, expected ScreenGrabCraft.Project" }
+          if (-not (Get-ItemProperty 'HKCU:\SOFTWARE\RegisteredApplications').'ScreenGrabCraft Editor') { throw 'the editor is not offered in Default apps for this user' }
+          # Windows Installer logs how it ran the product: an install for everyone is "assigned"
+          # and runs with elevated privileges, one for a single user with that user's.
+          Select-String -Path $log -Pattern 'Running product' | ForEach-Object { $_.Line }
+          if (Select-String -Path $log -Pattern 'with elevated privileges' -Quiet) { throw 'the per-user install ran with elevated privileges' }
+
+          $env:SCREENGRABCRAFT_NO_PREFS = '1'
+          Start-Process (Join-Path $dir 'screengrabcraft.exe') -ArgumentList '--background'
+          Start-Sleep -Seconds 5
+          Get-Process screengrabcraft -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', $entry.PSChildName, '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\uninstall-user.log") -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\uninstall-user.log" -Tail 60; throw "per-user uninstall failed ($($p.ExitCode))" }
+          if (Get-Process screengrabcraft -ErrorAction SilentlyContinue) { throw 'the capture service is still running after the per-user uninstall' }
+          if (Test-Path (Join-Path $dir 'screengrabcraft.exe')) { throw 'the per-user uninstall left screengrabcraft.exe behind' }
+          if ((Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').ScreenGrabCraft) { throw 'the per-user uninstall left the sign-in entry behind' }
+          if (Test-Path 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe') { throw 'the per-user uninstall left App Paths behind' }
       - uses: actions/upload-artifact@v4
         with:
           name: release-windows-${{ matrix.arch }}

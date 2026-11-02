@@ -157,6 +157,17 @@ their checksums: an MSI and a portable zip for Windows, a disk image for macOS, 
 `.rpm`, Flatpak and tarballs for Linux, a FreeBSD tarball and the web build. The builds are not
 signed yet, so Windows and macOS ask before running them. See [docs/releasing.md](docs/releasing.md).
 
+The Windows installer asks who it's for: **Just for me** installs into
+`%LocalAppData%\Programs\ScreenGrabCraft` without an administrator; **Everyone on this PC** installs
+into Program Files and Windows asks for an administrator's permission. An update keeps the choice.
+On the command line, everyone on this PC is the default; just for you is:
+
+```
+msiexec /i screengrabcraft-<version>-windows-x64.msi ALLUSERS=2 MSIINSTALLPERUSER=1
+```
+
+(add `/passive` or `/qn` to install without the dialogs).
+
 ## Building
 
 ```
