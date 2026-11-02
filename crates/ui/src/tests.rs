@@ -1583,3 +1583,30 @@ fn the_file_menu_has_room_between_its_items() {
         let _ = img.save(format!("{dir}/file-menu.png"));
     }
 }
+
+#[test]
+fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_another() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.state_mut().set_tool(Tool::Draw(Kind::Stamp));
+    let p = at(&h, 150.0, 120.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "a click puts a stamp down");
+    let id = h.state().session.doc.objects[0].id;
+    // Clicked again, still with the Stamp tool: selected, not a second stamp.
+    h.state_mut().session.select(Vec::new());
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert_eq!(h.state().session.selected(), vec![id]);
+    // Dragged: it moves, and there's still one.
+    let before = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    let to = at(&h, 220.0, 160.0);
+    drag(&mut h, p, to);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "no stamp added by the drag");
+    let after = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((after.x - before.x - 70.0).abs() < 2.0 && (after.y - before.y - 40.0).abs() < 2.0, "{before:?} → {after:?}");
+    // A slight wobble while clicking on it (a press that moves a few points) doesn't add one either.
+    let q = at(&h, 220.0, 160.0);
+    drag(&mut h, q, egui::pos2(q.x + 6.0, q.y + 4.0));
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}

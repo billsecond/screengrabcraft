@@ -444,6 +444,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             ctx.set_cursor_icon(cursor);
         }
     }
+    // While a drag goes on, the cursor stays what it was when it started: the arrows of the
+    // handle being pulled, or the hand of what's being moved.
+    match &ed.drag {
+        Some(Drag::Handle { handle, .. }) => ctx.set_cursor_icon(cursor_for(*handle)),
+        Some(Drag::CropHandle { handle }) => ctx.set_cursor_icon(cursor_for(*handle)),
+        Some(Drag::Move { .. } | Drag::CropMove { .. }) => ctx.set_cursor_icon(CursorIcon::Grabbing),
+        _ => {}
+    }
 
     // ---- double click: type into text ----
     if resp.double_clicked()
