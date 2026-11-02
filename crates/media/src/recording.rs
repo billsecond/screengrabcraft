@@ -605,6 +605,14 @@ impl ScreenDecoder {
 }
 
 #[cfg(test)]
+impl RecordingWriter<Vec<u8>> {
+    /// What's been written so far (a recording still going, as another reader sees it).
+    pub(crate) fn out_bytes(&self) -> Vec<u8> {
+        self.out.clone()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use screengrabcraft_model::Color;
 
