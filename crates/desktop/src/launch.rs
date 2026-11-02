@@ -96,6 +96,18 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     result.map(|_| ()).map_err(|e| e.to_string())
 }
 
+/// Opens a file in the program the system uses for it (a video in its player).
+pub fn open_file(path: &Path) -> Result<(), String> {
+    let result = if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(path).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else {
+        Command::new("xdg-open").arg(path).spawn()
+    };
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// Opens a web page in the browser.
 pub fn open_url(url: &str) -> Result<(), String> {
     webbrowser::open(url).map_err(|e| e.to_string())

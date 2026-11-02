@@ -165,10 +165,15 @@ pub enum CaptureMode {
     Gif,
     /// An area captured while it scrolls, stitched into one long picture.
     Scrolling,
+    /// An area recorded as a small video (MP4).
+    Video,
+    /// An area recorded with the computer's sound, the microphone and the camera, each on a
+    /// track of its own, to edit in the editor.
+    Production,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 7] = [
+    pub const ALL: [CaptureMode; 9] = [
         CaptureMode::Region,
         CaptureMode::Window,
         CaptureMode::Screen,
@@ -176,6 +181,8 @@ impl CaptureMode {
         CaptureMode::Repeat,
         CaptureMode::Scrolling,
         CaptureMode::Gif,
+        CaptureMode::Video,
+        CaptureMode::Production,
     ];
 
     pub fn label(self) -> &'static str {
@@ -187,6 +194,8 @@ impl CaptureMode {
             CaptureMode::Repeat => "Repeat Last Capture",
             CaptureMode::Gif => "Record GIF",
             CaptureMode::Scrolling => "Scrolling Capture",
+            CaptureMode::Video => "Record Video",
+            CaptureMode::Production => "Video Production",
         }
     }
 
@@ -200,6 +209,8 @@ impl CaptureMode {
             CaptureMode::Repeat => "repeat",
             CaptureMode::Gif => "gif",
             CaptureMode::Scrolling => "scrolling",
+            CaptureMode::Video => "video",
+            CaptureMode::Production => "production",
         }
     }
 
@@ -219,6 +230,8 @@ pub struct Hotkeys {
     pub repeat: Option<Hotkey>,
     pub scrolling: Option<Hotkey>,
     pub gif: Option<Hotkey>,
+    pub video: Option<Hotkey>,
+    pub production: Option<Hotkey>,
     pub editor: Option<Hotkey>,
 }
 
@@ -237,6 +250,8 @@ impl Hotkeys {
                 repeat: k("R"),
                 scrolling: k("S"),
                 gif: k("G"),
+                video: k("V"),
+                production: k("P"),
                 editor: k("E"),
             }
         } else {
@@ -248,6 +263,8 @@ impl Hotkeys {
                 repeat: Some(Hotkey::new(false, false, true, false, "PrintScreen")),
                 scrolling: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
                 gif: Some(Hotkey::new(false, true, true, false, "PrintScreen")),
+                video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
+                production: None,
                 editor: None,
             }
         }
@@ -262,6 +279,8 @@ impl Hotkeys {
             CaptureMode::Repeat => self.repeat.as_ref(),
             CaptureMode::Gif => self.gif.as_ref(),
             CaptureMode::Scrolling => self.scrolling.as_ref(),
+            CaptureMode::Video => self.video.as_ref(),
+            CaptureMode::Production => self.production.as_ref(),
         }
     }
 
@@ -274,6 +293,8 @@ impl Hotkeys {
             CaptureMode::Repeat => &mut self.repeat,
             CaptureMode::Gif => &mut self.gif,
             CaptureMode::Scrolling => &mut self.scrolling,
+            CaptureMode::Video => &mut self.video,
+            CaptureMode::Production => &mut self.production,
         };
         *slot = key;
     }
@@ -394,6 +415,34 @@ pub enum Theme {
     Dark,
 }
 
+/// What a video recording takes in besides the screen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VideoOptions {
+    /// What the computer plays (Windows only).
+    pub system_sound: bool,
+    pub microphone: bool,
+    /// The microphone by name; `None` is the system's default one.
+    pub microphone_name: Option<String>,
+    pub camera: bool,
+    /// The camera by number; `None` is the first one.
+    pub camera_index: Option<u32>,
+}
+
+impl Default for VideoOptions {
+    /// A quick video: the screen and what the computer plays.
+    fn default() -> VideoOptions {
+        VideoOptions { system_sound: true, microphone: false, microphone_name: None, camera: false, camera_index: None }
+    }
+}
+
+impl VideoOptions {
+    /// Video Production: everything, each on its own track.
+    pub fn production() -> VideoOptions {
+        VideoOptions { system_sound: true, microphone: true, microphone_name: None, camera: true, camera_index: None }
+    }
+}
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -421,6 +470,16 @@ pub struct Settings {
     /// written at every save, so it says nothing of what the owner chose, and is left behind.
     pub gif_frame_rate: u32,
     pub gif_max_secs: u32,
+    /// A quick video (Record Video).
+    pub video: VideoOptions,
+    /// A Video Production recording.
+    pub production: VideoOptions,
+    /// Frames a second of a video recording.
+    pub video_frame_rate: u32,
+    /// The longest a video recording runs, in minutes.
+    pub video_max_mins: u32,
+    /// Keep a quick video at the size recorded (else it is made no larger than 1920 × 1080).
+    pub video_full_size: bool,
     pub theme: Theme,
     /// The area of the last region capture, for Repeat Last Capture.
     pub last_region: Option<IRect>,
@@ -448,6 +507,11 @@ impl Default for Settings {
             start_at_login: None,
             gif_frame_rate: 30,
             gif_max_secs: 60,
+            video: VideoOptions::default(),
+            production: VideoOptions::production(),
+            video_frame_rate: 30,
+            video_max_mins: 60,
+            video_full_size: false,
             theme: Theme::System,
             last_region: None,
             welcomed: false,
@@ -483,6 +547,8 @@ impl Settings {
         self.delay_secs = self.delay_secs.min(60);
         self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
+        self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
+        self.video_max_mins = self.video_max_mins.clamp(1, 240);
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }

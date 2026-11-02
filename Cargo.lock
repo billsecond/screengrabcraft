@@ -4474,6 +4474,7 @@ dependencies = [
  "rfd",
  "screengrabcraft-capture",
  "screengrabcraft-desktop",
+ "screengrabcraft-media",
  "screengrabcraft-model",
  "screengrabcraft-render",
  "screengrabcraft-ui",

@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 screengrabcraft-model = { workspace = true }
 screengrabcraft-render = { workspace = true }
+screengrabcraft-media = { workspace = true }
 screengrabcraft-capture = { workspace = true }
 screengrabcraft-ui = { workspace = true }
 screengrabcraft-desktop = { workspace = true }

@@ -37,6 +37,8 @@ pub enum Purpose {
     Window,
     Gif,
     Scrolling,
+    /// A video: Record Video or Video Production.
+    Video,
 }
 
 /// What to do with the chosen area.
@@ -383,6 +385,7 @@ impl Overlay {
             Purpose::Window => "Click the window to capture  ·  Esc: cancel",
             Purpose::Gif => "Drag out the area to record as a GIF  ·  Esc: cancel",
             Purpose::Scrolling => "Drag out the area that scrolls  ·  Esc: cancel",
+            Purpose::Video => "Drag out the area to record as a video  ·  Esc: cancel",
         };
         let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(15.0), Color32::WHITE);
         let at = pos2(screen.center().x - galley.size().x / 2.0, screen.min.y + 28.0);
@@ -443,6 +446,7 @@ impl Overlay {
         let buttons = match self.purpose {
             Purpose::Gif => vec![button(Icon::Gif, "Record GIF", "Enter", Weight::Main, Some(Action::Start)), cancel],
             Purpose::Scrolling => vec![button(Icon::Scrolling, "Start scrolling capture", "Enter", Weight::Main, Some(Action::Start)), cancel],
+            Purpose::Video => vec![button(Icon::Gif, "Start recording", "Enter", Weight::Main, Some(Action::Start)), cancel],
             _ => {
                 let mut bar = Vec::with_capacity(5);
                 if enter == Action::Default {
@@ -653,7 +657,7 @@ impl Overlay {
                         self.phase = Phase::Choosing;
                         return;
                     }
-                    if self.preview || matches!(self.purpose, Purpose::Gif | Purpose::Scrolling) {
+                    if self.preview || matches!(self.purpose, Purpose::Gif | Purpose::Scrolling | Purpose::Video) {
                         self.phase = Phase::Adjusting;
                     } else {
                         self.choose(Action::Default);

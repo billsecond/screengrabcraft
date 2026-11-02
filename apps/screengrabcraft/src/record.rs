@@ -1,14 +1,21 @@
-//! Captures that run for a while: an area recorded as an animated GIF, and an area captured as
-//! its content scrolls and joined into one long picture. Each runs on a thread of its own and
-//! is stopped from the tray, its small control window or its shortcut.
+//! Captures that run for a while: an area recorded as an animated GIF, an area captured as its
+//! content scrolls and joined into one long picture, and video: a small MP4 (Record Video) or
+//! a recording with a track for each source to edit (Video Production). Each runs on a thread of
+//! its own and is stopped from the tray, its small control window or its shortcut.
 
 use std::io::BufWriter;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use screengrabcraft_capture::audio::{self, AudioCapture, AudioSource, SoundBlock};
+use screengrabcraft_capture::camera::{self, CameraCapture};
+use screengrabcraft_media::export::{self, ExportSettings};
+use screengrabcraft_media::recording::{self, FileSource, Header, RecordingWriter, StreamInfo, StreamKind};
+use screengrabcraft_media::timeline::Timeline;
+use screengrabcraft_model::settings::VideoOptions;
 use screengrabcraft_model::{IRect, Raster};
 use screengrabcraft_render::anim::GifWriter;
 use screengrabcraft_render::stitch::{Step, Stitcher};
@@ -17,6 +24,8 @@ use screengrabcraft_render::stitch::{Step, Stitcher};
 pub enum Kind {
     Gif,
     Scrolling,
+    Video,
+    Production,
 }
 
 /// What a finished recording made.
@@ -25,6 +34,10 @@ pub enum Output {
     Gif(PathBuf, u32),
     /// The joined scrolling picture.
     Picture(Raster),
+    /// A video made: the MP4 and how long it is (µs).
+    Video(PathBuf, u64),
+    /// A Video Production recording, to open in the editor.
+    Production(PathBuf),
     Cancelled,
 }
 
@@ -39,6 +52,12 @@ pub struct Recording {
     pub progress: Arc<AtomicU32>,
     /// Frames that could not be joined lately (scrolling): the owner scrolled too fast.
     pub lost: Arc<AtomicU32>,
+    /// Making the video after the recording stopped: 0 not yet, then 1 to 1001 (its progress + 1).
+    pub saving: Arc<AtomicU32>,
+    /// How loud the computer's sound and the microphone are just now (`f32` bits, 0 to 1).
+    pub levels: Arc<[AtomicU32; 2]>,
+    /// What the recording takes in, or couldn't, for the owner (`Computer sound`, `No camera`…).
+    pub sources: Arc<Mutex<Vec<String>>>,
     handle: Option<JoinHandle<Result<Output, String>>>,
 }
 
@@ -85,12 +104,25 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
             let out = match kind {
                 Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &p, &wake),
                 Kind::Scrolling => scrolling(monitor, area, &s, &c, &p, &l, &wake),
+                Kind::Video | Kind::Production => Err("a video is started with start_video".to_string()),
             };
             wake.request_repaint();
             out
         })
         .map_err(|e| e.to_string())?;
-    Ok(Recording { kind, started: Instant::now(), desktop, stop, cancel, progress, lost, handle: Some(handle) })
+    Ok(Recording {
+        kind,
+        started: Instant::now(),
+        desktop,
+        stop,
+        cancel,
+        progress,
+        lost,
+        saving: Arc::default(),
+        levels: Arc::default(),
+        sources: Arc::default(),
+        handle: Some(handle),
+    })
 }
 
 fn gif(
@@ -184,4 +216,286 @@ fn scrolling(
         return Ok(Output::Cancelled);
     }
     s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
+}
+
+/// What a video recording is to do.
+pub struct VideoPlan {
+    pub kind: Kind,
+    pub monitor: u32,
+    /// In the monitor's pixels.
+    pub area: IRect,
+    pub desktop: IRect,
+    pub fps: u32,
+    pub max_secs: u32,
+    pub options: VideoOptions,
+    /// Record Video: the MP4 to make (the recording itself goes to the temporary folder).
+    /// Video Production: the recording file, which the editor opens.
+    pub out: PathBuf,
+    /// Record Video: the largest the MP4 is made.
+    pub max_size: (u32, u32),
+    /// When it was started, in local time, for the recording file.
+    pub created: String,
+}
+
+/// Starts a video recording.
+pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, String> {
+    let r = Recording {
+        kind: plan.kind,
+        started: Instant::now(),
+        desktop: plan.desktop,
+        stop: Arc::default(),
+        cancel: Arc::default(),
+        progress: Arc::default(),
+        lost: Arc::default(),
+        saving: Arc::default(),
+        levels: Arc::default(),
+        sources: Arc::default(),
+        handle: None,
+    };
+    let (stop, cancel, progress, saving, levels, sources) =
+        (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone());
+    let handle = std::thread::Builder::new()
+        .name("video".into())
+        .spawn(move || {
+            let shared =
+                Shared { stop: &stop, cancel: &cancel, progress: &progress, saving: &saving, levels: &levels, sources: &sources, wake: &wake };
+            let out = video(&plan, &shared);
+            wake.request_repaint();
+            out
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(Recording { handle: Some(handle), ..r })
+}
+
+struct Shared<'a> {
+    stop: &'a AtomicBool,
+    cancel: &'a AtomicBool,
+    progress: &'a AtomicU32,
+    saving: &'a AtomicU32,
+    levels: &'a [AtomicU32; 2],
+    sources: &'a Mutex<Vec<String>>,
+    wake: &'a egui::Context,
+}
+
+impl Shared<'_> {
+    fn note(&self, text: String) {
+        if let Ok(mut s) = self.sources.lock() {
+            s.push(text);
+        }
+    }
+}
+
+/// What the writer thread is handed.
+enum Item {
+    Screen(u64, Raster),
+    Camera(u64, Vec<u8>),
+    Sound(u8, SoundBlock),
+}
+
+/// Screen pictures waiting to be written, at most (a slow disk loses pictures, not memory).
+const WAITING: usize = 8;
+
+/// The sound devices and the camera a recording asked for, those that started.
+struct Devices {
+    system: Option<AudioCapture>,
+    mic: Option<AudioCapture>,
+    camera: Option<CameraCapture>,
+}
+
+fn open_devices(o: &VideoOptions, started: Instant, s: &Shared) -> Devices {
+    let system = if o.system_sound && audio::system_sound_supported() {
+        AudioCapture::start(AudioSource::SystemSound, started).map_err(|e| s.note(format!("No computer sound: {e}"))).ok()
+    } else {
+        None
+    };
+    let mic = if o.microphone {
+        AudioCapture::start(AudioSource::Microphone(o.microphone_name.clone()), started).map_err(|e| s.note(format!("No microphone: {e}"))).ok()
+    } else {
+        None
+    };
+    let camera = if o.camera {
+        match o.camera_index.or_else(|| camera::cameras().first().map(|c| c.0)) {
+            Some(i) => CameraCapture::start(i, started).map_err(|e| s.note(format!("No camera: {e}"))).ok(),
+            None => {
+                s.note("No camera was found".to_string());
+                None
+            }
+        }
+    } else {
+        None
+    };
+    Devices { system, mic, camera }
+}
+
+fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
+    let file_path = match plan.kind {
+        Kind::Production => plan.out.clone(),
+        _ => {
+            let dir = std::env::temp_dir().join("ScreenGrabCraft");
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            dir.join(format!("recording-{}.{}", std::process::id(), recording::EXT))
+        }
+    };
+    let started = Instant::now();
+    // The devices first: they take a moment to start, and their sound is placed by the clock.
+    let d = open_devices(&plan.options, started, s);
+    let mut streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: plan.area.w, height: plan.area.h, channels: 0 }];
+    if let Some(a) = &d.system {
+        streams.push(StreamInfo { id: 1, kind: StreamKind::SystemSound, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
+        s.note("Computer sound".to_string());
+    }
+    if let Some(a) = &d.mic {
+        streams.push(StreamInfo { id: 2, kind: StreamKind::Microphone, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
+        s.note(format!("Microphone: {}", a.name));
+    }
+    if let Some(c) = &d.camera {
+        streams.push(StreamInfo { id: 3, kind: StreamKind::Camera, name: c.name.clone(), width: 640, height: 480, channels: 0 });
+        s.note(format!("Camera: {}", c.name));
+    }
+    let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
+    let file = std::fs::File::create(&file_path).map_err(|e| format!("{}: {e}", file_path.display()))?;
+    let writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<Item>();
+    let waiting = Arc::new(AtomicUsize::new(0));
+    let w = waiting.clone();
+    let write_thread = std::thread::Builder::new()
+        .name("video-writer".into())
+        .spawn(move || -> Result<RecordingWriter<BufWriter<std::fs::File>>, String> {
+            let mut writer = writer;
+            for item in rx {
+                let r = match item {
+                    Item::Screen(pts, pic) => {
+                        w.fetch_sub(1, Ordering::SeqCst);
+                        writer.video_frame(0, pts, &pic)
+                    }
+                    Item::Camera(pts, jpeg) => writer.jpeg_frame(3, pts, &jpeg),
+                    Item::Sound(stream, b) => writer.audio(stream, b.first, &b.samples),
+                };
+                r.map_err(|e| e.to_string())?;
+            }
+            Ok(writer)
+        })
+        .map_err(|e| e.to_string())?;
+    let frames = record_screen(plan, s, &d, &tx, &waiting, started);
+    let duration = started.elapsed().as_micros() as u64;
+    // What the devices still hold, then they're let go (the camera's light goes off).
+    if let Some(a) = d.system {
+        send_sound(&tx, 1, a.stop());
+    }
+    if let Some(a) = d.mic {
+        send_sound(&tx, 2, a.stop());
+    }
+    if let Some(c) = d.camera {
+        for f in c.stop() {
+            let _ = tx.send(Item::Camera(f.at.as_micros() as u64, f.jpeg));
+        }
+    }
+    drop(tx);
+    let writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
+    writer.finish(duration).map_err(|e| e.to_string())?;
+    if s.cancel.load(Ordering::SeqCst) || frames.is_err() {
+        let _ = std::fs::remove_file(&file_path);
+        return frames.map(|_| Output::Cancelled);
+    }
+    if plan.kind == Kind::Production {
+        return Ok(Output::Production(file_path));
+    }
+    // Record Video: the MP4 is made from the recording, then the recording goes.
+    s.saving.store(1, Ordering::SeqCst);
+    s.wake.request_repaint();
+    let made = make_mp4(plan, &file_path, s);
+    let _ = std::fs::remove_file(&file_path);
+    if s.cancel.load(Ordering::SeqCst) {
+        return Ok(Output::Cancelled);
+    }
+    made.map(|d| Output::Video(plan.out.clone(), d))
+}
+
+fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>) {
+    for b in blocks {
+        let _ = tx.send(Item::Sound(id, b));
+    }
+}
+
+/// The screen on a steady beat, with the devices' sound and pictures passed on as they come.
+/// The number of screen pictures taken, or why there were none.
+fn record_screen(
+    plan: &VideoPlan,
+    s: &Shared,
+    d: &Devices,
+    tx: &std::sync::mpsc::Sender<Item>,
+    waiting: &AtomicUsize,
+    started: Instant,
+) -> Result<u32, String> {
+    let mut grab = screengrabcraft_capture::grabber(plan.monitor, plan.area).map_err(|e| e.to_string())?;
+    let tick = Duration::from_secs_f64(1.0 / f64::from(plan.fps.clamp(5, 30)));
+    let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
+    let mut due = Instant::now();
+    let mut frames = 0u32;
+    while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
+        let at = started.elapsed();
+        match grab() {
+            Ok(pic) if pic.width() == plan.area.w && pic.height() == plan.area.h => {
+                if waiting.load(Ordering::SeqCst) < WAITING {
+                    waiting.fetch_add(1, Ordering::SeqCst);
+                    let _ = tx.send(Item::Screen(at.as_micros() as u64, pic));
+                    frames += 1;
+                    s.progress.store(frames, Ordering::SeqCst);
+                } else {
+                    log::warn!("a video picture was left out: the disk is behind");
+                }
+            }
+            Ok(_) => log::warn!("a picture of the wrong size was left out"),
+            Err(e) => log::warn!("a picture could not be captured: {e}"),
+        }
+        if let Some(a) = &d.system {
+            send_sound(tx, 1, a.take());
+            s.levels[0].store(a.level().to_bits(), Ordering::Relaxed);
+        }
+        if let Some(a) = &d.mic {
+            send_sound(tx, 2, a.take());
+            s.levels[1].store(a.level().to_bits(), Ordering::Relaxed);
+        }
+        if let Some(c) = &d.camera {
+            for f in c.take() {
+                let _ = tx.send(Item::Camera(f.at.as_micros() as u64, f.jpeg));
+            }
+        }
+        s.wake.request_repaint_after(Duration::from_millis(250));
+        due = (due + tick).max(Instant::now());
+        std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    if frames == 0 {
+        return Err("nothing could be recorded".to_string());
+    }
+    Ok(frames)
+}
+
+/// Record Video's MP4, made from the recording file. How long it is, in µs.
+fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared) -> Result<u64, String> {
+    let source = FileSource::open(file_path).map_err(|e| e.to_string())?;
+    let rec = Arc::new(recording::Recording::open(Box::new(source)).map_err(|e| e.to_string())?);
+    let tl = Timeline::new(&rec);
+    let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
+    // The export counts 0 to 1000; the control window reads it + 1 (0 is "not saving").
+    let progress = AtomicU32::new(0);
+    let done = std::thread::scope(|scope| {
+        let relay = scope.spawn(|| {
+            while s.saving.load(Ordering::SeqCst) != 0 && !s.cancel.load(Ordering::SeqCst) {
+                let p = progress.load(Ordering::SeqCst);
+                if p >= 1000 {
+                    break;
+                }
+                s.saving.store(p + 1, Ordering::SeqCst);
+                s.wake.request_repaint();
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        let r = export::export(rec, &tl, &plan.out, settings, &progress, s.cancel);
+        progress.store(1000, Ordering::SeqCst);
+        let _ = relay.join();
+        r
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(done.duration_us)
 }

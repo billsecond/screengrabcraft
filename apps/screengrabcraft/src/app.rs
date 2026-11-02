@@ -269,7 +269,9 @@ impl Service {
             }
             Msg::Hotkey(id) => match self.keys.target(id) {
                 Some(Target::Capture(CaptureMode::Gif)) if self.recording.is_some() => self.stop_recording(false),
-                Some(Target::Capture(CaptureMode::Scrolling)) if self.recording.is_some() => self.stop_recording(false),
+                Some(Target::Capture(CaptureMode::Scrolling | CaptureMode::Video | CaptureMode::Production)) if self.recording.is_some() => {
+                    self.stop_recording(false)
+                }
                 Some(Target::Capture(m)) => self.start(m, 0),
                 Some(Target::Editor) => {
                     let _ = launch::open_editor(&[]);
@@ -432,6 +434,7 @@ impl Service {
                     CaptureMode::Window => Purpose::Window,
                     CaptureMode::Gif => Purpose::Gif,
                     CaptureMode::Scrolling => Purpose::Scrolling,
+                    CaptureMode::Video | CaptureMode::Production => Purpose::Video,
                     _ => Purpose::Picture,
                 };
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
@@ -489,6 +492,7 @@ impl Service {
                     Err(e) => self.notify("The recording could not start", e, None, None, true),
                 }
             }
+            CaptureMode::Video | CaptureMode::Production => self.start_video(run.mode, m.id, area, desktop),
             _ => {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
                 let origin = (area.x.max(0) as u32, area.y.max(0) as u32);
@@ -529,6 +533,42 @@ impl Service {
         }
     }
 
+    /// Starts recording a video of `area` (the monitor's pixels).
+    fn start_video(&mut self, mode: CaptureMode, monitor: u32, area: IRect, desktop: IRect) {
+        let production = mode == CaptureMode::Production;
+        let dir = paths::captures_dir(&self.settings);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.notify("The recording could not start", format!("{}: {e}", dir.display()), None, None, true);
+            return;
+        }
+        let now = screengrabcraft_desktop::time::now();
+        let source = if production { "Video Production" } else { "Video" };
+        let name = screengrabcraft_model::settings::expand_name(&self.settings.file_name, now, source, 1);
+        let ext = if production { screengrabcraft_media::recording::EXT } else { "mp4" };
+        let s = &self.settings;
+        let plan = record::VideoPlan {
+            kind: if production { record::Kind::Production } else { record::Kind::Video },
+            monitor,
+            area,
+            desktop,
+            fps: s.video_frame_rate,
+            max_secs: s.video_max_mins.saturating_mul(60),
+            options: if production { s.production.clone() } else { s.video.clone() },
+            out: free_path(&dir, &name, ext),
+            max_size: if s.video_full_size { (7680, 4320) } else { (1920, 1080) },
+            created: format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", now.year, now.month, now.day, now.hour, now.minute, now.second),
+        };
+        match record::start_video(plan, self.ctx.clone()) {
+            Ok(r) => {
+                self.recording = Some(r);
+                if let Some(t) = &mut self.tray {
+                    t.set_recording(true);
+                }
+            }
+            Err(e) => self.notify("The recording could not start", e, None, None, true),
+        }
+    }
+
     pub fn stop_recording(&mut self, cancel: bool) {
         if let Some(r) = &self.recording {
             if cancel {
@@ -561,6 +601,19 @@ impl Service {
                 }
             }
             Ok(record::Output::Picture(p)) => self.finish(p, "Scrolling capture", Action::Default),
+            Ok(record::Output::Video(path, us)) => {
+                let secs = us / 1_000_000;
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let detail = format!("{}:{:02}, {:.1} MB — {}", secs / 60, secs % 60, size as f64 / 1e6, file_name(&path));
+                self.notify("Video saved", detail, Some(path), None, false);
+            }
+            Ok(record::Output::Production(path)) => {
+                if launch::open_editor(&[path.to_string_lossy().to_string()]).is_ok() {
+                    self.editor_aside = false;
+                } else {
+                    self.notify("Recording saved", file_name(&path), Some(path), None, false);
+                }
+            }
             Ok(record::Output::Cancelled) => {}
             Err(e) => self.notify("The recording failed", e, None, None, true),
         }

@@ -91,6 +91,9 @@ impl Tray {
         }
         let gif = self.add(&menu, label(CaptureMode::Gif.label(), keys.label(&settings.hotkeys, CaptureMode::Gif)), Item::Capture(CaptureMode::Gif));
         self.gif_item = Some(gif);
+        for mode in [CaptureMode::Video, CaptureMode::Production] {
+            self.add(&menu, label(mode.label(), keys.label(&settings.hotkeys, mode)), Item::Capture(mode));
+        }
         self.add(&menu, label(CaptureMode::Repeat.label(), keys.label(&settings.hotkeys, CaptureMode::Repeat)), Item::Capture(CaptureMode::Repeat));
         let delayed = Submenu::new("Capture Region After a Delay", true);
         for secs in [3u32, 5, 10] {
