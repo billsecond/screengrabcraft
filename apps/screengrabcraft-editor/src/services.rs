@@ -5,13 +5,14 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use screengrabcraft_desktop::{clipboard, launch, paths, store};
 use screengrabcraft_media::recording::{FileSource, Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_ui::services::{DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoJob};
+use screengrabcraft_render::matte::Matting;
 
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
@@ -40,6 +41,8 @@ pub struct DesktopServices {
     /// then written at once).
     save_tx: Option<Sender<SaveJob>>,
     saved_rx: Receiver<Saved>,
+    /// Remove Background's model, looked for once.
+    model: OnceLock<Result<Arc<dyn Matting>, String>>,
 }
 
 impl DesktopServices {
@@ -83,7 +86,7 @@ impl DesktopServices {
                 None
             }
         };
-        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, save_tx, saved_rx }
+        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, save_tx, saved_rx, model: OnceLock::new() }
     }
 }
 
@@ -362,5 +365,9 @@ impl Services for DesktopServices {
         if let Err(e) = launch::open_file(Path::new(path)) {
             log::warn!("opening a video: {e}");
         }
+    }
+
+    fn background_model(&self) -> Result<Arc<dyn Matting>, String> {
+        self.model.get_or_init(screengrabcraft_desktop::models::background_model).clone()
     }
 }

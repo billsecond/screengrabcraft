@@ -47,7 +47,8 @@ rm -rf "$WORK"
 
 # BSD install has no -D: make the directories first.
 mkdir -p "$STAGE/bin" "$STAGE/share/applications" "$STAGE/share/mime/packages" "$STAGE/share/metainfo" \
-  "$STAGE/share/icons" "$STAGE/share/doc/screengrabcraft" "$STAGE/share/screengrabcraft/autostart"
+  "$STAGE/share/icons" "$STAGE/share/doc/screengrabcraft" "$STAGE/share/screengrabcraft/autostart" \
+  "$STAGE/share/screengrabcraft/models"
 for bin in screengrabcraft screengrabcraft-editor screengrabcraft-cli; do
   install -m 755 "$BIN/$bin" "$STAGE/bin/$bin"
   strip "$STAGE/bin/$bin" 2>/dev/null || true
@@ -60,6 +61,8 @@ done
 install -m 644 "$LINUX/$APP_ID.mime.xml" "$STAGE/share/mime/packages/$APP_ID.xml"
 install -m 644 "$LINUX/autostart/$APP_ID.desktop" "$STAGE/share/screengrabcraft/autostart/$APP_ID.desktop"
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
+# Remove Background's model, where the editor and the CLI look for it (../share/screengrabcraft/models).
+install -m 644 "$ROOT/assets/models/isnet-general-use-int8.onnx" "$STAGE/share/screengrabcraft/models/isnet-general-use-int8.onnx"
 copy_docs "$STAGE/share/doc/screengrabcraft"
 
 tar -C "$WORK" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"

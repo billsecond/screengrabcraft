@@ -26,3 +26,8 @@ License, Version 2.0:
 
 Bundled fonts: PatroneOS Sans and PatroneOS Mono, Copyright 2026 William Daugherty
 (https://patroneos.com/fonts), under the SIL Open Font License 1.1 (assets/fonts/).
+
+Bundled model: IS-Net "general use" (Xuebin Qin, Hang Dai, Xiaobin Hu, Deng-Ping Fan, Ling Shao,
+Luc Van Gool; https://github.com/xuebinqin/DIS), under the Apache License, Version 2.0, as ONNX
+by rembg (Daniel Gatis, https://github.com/danielgatis/rembg). Modified: its weights are kept in
+8 bits (assets/models/README.md).

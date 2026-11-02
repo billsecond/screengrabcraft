@@ -4,7 +4,8 @@
 //! screengrabcraft-cli capture [--screen N | --all | --area X,Y,W,H | --window TITLE] [--delay S] [-o FILE] [--clipboard]
 //! screengrabcraft-cli monitors | windows
 //! screengrabcraft-cli render IN [-o OUT]                 a project or picture flattened to a picture
-//! screengrabcraft-cli run IN --cmd ID[=JSON]... [-o OUT]  editing commands, as the editor runs them
+//! screengrabcraft-cli run IN --cmd ID[=JSON]... [--model FILE] [-o OUT]
+//!                                                      editing commands, as the editor runs them
 //! screengrabcraft-cli commands                            every editing command, as JSON
 //! screengrabcraft-cli stitch FRAME... -o OUT              join the frames of a scrolling page
 //! screengrabcraft-cli service install|uninstall|status    the capture service at sign-in
@@ -29,13 +30,14 @@ const USAGE: &str = "usage:
   screengrabcraft-cli monitors
   screengrabcraft-cli windows
   screengrabcraft-cli render IN [-o OUT]
-  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [-o OUT]
+  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [-o OUT]
   screengrabcraft-cli commands
   screengrabcraft-cli stitch FRAME... -o OUT
   screengrabcraft-cli service install|uninstall|status
   screengrabcraft-cli --version
 
-Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft (a project).";
+Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft (a project).
+--model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).";
 
 type R<T> = Result<T, String>;
 
@@ -237,9 +239,15 @@ fn cmd_render(args: &[String]) -> R<()> {
 }
 
 fn cmd_run(args: &[String]) -> R<()> {
-    let ins = positional(args, &["-o", "--output", "--cmd"]);
+    let ins = positional(args, &["-o", "--output", "--cmd", "--model"]);
     let input = PathBuf::from(ins.first().ok_or("run needs an input file")?);
     let mut session = Session::new(read_doc(&input)?);
+    // image.removeBackground's model: the one given, else the one installed (read only if used).
+    let model = match opt(args, "--model") {
+        Some(m) => Some(screengrabcraft_desktop::models::open(PathBuf::from(m))),
+        None => screengrabcraft_desktop::models::background_model().ok(),
+    };
+    session.background.set_model(model);
     let mut i = 0;
     while let Some(pos) = args.iter().skip(i).position(|a| a == "--cmd") {
         let at = i + pos + 1;

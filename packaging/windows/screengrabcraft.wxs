@@ -88,7 +88,9 @@
     </UI>
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="ScreenGrabCraft" />
+      <Directory Id="INSTALLFOLDER" Name="ScreenGrabCraft">
+        <Directory Id="MODELSFOLDER" Name="models" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
@@ -189,6 +191,12 @@
 
       <Component Id="ScreenGrabCraftCli">
         <File Id="ScreenGrabCraftCliExe" Source="$(var.BinDir)\screengrabcraft-cli.exe" KeyPath="yes" />
+      </Component>
+
+      <!-- Remove Background's model (IS-Net, Apache-2.0; see assets/models/README.md), in models\
+           beside the editor and the command-line program, where they look for it. -->
+      <Component Id="BackgroundModel" Directory="MODELSFOLDER" Guid="F4C1D861-7EB5-42E6-8C81-3A4587B9C577">
+        <File Id="BackgroundModelFile" Source="$(var.BinDir)\models\isnet-general-use-int8.onnx" KeyPath="yes" />
       </Component>
     </ComponentGroup>
   </Fragment>

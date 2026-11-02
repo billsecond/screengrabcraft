@@ -5,6 +5,7 @@
 use screengrabcraft_media::recording::{Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
+use screengrabcraft_render::matte::Matting;
 
 pub use crate::autosave::{SaveJob, Saved};
 
@@ -190,6 +191,12 @@ pub trait Services {
 
     /// Opens a file in the program the system uses for it (a video in its player).
     fn open_with_system(&self, _path: &str) {}
+
+    /// The model Remove Background runs (on a thread of the editor's own; reading its file is
+    /// left to the model's first use), or why there is none here.
+    fn background_model(&self) -> Result<std::sync::Arc<dyn Matting>, String> {
+        Err("Remove Background needs ScreenGrabCraft Editor on the desktop: its model doesn't run in the browser".to_string())
+    }
 }
 
 /// A host with nothing, not even paths (nothing is saved by itself): for tests.

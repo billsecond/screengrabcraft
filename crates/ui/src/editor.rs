@@ -123,6 +123,8 @@ pub struct Editor {
     fonts_installed: bool,
     theme_applied: Option<screengrabcraft_model::Theme>,
     pub(crate) pointer_px: Option<(i32, i32)>,
+    /// Remove Background at work, and the Make a Colour Transparent window.
+    pub(crate) background: crate::background::State,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -177,6 +179,7 @@ impl Editor {
             fonts_installed: false,
             theme_applied: None,
             pointer_px: None,
+            background: crate::background::State::default(),
         }
     }
 
@@ -652,13 +655,14 @@ impl Editor {
         crate::props::panel(self, ui);
         crate::canvas::show(self, ui);
         crate::dialogs::show(self, &ctx);
+        crate::background::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || self.save_problem.is_some() || (self.pending.is_some() && !self.autosaves()) {
+        if self.dialog.is_some() || self.save_problem.is_some() || (self.pending.is_some() && !self.autosaves()) || self.background.busy() {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input() || self.editing.is_some();
@@ -948,6 +952,8 @@ impl Editor {
                         self.run(&ctx, "image.flip", json!({"horizontal": false}));
                         ui.close();
                     }
+                    ui.separator();
+                    crate::background::menu(self, ui);
                 });
                 ui.menu_button("Effects", |ui| {
                     for (label, d) in [

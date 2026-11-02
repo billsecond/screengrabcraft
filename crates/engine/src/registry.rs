@@ -7,6 +7,7 @@
 
 use screengrabcraft_model::{Color, Document, Object, ObjectId, Order, Pt, Rect, Shape, Style};
 use screengrabcraft_render::effects;
+use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
 
 use crate::session::Session;
@@ -145,6 +146,33 @@ pub static COMMANDS: &[CommandSpec] = &[
     cmd!("image.rotate", "Rotate", "Image", None, r#"{"degrees": 90|180|270}"#, always, rotate),
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
+    cmd!(
+        "image.removeBackground",
+        "Remove Background",
+        "Image",
+        None,
+        r#"{"model"?: "isnet-general-use-int8"} — a model tells the subject from the background, which becomes transparent with soft edges (the desktop editor and the command-line program have the model)"#,
+        always,
+        remove_background
+    ),
+    cmd!(
+        "image.removeSolidBackground",
+        "Remove Solid Background",
+        "Image",
+        None,
+        r##"{"tolerance"?: 24, "color"?: "#RRGGBB", "shadows"?: true} — the plain colour round the picture's edges (theirs unless given) becomes transparent up to the subject; its soft shadows become see-through black"##,
+        always,
+        remove_solid_background
+    ),
+    cmd!(
+        "image.makeColorTransparent",
+        "Make a Colour Transparent",
+        "Image",
+        None,
+        r##"{"color"?: "#RRGGBB", "x"?: px, "y"?: px, "tolerance"?: 24, "contiguous"?: false, "shadows"?: true} — a colour (given, or the pixel at x, y) becomes transparent everywhere, or only where it joins x, y"##,
+        always,
+        make_color_transparent
+    ),
     cmd!("effect.border", "Border", "Effects", None, r##"{"width"?: 4, "color"?: "#000000"}"##, always, border),
     cmd!("effect.shadow", "Drop Shadow", "Effects", None, r##"{"offset"?: 8, "softness"?: 10, "color"?: "#00000080"}"##, always, shadow),
     cmd!(
@@ -495,6 +523,99 @@ fn trim(s: &mut Session, p: &Value) -> Result<Value> {
     let tol = int(p, "tolerance", 8, 0, 255)? as u8;
     let area = effects::trim_bounds(&s.doc.base, tol);
     crop(s, &json!({ "x": area.x, "y": area.y, "w": area.w, "h": area.h }))
+}
+
+// ---- the background ----
+
+/// A picture just taken away, or why nothing could be.
+fn cleared(s: &mut Session, out: matte::Removed, colour: Color) -> Result<Value> {
+    let all = u64::from(s.doc.width()) * u64::from(s.doc.height());
+    if out.cleared == 0 && out.softened == 0 {
+        return Err(EngineError::Failed(format!("nothing in the picture is close enough to {} to take away", colour.to_hex())));
+    }
+    if out.cleared >= all {
+        return Err(EngineError::Failed(format!("the whole picture is {}, so nothing would be left", colour.to_hex())));
+    }
+    s.doc.base = out.picture;
+    Ok(json!({ "color": colour.to_hex(), "cleared": out.cleared, "softened": out.softened }))
+}
+
+fn remove_solid_background(s: &mut Session, p: &Value) -> Result<Value> {
+    let tolerance = int(p, "tolerance", 24, 0, 255)? as u8;
+    let colour = match p.get("color") {
+        None | Some(Value::Null) => matte::edge_colour(&s.doc.base).ok_or_else(|| {
+            EngineError::Failed("the picture's edges aren't one plain colour, so there is no plain background to take away (Remove Background tells a subject from any background)".to_string())
+        })?,
+        Some(_) => color(p, "color", Color::TRANSPARENT)?,
+    };
+    if colour.a == 0 {
+        return Err(EngineError::Failed("the background is transparent already".to_string()));
+    }
+    let out = matte::remove_colour(&s.doc.base, colour, tolerance, Region::Edges, boolean(p, "shadows", true))?;
+    cleared(s, out, colour)
+}
+
+/// The pixel at `x`, `y`, if they are given.
+fn pixel_param(s: &Session, p: &Value) -> Result<Option<(u32, u32)>> {
+    let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
+    if !given("x") && !given("y") {
+        return Ok(None);
+    }
+    let (x, y) = (need(p, "x")?.floor(), need(p, "y")?.floor());
+    if x < 0.0 || y < 0.0 || x >= s.doc.width() as f32 || y >= s.doc.height() as f32 {
+        return Err(EngineError::Params("the point is outside the picture".to_string()));
+    }
+    Ok(Some((x as u32, y as u32)))
+}
+
+fn make_color_transparent(s: &mut Session, p: &Value) -> Result<Value> {
+    let tolerance = int(p, "tolerance", 24, 0, 255)? as u8;
+    let at = pixel_param(s, p)?;
+    let colour = match (p.get("color"), at) {
+        (None | Some(Value::Null), Some((x, y))) => {
+            s.doc.base.pixel(x, y).ok_or_else(|| EngineError::Params("the point is outside the picture".to_string()))?
+        }
+        (None | Some(Value::Null), None) => return Err(EngineError::Params("give a `color`, or the `x` and `y` of a pixel of it".to_string())),
+        _ => color(p, "color", Color::TRANSPARENT)?,
+    };
+    let region = if boolean(p, "contiguous", false) {
+        let (x, y) = at.ok_or_else(|| EngineError::Params("`contiguous` needs the `x` and `y` to start from".to_string()))?;
+        Region::From(x, y)
+    } else {
+        Region::Everywhere
+    };
+    if colour.a == 0 {
+        return Err(EngineError::Failed("that colour is transparent already".to_string()));
+    }
+    let out = matte::remove_colour(&s.doc.base, colour, tolerance, region, boolean(p, "shadows", true))?;
+    cleared(s, out, colour)
+}
+
+fn remove_background(s: &mut Session, p: &Value) -> Result<Value> {
+    let wanted = match p.get("model") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(m)) => Some(m.clone()),
+        Some(_) => return Err(EngineError::Params("`model` is the name of a model".to_string())),
+    };
+    let (name, found) = match s.background.take_prepared(&s.doc.base, wanted.as_deref()) {
+        Some(ready) => ready,
+        None => {
+            let model = s
+                .background
+                .model()
+                .cloned()
+                .ok_or_else(|| EngineError::Failed("there is no background model here (Remove Solid Background needs none)".to_string()))?;
+            if let Some(w) = &wanted
+                && w != model.name()
+            {
+                return Err(EngineError::Params(format!("there is no model `{w}` here (there is `{}`)", model.name())));
+            }
+            let found = model.matte(&s.doc.base, &mut |_| true).map_err(|e| EngineError::Failed(format!("removing the background: {e}")))?;
+            (model.name().to_string(), found)
+        }
+    };
+    s.doc.base = matte::apply_clean(&s.doc.base, &found)?;
+    Ok(json!({ "model": name }))
 }
 
 fn border(s: &mut Session, p: &Value) -> Result<Value> {

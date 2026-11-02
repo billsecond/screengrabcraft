@@ -1,8 +1,8 @@
 # Architecture
 
-> **Last updated:** 2026-10-14 · **Change:** first version
+> **Last updated:** 2026-11-02 · **Change:** the `matte` crate and making the background transparent
 
-ScreenGrabCraft is a Cargo workspace of six library crates in layers and four programs. A crate
+ScreenGrabCraft is a Cargo workspace of seven library crates in layers and four programs. A crate
 may depend only on crates in lower layers (`cargo xtask layers` checks it), and nothing below L6
 knows about a user interface.
 
@@ -13,7 +13,7 @@ L6   desktop ─────────────┤                         
      (settings, log,      │                           │   (editor, overlay)    │                   │
       instance, service)  │                           │                        │                   │
 L4                        │                     engine (Session, undo, command registry)           │
-L3   capture (monitors, windows, pixels: xcap · x11rb · portal)                                    │
+L3   capture (monitors, windows, pixels: xcap · x11rb · portal)   matte (background model: tract)│
 L2                              render (tiny-skia drawing, text, effects, codecs, PDF, projects, stitching, GIF)
 L1                              model (document, shapes, styles, geometry, settings)
 ```
@@ -24,9 +24,10 @@ L1                              model (document, shapes, styles, geometry, setti
 | `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
 | `media` | yes (no encoders) | video: the recording file (`recording`: append-only chunks, a track per source), the `Timeline` of edits, the `Composer` (the frame at a moment, the camera in its corner) and `mix` (the sound), the MP4 writer, AV1 (rav1e) and Opus (rusty-opus) encoders and the parallel `export` |
 | `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
+| `matte` | no | Remove Background's model: an ONNX salient-object model (IS-Net, U²-Net, BiRefNet) run by tract, the runtime written in Rust; the picture shrunk to the model's square, its answer stretched back as a soft matte. The host reads the model file; `desktop::models` finds it |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
-| `desktop` | no | paths, settings files, logging, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend, the update check (the only network code: HTTPS to GitHub's releases, the installer downloaded, checked and run on Windows) |
+| `desktop` | no | paths, settings files, logging, the background model's file, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend, the update check (the only network code: HTTPS to GitHub's releases, the installer downloaded, checked and run on Windows) |
 
 ## The document
 
@@ -47,6 +48,19 @@ Every editing action is a `CommandSpec` (id, label, group, shortcut, parameter d
 snapshot becomes the undo step if the document changed. A drag on the canvas is bracketed by
 `Session::begin` and `commit`, so it is one undo step however many frames it took. Pictures are
 shared between snapshots (`Arc`), so undo costs little memory unless the picture itself changed.
+
+## Making the background transparent
+
+Three commands in the Image menu, each one undo step. `image.removeSolidBackground` and
+`image.makeColorTransparent` are picture work in `render::matte`: the colour is flooded in from the
+edges (or taken everywhere) within a tolerance, compared with the colour itself so a gradient isn't
+eaten; the pixels at the edge of what went are unmixed (as transparent as they were mixed, the old
+colour taken out), and a soft shadow becomes see-through black. `image.removeBackground` applies a
+matte from a model the host lends the session (`Session::background`). The model takes seconds,
+so the editor runs it on a thread of its own (`ui::background`, with a progress window and Stop),
+hands the matte to the session for that picture, and then runs the command; the command-line
+program runs it in place. The model is IS-Net, its weights in 8 bits (`assets/models`), installed
+beside the programs and never downloaded; the browser build has none, and says so.
 
 ## The capture service
 
