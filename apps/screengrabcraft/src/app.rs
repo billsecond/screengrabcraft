@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
 use screengrabcraft_desktop::{clipboard, graphics, instance, launch, paths, store};
-use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, Settings};
+use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, RecordArea, RecorderOptions, Settings};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
 use crate::hotkeys::{Registered, Target};
@@ -84,6 +84,12 @@ pub struct Service {
     rx: Receiver<Msg>,
     pub ctx: egui::Context,
     pub home: Option<crate::home::Home>,
+    /// Video Production's window, while it's open.
+    pub recorder: Option<crate::recorder::Recorder>,
+    /// Record was pressed in the Recorder: the recording starts at this moment, once the
+    /// Recorder (and the editor, if it steps aside) has left the screen. True once the editor has
+    /// been asked aside.
+    production_at: Option<(Instant, bool)>,
     pub overlay: Option<OverlayRun>,
     pub countdown: Option<Countdown>,
     /// A countdown just ended: the capture starts once its window has gone.
@@ -149,6 +155,8 @@ impl Service {
             rx,
             ctx,
             home: None,
+            recorder: None,
+            production_at: None,
             overlay: None,
             countdown: None,
             after_countdown: None,
@@ -170,6 +178,7 @@ impl Service {
             || self.freezing.is_some()
             || self.countdown.is_some()
             || self.after_countdown.is_some()
+            || self.production_at.is_some()
             || self.recording.is_some()
             || self.keeping
     }
@@ -190,6 +199,64 @@ impl Service {
         }
         if let Some(h) = &mut self.home {
             h.focus = true;
+        }
+    }
+
+    /// Opens Video Production's Recorder, or brings it to the front.
+    pub fn open_recorder(&mut self) {
+        match &mut self.recorder {
+            Some(r) => r.focus = true,
+            None => self.recorder = Some(crate::recorder::Recorder::open()),
+        }
+    }
+
+    /// The Recorder's Record: the service's windows go, then the recording starts (see
+    /// [`Service::begin_production`]).
+    pub fn record_production(&mut self) {
+        self.recorder = None;
+        self.home = None;
+        self.notice = None;
+        self.updates.close_notice();
+        self.production_at = Some((Instant::now() + Duration::from_millis(300), false));
+    }
+
+    /// Starts a Video Production recording as the Recorder's choices say: the overlay first for an
+    /// area chosen on the screen, else the recording at once. `aside` is true once the editor has
+    /// been asked out of the picture.
+    fn begin_production(&mut self, aside: bool) {
+        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.keeping {
+            return;
+        }
+        if self.recording.is_some() {
+            self.notify("A recording is running", "Stop it first (the tray icon, or its shortcut).", None, None, true);
+            return;
+        }
+        let r = self.settings.recorder.clone();
+        if r.screen && screengrabcraft_capture::permission() == screengrabcraft_capture::Permission::Denied {
+            screengrabcraft_capture::request_permission();
+            self.notify(
+                "ScreenGrabCraft may not record the screen yet",
+                "Allow it in System Settings › Privacy & Security › Screen & System Audio Recording, then record again.",
+                None,
+                None,
+                true,
+            );
+            return;
+        }
+        if r.screen && r.area.chosen_on_screen() {
+            // The overlay takes the editor aside itself.
+            self.freeze(CaptureMode::Production);
+            return;
+        }
+        if r.screen && !aside && self.editor_goes_aside() {
+            let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_HIDE));
+            self.production_at = Some((Instant::now() + EDITOR_ASIDE + Duration::from_millis(50), true));
+            return;
+        }
+        let monitors = screengrabcraft_capture::monitors().unwrap_or_default();
+        match record::production_screen(&r, &monitors, None) {
+            Ok((screen, place)) => self.start_video(CaptureMode::Production, screen, place),
+            Err(e) => self.notify("The recording could not start", e, None, None, true),
         }
     }
 
@@ -337,6 +404,11 @@ impl Service {
             self.notify("A recording is running", "Stop it first (the tray icon, or its shortcut).", None, None, true);
             return;
         }
+        // Video Production starts at its Recorder, where the area and the inputs are chosen.
+        if mode == CaptureMode::Production {
+            self.open_recorder();
+            return;
+        }
         if screengrabcraft_capture::permission() == screengrabcraft_capture::Permission::Denied {
             screengrabcraft_capture::request_permission();
             self.notify(
@@ -364,8 +436,9 @@ impl Service {
             return;
         }
         // The service's own windows go first, so they aren't in the picture.
-        if self.home.is_some() || self.notice.is_some() || self.updates.notice_up() {
+        if self.home.is_some() || self.recorder.is_some() || self.notice.is_some() || self.updates.notice_up() {
             self.home = None;
+            self.recorder = None;
             self.notice = None;
             self.updates.close_notice();
             self.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
@@ -454,7 +527,8 @@ impl Service {
                     CaptureMode::Window => Purpose::Window,
                     CaptureMode::Gif => Purpose::Gif,
                     CaptureMode::Scrolling => Purpose::Scrolling,
-                    CaptureMode::Video | CaptureMode::Production => Purpose::Video,
+                    CaptureMode::Video => Purpose::Video,
+                    CaptureMode::Production => production_purpose(&self.settings.recorder),
                     _ => Purpose::Picture,
                 };
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
@@ -512,7 +586,7 @@ impl Service {
                     Err(e) => self.notify("The recording could not start", e, None, None, true),
                 }
             }
-            CaptureMode::Video | CaptureMode::Production => self.start_video(run.mode, m.id, area, desktop),
+            CaptureMode::Video | CaptureMode::Production => self.start_video(run.mode, record::Screen::Part { monitor: m.id, area }, desktop),
             _ => {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
                 let origin = (area.x.max(0) as u32, area.y.max(0) as u32);
@@ -553,8 +627,8 @@ impl Service {
         }
     }
 
-    /// Starts recording a video of `area` (the monitor's pixels).
-    fn start_video(&mut self, mode: CaptureMode, monitor: u32, area: IRect, desktop: IRect) {
+    /// Starts recording a video of `screen`; its control window is placed by `desktop`.
+    fn start_video(&mut self, mode: CaptureMode, screen: record::Screen, desktop: IRect) {
         let production = mode == CaptureMode::Production;
         let dir = paths::captures_dir(&self.settings);
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -566,14 +640,16 @@ impl Service {
         let name = screengrabcraft_model::settings::expand_name(&self.settings.file_name, now, source, 1);
         let ext = if production { screengrabcraft_media::recording::EXT } else { "mp4" };
         let s = &self.settings;
+        let mut options = if production { s.production.clone() } else { s.video.clone() };
+        // Where a camera can't be recorded the Recorder shows it off; it isn't tried either.
+        options.camera &= cfg!(any(target_os = "windows", target_os = "macos"));
         let plan = record::VideoPlan {
             kind: if production { record::Kind::Production } else { record::Kind::Video },
-            monitor,
-            area,
+            screen,
             desktop,
             fps: s.video_frame_rate,
             max_secs: s.video_max_mins.saturating_mul(60),
-            options: if production { s.production.clone() } else { s.video.clone() },
+            options,
             out: free_path(&dir, &name, ext),
             max_size: if s.video_full_size { (7680, 4320) } else { (1920, 1080) },
             created: format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", now.year, now.month, now.day, now.hour, now.minute, now.second),
@@ -661,12 +737,24 @@ impl Service {
             self.after_countdown = None;
             self.start(mode, 0);
         }
+        if let Some((at, aside)) = self.production_at
+            && Instant::now() >= at
+        {
+            self.production_at = None;
+            self.begin_production(aside);
+        }
         if self.overlay.as_ref().is_some_and(|o| *o.overlay.outcome() != Outcome::Pending) {
             self.overlay_done();
         }
         self.poll_recording();
         // However the capture ended, the editor doesn't stay aside.
-        if self.editor_aside && self.freezing.is_none() && self.overlay.is_none() && self.recording.is_none() && !self.keeping {
+        if self.editor_aside
+            && self.freezing.is_none()
+            && self.overlay.is_none()
+            && self.recording.is_none()
+            && self.production_at.is_none()
+            && !self.keeping
+        {
             self.editor_aside = false;
             editor_back();
         }
@@ -684,7 +772,7 @@ impl Service {
         // once it has been: Windows shows a window without activating it only the first time, so
         // showing it again would take the keyboard from the program the owner is typing in.
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
-        let busy = busy || self.updates.notice_up();
+        let busy = busy || self.recorder.is_some() || self.updates.notice_up();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(need));
@@ -692,7 +780,12 @@ impl Service {
             ctx.request_repaint();
         }
         // Timers: countdown seconds, notices and recordings tick without input.
-        if self.countdown.is_some() || self.recording.is_some() || self.after_countdown.is_some() || self.freezing.is_some() {
+        if self.countdown.is_some()
+            || self.recording.is_some()
+            || self.after_countdown.is_some()
+            || self.production_at.is_some()
+            || self.freezing.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(100));
         } else if let Some(n) = &self.notice {
             ctx.request_repaint_after(n.until.saturating_duration_since(Instant::now()));
@@ -729,6 +822,16 @@ impl Service {
         crate::popups::notice(self, &ctx);
         crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);
+        crate::recorder::show(self, &ctx);
+    }
+}
+
+/// The overlay's purpose for a Video Production area chosen on the screen.
+fn production_purpose(r: &RecorderOptions) -> Purpose {
+    match r.area {
+        RecordArea::Window => Purpose::VideoWindow,
+        RecordArea::Fixed => Purpose::VideoFixed(r.width, r.height),
+        RecordArea::Region | RecordArea::Screen | RecordArea::AllScreens => Purpose::Video,
     }
 }
 
@@ -899,6 +1002,18 @@ mod tests {
         assert_eq!(enter_button(&a(false, true, true)), Action::Copy);
         assert_eq!(enter_button(&a(false, false, true)), Action::Save);
         assert_eq!(enter_button(&a(false, false, false)), Action::Edit);
+    }
+
+    #[test]
+    fn video_production_chooses_on_the_overlay_as_its_recorder_says() {
+        let r = |area| RecorderOptions { area, width: 1080, height: 1920, ..RecorderOptions::default() };
+        assert_eq!(production_purpose(&r(RecordArea::Region)), Purpose::Video);
+        assert_eq!(production_purpose(&r(RecordArea::Window)), Purpose::VideoWindow);
+        assert_eq!(production_purpose(&r(RecordArea::Fixed)), Purpose::VideoFixed(1080, 1920));
+        // Only these three are chosen on the overlay; the others record at once.
+        for a in RecordArea::ALL {
+            assert_eq!(a.chosen_on_screen(), matches!(a, RecordArea::Region | RecordArea::Window | RecordArea::Fixed));
+        }
     }
 
     #[test]

@@ -40,6 +40,53 @@ pub enum Purpose {
     Scrolling,
     /// A video: Record Video or Video Production.
     Video,
+    /// A video of a window: click one (Video Production's Recorder).
+    VideoWindow,
+    /// A video of a set size, in the monitor's pixels: a frame of that size follows the pointer
+    /// and a click places it (Video Production's Recorder). It is moved, not resized.
+    VideoFixed(u32, u32),
+}
+
+impl Purpose {
+    /// Whether a window is clicked rather than an area dragged out.
+    fn clicks_window(self) -> bool {
+        matches!(self, Purpose::Window | Purpose::VideoWindow)
+    }
+
+    /// Whether the area is for a recording, which waits on its bar to be started.
+    fn records(self) -> bool {
+        matches!(self, Purpose::Gif | Purpose::Scrolling | Purpose::Video | Purpose::VideoWindow | Purpose::VideoFixed(..))
+    }
+
+    /// The fixed size of the frame, if it has one.
+    fn fixed(self) -> Option<(u32, u32)> {
+        match self {
+            Purpose::VideoFixed(w, h) => Some((w, h)),
+            _ => None,
+        }
+    }
+}
+
+/// A frame of `size` pixels centred on `p`, kept on a monitor of `mon` pixels: it's made smaller,
+/// keeping its shape, when it's larger than the monitor, and its corner is on a whole pixel.
+pub fn fixed_frame(size: (u32, u32), p: (f32, f32), mon: (f32, f32)) -> Rect {
+    let (mw, mh) = (mon.0.max(1.0), mon.1.max(1.0));
+    let (w, h) = (size.0.max(1) as f32, size.1.max(1) as f32);
+    let f = (mw / w).min(mh / h).min(1.0);
+    let (w, h) = ((w * f).floor().max(1.0), (h * f).floor().max(1.0));
+    let x = (p.0 - w / 2.0).round().min(mw - w).max(0.0);
+    let y = (p.1 - h / 2.0).round().min(mh - h).max(0.0);
+    Rect::new(x, y, w, h)
+}
+
+/// A fixed frame in whole pixels, its size exactly as chosen (rounding its corner can't make it
+/// a pixel larger).
+fn fixed_pixels(r: Rect, w: u32, h: u32) -> IRect {
+    let fw = (r.w.round().max(1.0) as u32).min(w.max(1));
+    let fh = (r.h.round().max(1.0) as u32).min(h.max(1));
+    let x = r.x.round().min(w.saturating_sub(fw) as f32).max(0.0);
+    let y = r.y.round().min(h.saturating_sub(fh) as f32).max(0.0);
+    IRect::new(x as i32, y as i32, fw, fh)
 }
 
 /// What to do with the chosen area.
@@ -226,7 +273,11 @@ impl Overlay {
     fn choose(&mut self, action: Action) {
         let Some((mi, r)) = self.sel else { return };
         let Some(m) = self.monitors.get(mi) else { return };
-        let area = pixels(r, m.picture.width(), m.picture.height());
+        let area = if self.purpose.fixed().is_some() {
+            fixed_pixels(r, m.picture.width(), m.picture.height())
+        } else {
+            pixels(r, m.picture.width(), m.picture.height())
+        };
         let desktop = px_to_desk(m, Rect::new(area.x as f32, area.y as f32, area.w as f32, area.h as f32));
         self.outcome = Outcome::Chosen { monitor: mi, area, desktop, action, title: self.title.clone() };
     }
@@ -308,7 +359,10 @@ impl Overlay {
         let dim = Color32::from_black_alpha(110);
         let lit: Option<Rect> = if let Some((m, r)) = self.sel {
             (m == mi).then_some(r)
-        } else if self.phase == Phase::Choosing && matches!(self.purpose, Purpose::Picture | Purpose::Window) {
+        } else if let (Some(size), Phase::Choosing) = (self.purpose.fixed(), self.phase) {
+            // The frame follows the pointer until a click places it.
+            self.pointer.filter(|(m, _)| *m == mi).map(|(_, p)| fixed_frame(size, p, (pic_w, pic_h)))
+        } else if self.phase == Phase::Choosing && (self.purpose == Purpose::Picture || self.purpose.clicks_window()) {
             self.pointer.filter(|(m, _)| *m == mi).and_then(|(_, p)| self.window_at(mi, p)).map(|(r, _)| r)
         } else {
             None
@@ -328,7 +382,9 @@ impl Overlay {
                 }
                 let chosen = self.sel.is_some();
                 painter.rect_stroke(rs, 0.0, Stroke::new(if chosen { 1.5 } else { 3.0 }, ACCENT), StrokeKind::Outside);
-                if chosen && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. }) {
+                // A fixed size has no handles: it's moved, not resized.
+                if chosen && self.purpose.fixed().is_none() && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. })
+                {
                     for (x, y) in handles(r) {
                         let hr = egui::Rect::from_center_size(to_screen(x, y), vec2(HANDLE, HANDLE));
                         painter.rect_filled(hr, 2.0, Color32::WHITE);
@@ -365,7 +421,7 @@ impl Overlay {
                 painter.line_segment([pos2(screen.min.x, s.y), pos2(screen.max.x, s.y)], line);
                 painter.line_segment([pos2(s.x, screen.min.y), pos2(s.x, screen.max.y)], line);
             }
-            if self.magnifier {
+            if self.magnifier && self.purpose.fixed().is_none() {
                 self.loupe(&painter, tex, screen, s, p, (pic_w, pic_h), mi);
             }
             ctx.set_cursor_icon(CursorIcon::Crosshair);
@@ -382,6 +438,8 @@ impl Overlay {
             Purpose::Gif => "Drag out the area to record as a GIF  ·  Esc: cancel",
             Purpose::Scrolling => "Drag out the area that scrolls  ·  Esc: cancel",
             Purpose::Video => "Drag out the area to record as a video  ·  Esc: cancel",
+            Purpose::VideoWindow => "Click the window to record  ·  Esc: cancel",
+            Purpose::VideoFixed(..) => "Click to place the frame to record  ·  Esc: cancel",
         };
         let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(15.0), Color32::WHITE);
         let at = pos2(screen.center().x - galley.size().x / 2.0, screen.min.y + 28.0);
@@ -442,8 +500,10 @@ impl Overlay {
         let mut buttons = match self.purpose {
             Purpose::Gif => vec![button(Icon::Gif, "Record GIF", "Enter", Weight::Main, Some(Action::Start)), cancel],
             Purpose::Scrolling => vec![button(Icon::Scrolling, "Start scrolling capture", "Enter", Weight::Main, Some(Action::Start)), cancel],
-            Purpose::Video => vec![button(Icon::Gif, "Start recording", "Enter", Weight::Main, Some(Action::Start)), cancel],
-            _ => {
+            Purpose::Video | Purpose::VideoWindow | Purpose::VideoFixed(..) => {
+                vec![button(Icon::Gif, "Start recording", "Enter", Weight::Main, Some(Action::Start)), cancel]
+            }
+            Purpose::Picture | Purpose::Window => {
                 let mut bar = Vec::with_capacity(5);
                 if enter == Action::Default {
                     bar.push(button(Icon::Edit, "Copy & Edit", "Enter", Weight::Main, Some(Action::Default)));
@@ -528,6 +588,16 @@ impl Overlay {
                     self.title = Some(mon.name.clone());
                 }
             }
+            if self.sel.is_none()
+                && let Some(size) = self.purpose.fixed()
+            {
+                // Where the frame is shown: at the pointer, else in the middle.
+                let (m, p) = self.pointer.unwrap_or((mi, (pw / 2.0, ph / 2.0)));
+                if let Some(mon) = self.monitors.get(m) {
+                    let full = (mon.picture.width() as f32, mon.picture.height() as f32);
+                    self.sel = Some((m, fixed_frame(size, p, full)));
+                }
+            }
             self.choose(Action::Default);
             return;
         }
@@ -555,7 +625,8 @@ impl Overlay {
                     (egui::Key::ArrowDown, 0.0, 1.0),
                 ] {
                     if ctx.input(|i| i.key_pressed(key)) {
-                        if shift {
+                        // A fixed size keeps its size.
+                        if shift && self.purpose.fixed().is_none() {
                             r.w = (r.w + dx).max(1.0);
                             r.h = (r.h + dy).max(1.0);
                         } else {
@@ -582,7 +653,15 @@ impl Overlay {
             let p = to_px(start);
             let tol = HANDLE / scale.max(0.01);
             self.phase = match (self.sel, self.purpose) {
-                (_, Purpose::Window) => Phase::Choosing,
+                (_, purpose) if purpose.clicks_window() => Phase::Choosing,
+                // A fixed frame is moved from wherever it's grabbed; grabbed outside, it comes to the pointer first.
+                (sel, Purpose::VideoFixed(w, h)) => {
+                    let inside = sel.is_some_and(|(m, r)| m == mi && r.contains(screengrabcraft_model::Pt::new(p.0, p.1)));
+                    if !inside {
+                        self.sel = Some((mi, fixed_frame((w, h), p, (pw, ph))));
+                    }
+                    Phase::Moving { last: p }
+                }
                 (Some((m, r)), _) if m == mi && self.phase == Phase::Adjusting => {
                     if let Some(h) = handles(r).iter().position(|(x, y)| (x - p.0).abs() <= tol && (y - p.1).abs() <= tol) {
                         Phase::Resizing { handle: h }
@@ -628,6 +707,21 @@ impl Overlay {
             }
         }
         let released = resp.drag_stopped() || (resp.clicked() && !resp.double_clicked());
+        if released && let Some(size) = self.purpose.fixed() {
+            // A click places the frame where it was shown; a drag has moved it there.
+            let at = press.or(latest).map(to_px);
+            let outside =
+                |sel: Option<(usize, Rect)>, p: (f32, f32)| sel.is_none_or(|(m, r)| m != mi || !r.contains(screengrabcraft_model::Pt::new(p.0, p.1)));
+            match (self.phase, at) {
+                (Phase::Choosing | Phase::Dragging { .. }, Some(p)) => self.sel = Some((mi, fixed_frame(size, p, (pw, ph)))),
+                (Phase::Adjusting, Some(p)) if outside(self.sel, p) => self.sel = Some((mi, fixed_frame(size, p, (pw, ph)))),
+                _ => {}
+            }
+            if self.sel.is_some() {
+                self.phase = Phase::Adjusting;
+            }
+            return;
+        }
         if released {
             match self.phase {
                 Phase::Dragging { .. } | Phase::Choosing => {
@@ -641,7 +735,7 @@ impl Overlay {
                                 self.sel = r.intersect(monitor_rect).map(|r| (mi, r));
                                 self.title = Some(title);
                             }
-                            (None, Purpose::Window) => {
+                            (None, purpose) if purpose.clicks_window() => {
                                 self.phase = Phase::Choosing;
                                 return;
                             }
@@ -657,7 +751,7 @@ impl Overlay {
                         self.phase = Phase::Choosing;
                         return;
                     }
-                    if self.preview || matches!(self.purpose, Purpose::Gif | Purpose::Scrolling | Purpose::Video) {
+                    if self.preview || self.purpose.records() {
                         self.phase = Phase::Adjusting;
                     } else {
                         self.choose(Action::Default);
@@ -707,5 +801,129 @@ mod tests {
             }
         );
         assert_eq!(pixels(Rect::new(-5.0, 2.4, 1000.0, 10.0), 200, 100), IRect::new(0, 2, 200, 11));
+    }
+
+    #[test]
+    fn a_fixed_frame_follows_the_pointer_and_stays_on_the_monitor() {
+        let mon = (1920.0, 1080.0);
+        // Centred on the pointer, on whole pixels.
+        assert_eq!(fixed_frame((640, 360), (960.4, 540.0), mon), Rect::new(640.0, 360.0, 640.0, 360.0));
+        // Against an edge or a corner: pushed back on.
+        assert_eq!(fixed_frame((640, 360), (10.0, 10.0), mon), Rect::new(0.0, 0.0, 640.0, 360.0));
+        assert_eq!(fixed_frame((640, 360), (1919.0, 1079.0), mon), Rect::new(1280.0, 720.0, 640.0, 360.0));
+        // As large as the monitor: the whole of it.
+        assert_eq!(fixed_frame((1920, 1080), (5.0, 1000.0), mon), Rect::new(0.0, 0.0, 1920.0, 1080.0));
+        // Larger (a vertical video on a landscape monitor): made smaller, keeping its shape.
+        let tall = fixed_frame((1080, 1920), (100.0, 500.0), mon);
+        assert_eq!((tall.w, tall.h, tall.x, tall.y), (607.0, 1080.0, 0.0, 0.0));
+        // Nonsense in, a frame on the monitor out.
+        for (size, p, m) in [((0, 0), (f32::MAX, -5.0), mon), ((5000, 5000), (0.0, 0.0), (0.0, 0.0)), ((u32::MAX, 1), (3.0, 3.0), (10.0, 10.0))] {
+            let r = fixed_frame(size, p, m);
+            assert!(r.w >= 1.0 && r.h >= 1.0 && r.x >= 0.0 && r.y >= 0.0, "{r:?}");
+            assert!(r.right() <= m.0.max(1.0) && r.bottom() <= m.1.max(1.0), "{r:?}");
+        }
+        // Its pixels are exactly its size, wherever it was moved to.
+        assert_eq!(fixed_pixels(Rect::new(10.4, 20.6, 300.0, 200.0), 800, 600), IRect::new(10, 21, 300, 200));
+        assert_eq!(fixed_pixels(Rect::new(700.0, 500.0, 300.0, 200.0), 800, 600), IRect::new(500, 400, 300, 200));
+    }
+
+    fn harness(o: Overlay) -> egui_kittest::Harness<'static, Overlay> {
+        egui_kittest::Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+            |ui, o: &mut Overlay| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+            },
+            o,
+        )
+    }
+
+    fn screen_800() -> OverlayMonitor {
+        OverlayMonitor { rect: IRect::new(0, 0, 800, 600), picture: Raster::filled(800, 600, Color::WHITE).unwrap(), name: "Main".into() }
+    }
+
+    fn click(h: &mut egui_kittest::Harness<'_, Overlay>, at: egui::Pos2) {
+        h.hover_at(at);
+        h.run_steps(1);
+        h.drag_at(at);
+        h.run_steps(1);
+        h.drop_at(at);
+        h.run_steps(2);
+    }
+
+    #[test]
+    fn a_fixed_size_is_placed_with_a_click_and_clamped_to_the_monitor() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoFixed(300, 200));
+        o.preview = false;
+        let mut h = harness(o);
+        h.run_steps(2);
+        // Near the bottom right corner: the frame stays on the monitor.
+        click(&mut h, egui::pos2(790.0, 590.0));
+        assert_eq!(*h.state().outcome(), Outcome::Pending, "a recording waits to be started");
+        h.get_by_label("Start recording").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, desktop, .. } => {
+                assert_eq!(*area, IRect::new(500, 400, 300, 200));
+                assert_eq!(*desktop, IRect::new(500, 400, 300, 200));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Larger than the monitor: as large as fits, keeping its shape; Enter places it at once.
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoFixed(1080, 1920)));
+        h.run_steps(2);
+        h.hover_at(egui::pos2(400.0, 300.0));
+        h.run_steps(1);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, .. } => assert_eq!(*area, IRect::new(232, 0, 337, 600)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_fixed_frame_is_moved_not_resized() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoFixed(200, 100));
+        o.preselect(0, IRect::new(100, 100, 200, 100));
+        let mut h = harness(o);
+        h.run_steps(2);
+        // Grabbed by its bottom right corner, where a handle would be.
+        h.hover_at(egui::pos2(300.0, 200.0));
+        h.run_steps(1);
+        h.drag_at(egui::pos2(299.0, 199.0));
+        h.run_steps(1);
+        for i in 1..=5 {
+            h.hover_at(egui::pos2(299.0 + i as f32 * 20.0, 199.0 + i as f32 * 10.0));
+            h.run_steps(1);
+        }
+        h.drop_at(egui::pos2(399.0, 249.0));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, .. } => assert_eq!((area.w, area.h), (200, 100), "{area:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_window_to_record_is_clicked() {
+        use egui_kittest::kittest::Queryable as _;
+        let w = OverlayWindow { rect: IRect::new(100, 50, 400, 300), title: "Notes".into() };
+        let mut h = harness(Overlay::new(vec![screen_800()], vec![w], Purpose::VideoWindow));
+        h.run_steps(2);
+        // Nothing there: still choosing.
+        click(&mut h, egui::pos2(700.0, 500.0));
+        assert!(h.query_by_label("Start recording").is_none());
+        click(&mut h, egui::pos2(200.0, 200.0));
+        h.get_by_label("Start recording").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, title, .. } => {
+                assert_eq!(*area, IRect::new(100, 50, 400, 300));
+                assert_eq!(title.as_deref(), Some("Notes"));
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }

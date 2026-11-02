@@ -459,6 +459,110 @@ impl VideoOptions {
     }
 }
 
+/// What a Video Production recording shows of the screen: the Recorder's Area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordArea {
+    /// An area dragged out on the overlay.
+    #[default]
+    Region,
+    /// A window clicked on the overlay: where it was then (it isn't followed if it moves).
+    Window,
+    /// One monitor, whole ([`RecorderOptions::monitor`]).
+    Screen,
+    /// Every monitor in one picture.
+    AllScreens,
+    /// A frame of a set size ([`RecorderOptions::width`] × [`RecorderOptions::height`] pixels),
+    /// placed with a click on the overlay.
+    Fixed,
+}
+
+impl RecordArea {
+    pub const ALL: [RecordArea; 5] = [RecordArea::Region, RecordArea::Window, RecordArea::Screen, RecordArea::AllScreens, RecordArea::Fixed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RecordArea::Region => "Region",
+            RecordArea::Window => "Window",
+            RecordArea::Screen => "Full screen",
+            RecordArea::AllScreens => "All screens",
+            RecordArea::Fixed => "Fixed size",
+        }
+    }
+
+    /// Whether the area is chosen on the overlay once Record is pressed.
+    pub fn chosen_on_screen(self) -> bool {
+        matches!(self, RecordArea::Region | RecordArea::Window | RecordArea::Fixed)
+    }
+}
+
+/// A monitor as the Recorder remembers it: its name, and where its top left corner is on the
+/// desktop (two monitors of the same model have the same name).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MonitorChoice {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl MonitorChoice {
+    /// Which of `monitors` (each its name and top left corner) this is: the one with its name
+    /// where it was, else one with its name (moved), else one where it was (renamed); none when
+    /// no monitor is like it.
+    pub fn pick(&self, monitors: &[(&str, i32, i32)]) -> Option<usize> {
+        let at = |m: &(&str, i32, i32)| m.1 == self.x && m.2 == self.y;
+        let named = |m: &(&str, i32, i32)| m.0 == self.name;
+        monitors.iter().position(|m| named(m) && at(m)).or_else(|| monitors.iter().position(named)).or_else(|| monitors.iter().position(at))
+    }
+}
+
+/// The fixed sizes the Recorder offers, in pixels, and what each is for.
+pub const FIXED_SIZES: [(u32, u32, &str); 4] =
+    [(1920, 1080, "Full HD"), (1280, 720, "HD"), (1080, 1920, "vertical, for phones"), (1080, 1080, "square")];
+
+/// The smallest and largest side of a fixed-size recording.
+pub const FIXED_MIN: u32 = 64;
+pub const FIXED_MAX: u32 = 7680;
+
+/// The Recorder's choices for a Video Production recording: the area, and whether the screen is
+/// recorded at all. What it takes in besides is [`Settings::production`] (the computer's sound,
+/// the microphone and the camera).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RecorderOptions {
+    pub area: RecordArea,
+    /// Full screen: the monitor; none is the main one.
+    pub monitor: Option<MonitorChoice>,
+    /// Fixed size, in the monitor's pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Record the screen (off: only the camera and the sound).
+    pub screen: bool,
+}
+
+impl Default for RecorderOptions {
+    fn default() -> RecorderOptions {
+        RecorderOptions { area: RecordArea::Region, monitor: None, width: 1920, height: 1080, screen: true }
+    }
+}
+
+impl RecorderOptions {
+    /// Every number in its range.
+    pub fn clamped(mut self) -> RecorderOptions {
+        self.width = self.width.clamp(FIXED_MIN, FIXED_MAX);
+        self.height = self.height.clamp(FIXED_MIN, FIXED_MAX);
+        self
+    }
+
+    /// Whether anything at all is recorded: the screen, or one of `sources`. What this system
+    /// can't record (the computer's sound where `system_sound` is false, the camera where `camera`
+    /// is) doesn't count.
+    pub fn records_anything(&self, sources: &VideoOptions, system_sound: bool, camera: bool) -> bool {
+        self.screen || (sources.camera && camera) || sources.microphone || (sources.system_sound && system_sound)
+    }
+}
+
 /// The shortcuts' defaults as of this version: 1 is 0.1.9 (Record GIF on Ctrl+Alt+Print Screen, no
 /// default for Capture All Screens).
 pub const HOTKEYS_VERSION: u32 = 1;
@@ -494,8 +598,10 @@ pub struct Settings {
     pub gif_max_secs: u32,
     /// A quick video (Record Video).
     pub video: VideoOptions,
-    /// A Video Production recording.
+    /// A Video Production recording: what it takes in besides the screen.
     pub production: VideoOptions,
+    /// A Video Production recording: the Recorder's area, and whether the screen is in it.
+    pub recorder: RecorderOptions,
     /// Frames a second of a video recording.
     pub video_frame_rate: u32,
     /// The longest a video recording runs, in minutes.
@@ -540,6 +646,7 @@ impl Default for Settings {
             gif_max_secs: 60,
             video: VideoOptions::default(),
             production: VideoOptions::production(),
+            recorder: RecorderOptions::default(),
             video_frame_rate: 30,
             video_max_mins: 60,
             video_full_size: false,
@@ -595,6 +702,7 @@ impl Settings {
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
         self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
         self.video_max_mins = self.video_max_mins.clamp(1, 240);
+        self.recorder = self.recorder.clamped();
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }
@@ -825,6 +933,60 @@ mod tests {
         assert!(!off.check_updates);
         assert_eq!(Settings::from_json(&serde_json::to_string(&off).unwrap()), off);
         assert!(Settings::from_json(r#"{"checkUpdates":"sometimes"}"#).check_updates, "unreadable: the default");
+    }
+
+    #[test]
+    fn the_recorders_choices_are_kept_and_a_file_from_before_gets_the_defaults() {
+        // A file from before the Recorder: the screen, an area dragged out, 1920 × 1080 for a fixed size.
+        let old = Settings::from_json(r#"{"production":{"systemSound":false,"microphone":true,"camera":false}}"#);
+        assert_eq!(old.recorder, RecorderOptions::default());
+        assert!(old.recorder.screen && old.recorder.area == RecordArea::Region);
+        assert!(old.production.microphone && !old.production.system_sound, "the rest is as chosen");
+        let recorder = RecorderOptions {
+            area: RecordArea::Fixed,
+            monitor: Some(MonitorChoice { name: "DELL U2720Q".into(), x: -2560, y: 0 }),
+            width: 1080,
+            height: 1920,
+            screen: false,
+        };
+        let s = Settings { recorder, ..Settings::default() };
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back.recorder, s.recorder);
+        // Sizes are kept in range; an area this version doesn't know leaves the Recorder at its defaults only.
+        let s = Settings::from_json(r#"{"recorder":{"area":"fixed","width":0,"height":99999},"delaySecs":7}"#);
+        assert_eq!((s.recorder.width, s.recorder.height), (FIXED_MIN, FIXED_MAX));
+        let s = Settings::from_json(r#"{"recorder":{"area":"hologram"},"delaySecs":7}"#);
+        assert_eq!((s.recorder.clone(), s.delay_secs), (RecorderOptions::default(), 7));
+        for a in RecordArea::ALL {
+            assert!(!a.label().is_empty());
+            assert_eq!(a.chosen_on_screen(), !matches!(a, RecordArea::Screen | RecordArea::AllScreens));
+        }
+    }
+
+    #[test]
+    fn a_remembered_monitor_is_found_again() {
+        let c = MonitorChoice { name: "DELL".into(), x: 1920, y: 0 };
+        let two_dells = [("DELL", 0, 0), ("DELL", 1920, 0), ("LG", 3840, 0)];
+        assert_eq!(c.pick(&two_dells), Some(1), "the one where it was");
+        assert_eq!(c.pick(&[("LG", 0, 0), ("DELL", -1920, 0)]), Some(1), "moved");
+        assert_eq!(c.pick(&[("LG", 0, 0), ("Generic", 1920, 0)]), Some(1), "renamed");
+        assert_eq!(c.pick(&[("LG", 0, 0)]), None);
+        assert_eq!(c.pick(&[]), None);
+    }
+
+    #[test]
+    fn something_must_be_recorded() {
+        let none = VideoOptions { system_sound: false, microphone: false, microphone_name: None, camera: false, camera_index: None };
+        let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
+        assert!(!off.records_anything(&none, true, true));
+        assert!(RecordArea::ALL.iter().all(|a| RecorderOptions { area: *a, ..RecorderOptions::default() }.records_anything(&none, true, true)));
+        assert!(off.records_anything(&VideoOptions { camera: true, ..none.clone() }, false, true));
+        assert!(off.records_anything(&VideoOptions { microphone: true, ..none.clone() }, false, false));
+        // The computer's sound and the camera count only where they can be recorded.
+        let sound = VideoOptions { system_sound: true, ..none.clone() };
+        assert!(off.records_anything(&sound, true, false));
+        assert!(!off.records_anything(&sound, false, true));
+        assert!(!off.records_anything(&VideoOptions { camera: true, ..none }, true, false));
     }
 
     #[test]

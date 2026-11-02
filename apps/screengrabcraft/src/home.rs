@@ -206,7 +206,7 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Gif, Icon::Gif, "Record an area as an animated GIF"),
         (CaptureMode::Video, Icon::Play, "Record an area as a small MP4"),
-        (CaptureMode::Production, Icon::Edit, "Screen, sound, microphone and camera, to edit"),
+        (CaptureMode::Production, Icon::Edit, "Choose the area, camera, mic and sound, to edit"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
     ];
     let mut chosen: Option<(CaptureMode, u32)> = None;
@@ -245,7 +245,10 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     if let Some((mode, delay)) = chosen {
         // The window goes first, so it isn't in the picture.
         *close = true;
-        if delay > 0 {
+        if mode == CaptureMode::Production {
+            // Its Recorder first, where the area and the inputs are chosen.
+            svc.open_recorder();
+        } else if delay > 0 {
             svc.start(mode, delay);
         } else {
             svc.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
@@ -585,6 +588,16 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.label(RichText::new("Each on a track of its own, to cut and edit in the Editor before you make the MP4.").size(12.0).color(t.muted));
     ui.add_space(4.0);
     sources(ui, "production", &mut s.production, d, true);
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Video Production opens the Recorder, where you choose the area (a region, a window, a whole screen, all screens or a fixed size), turn the screen and each of these on or off, and press Record. These are the same choices.")
+            .size(12.0)
+            .color(t.muted),
+    );
+    let mut open_recorder = false;
+    if widgets::button(ui, "Open the Recorder").clicked() {
+        open_recorder = true;
+    }
     ui.add_space(14.0);
     ui.label(RichText::new("Both").strong());
     egui::Grid::new("video-both").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
@@ -602,6 +615,9 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     if s != svc.settings {
         svc.settings = s;
         svc.apply_settings();
+    }
+    if open_recorder {
+        svc.open_recorder();
     }
 }
 

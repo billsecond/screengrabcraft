@@ -36,7 +36,7 @@ beside them for scripts and agents.
 | Alt+Shift+Print Screen | Ctrl+Shift+S | **Scrolling**: scroll a long page while ScreenGrabCraft joins it into one picture |
 | Ctrl+Alt+Print Screen | Ctrl+Shift+G | **Record GIF** of an area (press again, or click the tray icon, to stop) |
 | Ctrl+Alt+Shift+Print Screen | Ctrl+Shift+V | **Record Video**: a small MP4 of an area, with the computer's sound (press again to stop) |
-| — (set one in Settings) | Ctrl+Shift+P | **Video Production**: the screen, the computer's sound, the microphone and the camera, each on a track of its own, to edit |
+| — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
@@ -59,11 +59,17 @@ not on the animation, and the GIF file itself is never changed.
 small (a minute of a screen with some typing is a few megabytes). Windows 11, macOS 14 and every
 current browser play them; on Windows 10 the free AV1 Video Extension from the Microsoft Store
 adds AV1. **Record Video** makes the MP4 as soon as you stop (no larger than 1920 × 1080 unless
-you choose the full size). **Video Production** keeps a recording file (`.sgvideo`) with a track
-for each source and opens it in the editor, where you cut and edit it, then Export Video makes the
-MP4 beside it. What each takes in (the computer's sound, the microphone, the camera, and which
-ones) is in Settings › Video. The computer's sound can be recorded on Windows; the camera on
-Windows and macOS.
+you choose the full size). **Video Production** (the tray menu's video section, the Capture page,
+or its shortcut) opens the **Recorder**. Choose the area: a **region** you drag out, a **window**
+you click (where it was then; it isn't followed if it moves), one **full screen**, **all screens**
+in one video (made no larger than 3840 × 2160), or a **fixed size** (1920 × 1080, 1280 × 720,
+1080 × 1920, 1080 × 1080 or your own) placed with a click. Turn each input on or off: the screen,
+the camera, the microphone (with a level meter once you turn it on or press Test) and the
+computer's sound. With the screen off the camera's picture is the video. Press the red **Record**;
+the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
+and opens in the editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
+computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
+sources are in Settings › Video.
 
 ## Editing a video
 

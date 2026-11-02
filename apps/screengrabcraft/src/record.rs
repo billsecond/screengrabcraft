@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use screengrabcraft_capture::Monitor;
 use screengrabcraft_capture::audio::{self, AudioCapture, AudioSource, SoundBlock};
 use screengrabcraft_capture::camera::{self, CameraCapture};
 use screengrabcraft_media::compose;
@@ -17,7 +18,7 @@ use screengrabcraft_media::export::{self, ExportSettings, Exporter};
 use screengrabcraft_media::recording::{self, FileSource, Header, RecordingWriter, StreamInfo, StreamKind};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::settings::VideoOptions;
-use screengrabcraft_model::{IRect, Raster};
+use screengrabcraft_model::{IRect, MonitorChoice, Raster, RecordArea, RecorderOptions};
 use screengrabcraft_render::anim::GifWriter;
 use screengrabcraft_render::stitch::{Step, Stitcher};
 
@@ -219,12 +220,121 @@ fn scrolling(
     s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
 }
 
+/// What of the screen a video recording shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Screen {
+    /// Part of one monitor, in its pixels (an area dragged out, a window, a fixed size).
+    Part { monitor: u32, area: IRect },
+    /// One monitor, whole.
+    Monitor { monitor: u32 },
+    /// Every monitor (by id, and where it is on the desktop), put together in one picture of
+    /// `size`.
+    All { monitors: Vec<(u32, IRect)>, size: (u32, u32) },
+    /// None: the camera and the sound only.
+    Off,
+}
+
+/// The largest an all-screens recording is: the monitors' pictures are made smaller to fit, so
+/// each frame is put together and written in time.
+pub const ALL_SCREENS_MAX: (u32, u32) = (3840, 2160);
+
+/// The desktop that holds every monitor, and the size an all-screens recording of it is made at.
+pub fn all_screens_size(rects: &[IRect]) -> Option<(IRect, (u32, u32))> {
+    let desktop = rects.iter().copied().reduce(IRect::union)?;
+    if desktop.is_empty() {
+        return None;
+    }
+    Some((desktop, compose::fit(desktop.w, desktop.h, ALL_SCREENS_MAX.0, ALL_SCREENS_MAX.1)))
+}
+
+/// Which of the monitors the Recorder means: see [`MonitorChoice::pick`]; the main one when it
+/// names none or none like it is connected.
+pub fn chosen_monitor<'a>(choice: Option<&MonitorChoice>, monitors: &'a [Monitor]) -> Option<&'a Monitor> {
+    let main = monitors.iter().find(|m| m.primary).or(monitors.first());
+    let Some(c) = choice else { return main };
+    let list: Vec<(&str, i32, i32)> = monitors.iter().map(|m| (m.name.as_str(), m.rect.x, m.rect.y)).collect();
+    c.pick(&list).and_then(|i| monitors.get(i)).or(main)
+}
+
+/// What a Video Production recording is of, from the Recorder's choices, and the part of the
+/// desktop its control window is placed by. `chosen` is the overlay's answer for an area chosen on
+/// the screen (Region, Window, Fixed size): the monitor, the area in its pixels and on the desktop.
+pub fn production_screen(r: &RecorderOptions, monitors: &[Monitor], chosen: Option<(u32, IRect, IRect)>) -> Result<(Screen, IRect), String> {
+    let main = monitors.iter().find(|m| m.primary).or(monitors.first()).map(|m| m.rect).unwrap_or_default();
+    if !r.screen {
+        return Ok((Screen::Off, main));
+    }
+    match r.area {
+        RecordArea::Region | RecordArea::Window | RecordArea::Fixed => {
+            let (monitor, area, desktop) = chosen.ok_or("no area was chosen")?;
+            if area.is_empty() {
+                return Err("the area is empty".to_string());
+            }
+            Ok((Screen::Part { monitor, area }, desktop))
+        }
+        RecordArea::Screen => {
+            let m = chosen_monitor(r.monitor.as_ref(), monitors).ok_or("no monitor was found")?;
+            Ok((Screen::Monitor { monitor: m.id }, m.rect))
+        }
+        RecordArea::AllScreens => match monitors {
+            [] => Err("no monitor was found".to_string()),
+            [one] => Ok((Screen::Monitor { monitor: one.id }, one.rect)),
+            _ => {
+                let rects: Vec<IRect> = monitors.iter().map(|m| m.rect).collect();
+                let (_, size) = all_screens_size(&rects).ok_or("the monitors cover nothing")?;
+                Ok((Screen::All { monitors: monitors.iter().map(|m| (m.id, m.rect)).collect(), size }, main))
+            }
+        },
+    }
+}
+
+/// Every monitor's picture put together in one picture of `size`, each where it is on `desktop`
+/// (made smaller or larger to fit its place). What no monitor covers is black. None for an
+/// empty or too large size.
+pub fn compose_screens(parts: &[(IRect, &Raster)], desktop: IRect, size: (u32, u32)) -> Option<Raster> {
+    let (w, h) = size;
+    if w == 0 || h == 0 || desktop.is_empty() {
+        return None;
+    }
+    let len = screengrabcraft_model::raster::checked_len(w, h).ok()?;
+    let mut out = [0u8, 0, 0, 255].repeat(len / 4);
+    let fx = f64::from(w) / f64::from(desktop.w.max(1));
+    let fy = f64::from(h) / f64::from(desktop.h.max(1));
+    let place = |v: f64, from: i32, f: f64, max: u32| ((v - f64::from(from)) * f).round().clamp(0.0, f64::from(max));
+    let row_bytes = w as usize * 4;
+    for (rect, pic) in parts {
+        let x0 = place(f64::from(rect.x), desktop.x, fx, w);
+        let y0 = place(f64::from(rect.y), desktop.y, fy, h);
+        let x1 = place(rect.right() as f64, desktop.x, fx, w);
+        let y1 = place(rect.bottom() as f64, desktop.y, fy, h);
+        if x1 <= x0 || y1 <= y0 || pic.width() == 0 || pic.height() == 0 {
+            continue;
+        }
+        let (tw, th) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        let resized;
+        let src: &Raster = if (pic.width(), pic.height()) == (tw, th) {
+            pic
+        } else {
+            let Some(r) = compose::scale(pic, tw, th) else { continue };
+            resized = r;
+            &resized
+        };
+        let (x0, y0) = (x0 as usize, y0 as usize);
+        for (y, row) in src.pixels().chunks_exact(tw as usize * 4).enumerate() {
+            let at = (y0 + y) * row_bytes + x0 * 4;
+            if let Some(dst) = out.get_mut(at..at + row.len()) {
+                dst.copy_from_slice(row);
+            }
+        }
+    }
+    Raster::new(w, h, out).ok()
+}
+
 /// What a video recording is to do.
 pub struct VideoPlan {
     pub kind: Kind,
-    pub monitor: u32,
-    /// In the monitor's pixels.
-    pub area: IRect,
+    pub screen: Screen,
+    /// The part of the desktop the control window is placed by.
     pub desktop: IRect,
     pub fps: u32,
     pub max_secs: u32,
@@ -340,7 +450,16 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let started = Instant::now();
     // The devices first: they take a moment to start, and their sound is placed by the clock.
     let d = open_devices(&plan.options, started, s);
-    let mut streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: plan.area.w, height: plan.area.h, channels: 0 }];
+    let mut screen = ScreenSource::open(&plan.screen)?;
+    if screen.is_none() && d.system.is_none() && d.mic.is_none() && d.camera.is_none() {
+        let why = s.sources.lock().map(|v| v.join("; ")).unwrap_or_default();
+        return Err(if why.is_empty() { "nothing was chosen to record".to_string() } else { format!("nothing could be recorded: {why}") });
+    }
+    let mut streams = Vec::with_capacity(4);
+    if let Some(src) = &screen {
+        let (width, height) = src.size;
+        streams.push(StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width, height, channels: 0 });
+    }
     if let Some(a) = &d.system {
         streams.push(StreamInfo { id: 1, kind: StreamKind::SystemSound, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
         s.note("Computer sound".to_string());
@@ -349,8 +468,17 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         streams.push(StreamInfo { id: 2, kind: StreamKind::Microphone, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
         s.note(format!("Microphone: {}", a.name));
     }
+    let mut first_camera = Vec::new();
     if let Some(c) = &d.camera {
-        streams.push(StreamInfo { id: 3, kind: StreamKind::Camera, name: c.name.clone(), width: 640, height: 480, channels: 0 });
+        let (mut width, mut height) = (640, 480);
+        if screen.is_none() {
+            // The camera is the picture: the video is the size of the camera's pictures.
+            first_camera = first_frames(c, s.stop, Duration::from_secs(3));
+            if let Some(f) = first_camera.first() {
+                (width, height) = (f.width.max(2), f.height.max(2));
+            }
+        }
+        streams.push(StreamInfo { id: 3, kind: StreamKind::Camera, name: c.name.clone(), width, height, channels: 0 });
         s.note(format!("Camera: {}", c.name));
     }
     let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
@@ -377,12 +505,18 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
             Ok(writer)
         })
         .map_err(|e| e.to_string())?;
+    for f in first_camera {
+        let _ = tx.send(Item::Camera(f.at.as_micros() as u64, f.jpeg));
+    }
     // Record Video: the MP4 is made as the recording goes, two seconds at a time.
-    let live = (plan.kind == Kind::Video).then(|| start_live(plan, &d)).flatten();
+    let live = match (&screen, plan.kind) {
+        (Some(src), Kind::Video) => start_live(plan, src.size, &d),
+        _ => None,
+    };
     let feeding = AtomicBool::new(true);
     let (frames, live) = std::thread::scope(|scope| {
         let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
-        let frames = record_screen(plan, s, &d, &tx, &waiting, started);
+        let frames = record_screen(plan, s, &d, &tx, &waiting, started, screen.as_mut());
         feeding.store(false, Ordering::SeqCst);
         let live = feeder.and_then(|h| h.join().ok()).flatten();
         (frames, live)
@@ -430,8 +564,109 @@ fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock
     }
 }
 
-/// The screen on a steady beat, with the devices' sound and pictures passed on as they come.
-/// The number of screen pictures taken, or why there were none.
+/// The camera's first pictures, waited for up to `wait` (so its size is known before the
+/// recording file is begun).
+fn first_frames(c: &CameraCapture, stop: &AtomicBool, wait: Duration) -> Vec<camera::CameraFrame> {
+    let until = Instant::now() + wait;
+    loop {
+        let got = c.take();
+        if !got.is_empty() || Instant::now() >= until || stop.load(Ordering::SeqCst) {
+            return got;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Where a recording's screen pictures come from, and their size.
+struct ScreenSource {
+    grab: Grab,
+    size: (u32, u32),
+    /// Pictures that couldn't be had, lately (so the log isn't flooded).
+    failures: u32,
+}
+
+enum Grab {
+    /// Part of a monitor, or all of one.
+    One(screengrabcraft_capture::Grabber),
+    /// Every monitor: each one's grabber, where it is on the desktop and its last picture, and
+    /// the desktop they make up.
+    All(Vec<(screengrabcraft_capture::Grabber, IRect, Option<Raster>)>, IRect),
+}
+
+impl ScreenSource {
+    /// None when the screen isn't recorded.
+    fn open(screen: &Screen) -> Result<Option<ScreenSource>, String> {
+        let source = |grab, size| Some(ScreenSource { grab, size, failures: 0 });
+        match screen {
+            Screen::Off => Ok(None),
+            Screen::Part { monitor, area } => {
+                let g = screengrabcraft_capture::grabber(*monitor, *area).map_err(|e| e.to_string())?;
+                Ok(source(Grab::One(g), (area.w, area.h)))
+            }
+            Screen::Monitor { monitor } => {
+                let mut g = screengrabcraft_capture::monitor_grabber(*monitor).map_err(|e| e.to_string())?;
+                // Its size is its picture's (a Retina display has more pixels than points).
+                let first = g().map_err(|e| e.to_string())?;
+                Ok(source(Grab::One(g), (first.width(), first.height())))
+            }
+            Screen::All { monitors, size } => {
+                let rects: Vec<IRect> = monitors.iter().map(|(_, r)| *r).collect();
+                let (desktop, _) = all_screens_size(&rects).ok_or("the monitors cover nothing")?;
+                let mut parts = Vec::with_capacity(monitors.len());
+                for (id, rect) in monitors {
+                    match screengrabcraft_capture::monitor_grabber(*id) {
+                        Ok(g) => parts.push((g, *rect, None)),
+                        Err(e) => log::warn!("a monitor is left out of the recording: {e}"),
+                    }
+                }
+                if parts.is_empty() {
+                    return Err("no monitor could be recorded".to_string());
+                }
+                Ok(source(Grab::All(parts, desktop), *size))
+            }
+        }
+    }
+
+    /// The next picture, at its size; none when there's none this time.
+    fn grab(&mut self) -> Option<Raster> {
+        let size = self.size;
+        let mut failed = Vec::new();
+        let pic = match &mut self.grab {
+            Grab::One(g) => match g() {
+                Ok(pic) if (pic.width(), pic.height()) == size => Some(pic),
+                // The monitor changed its resolution: the picture is fitted to the video.
+                Ok(pic) => compose::scale(&pic, size.0, size.1),
+                Err(e) => {
+                    failed.push(e.to_string());
+                    None
+                }
+            },
+            Grab::All(parts, desktop) => {
+                // A monitor that can't be had this time shows what it showed last.
+                for (g, _, last) in parts.iter_mut() {
+                    match g() {
+                        Ok(pic) => *last = Some(pic),
+                        Err(e) => failed.push(e.to_string()),
+                    }
+                }
+                let pics: Vec<(IRect, &Raster)> = parts.iter().filter_map(|(_, r, last)| last.as_ref().map(|p| (*r, p))).collect();
+                if pics.is_empty() { None } else { compose_screens(&pics, *desktop, size) }
+            }
+        };
+        if let Some(e) = failed.first() {
+            if self.failures.is_multiple_of(100) {
+                log::warn!("a picture could not be captured: {e}");
+            }
+            self.failures = self.failures.saturating_add(1);
+        } else {
+            self.failures = 0;
+        }
+        pic
+    }
+}
+
+/// The screen on a steady beat (if it's recorded), with the devices' sound and pictures passed on
+/// as they come. The number of screen pictures taken, or why there were none.
 fn record_screen(
     plan: &VideoPlan,
     s: &Shared,
@@ -439,27 +674,23 @@ fn record_screen(
     tx: &std::sync::mpsc::Sender<Item>,
     waiting: &AtomicUsize,
     started: Instant,
+    mut screen: Option<&mut ScreenSource>,
 ) -> Result<u32, String> {
-    let mut grab = screengrabcraft_capture::grabber(plan.monitor, plan.area).map_err(|e| e.to_string())?;
     let tick = Duration::from_secs_f64(1.0 / f64::from(plan.fps.clamp(5, 30)));
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
     let mut due = Instant::now();
     let mut frames = 0u32;
     while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
         let at = started.elapsed();
-        match grab() {
-            Ok(pic) if pic.width() == plan.area.w && pic.height() == plan.area.h => {
-                if waiting.load(Ordering::SeqCst) < WAITING {
-                    waiting.fetch_add(1, Ordering::SeqCst);
-                    let _ = tx.send(Item::Screen(at.as_micros() as u64, pic));
-                    frames += 1;
-                    s.progress.store(frames, Ordering::SeqCst);
-                } else {
-                    log::warn!("a video picture was left out: the disk is behind");
-                }
+        if let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab) {
+            if waiting.load(Ordering::SeqCst) < WAITING {
+                waiting.fetch_add(1, Ordering::SeqCst);
+                let _ = tx.send(Item::Screen(at.as_micros() as u64, pic));
+                frames += 1;
+                s.progress.store(frames, Ordering::SeqCst);
+            } else {
+                log::warn!("a video picture was left out: the disk is behind");
             }
-            Ok(_) => log::warn!("a picture of the wrong size was left out"),
-            Err(e) => log::warn!("a picture could not be captured: {e}"),
         }
         if let Some(a) = &d.system {
             send_sound(tx, 1, a.take());
@@ -478,16 +709,16 @@ fn record_screen(
         due = (due + tick).max(Instant::now());
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
     }
-    if frames == 0 {
+    if screen.is_some() && frames == 0 {
         return Err("nothing could be recorded".to_string());
     }
     Ok(frames)
 }
 
 /// The MP4 started as the recording starts (none if it can't be: it's then made after).
-fn start_live(plan: &VideoPlan, d: &Devices) -> Option<(Exporter, Arc<AtomicBool>)> {
+fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Exporter, Arc<AtomicBool>)> {
     let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
-    let (w, h) = compose::fit(plan.area.w, plan.area.h, settings.max_width, settings.max_height);
+    let (w, h) = compose::fit(size.0, size.1, settings.max_width, settings.max_height);
     let with_sound = d.system.is_some() || d.mic.is_some();
     let cancel = Arc::new(AtomicBool::new(false));
     match Exporter::new(&plan.out, w, h, with_sound, settings, cancel.clone()) {
@@ -588,7 +819,94 @@ fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared) -> Result
 
 #[cfg(test)]
 mod tests {
+    use screengrabcraft_model::Color;
+
     use super::*;
+
+    fn mon(id: u32, name: &str, rect: IRect, primary: bool) -> Monitor {
+        Monitor { id, name: name.into(), rect, scale: 1.0, primary }
+    }
+
+    /// A laptop on the left of a main monitor, lower down, and a second one of the same make.
+    fn desk() -> Vec<Monitor> {
+        vec![
+            mon(7, "DELL", IRect::new(0, 0, 2560, 1440), true),
+            mon(8, "Laptop", IRect::new(-1920, 360, 1920, 1080), false),
+            mon(9, "DELL", IRect::new(2560, 0, 2560, 1440), false),
+        ]
+    }
+
+    #[test]
+    fn each_area_comes_to_its_own_plan() {
+        let m = desk();
+        let r = |area| RecorderOptions { area, ..RecorderOptions::default() };
+        let chosen = Some((8, IRect::new(10, 20, 300, 200), IRect::new(-1910, 380, 300, 200)));
+        // Chosen on the overlay: that part of that monitor.
+        for area in [RecordArea::Region, RecordArea::Window, RecordArea::Fixed] {
+            assert_eq!(
+                production_screen(&r(area), &m, chosen),
+                Ok((Screen::Part { monitor: 8, area: IRect::new(10, 20, 300, 200) }, IRect::new(-1910, 380, 300, 200))),
+                "{area:?}"
+            );
+            assert!(production_screen(&r(area), &m, None).is_err(), "{area:?} without an area");
+        }
+        assert!(production_screen(&r(RecordArea::Region), &m, Some((8, IRect::new(0, 0, 0, 5), IRect::default()))).is_err());
+        // Full screen: the monitor remembered, else the main one.
+        let main = production_screen(&r(RecordArea::Screen), &m, None);
+        assert_eq!(main, Ok((Screen::Monitor { monitor: 7 }, IRect::new(0, 0, 2560, 1440))));
+        let second = RecorderOptions { monitor: Some(MonitorChoice { name: "DELL".into(), x: 2560, y: 0 }), ..r(RecordArea::Screen) };
+        assert_eq!(production_screen(&second, &m, None).map(|p| p.0), Ok(Screen::Monitor { monitor: 9 }));
+        let gone = RecorderOptions { monitor: Some(MonitorChoice { name: "Projector".into(), x: 9000, y: 0 }), ..r(RecordArea::Screen) };
+        assert_eq!(production_screen(&gone, &m, None).map(|p| p.0), Ok(Screen::Monitor { monitor: 7 }));
+        // All screens: every monitor, the desktop made to fit 3840 × 2160; its control on the main one.
+        let (screen, place) = production_screen(&r(RecordArea::AllScreens), &m, None).unwrap();
+        let Screen::All { monitors, size } = screen else { panic!("{screen:?}") };
+        assert_eq!(monitors.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![7, 8, 9]);
+        // 7040 × 1440 made 3840 × 784 (even sides).
+        assert_eq!(size, (3840, 784));
+        assert_eq!(place, IRect::new(0, 0, 2560, 1440));
+        // One monitor: all screens is that one, whole.
+        let one = vec![mon(3, "Only", IRect::new(0, 0, 1366, 768), false)];
+        assert_eq!(production_screen(&r(RecordArea::AllScreens), &one, None).map(|p| p.0), Ok(Screen::Monitor { monitor: 3 }));
+        assert!(production_screen(&r(RecordArea::AllScreens), &[], None).is_err());
+        assert!(production_screen(&r(RecordArea::Screen), &[], None).is_err());
+        // The screen off: no screen, whatever the area; the control on the main monitor.
+        for area in RecordArea::ALL {
+            let off = RecorderOptions { screen: false, ..r(area) };
+            assert_eq!(production_screen(&off, &m, None), Ok((Screen::Off, IRect::new(0, 0, 2560, 1440))), "{area:?}");
+        }
+        assert_eq!(production_screen(&RecorderOptions { screen: false, ..RecorderOptions::default() }, &[], None).map(|p| p.0), Ok(Screen::Off));
+    }
+
+    #[test]
+    fn all_screens_are_put_together_where_they_are() {
+        let left = Raster::filled(4, 2, Color::RED).unwrap();
+        let main = Raster::filled(4, 4, Color::WHITE).unwrap();
+        let (l, m) = (IRect::new(-4, 2, 4, 2), IRect::new(0, 0, 4, 4));
+        let (desktop, size) = all_screens_size(&[l, m]).unwrap();
+        assert_eq!((desktop, size), (IRect::new(-4, 0, 8, 4), (16, 16)), "never smaller than 16 a side");
+        let out = compose_screens(&[(l, &left), (m, &main)], desktop, (8, 4)).unwrap();
+        assert_eq!(out.pixel(0, 2), Some(Color::RED));
+        assert_eq!(out.pixel(7, 0), Some(Color::WHITE));
+        assert_eq!(out.pixel(0, 0), Some(Color::BLACK), "no monitor there");
+        // Made smaller: half the size, each monitor in its half.
+        let out = compose_screens(&[(l, &left), (m, &main)], desktop, (4, 2)).unwrap();
+        assert_eq!(out.pixel(0, 1), Some(Color::RED));
+        assert_eq!(out.pixel(3, 0), Some(Color::WHITE));
+        // A Retina monitor's picture (twice its points) is fitted to its place.
+        let retina = Raster::filled(8, 8, Color::WHITE).unwrap();
+        let out = compose_screens(&[(m, &retina)], m, (4, 4)).unwrap();
+        assert!(out.pixels().as_chunks::<4>().0.iter().all(|p| *p == [255, 255, 255, 255]));
+        // Nothing to make, or nonsense: none, never a panic.
+        assert!(compose_screens(&[(m, &main)], m, (0, 4)).is_none());
+        assert!(compose_screens(&[(m, &main)], IRect::new(0, 0, 0, 0), (4, 4)).is_none());
+        assert!(compose_screens(&[(m, &main)], m, (70_000, 70_000)).is_none());
+        let far = compose_screens(&[(IRect::new(9_000, 9_000, 4, 4), &main), (IRect::new(i32::MIN, 0, u32::MAX, 4), &left)], m, (4, 4));
+        assert!(far.is_some());
+        assert!(all_screens_size(&[]).is_none());
+        let big = all_screens_size(&[IRect::new(0, 0, 3840, 2160), IRect::new(3840, 0, 3840, 2160)]).unwrap().1;
+        assert!(big.0 <= ALL_SCREENS_MAX.0 && big.1 <= ALL_SCREENS_MAX.1, "{big:?}");
+    }
 
     /// The real path on the real screen: 3 s of a small area and the computer's sound, made into
     /// an MP4, then deleted unopened. Run by hand only: `cargo test -p screengrabcraft live_video
@@ -603,8 +921,7 @@ mod tests {
         let out = std::env::temp_dir().join(format!("sgc-live-{}.mp4", std::process::id()));
         let plan = VideoPlan {
             kind: Kind::Video,
-            monitor: monitor.id,
-            area,
+            screen: Screen::Part { monitor: monitor.id, area },
             desktop: area,
             fps: 30,
             max_secs: 60,

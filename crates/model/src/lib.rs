@@ -17,7 +17,9 @@ pub use document::{DocError, Document, Meta, Order};
 pub use geom::{IRect, Pt, Rect};
 pub use object::{ArrowHeads, Handle, Kind, Object, ObjectId, Shape, StampKind, Style, TextAlign};
 pub use raster::{MAX_PIXELS, MAX_SIDE, Raster, RasterError};
-pub use settings::{AfterCapture, CaptureMode, EditorSettings, Hotkey, Hotkeys, ImageFormat, Settings, Stamp, Theme};
+pub use settings::{
+    AfterCapture, CaptureMode, EditorSettings, Hotkey, Hotkeys, ImageFormat, MonitorChoice, RecordArea, RecorderOptions, Settings, Stamp, Theme,
+};
 
 /// The program's name, as people see it.
 pub const APP_NAME: &str = "ScreenGrabCraft";
