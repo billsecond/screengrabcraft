@@ -11,8 +11,8 @@ use screengrabcraft_desktop::{clipboard, launch, paths, store};
 use screengrabcraft_media::recording::{FileSource, Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
-use screengrabcraft_ui::services::{DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoJob};
 use screengrabcraft_render::matte::Matting;
+use screengrabcraft_ui::services::{DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoJob};
 
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
