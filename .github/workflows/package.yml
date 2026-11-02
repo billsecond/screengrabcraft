@@ -161,10 +161,12 @@ jobs:
             $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) $l
             if (-not (Test-Path $lnk)) { throw "no Start menu shortcut $lnk" }
           }
-          $entry = Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }
-          if (-not $entry) { throw 'no per-user installed-programs entry named ScreenGrabCraft' }
-          $entry | Format-List DisplayName, DisplayVersion, InstallLocation, PSChildName
-          if (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }) { throw 'the per-user install is listed for everyone' }
+          # Windows Installer keeps a single user's products under HKCU\Software\Microsoft\Installer
+          # (not the Uninstall key, which is for everyone's).
+          $entry = Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Installer\Products\*' -ErrorAction SilentlyContinue | Where-Object { $_.ProductName -eq 'ScreenGrabCraft' }
+          if (-not $entry) { throw 'ScreenGrabCraft is not registered as installed for this user' }
+          $entry | Format-List ProductName, PSChildName
+          if (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'ScreenGrabCraft' }) { throw 'the per-user install is listed for everyone' }
           $expected = "`"$dir\screengrabcraft.exe`" --background"
           $run = (Get-ItemProperty 'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').ScreenGrabCraft
           if ($run -ne $expected) { throw "per-user sign-in entry is '$run', expected '$expected'" }
@@ -184,7 +186,8 @@ jobs:
           Start-Process (Join-Path $dir 'screengrabcraft.exe') -ArgumentList '--background'
           Start-Sleep -Seconds 5
           Get-Process screengrabcraft -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path
-          $p = Start-Process msiexec.exe -ArgumentList @('/x', $entry.PSChildName, '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\uninstall-user.log") -Wait -PassThru
+          # Removed by its package, in its scope (a user's product has no code under the Uninstall key).
+          $p = Start-Process msiexec.exe -ArgumentList @('/x', "`"$msi`"", 'ALLUSERS=2', 'MSIINSTALLPERUSER=1', '/qn', '/norestart', '/l*v', "$env:RUNNER_TEMP\uninstall-user.log") -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\uninstall-user.log" -Tail 60; throw "per-user uninstall failed ($($p.ExitCode))" }
           if (Get-Process screengrabcraft -ErrorAction SilentlyContinue) { throw 'the capture service is still running after the per-user uninstall' }
           if (Test-Path (Join-Path $dir 'screengrabcraft.exe')) { throw 'the per-user uninstall left screengrabcraft.exe behind' }
