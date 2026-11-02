@@ -239,7 +239,9 @@ fn next_step(rec: &RecorderOptions) -> &'static str {
         RecordArea::Region => "Next, drag out the area to record.",
         RecordArea::Window => "Next, click the window to record.",
         RecordArea::Fixed => "Next, click where the frame goes.",
-        RecordArea::Screen | RecordArea::AllScreens => "Recording starts at once. Stop it from its control or the tray.",
+        RecordArea::Screen | RecordArea::AllScreens => {
+            "Recording starts at once. Its control goes on a screen that isn't recorded; if there's none, stop it from the tray icon."
+        }
     }
 }
 

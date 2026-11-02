@@ -168,10 +168,8 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     let secs = rec.elapsed().as_secs();
     let progress = rec.progress.load(std::sync::atomic::Ordering::SeqCst);
     let lost = rec.lost.load(std::sync::atomic::Ordering::SeqCst);
-    let scale = screengrabcraft_capture::monitors()
-        .ok()
-        .and_then(|ms| ms.into_iter().find(|m| m.rect.contains(i64::from(d.x), i64::from(d.y))).map(|m| (m.scale, m.rect)))
-        .unwrap_or((1.0, d));
+    let monitors: Vec<(IRect, f32)> =
+        screengrabcraft_capture::monitors().map(|ms| ms.into_iter().map(|m| (m.rect, m.scale)).collect()).unwrap_or_default();
     let level = |i: usize| rec.levels.get(i).map(|l| f32::from_bits(l.load(std::sync::atomic::Ordering::Relaxed))).unwrap_or(0.0);
     let sources = rec.sources.lock().map(|s| s.clone()).unwrap_or_default();
     let has = |prefix: &str| sources.iter().any(|s| s.starts_with(prefix));
@@ -185,17 +183,14 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         missing: sources.iter().filter(|s| s.starts_with("No ")).cloned().collect(),
     };
     let size = recording_size(kind);
-    // Below the area, else above it, else inside its top.
-    let (s, mon) = scale;
-    let below = d.bottom() as f32 + 10.0;
-    let y = if below + size.y * s < mon.bottom() as f32 {
-        below
-    } else if d.y as f32 - 10.0 - size.y * s > mon.y as f32 {
-        d.y as f32 - 10.0 - size.y * s
-    } else {
-        d.y as f32 + 10.0
+    // Never in the video: beside the area, else on a screen that isn't recorded, else nowhere
+    // (the tray icon stops it). Once it's making the video, the area doesn't matter.
+    let place = control_place(d, &monitors, size).or_else(|| (view.saving > 0).then_some((d.x as f32 + 10.0, d.y as f32 + 10.0, 1.0)));
+    let Some((x, y, s)) = place else {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        return;
     };
-    let at = points(d.x as f32, y, s);
+    let at = points(x, y, s);
     let mut choice = None;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup("ScreenGrabCraft recording", at, size, false), |ui, _| {
         egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
@@ -208,6 +203,32 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         Some(RecordingChoice::Cancel) => svc.stop_recording(true),
         None => {}
     }
+}
+
+/// Where the recording control goes (desktop pixels, and that monitor's scale) so it isn't in
+/// what's recorded: below the area, else above it, on the area's monitor; else at the bottom of
+/// a monitor the area doesn't touch. None when every place is in the recording.
+fn control_place(area: IRect, monitors: &[(IRect, f32)], size: Vec2) -> Option<(f32, f32, f32)> {
+    let overlaps =
+        |r: IRect| i64::from(r.x) < area.right() && i64::from(area.x) < r.right() && i64::from(r.y) < area.bottom() && i64::from(area.y) < r.bottom();
+    let (w, h) = (|s: f32| size.x * s, |s: f32| size.y * s);
+    let home = monitors.iter().find(|(m, _)| m.contains(i64::from(area.x), i64::from(area.y))).copied();
+    if let Some((m, s)) = home {
+        let x = (area.x as f32).clamp(m.x as f32, (m.right() as f32 - w(s)).max(m.x as f32));
+        let below = area.bottom() as f32 + 10.0;
+        if below + h(s) <= m.bottom() as f32 {
+            return Some((x, below, s));
+        }
+        let above = area.y as f32 - 10.0 - h(s);
+        if above >= m.y as f32 {
+            return Some((x, above, s));
+        }
+    }
+    monitors.iter().find(|(m, _)| !overlaps(*m)).map(|(m, s)| {
+        let x = m.x as f32 + (m.w as f32 - w(*s)) / 2.0;
+        let y = m.bottom() as f32 - h(*s) - 60.0 * s;
+        (x, y.max(m.y as f32), *s)
+    })
 }
 
 // ---- the notice after a capture ----
@@ -374,6 +395,33 @@ mod tests {
     use screengrabcraft_model::Theme;
 
     use super::*;
+
+    #[test]
+    fn the_recording_control_stays_out_of_the_recording() {
+        let size = vec2(520.0, 54.0);
+        let left = IRect { x: 0, y: 0, w: 3840, h: 2160 };
+        let right = IRect { x: 3840, y: 0, w: 1920, h: 1080 };
+        let screens = [(left, 1.5), (right, 1.0)];
+        let outside = |(x, y, s): (f32, f32, f32), area: IRect| {
+            let (r, b) = (x + size.x * s, y + size.y * s);
+            r <= area.x as f32 || x >= area.right() as f32 || b <= area.y as f32 || y >= area.bottom() as f32
+        };
+        // A region: just below it.
+        let region = IRect { x: 100, y: 100, w: 800, h: 600 };
+        let p = control_place(region, &screens, size).unwrap();
+        assert_eq!((p.0, p.1), (100.0, 710.0));
+        // A region at the bottom of its screen: above it.
+        let low = IRect { x: 100, y: 1800, w: 800, h: 360 };
+        let p = control_place(low, &screens, size).unwrap();
+        assert!(outside(p, low) && p.1 < 1800.0);
+        // The whole left screen: on the right one.
+        let p = control_place(left, &screens, size).unwrap();
+        assert!(p.0 >= 3840.0 && outside(p, left));
+        // Every screen: nowhere (the tray icon stops it).
+        let all = IRect { x: 0, y: 0, w: 5760, h: 2160 };
+        assert_eq!(control_place(all, &screens, size), None);
+        assert_eq!(control_place(left, &[(left, 1.0)], size), None);
+    }
 
     #[test]
     fn a_gif_is_played_a_picture_is_edited_and_a_pdf_stays_out() {

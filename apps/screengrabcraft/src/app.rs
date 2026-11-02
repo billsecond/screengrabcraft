@@ -571,7 +571,13 @@ impl Service {
     fn overlay_done(&mut self) {
         let Some(mut run) = self.overlay.take() else { return };
         run.opening.opened();
-        let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else { return };
+        let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else {
+            // Choosing the area for Video Production was cancelled: back to the Recorder, as it was.
+            if run.mode == CaptureMode::Production {
+                self.open_recorder();
+            }
+            return;
+        };
         let Some(m) = run.monitors.get(monitor).cloned() else { return };
         match run.mode {
             CaptureMode::Gif | CaptureMode::Scrolling => {
