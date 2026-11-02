@@ -259,10 +259,11 @@ impl Hotkeys {
                 region: Some(Hotkey::new(false, false, false, false, "PrintScreen")),
                 window: Some(Hotkey::new(false, true, false, false, "PrintScreen")),
                 screen: Some(Hotkey::new(true, false, false, false, "PrintScreen")),
-                all_screens: Some(Hotkey::new(true, false, true, false, "PrintScreen")),
+                // Ctrl+Shift+Print Screen is Windows' own; every other Print Screen key is taken.
+                all_screens: None,
                 repeat: Some(Hotkey::new(false, false, true, false, "PrintScreen")),
-                scrolling: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
-                gif: Some(Hotkey::new(false, true, true, false, "PrintScreen")),
+                scrolling: Some(Hotkey::new(false, true, true, false, "PrintScreen")),
+                gif: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
                 video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
                 production: None,
                 editor: None,
@@ -281,6 +282,21 @@ impl Hotkeys {
             CaptureMode::Scrolling => self.scrolling.as_ref(),
             CaptureMode::Video => self.video.as_ref(),
             CaptureMode::Production => self.production.as_ref(),
+        }
+    }
+
+    /// The 0.1.9 changes, each only where the shortcut still is what it was by default before,
+    /// so nothing the owner chose is lost: Record GIF moved to Ctrl+Alt+Print Screen and
+    /// Scrolling Capture to Alt+Shift+Print Screen (they swapped), and Capture All Screens lost
+    /// Ctrl+Shift+Print Screen, which Windows uses itself.
+    fn bring_up_to_0_1_9(&mut self) {
+        let old_gif = Some(Hotkey::new(false, true, true, false, "PrintScreen"));
+        let old_scrolling = Some(Hotkey::new(true, true, false, false, "PrintScreen"));
+        if self.gif == old_gif && self.scrolling == old_scrolling {
+            std::mem::swap(&mut self.gif, &mut self.scrolling);
+        }
+        if self.all_screens == Some(Hotkey::new(true, false, true, false, "PrintScreen")) {
+            self.all_screens = None;
         }
     }
 
@@ -443,11 +459,17 @@ impl VideoOptions {
     }
 }
 
+/// The shortcuts' defaults as of this version: 1 is 0.1.9 (Record GIF on Ctrl+Alt+Print Screen, no
+/// default for Capture All Screens).
+pub const HOTKEYS_VERSION: u32 = 1;
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub hotkeys: Hotkeys,
+    /// Which defaults the shortcuts were last brought up to (see [`Settings::from_json`]).
+    pub hotkeys_version: u32,
     pub after_capture: AfterCapture,
     /// Where captures are saved; `None` is `Pictures/ScreenGrabCraft`.
     pub folder: Option<String>,
@@ -503,6 +525,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             hotkeys: Hotkeys::default(),
+            hotkeys_version: HOTKEYS_VERSION,
             after_capture: AfterCapture::default(),
             folder: None,
             file_name: "Capture {date} {time}".to_string(),
@@ -533,10 +556,24 @@ impl Default for Settings {
 impl Settings {
     /// Reads settings, replacing what can't be read with defaults (field by field where the
     /// JSON is an object, wholesale where it isn't JSON at all).
+    ///
+    /// Every shortcut is written at every save, so a changed default wouldn't reach anyone who
+    /// has a settings file. A file from before the defaults changed is brought up to them where
+    /// it still has the old ones; a shortcut the owner chose is left as it is.
     pub fn from_json(text: &str) -> Settings {
         let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else {
             return Settings::default();
         };
+        let version = map.get("hotkeysVersion").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let mut s = Settings::from_map(map);
+        if version < 1 {
+            s.hotkeys.bring_up_to_0_1_9();
+        }
+        s.hotkeys_version = HOTKEYS_VERSION;
+        s
+    }
+
+    fn from_map(map: serde_json::Map<String, serde_json::Value>) -> Settings {
         let mut out = serde_json::Map::new();
         let defaults = serde_json::to_value(Settings::default()).unwrap_or_default();
         for (k, v) in map {
@@ -679,6 +716,50 @@ mod tests {
         }
         let json = serde_json::to_string(&h).unwrap();
         assert_eq!(serde_json::from_str::<Hotkey>(&json).unwrap(), h);
+    }
+
+    #[test]
+    fn gif_is_ctrl_alt_print_screen_and_all_screens_leaves_windows_its_key() {
+        let k = Hotkeys::defaults_for(false);
+        assert_eq!(k.gif, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        assert_eq!(k.scrolling, Some(Hotkey::new(false, true, true, false, "PrintScreen")));
+        assert_eq!(k.all_screens, None);
+        assert_eq!(Settings::default().hotkeys_version, HOTKEYS_VERSION);
+    }
+
+    /// A settings file written before 0.1.9, with every shortcut as it was by default then.
+    fn file_before_0_1_9(gif: &str) -> String {
+        format!(
+            r#"{{"hotkeys":{{"region":"PrintScreen","window":"Alt+PrintScreen","screen":"Ctrl+PrintScreen","allScreens":"Ctrl+Shift+PrintScreen","repeat":"Shift+PrintScreen","scrolling":"Ctrl+Alt+PrintScreen","gif":"{gif}"}},"delaySecs":5}}"#
+        )
+    }
+
+    #[test]
+    fn a_file_from_before_gets_the_new_shortcuts_where_they_were_the_old_defaults() {
+        let s = Settings::from_json(&file_before_0_1_9("Alt+Shift+PrintScreen"));
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        assert_eq!(s.hotkeys.gif, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        assert_eq!(s.hotkeys.scrolling, Some(Hotkey::new(false, true, true, false, "PrintScreen")));
+        assert_eq!(s.hotkeys.all_screens, None);
+        assert_eq!(s.delay_secs, 5);
+        assert_eq!(s.hotkeys_version, HOTKEYS_VERSION);
+        assert!(s.hotkeys.clashes().is_empty());
+    }
+
+    #[test]
+    fn a_shortcut_the_owner_chose_is_kept() {
+        // GIF on a key of the owner's own: neither GIF nor Scrolling moves.
+        let s = Settings::from_json(&file_before_0_1_9("Ctrl+Shift+G"));
+        assert_eq!(s.hotkeys.gif, Some(Hotkey::new(true, false, true, false, "G")));
+        assert_eq!(s.hotkeys.scrolling, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        // Once brought up to date, the file's shortcuts are the owner's: nothing moves again.
+        let text = serde_json::to_string(&Settings { hotkeys: Hotkeys::defaults_for(false), ..Settings::default() }).unwrap();
+        let mut again = Settings::from_json(&text);
+        again.hotkeys.all_screens = Some(Hotkey::new(true, false, true, false, "PrintScreen"));
+        let text = serde_json::to_string(&again).unwrap();
+        assert_eq!(Settings::from_json(&text).hotkeys.all_screens, Some(Hotkey::new(true, false, true, false, "PrintScreen")));
     }
 
     #[test]
