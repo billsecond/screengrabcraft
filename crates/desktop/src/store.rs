@@ -3,6 +3,7 @@
 //! file behind.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use screengrabcraft_model::{EditorSettings, Settings};
 
@@ -26,9 +27,15 @@ fn read(name: &str) -> Option<String> {
     std::fs::read_to_string(&path).ok()
 }
 
-/// Writes `bytes` to `path` by way of a temporary file beside it.
+/// Writes `bytes` to `path` by way of a temporary file beside it. Each write has its own
+/// temporary file, so two at once (a save and an export of `capture.png` and `capture.jpg`)
+/// never write into the same one.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp: PathBuf = path.with_extension(format!("tmp-{}", std::process::id()));
+    static WRITES: AtomicU64 = AtomicU64::new(0);
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".tmp-{}-{n}", std::process::id()));
+    let tmp: PathBuf = path.with_file_name(name);
     std::fs::write(&tmp, bytes)?;
     match std::fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
@@ -74,4 +81,26 @@ pub fn save_editor_settings(s: &EditorSettings) {
 pub fn settings_modified() -> Option<std::time::SystemTime> {
     let path = paths::settings_dir()?.join(SETTINGS);
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_writes_at_once_beside_each_other_keep_to_their_own_files() {
+        let dir = std::env::temp_dir().join(format!("screengrabcraft-store-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (png, jpg) = (dir.join("capture.png"), dir.join("capture.jpg"));
+        // Same name before the extension: once they shared a temporary file.
+        std::thread::scope(|s| {
+            s.spawn(|| (0..40).for_each(|i| write_atomic(&png, format!("png {i}").as_bytes()).unwrap()));
+            s.spawn(|| (0..40).for_each(|i| write_atomic(&jpg, format!("jpeg {i}").as_bytes()).unwrap()));
+        });
+        assert_eq!(std::fs::read(&png).unwrap(), b"png 39");
+        assert_eq!(std::fs::read(&jpg).unwrap(), b"jpeg 39");
+        let left = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().contains(".tmp-")).count();
+        assert_eq!(left, 0, "no temporary files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

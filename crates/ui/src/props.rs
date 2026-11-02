@@ -97,6 +97,20 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             ui.label("Drag the frame's edges or corners, or drag out a new frame. Hold Shift for a square.");
             ui.add_space(8.0);
             ui.label("Enter or Apply Crop keeps what is inside; Esc cancels.");
+            ui.add_space(12.0);
+            // Here rather than on the tool bar, which has no room for them beside its bigger buttons.
+            let ctx = ui.ctx().clone();
+            ui.horizontal(|ui| {
+                let tall = egui::vec2(0.0, 32.0);
+                let label = egui::RichText::new("Apply Crop").color(t.accent_text);
+                if ui.add(egui::Button::new(label).fill(t.accent).min_size(tall)).clicked() {
+                    ed.apply_crop(&ctx);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(tall)).clicked() {
+                    ed.crop = None;
+                    ed.tool = Tool::Select;
+                }
+            });
             return;
         }
         (None, Tool::Select) => {
@@ -350,6 +364,9 @@ fn shape_options(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>
                         let mut style = ed.tool_style(Kind::Stamp);
                         style.fill = screengrabcraft_render::stamp::default_fill(k);
                         ed.settings.styles.insert(Kind::Stamp, style);
+                        // The stamp picked is the one the editor starts with next time.
+                        ed.settings.stamp = Some(k);
+                        ed.services.save_settings(&ed.settings);
                         set_on_selection(ed, &|s| {
                             if let Shape::Stamp { stamp, .. } = s {
                                 *stamp = k;

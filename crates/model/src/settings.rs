@@ -578,6 +578,23 @@ pub struct EditorSettings {
     pub show_tray: bool,
     /// The format Export proposes.
     pub export_format: ImageFormat,
+    /// The drawing tool last picked, which the editor starts with. One that can't be read is
+    /// let go, not the rest of the settings with it.
+    #[serde(deserialize_with = "or_none")]
+    pub tool: Option<Kind>,
+    /// The stamp last picked.
+    #[serde(deserialize_with = "or_none")]
+    pub stamp: Option<crate::object::StampKind>,
+}
+
+/// A setting that can't be read is none.
+fn or_none<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 impl EditorSettings {
@@ -760,5 +777,16 @@ mod tests {
         e.remember("f25.png");
         assert_eq!(e.recent.len(), EditorSettings::MAX_RECENT);
         assert_eq!(e.recent.first().map(String::as_str), Some("f25.png"));
+    }
+
+    #[test]
+    fn the_last_tool_is_remembered_and_a_bad_one_spoils_nothing() {
+        assert_eq!(EditorSettings::from_json("{}").tool, None, "a file from before has none");
+        let e =
+            EditorSettings { tool: Some(Kind::Callout), stamp: Some(crate::object::StampKind::Cross), show_tray: true, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
+        let e = EditorSettings::from_json(r#"{"tool":"teapot","stamp":7,"showTray":true}"#);
+        assert_eq!((e.tool, e.stamp), (None, None));
+        assert!(e.show_tray, "the rest is still read");
     }
 }

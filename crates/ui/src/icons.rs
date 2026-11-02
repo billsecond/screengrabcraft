@@ -275,8 +275,13 @@ fn contrast(c: Color32) -> Color32 {
 
 /// A square icon button with a tooltip; `on` draws it as selected.
 pub fn button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
+    button_sized(ui, icon, tip, on, enabled, 30.0)
+}
+
+/// [`button`], `side` points square (the icon grows with it).
+pub fn button_sized(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool, side: f32) -> egui::Response {
     let t = crate::theme::Tokens::get(ui.ctx());
-    let size = vec2(30.0, 30.0);
+    let size = vec2(side, side);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let bg = if on {
         t.selected
@@ -298,6 +303,6 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool)
     } else {
         t.text
     };
-    paint(ui.painter(), rect.shrink(6.0), icon, color);
+    paint(ui.painter(), rect.shrink(side * 0.2), icon, color);
     resp.on_hover_text(tip)
 }
