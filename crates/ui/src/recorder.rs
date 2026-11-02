@@ -690,7 +690,9 @@ mod tests {
         h.run_steps(2);
         let (record, cancel) = (h.get_by_label("Record").rect(), h.get_by_label("Cancel").rect());
         assert!(record.width() > widgets::BUTTON_SIZE.x && record.height() > widgets::BUTTON_SIZE.y, "{record:?}");
-        assert!(record.max.y > SIZE.y - 40.0 && cancel.max.x > SIZE.x - 40.0, "{record:?} {cancel:?}");
+        // The last button of the row (Cancel on Windows, Record on macOS) ends at the right.
+        let right = record.max.x.max(cancel.max.x);
+        assert!(record.max.y > SIZE.y - 40.0 && right > SIZE.x - 40.0, "{record:?} {cancel:?}");
         if cfg!(target_os = "macos") {
             assert!(cancel.max.x < record.min.x);
         } else {
