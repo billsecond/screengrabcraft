@@ -21,6 +21,8 @@ pub enum Item {
     Folder,
     Settings,
     StopRecording,
+    CheckUpdates,
+    InstallUpdate,
     Quit,
 }
 
@@ -29,6 +31,8 @@ pub struct Tray {
     items: Vec<(MenuId, Item)>,
     gif_item: Option<MenuItem>,
     recording: bool,
+    /// The update waiting, as its item says it (`Install Update 0.1.8`); see `crate::update`.
+    pub update: Option<String>,
 }
 
 fn icon(look: Look) -> Option<Icon> {
@@ -47,7 +51,7 @@ fn label(text: &str, shortcut: Option<String>) -> String {
 impl Tray {
     /// Builds the tray icon and menu (on the main thread, with the event loop running).
     pub fn new(settings: &Settings, keys: &Registered) -> Tray {
-        let mut t = Tray { icon: None, items: Vec::new(), gif_item: None, recording: false };
+        let mut t = Tray { icon: None, items: Vec::new(), gif_item: None, recording: false, update: None };
         let menu = t.menu(settings, keys);
         let look = if cfg!(target_os = "macos") { Look::Template } else { Look::Normal };
         let mut b = TrayIconBuilder::new()
@@ -106,6 +110,9 @@ impl Tray {
         self.add(&menu, "Open Editor".to_string(), Item::Editor);
         self.add(&menu, "Open Captures Folder".to_string(), Item::Folder);
         self.add(&menu, "Settings…".to_string(), Item::Settings);
+        for (text, item) in crate::update::tray_items(self.update.as_deref()) {
+            self.add(&menu, text, item);
+        }
         let _ = menu.append(&PredefinedMenuItem::separator());
         self.add(&menu, "Quit ScreenGrabCraft".to_string(), Item::Quit);
         menu

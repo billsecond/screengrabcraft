@@ -25,7 +25,7 @@ L1                              model (document, shapes, styles, geometry, setti
 | `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
-| `desktop` | no | paths, settings files, logging, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend |
+| `desktop` | no | paths, settings files, logging, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend, the update check (the only network code: HTTPS to GitHub's releases, the installer downloaded, checked and run on Windows) |
 
 ## The document
 

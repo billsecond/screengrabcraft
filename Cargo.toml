@@ -61,6 +61,11 @@ tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] 
 global-hotkey = "0.8.0"
 dirs = "7"
 webbrowser = "1.2"
+# The update check, the one thing that goes to the network: HTTPS to GitHub's releases. Rust all
+# the way (rustls with ring, Mozilla's roots bundled), no cookies, no compression.
+ureq = { version = "3.5", default-features = false, features = ["rustls"] }
+semver = "1"
+ring = "0.17"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

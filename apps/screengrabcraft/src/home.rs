@@ -481,7 +481,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     let _ = Color32::WHITE;
 }
 
-fn about_tab(_svc: &mut Service, ui: &mut Ui) {
+fn about_tab(svc: &mut Service, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.heading("ScreenGrabCraft");
     ui.label(screengrabcraft_desktop::version::line("ScreenGrabCraft"));
@@ -498,6 +498,7 @@ fn about_tab(_svc: &mut Service, ui: &mut Ui) {
     ui.hyperlink_to("github.com/billsecond/screengrabcraft", screengrabcraft_model::HOMEPAGE);
     ui.add_space(8.0);
     ui.label(RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
+    crate::update::about(svc, ui);
 }
 
 #[cfg(test)]

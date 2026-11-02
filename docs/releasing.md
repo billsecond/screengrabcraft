@@ -78,6 +78,32 @@ ScreenGrabCraft, and where each part stands:
 | An icon in the Craft style, for each program | `cargo xtask icon` (`packaging/icons.sh`) draws both into `assets/app-icon/`; `packaging/check-icons.sh` checks every size the packages use |
 | A row in the launcher's catalog (`crates/core/src/catalog.rs` in `storytold/craft-launcher`): id, name, tagline, colours, `owner/repo`; for an app outside the organisation also its own reverse-DNS id (`io.github.billsecond.screengrabcraft`) and publisher (the "community apps" group) | A pull request on that repository, after the first release; the 128 px icon goes with it |
 
+## Automatic updates
+
+The capture service checks `GET /repos/billsecond/screengrabcraft/releases/latest` a minute after
+it starts and every six hours (never during a capture; "Check for updates automatically" in About
+turns it off; `crates/desktop/src/update.rs`). It relies on what the workflow above produces, so
+keep it so:
+
+- The tag is `v<version>` and the version is semver. Drafts and pre-releases are never offered
+  (GitHub's "latest" skips them anyway).
+- The Windows MSIs are named `screengrabcraft-<ver>-windows-{x64,x86,arm64}.msi`, and
+  `SHA256SUMS.txt` lists them. A copy the MSI installed downloads the MSI of its own architecture
+  into `%TEMP%\ScreenGrabCraft\updates`, checks it against `SHA256SUMS.txt` (and GitHub's own
+  digest of the file, when it gives one), and deletes it on a mismatch. A file that isn't
+  listed, or a release without `SHA256SUMS.txt`, is never installed.
+- Update now runs `msiexec /i <msi> /passive /norestart /l*v install.log` through a detached
+  `cmd.exe` that then starts `screengrabcraft.exe --background` from where this copy is installed:
+  the MSI closes the service while it installs (`util:CloseApplication`), and a passive install
+  shows no finish page to start it again. Windows asks for permission (UAC); if the owner says no,
+  nothing was closed, the new start hands over to the running service and ends, and the update
+  stays offered.
+- macOS, Linux, FreeBSD, the portable zip and builds in `target/` only tell the owner and open the
+  release page. The Flatpak has no network permission and never checks.
+
+`cargo run -p screengrabcraft-desktop --example update_check -- --as 0.1.6 --download <folder>`
+asks the real API as an older version and downloads and checks the x64 MSI, without installing.
+
 ## What the installers do
 
 - **Windows (`.msi`, WiX 5, `packaging/windows/screengrabcraft.wxs`):** per-machine install into
@@ -214,3 +240,4 @@ under Xvfb); signing; the release workflow on GitHub, which will need fixing on 
 | Date | Change |
 |---|---|
 | 2026-10-14 | First version: packaging for Windows, macOS, Linux, FreeBSD and the web from MailCraft's; the persistent capture service on each platform; the editor's file types; a release workflow of ScreenGrabCraft's own; what has and hasn't been checked |
+| 2026-11-02 | Automatic updates: what the update check relies on in a release, and how Windows installs one and starts the service again |

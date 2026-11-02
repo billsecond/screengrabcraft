@@ -134,8 +134,11 @@ the tray) is spoken in Rust. The web build: `cd apps/screengrabcraft-web && trun
 
 ## Privacy
 
-Captures never leave your computer unless you send them somewhere. ScreenGrabCraft has no network
-code at all: no accounts, no telemetry, no update checks. See [PRIVACY.md](PRIVACY.md).
+Captures never leave your computer unless you send them somewhere. No accounts, no telemetry, no
+upload. The one thing ScreenGrabCraft asks the network for is its own latest release on GitHub,
+to tell you about an update (and on Windows to download and install it when you say so); that
+request carries nothing about you or your captures, and "Check for updates automatically" turns it
+off. See [PRIVACY.md](PRIVACY.md).
 
 ## Licence
 
