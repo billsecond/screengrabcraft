@@ -6,6 +6,7 @@
 //!                                      scrolling or gif (the running service does it)
 //! screengrabcraft --delay <seconds>    capture an area after a countdown
 //! screengrabcraft --settings           show the settings
+//! screengrabcraft --check-updates      look for a newer release now (and say what was found)
 //! screengrabcraft --quit               stop the running service
 //! screengrabcraft --background         the sign-in entry: run the service and start it again
 //!                                      if it stops unexpectedly
@@ -23,12 +24,14 @@ mod hotkeys;
 mod popups;
 mod record;
 mod tray;
+mod update;
 
 use std::process::ExitCode;
 
 use screengrabcraft_desktop::{graphics, instance, logging, paths, service, store, version};
 
 const USAGE: &str = "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif] [--delay <s>] [--settings] [--quit]
+       screengrabcraft --check-updates
        screengrabcraft --background | --tray
        screengrabcraft service install|uninstall|status
        screengrabcraft --version";

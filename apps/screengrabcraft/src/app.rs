@@ -99,6 +99,8 @@ pub struct Service {
     pub screens: Vec<((i32, i32), (u32, u32), String)>,
     root_shown: bool,
     pub quit: bool,
+    /// The update check, and an update waiting (`crate::update`).
+    pub updates: crate::update::Updates,
 }
 
 impl Service {
@@ -158,7 +160,18 @@ impl Service {
             screens: Vec::new(),
             root_shown: false,
             quit: false,
+            updates: crate::update::Updates::new(),
         }
+    }
+
+    /// Whether a capture or a recording is under way, from its countdown to the kept file.
+    pub fn capturing(&self) -> bool {
+        self.overlay.is_some()
+            || self.freezing.is_some()
+            || self.countdown.is_some()
+            || self.after_countdown.is_some()
+            || self.recording.is_some()
+            || self.keeping
     }
 
     /// Saves the settings and puts them to work (shortcuts, the tray menu's labels).
@@ -222,6 +235,10 @@ impl Service {
                     acted = true;
                     self.open_home();
                 }
+                "--check-updates" => {
+                    acted = true;
+                    crate::update::ask_from_tray(self);
+                }
                 "--quit" => {
                     acted = true;
                     self.quit = true;
@@ -263,6 +280,8 @@ impl Service {
                         let _ = launch::reveal(&d);
                     }
                     Some(Item::Settings) => self.open_home(),
+                    Some(Item::CheckUpdates) => crate::update::ask_from_tray(self),
+                    Some(Item::InstallUpdate) => crate::update::install_now(self),
                     Some(Item::Quit) => self.quit = true,
                     None => {}
                 }
@@ -343,9 +362,10 @@ impl Service {
             return;
         }
         // The service's own windows go first, so they aren't in the picture.
-        if self.home.is_some() || self.notice.is_some() {
+        if self.home.is_some() || self.notice.is_some() || self.updates.notice_up() {
             self.home = None;
             self.notice = None;
+            self.updates.close_notice();
             self.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
             return;
         }
@@ -600,6 +620,7 @@ impl Service {
         if self.notice.as_ref().is_some_and(|n| Instant::now() >= n.until) {
             self.notice = None;
         }
+        crate::update::tick(self, ctx);
         if self.overlay.is_some() && self.screens.is_empty() {
             self.screens = winit_screens(frame);
         }
@@ -610,6 +631,7 @@ impl Service {
         // once it has been: Windows shows a window without activating it only the first time, so
         // showing it again would take the keyboard from the program the owner is typing in.
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
+        let busy = busy || self.updates.notice_up();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(need));
@@ -652,6 +674,7 @@ impl Service {
         crate::popups::countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
         crate::popups::notice(self, &ctx);
+        crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);
     }
 }

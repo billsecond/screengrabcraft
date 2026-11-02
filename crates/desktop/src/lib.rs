@@ -2,8 +2,8 @@
 //! where things are kept ([`paths`], [`store`]), the log ([`logging`]), one running copy each
 //! ([`instance`]), the clipboard ([`clipboard`]), the persistent sign-in service and its
 //! supervisor ([`service`]), starting the other program ([`launch`]), the graphics backend on
-//! Windows ([`graphics`]), the tray icon ([`tray_icon`]), local time ([`time`]) and the version
-//! line ([`version`]).
+//! Windows ([`graphics`]), the tray icon ([`tray_icon`]), local time ([`time`]), the version
+//! line ([`version`]) and updates from GitHub's releases ([`update`], the only network code).
 //!
 //! Layer L6, desktop only.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -18,4 +18,5 @@ pub mod service;
 pub mod store;
 pub mod time;
 pub mod tray_icon;
+pub mod update;
 pub mod version;

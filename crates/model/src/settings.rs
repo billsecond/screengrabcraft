@@ -430,6 +430,14 @@ pub struct Settings {
     pub sound: bool,
     /// Take an open editor out of the picture before a capture.
     pub hide_editor: bool,
+    /// Ask GitHub for a newer release now and then (the only network request ScreenGrabCraft
+    /// makes). A file from before it existed gets the default, on.
+    #[serde(default = "on")]
+    pub check_updates: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -453,6 +461,7 @@ impl Default for Settings {
             welcomed: false,
             sound: false,
             hide_editor: true,
+            check_updates: true,
         }
     }
 }
@@ -640,6 +649,18 @@ mod tests {
         assert_eq!(s.gif_frame_rate, 15, "a rate of its own is kept");
         assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
         assert_eq!(Settings::from_json(r#"{"gifFrameRate":500}"#).gif_frame_rate, 30);
+    }
+
+    #[test]
+    fn update_checks_are_on_unless_turned_off() {
+        assert!(Settings::default().check_updates);
+        // A file from before the setting existed.
+        assert!(Settings::from_json(r#"{"format":"jpeg","welcomed":true}"#).check_updates);
+        assert!(serde_json::from_str::<Settings>(r#"{"welcomed":true}"#).unwrap().check_updates);
+        let off = Settings::from_json(r#"{"checkUpdates":false}"#);
+        assert!(!off.check_updates);
+        assert_eq!(Settings::from_json(&serde_json::to_string(&off).unwrap()), off);
+        assert!(Settings::from_json(r#"{"checkUpdates":"sometimes"}"#).check_updates, "unreadable: the default");
     }
 
     #[test]
