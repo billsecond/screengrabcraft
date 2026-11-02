@@ -17,13 +17,18 @@
 //!
 //! ## Installing and starting again (Windows)
 //!
-//! The MSI is per-machine, so Windows asks for permission (UAC), and while installing it closes
-//! every `screengrabcraft.exe`: the capture service and its supervisor (`packaging/windows`,
-//! `util:CloseApplication`). A passive install doesn't show the finish page that would start it
-//! again, so [`install`] hands the work to a small helper outside ScreenGrabCraft's own programs:
-//! `cmd.exe`, started detached and windowless, which waits for `msiexec /i … /passive
-//! /norestart` to end and then starts `screengrabcraft.exe --background` from where this copy is
-//! installed, the way signing in does. Whatever the installer did, the service comes back:
+//! The MSI installs either for everyone on this PC (Program Files; the default) or just for the
+//! person installing it (`%LocalAppData%\Programs`), and Windows upgrades only a copy installed the
+//! same way, so an update keeps this copy's [`Scope`] ([`scope_of`], from where this program
+//! is): for everyone, `msiexec` as always, and Windows asks for permission (UAC); just for one
+//! person, with `ALLUSERS=2 MSIINSTALLPERUSER=1`, and nothing is asked. While installing, the MSI
+//! closes every `screengrabcraft.exe`: the capture service and its supervisor
+//! (`packaging/windows`, `util:CloseApplication`). A passive install doesn't show the finish page
+//! that would start it again, so [`install`] hands the work to a small helper outside
+//! ScreenGrabCraft's own programs: `cmd.exe`, started detached and windowless, which waits for
+//! `msiexec /i … /passive /norestart` to end and then starts `screengrabcraft.exe --background`
+//! from where this copy is installed, the way signing in does. Whatever the installer did, the
+//! service comes back:
 //! - installed: the new version starts;
 //! - the owner said no to the permission prompt, or the install failed and rolled back: the
 //!   service was never closed (or the old version is back), so the new start finds it running,
@@ -501,35 +506,84 @@ impl Schedule {
 
 // ---- installing (Windows) ----
 
-/// The command line `cmd.exe /d /v:off /s /c "…"` runs to install: msiexec, waited for, then
-/// the capture service started again. Paths that cmd would read differently (`%`, quotes,
-/// control characters) are refused rather than passed on.
-pub fn helper_line(msiexec: &str, msi: &str, log: &str, service: &str) -> Result<String, String> {
+/// Who the MSI installed a copy for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Everyone on this PC: Program Files, HKLM. Windows asks for permission to change it.
+    Machine,
+    /// Just the person who installed it: `%LocalAppData%\Programs`, HKCU. Nothing is asked.
+    User,
+}
+
+impl Scope {
+    /// What `msiexec` is given so an update stays in this scope: nothing for everyone (the MSI's
+    /// own default), `ALLUSERS=2 MSIINSTALLPERUSER=1` for one person (Windows reads the second
+    /// only with the first).
+    pub fn msi_properties(self) -> &'static str {
+        match self {
+            Scope::Machine => "",
+            Scope::User => " ALLUSERS=2 MSIINSTALLPERUSER=1",
+        }
+    }
+
+    /// Whether Windows asks for permission (UAC) to install an update in this scope.
+    pub fn asks_permission(self) -> bool {
+        self == Scope::Machine
+    }
+}
+
+/// A path as Windows compares them: no quotes, no `\\?\`, backslashes, any case.
+fn plain_path(s: &str) -> String {
+    s.trim().trim_matches('"').trim_start_matches(r"\\?\").replace('/', "\\").to_lowercase()
+}
+
+/// The scope of the installed program at `exe`, from where it is: in `%LocalAppData%\Programs`
+/// (where Windows puts a per-user install; `local_app_data` is `%LocalAppData%`) it is the one
+/// person's, anywhere else (Program Files) everyone's.
+pub fn scope_of(exe: &Path, local_app_data: Option<&Path>) -> Scope {
+    let Some(base) = local_app_data.map(|p| plain_path(&p.to_string_lossy())) else { return Scope::Machine };
+    let base = base.trim_end_matches('\\');
+    if base.is_empty() {
+        return Scope::Machine;
+    }
+    if plain_path(&exe.to_string_lossy()).starts_with(&format!("{base}\\programs\\")) { Scope::User } else { Scope::Machine }
+}
+
+/// The command line `cmd.exe /d /v:off /s /c "…"` runs to install: msiexec, waited for (in
+/// `scope`, so the update replaces this copy), then the capture service started again. Paths that
+/// cmd would read differently (`%`, quotes, control characters) are refused rather than passed on.
+pub fn helper_line(msiexec: &str, msi: &str, log: &str, service: &str, scope: Scope) -> Result<String, String> {
     for p in [msiexec, msi, log, service] {
         if p.trim().is_empty() || p.chars().any(|c| c == '"' || c == '%' || c.is_control()) {
             return Err(format!("the path {} can't be handed to the installer safely", excerpt(p)));
         }
     }
-    Ok(format!(r#"start "" /wait "{msiexec}" /i "{msi}" /passive /norestart /l*v "{log}" & start "" "{service}" --background"#))
+    let properties = scope.msi_properties();
+    Ok(format!(r#"start "" /wait "{msiexec}" /i "{msi}"{properties} /passive /norestart /l*v "{log}" & start "" "{service}" --background"#))
 }
 
 /// Whether `registered` (a path the installer wrote) names `exe`.
 pub fn same_program(registered: &str, exe: &Path) -> bool {
-    let norm = |s: &str| s.trim().trim_matches('"').trim_start_matches(r"\\?\").replace('/', "\\").to_lowercase();
-    let r = norm(registered);
-    !r.is_empty() && r == norm(&exe.to_string_lossy())
+    let r = plain_path(registered);
+    !r.is_empty() && r == plain_path(&exe.to_string_lossy())
 }
 
 /// Whether this copy can install updates itself: on Windows, the capture service the MSI
 /// installed (the portable zip and a build in the source tree only tell the owner).
 pub fn can_install() -> bool {
+    install_scope().is_some()
+}
+
+/// Who the MSI installed this copy for, when it did (Windows only; see [`can_install`]).
+pub fn install_scope() -> Option<Scope> {
     #[cfg(target_os = "windows")]
     {
-        std::env::current_exe().is_ok_and(|exe| windows::installed_by_msi(&exe))
+        let exe = std::env::current_exe().ok()?;
+        windows::installed_by_msi(&exe).then(|| scope_of(&exe, dirs::data_local_dir().as_deref()))
     }
     #[cfg(not(target_os = "windows"))]
     {
-        false
+        None
     }
 }
 
@@ -576,11 +630,14 @@ mod windows {
     const INSTALL_LOG: &str = "install.log";
     const APP_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe";
 
-    /// Whether the MSI installed `exe`: its App Paths entry names it.
+    /// Whether the MSI installed `exe`: its App Paths entry names it (in HKLM for everyone on
+    /// this PC, in HKCU for one person).
     pub fn installed_by_msi(exe: &Path) -> bool {
         use winreg::RegKey;
-        use winreg::enums::HKEY_LOCAL_MACHINE;
-        RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(APP_PATH).and_then(|k| k.get_value::<String, _>("")).is_ok_and(|v| same_program(&v, exe))
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER]
+            .into_iter()
+            .any(|root| RegKey::predef(root).open_subkey(APP_PATH).and_then(|k| k.get_value::<String, _>("")).is_ok_and(|v| same_program(&v, exe)))
     }
 
     fn system32() -> PathBuf {
@@ -602,7 +659,11 @@ mod windows {
         }
         let dir = installer.path.parent().map(Path::to_path_buf).unwrap_or_else(updates_dir);
         let log_file = dir.join(INSTALL_LOG);
-        let line = helper_line(&msiexec.to_string_lossy(), &installer.path.to_string_lossy(), &log_file.to_string_lossy(), &exe.to_string_lossy())?;
+        // The update replaces this copy only in the scope it was installed in; for one person,
+        // msiexec doesn't ask for permission.
+        let scope = scope_of(&exe, dirs::data_local_dir().as_deref());
+        let line =
+            helper_line(&msiexec.to_string_lossy(), &installer.path.to_string_lossy(), &log_file.to_string_lossy(), &exe.to_string_lossy(), scope)?;
         let marker = dir.join(MARKER);
         let _ = std::fs::write(&marker, version.to_string());
         let spawn = |flags: u32| {
@@ -622,7 +683,8 @@ mod windows {
         let started = spawn(detached | CREATE_BREAKAWAY_FROM_JOB).or_else(|_| spawn(detached));
         match started {
             Ok(helper) => {
-                log::info!("installing ScreenGrabCraft {version} with {}", installer.path.display());
+                let whom = if scope == Scope::User { "just for this user" } else { "for everyone on this PC" };
+                log::info!("installing ScreenGrabCraft {version} with {} ({whom})", installer.path.display());
                 Ok(Installing { helper })
             }
             Err(e) => {
@@ -912,23 +974,76 @@ mod tests {
 
     #[test]
     fn the_helper_runs_the_installer_then_starts_the_service() {
+        // For everyone on this PC: exactly as before per-user installs existed.
         let line = helper_line(
             r"C:\Windows\System32\msiexec.exe",
             r"C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\screengrabcraft-0.1.8-windows-x64.msi",
             r"C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\install.log",
             r"C:\Program Files\ScreenGrabCraft\screengrabcraft.exe",
+            Scope::Machine,
         )
         .unwrap();
         assert_eq!(
             line,
             r#"start "" /wait "C:\Windows\System32\msiexec.exe" /i "C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\screengrabcraft-0.1.8-windows-x64.msi" /passive /norestart /l*v "C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\install.log" & start "" "C:\Program Files\ScreenGrabCraft\screengrabcraft.exe" --background"#
         );
+        // Just for one person: the per-user properties, so the update replaces that copy and
+        // Windows asks nothing; the service starts again from the same place.
+        let line = helper_line(
+            r"C:\Windows\System32\msiexec.exe",
+            r"C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\screengrabcraft-0.1.8-windows-x64.msi",
+            r"C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\install.log",
+            r"C:\Users\Ann Lee\AppData\Local\Programs\ScreenGrabCraft\screengrabcraft.exe",
+            Scope::User,
+        )
+        .unwrap();
+        assert_eq!(
+            line,
+            r#"start "" /wait "C:\Windows\System32\msiexec.exe" /i "C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\screengrabcraft-0.1.8-windows-x64.msi" ALLUSERS=2 MSIINSTALLPERUSER=1 /passive /norestart /l*v "C:\Users\Ann Lee\AppData\Local\Temp\ScreenGrabCraft\updates\install.log" & start "" "C:\Users\Ann Lee\AppData\Local\Programs\ScreenGrabCraft\screengrabcraft.exe" --background"#
+        );
         // `&`, `^` and parentheses are plain text inside quotes; `%` and quotes are not.
-        assert!(helper_line("a", r"C:\Users\R&D (1)^\x.msi", "c", "d").is_ok());
-        for bad in [r"C:\Users\50%off\x.msi", "C:\\a\"b", "C:\\a\nb", "", " "] {
-            assert!(helper_line("a", bad, "c", "d").is_err(), "{bad:?}");
-            assert!(helper_line("a", "b", "c", bad).is_err(), "{bad:?}");
+        for scope in [Scope::Machine, Scope::User] {
+            assert!(helper_line("a", r"C:\Users\R&D (1)^\x.msi", "c", "d", scope).is_ok());
+            for bad in [r"C:\Users\50%off\x.msi", "C:\\a\"b", "C:\\a\nb", "", " "] {
+                assert!(helper_line("a", bad, "c", "d", scope).is_err(), "{bad:?}");
+                assert!(helper_line("a", "b", "c", bad, scope).is_err(), "{bad:?}");
+            }
         }
+    }
+
+    #[test]
+    fn the_scope_is_where_the_program_is() {
+        let local = Path::new(r"C:\Users\Ann Lee\AppData\Local");
+        let user = |p: &str| scope_of(Path::new(p), Some(local));
+        assert_eq!(user(r"C:\Users\Ann Lee\AppData\Local\Programs\ScreenGrabCraft\screengrabcraft.exe"), Scope::User);
+        // Windows' paths come in any case, with `\\?\`, forward slashes, a trailing separator.
+        assert_eq!(user(r"\\?\c:\users\ann lee\appdata\local\PROGRAMS\ScreenGrabCraft\screengrabcraft.exe"), Scope::User);
+        assert_eq!(user("C:/Users/Ann Lee/AppData/Local/Programs/ScreenGrabCraft/screengrabcraft.exe"), Scope::User);
+        assert_eq!(
+            scope_of(
+                Path::new(r"C:\Users\Ann Lee\AppData\Local\Programs\x\screengrabcraft.exe"),
+                Some(Path::new(r"C:\Users\Ann Lee\AppData\Local\"))
+            ),
+            Scope::User
+        );
+        // Program Files (64- or 32-bit) is everyone's; so is anything else.
+        assert_eq!(user(r"C:\Program Files\ScreenGrabCraft\screengrabcraft.exe"), Scope::Machine);
+        assert_eq!(user(r"C:\Program Files (x86)\ScreenGrabCraft\screengrabcraft.exe"), Scope::Machine);
+        // Near misses: elsewhere in LocalAppData, a folder whose name only starts the same,
+        // another person's Programs.
+        assert_eq!(user(r"C:\Users\Ann Lee\AppData\Local\ScreenGrabCraft\screengrabcraft.exe"), Scope::Machine);
+        assert_eq!(user(r"C:\Users\Ann Lee\AppData\Local\ProgramsOld\ScreenGrabCraft\screengrabcraft.exe"), Scope::Machine);
+        assert_eq!(user(r"C:\Users\Bo\AppData\Local\Programs\ScreenGrabCraft\screengrabcraft.exe"), Scope::Machine);
+        assert_eq!(user(r"C:\Users\Ann Lee\AppData\Local\Programs"), Scope::Machine);
+        // Without a LocalAppData (or an empty one) nothing is taken for a per-user install.
+        assert_eq!(scope_of(Path::new(r"C:\Users\Ann Lee\AppData\Local\Programs\x.exe"), None), Scope::Machine);
+        assert_eq!(scope_of(Path::new(r"\programs\x.exe"), Some(Path::new(""))), Scope::Machine);
+        assert_eq!(scope_of(Path::new(""), Some(local)), Scope::Machine);
+
+        assert!(Scope::Machine.asks_permission());
+        assert!(!Scope::User.asks_permission());
+        assert_eq!(Scope::Machine.msi_properties(), "");
+        assert_eq!(Scope::User.msi_properties(), " ALLUSERS=2 MSIINSTALLPERUSER=1");
     }
 
     #[test]

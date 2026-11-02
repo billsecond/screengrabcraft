@@ -7,11 +7,26 @@
     wix build screengrabcraft.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
       -d Version=1.2.3 -d BinDir=... -d IconPath=... -d EditorIconPath=... -d LicenseRtf=... -o out.msi
 
-  Per-machine install into Program Files\ScreenGrabCraft: the capture service
-  (screengrabcraft.exe), the editor (screengrabcraft-editor.exe) and the command-line program
-  (screengrabcraft-cli.exe), with Start Menu shortcuts for the first two. The capture service
-  starts at every sign-in (the Run value below). The installer shows the standard WiX dialogs:
-  welcome + license, progress, and a finish page.
+  The capture service (screengrabcraft.exe), the editor (screengrabcraft-editor.exe) and the
+  command-line program (screengrabcraft-cli.exe), with Start Menu shortcuts for the first two. The
+  capture service starts at every sign-in (the Run value below). The installer shows the standard
+  WiX look: the license with the choice of who it's for, progress, and a finish page.
+
+  One package, two ways to install it (a "dual-purpose" package, Windows Installer 5.0):
+  - for everyone on this PC (per-machine): Program Files\ScreenGrabCraft, the all-users Start
+    menu, HKLM. An administrator has to allow it (UAC). This is the default, as it always was:
+    `msiexec /i x.msi`, `/passive` and `/qn` all install per-machine.
+  - just for me (per-user): %LocalAppData%\Programs\ScreenGrabCraft, my own Start menu, HKCU. No
+    administrator. The installer's first page offers it; on the command line it is
+    `msiexec /i x.msi ALLUSERS=2 MSIINSTALLPERUSER=1` (both: the package's own ALLUSERS is 1, and
+    Windows reads MSIINSTALLPERUSER only when ALLUSERS is 2).
+  Everything below works in both: the files go under ProgramFiles6432Folder, which Windows points
+  at %LocalAppData%\Programs for a per-user install, and every registry value is HKMU, which is
+  HKLM per-machine and HKCU per-user. Nothing needs an administrator except the location.
+  An install keeps its scope: Windows upgrades only a product installed the same way, so the
+  first page offers only the earlier install's scope when there is one, a silent install in the
+  other scope stops with a message, and the capture service's own updater passes the
+  properties of the scope it was installed in.
 
   UpgradeCode and the component GUIDs below belong to ScreenGrabCraft alone. Never copy them from
   (or into) a sibling Craft app: Windows Installer treats every package sharing an UpgradeCode as
@@ -69,13 +84,59 @@
           Condition="VersionNT &gt; 400" />
     </InstallExecuteSequence>
 
-    <!-- Installer UI: WixUI_Minimal is welcome + license, progress, then a finish page so people
-         can see the install worked. Its dialogs and bitmaps are WiX's own (WixToolset.UI.wixext);
-         package.ps1 builds the license RTF from LICENSE-MIT, LICENSE-APACHE and the fonts' OFL.
+    <!-- An earlier ScreenGrabCraft, and how it was installed: the capture service's App Paths
+         entry, in HKLM for everyone on this PC, in HKCU for this person alone. (The registry view
+         is the package's own, so an x64 package reads the 64-bit HKLM, where its earlier
+         versions wrote.) -->
+    <Property Id="SGC_MACHINE_INSTALL" Secure="yes">
+      <RegistrySearch Id="EarlierMachineInstall" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe" Type="raw" />
+    </Property>
+    <Property Id="SGC_USER_INSTALL" Secure="yes">
+      <RegistrySearch Id="EarlierUserInstall" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe" Type="raw" />
+    </Property>
+
+    <!-- An install in the other scope than the earlier one would not replace it (Windows upgrades
+         only a product installed the same way) but sit beside it, with a second sign-in entry. A
+         silent install that would do that stops instead. The context is per-user when ALLUSERS
+         is empty, or still 2 with MSIINSTALLPERUSER set (Windows resets ALLUSERS=2 to 1 or empty
+         as it decides). -->
+    <CustomAction Id="InstalledForEveryone" Error="ScreenGrabCraft is installed for everyone on this PC, so this version can only be installed for everyone too (leave out ALLUSERS=2 MSIINSTALLPERUSER=1). To have it just for you, uninstall it first." />
+    <CustomAction Id="InstalledJustForYou" Error="ScreenGrabCraft is installed just for you, so this version can only be installed just for you too (msiexec /i with ALLUSERS=2 MSIINSTALLPERUSER=1). To have it for everyone on this PC, uninstall it first." />
+    <InstallExecuteSequence>
+      <Custom Action="InstalledForEveryone" After="AppSearch"
+          Condition="NOT Installed AND SGC_MACHINE_INSTALL AND (NOT ALLUSERS OR (ALLUSERS = 2 AND MSIINSTALLPERUSER = 1))" />
+      <Custom Action="InstalledJustForYou" After="InstalledForEveryone"
+          Condition="NOT Installed AND SGC_USER_INSTALL AND NOT SGC_MACHINE_INSTALL AND NOT (NOT ALLUSERS OR (ALLUSERS = 2 AND MSIINSTALLPERUSER = 1))" />
+    </InstallExecuteSequence>
+
+    <!-- With the full UI, Windows looks for the version to replace (FindRelatedProducts) in the UI
+         process, once, in the context it starts in: per-machine, the package's default. When the
+         earlier install is per-user (and there is no per-machine one, which then wins), that
+         context is switched to per-user first, so the earlier version is found and replaced; the
+         first page then offers only "Just for me". AppSearch runs first to know. (ALLUSERS is
+         emptied through a property that is never set: an empty ALLUSERS is per-user.) -->
+    <CustomAction Id="LookForTheEarlierUserInstall" Property="ALLUSERS" Value="[SGC_NO_VALUE]" Execute="immediate" />
+    <InstallUISequence>
+      <AppSearch Sequence="22" />
+      <Custom Action="LookForTheEarlierUserInstall" Sequence="23"
+          Condition="NOT Installed AND SGC_USER_INSTALL AND NOT SGC_MACHINE_INSTALL" />
+    </InstallUISequence>
+
+    <!-- Installer UI: WixUI_Minimal (progress, the finish page, repair and remove), with its first
+         page (the license, whose Install button installs) replaced by the same page with two
+         buttons, "Just for me" and "Everyone on this PC", which also decide the scope. Its
+         dialogs and bitmaps are WiX's own (WixToolset.UI.wixext); package.ps1 builds the license
+         RTF from LICENSE-MIT, LICENSE-APACHE and the fonts' OFL.
+         "Just for me" sets ALLUSERS=2 and MSIINSTALLPERUSER=1 (as Microsoft's dual-purpose sample
+         does) and points INSTALLFOLDER at %LocalAppData%\Programs\ScreenGrabCraft, where Windows
+         puts a per-user install's ProgramFiles6432Folder: the UI process resolved its folders
+         per-machine, and its INSTALLFOLDER is the one handed to the install and the one the finish
+         page launches from. "Everyone on this PC" (with the administrator shield) sets ALLUSERS=1.
+         When an earlier version is installed, only its scope's button is enabled.
          The finish page offers to start the capture service (ticked by default) the way a sign-in
          does (the same command line as the Run value), from the installer's UI process (as the
-         person installing, not from the elevated install service), without waiting for it; silent installs (/qn) never show it, and the service
-         then starts at the next sign-in. -->
+         person installing, not from the elevated install service), without waiting for it; silent
+         installs (/qn) never show it, and the service then starts at the next sign-in. -->
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch ScreenGrabCraft" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
@@ -85,7 +146,58 @@
       <ui:WixUI Id="WixUI_Minimal" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchScreenGrabCraft"
           Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+
+      <Dialog Id="ScopeEulaDlg" Width="370" Height="270" Title="!(loc.WelcomeEulaDlg_Title)">
+        <Control Id="Bitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="234" TabSkip="no" Text="!(loc.WelcomeEulaDlgBitmap)" />
+        <Control Id="Title" Type="Text" X="130" Y="6" Width="225" Height="30" Transparent="yes" NoPrefix="yes" Text="!(loc.WelcomeEulaDlgTitle)" />
+        <Control Id="LicenseText" Type="ScrollableText" X="130" Y="36" Width="226" Height="124" Sunken="yes" TabSkip="no">
+          <Text SourceFile="!(wix.WixUILicenseRtf)" />
+        </Control>
+        <Control Id="LicenseAcceptedCheckBox" Type="CheckBox" X="130" Y="164" Width="226" Height="18" CheckBoxValue="1" Property="SgcLicenseAccepted" Text="!(loc.WelcomeEulaDlgLicenseAcceptedCheckBox)" />
+        <Control Id="ChoiceText" Type="Text" X="130" Y="188" Width="226" Height="40" Transparent="yes" NoPrefix="yes" Hidden="yes"
+            ShowCondition="NOT SGC_MACHINE_INSTALL AND NOT SGC_USER_INSTALL"
+            Text="Who is it for? Just for you needs no administrator and installs in your own folders. Everyone on this PC needs an administrator's permission." />
+        <Control Id="MachineText" Type="Text" X="130" Y="188" Width="226" Height="40" Transparent="yes" NoPrefix="yes" Hidden="yes"
+            ShowCondition="SGC_MACHINE_INSTALL"
+            Text="ScreenGrabCraft is installed for everyone on this PC, so this version replaces it there. Windows asks for an administrator's permission." />
+        <Control Id="UserText" Type="Text" X="130" Y="188" Width="226" Height="40" Transparent="yes" NoPrefix="yes" Hidden="yes"
+            ShowCondition="SGC_USER_INSTALL AND NOT SGC_MACHINE_INSTALL"
+            Text="ScreenGrabCraft is installed just for you, so this version replaces it there. No administrator is needed." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="JustForMe" Type="PushButton" X="114" Y="243" Width="76" Height="17" Text="Just for &amp;me"
+            DisableCondition="SgcLicenseAccepted &lt;&gt; &quot;1&quot; OR SGC_MACHINE_INSTALL"
+            EnableCondition="SgcLicenseAccepted = &quot;1&quot; AND NOT SGC_MACHINE_INSTALL">
+          <Publish Property="ALLUSERS" Value="2" Order="1" />
+          <Publish Property="MSIINSTALLPERUSER" Value="1" Order="2" />
+          <Publish Property="INSTALLFOLDER" Value="[LocalAppDataFolder]Programs\ScreenGrabCraft\" Order="3" />
+          <Publish Event="SetTargetPath" Value="INSTALLFOLDER" Order="4" />
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Order="5" Condition="!(wix.WixUICostingPopupOptOut) OR CostingComplete = 1" />
+          <Publish Event="EndDialog" Value="Return" Order="6" Condition="OutOfDiskSpace &lt;&gt; 1" />
+          <Publish Event="SpawnDialog" Value="OutOfRbDiskDlg" Order="7" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND (PROMPTROLLBACKCOST=&quot;P&quot; OR NOT PROMPTROLLBACKCOST)" />
+          <Publish Event="EndDialog" Value="Return" Order="8" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="EnableRollback" Value="False" Order="9" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Order="10" Condition="(OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 1) OR (OutOfDiskSpace = 1 AND PROMPTROLLBACKCOST=&quot;F&quot;)" />
+        </Control>
+        <Control Id="Everyone" Type="PushButton" ElevationShield="yes" X="196" Y="243" Width="102" Height="17" Default="yes" Text="&amp;Everyone on this PC"
+            DisableCondition="SgcLicenseAccepted &lt;&gt; &quot;1&quot; OR (SGC_USER_INSTALL AND NOT SGC_MACHINE_INSTALL)"
+            EnableCondition="SgcLicenseAccepted = &quot;1&quot; AND (SGC_MACHINE_INSTALL OR NOT SGC_USER_INSTALL)">
+          <Publish Property="ALLUSERS" Value="1" Order="1" />
+          <Publish Event="SpawnWaitDialog" Value="WaitForCostingDlg" Order="2" Condition="!(wix.WixUICostingPopupOptOut) OR CostingComplete = 1" />
+          <Publish Event="EndDialog" Value="Return" Order="3" Condition="OutOfDiskSpace &lt;&gt; 1" />
+          <Publish Event="SpawnDialog" Value="OutOfRbDiskDlg" Order="4" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND (PROMPTROLLBACKCOST=&quot;P&quot; OR NOT PROMPTROLLBACKCOST)" />
+          <Publish Event="EndDialog" Value="Return" Order="5" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="EnableRollback" Value="False" Order="6" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Order="7" Condition="(OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 1) OR (OutOfDiskSpace = 1 AND PROMPTROLLBACKCOST=&quot;F&quot;)" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
     </UI>
+    <InstallUISequence>
+      <Show Dialog="override WelcomeEulaDlg" Before="ProgressDlg" Condition="0" />
+      <Show Dialog="ScopeEulaDlg" Before="ProgressDlg" Condition="NOT Installed" />
+    </InstallUISequence>
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="ScreenGrabCraft">
@@ -109,15 +221,17 @@
               Description="Capture the screen, a window or a region" WorkingDirectory="INSTALLFOLDER"
               Advertise="yes" Icon="ScreenGrabCraftIcon.ico" IconIndex="0" />
         </File>
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe" Value="[#ScreenGrabCraftExe]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe" Value="[#ScreenGrabCraftExe]" Type="string" />
       </Component>
 
-      <!-- Started at every sign-in, for every user: the persistent per-user service. Each person
-           can turn it off in the app's settings or in Task Manager › Startup apps (Windows keeps
-           that choice per user, under StartupApproved); nothing here changes when they do.
-           Removed on uninstall. -->
+      <!-- Started at every sign-in: the persistent per-user service. For every user from HKLM
+           (per-machine), for the one who installed it from HKCU (per-user). Each person can turn
+           it off in the app's settings or in Task Manager › Startup apps (Windows keeps that
+           choice per user, under StartupApproved); nothing here changes when they do, and the
+           app never deletes this value (it is the component's key path: a missing one would make
+           Windows repair it back). Removed on uninstall. -->
       <Component Id="StartAtSignIn" Guid="5C9658CB-9D98-4682-9428-F655BB59A5F3">
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="ScreenGrabCraft"
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="ScreenGrabCraft"
             Value="&quot;[INSTALLFOLDER]screengrabcraft.exe&quot; --background" Type="string" KeyPath="yes" />
       </Component>
 
@@ -128,7 +242,7 @@
               Description="Mark up screenshots and pictures" WorkingDirectory="INSTALLFOLDER"
               Advertise="yes" Icon="ScreenGrabCraftEditorIcon.ico" IconIndex="0" />
         </File>
-        <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft-editor.exe" Value="[#EditorExe]" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft-editor.exe" Value="[#EditorExe]" Type="string" />
       </Component>
 
       <!-- What the editor opens. Each picture type gets a ScreenGrabCraft ProgId (name, icon, open
@@ -139,54 +253,54 @@
            .webp over. A project file (.sgcraft, JSON) is ScreenGrabCraft's own and opens in the
            editor. Removed again on uninstall. -->
       <Component Id="EditorFileTypes" Guid="29FA50D6-B7E9-447B-B667-8020A6AFE666">
-        <RegistryValue Root="HKLM" Key="Software\RegisteredApplications" Name="ScreenGrabCraft Editor" Value="Software\ScreenGrabCraft\Editor\Capabilities" Type="string" KeyPath="yes" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationName" Value="ScreenGrabCraft Editor" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationDescription" Value="Marks up screenshots and pictures: arrows, callouts, highlights, blur and text." Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationIcon" Value="&quot;[#EditorExe]&quot;,0" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe" Name="FriendlyAppName" Value="ScreenGrabCraft Editor" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\RegisteredApplications" Name="ScreenGrabCraft Editor" Value="Software\ScreenGrabCraft\Editor\Capabilities" Type="string" KeyPath="yes" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationName" Value="ScreenGrabCraft Editor" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationDescription" Value="Marks up screenshots and pictures: arrows, callouts, highlights, blur and text." Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationIcon" Value="&quot;[#EditorExe]&quot;,0" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe" Name="FriendlyAppName" Value="ScreenGrabCraft Editor" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Png" Description="PNG Image" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Png\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.png\OpenWithProgids" Name="ScreenGrabCraft.Png" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".png" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".png" Value="ScreenGrabCraft.Png" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Png\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.png\OpenWithProgids" Name="ScreenGrabCraft.Png" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".png" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".png" Value="ScreenGrabCraft.Png" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Jpeg" Description="JPEG Image" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Jpeg\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.jpg\OpenWithProgids" Name="ScreenGrabCraft.Jpeg" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.jpeg\OpenWithProgids" Name="ScreenGrabCraft.Jpeg" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".jpg" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".jpeg" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".jpg" Value="ScreenGrabCraft.Jpeg" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".jpeg" Value="ScreenGrabCraft.Jpeg" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Jpeg\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.jpg\OpenWithProgids" Name="ScreenGrabCraft.Jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.jpeg\OpenWithProgids" Name="ScreenGrabCraft.Jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".jpg" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".jpg" Value="ScreenGrabCraft.Jpeg" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".jpeg" Value="ScreenGrabCraft.Jpeg" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Gif" Description="GIF Image" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Gif\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.gif\OpenWithProgids" Name="ScreenGrabCraft.Gif" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".gif" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".gif" Value="ScreenGrabCraft.Gif" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Gif\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.gif\OpenWithProgids" Name="ScreenGrabCraft.Gif" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".gif" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".gif" Value="ScreenGrabCraft.Gif" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Bmp" Description="Bitmap Image" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Bmp\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.bmp\OpenWithProgids" Name="ScreenGrabCraft.Bmp" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".bmp" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".bmp" Value="ScreenGrabCraft.Bmp" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Bmp\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.bmp\OpenWithProgids" Name="ScreenGrabCraft.Bmp" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".bmp" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".bmp" Value="ScreenGrabCraft.Bmp" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Webp" Description="WebP Image" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Webp\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.webp\OpenWithProgids" Name="ScreenGrabCraft.Webp" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".webp" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".webp" Value="ScreenGrabCraft.Webp" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Webp\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.webp\OpenWithProgids" Name="ScreenGrabCraft.Webp" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".webp" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".webp" Value="ScreenGrabCraft.Webp" Type="string" />
 
         <!-- ScreenGrabCraft's own project files: the editor is their default program. -->
         <ProgId Id="ScreenGrabCraft.Project" Description="ScreenGrabCraft Project" Icon="EditorExe" IconIndex="0" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\ScreenGrabCraft.Project\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.sgcraft" Value="ScreenGrabCraft.Project" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.sgcraft" Name="Content Type" Value="application/x-screengrabcraft-project" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\.sgcraft\OpenWithProgids" Name="ScreenGrabCraft.Project" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".sgcraft" Value="" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".sgcraft" Value="ScreenGrabCraft.Project" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\ScreenGrabCraft.Project\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.sgcraft" Value="ScreenGrabCraft.Project" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.sgcraft" Name="Content Type" Value="application/x-screengrabcraft-project" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\.sgcraft\OpenWithProgids" Name="ScreenGrabCraft.Project" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\SupportedTypes" Name=".sgcraft" Value="" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities\FileAssociations" Name=".sgcraft" Value="ScreenGrabCraft.Project" Type="string" />
       </Component>
 
       <Component Id="ScreenGrabCraftCli">

@@ -4,14 +4,15 @@
 //! installing are `screengrabcraft_desktop::update`'s; this is when, and what the owner sees.
 //!
 //! On Windows, in a copy the installer put there, a newer release's MSI is downloaded and
-//! checked before the owner hears of it, and Update now installs it (Windows asks for
-//! permission; the service starts again afterwards). Elsewhere the notice opens the release page.
+//! checked before the owner hears of it, and Update now installs it (for a copy installed for
+//! everyone, Windows asks for permission; one installed just for the owner updates without
+//! asking; the service starts again afterwards). Elsewhere the notice opens the release page.
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, pos2, vec2};
-use screengrabcraft_desktop::update::{self, Found, Installer, Installing, Schedule, Version};
+use screengrabcraft_desktop::update::{self, Found, Installer, Installing, Schedule, Scope, Version};
 use screengrabcraft_desktop::{launch, paths};
 use screengrabcraft_ui::theme::Tokens;
 
@@ -83,6 +84,9 @@ pub struct Updates {
     installing: Option<(Installing, Instant)>,
     /// This copy installs updates itself (Windows, installed by the MSI).
     can_install: bool,
+    /// Windows asks for permission to install them (installed for everyone on this PC, not just
+    /// for the owner).
+    asks_permission: bool,
     /// Checks happen by themselves (not in a run without settings, nor in the Flatpak).
     automatic: bool,
     /// The Flatpak: no network at all.
@@ -94,7 +98,8 @@ pub struct Updates {
 impl Updates {
     pub fn new() -> Updates {
         let flatpak = std::env::var_os("FLATPAK_ID").is_some();
-        let can_install = update::can_install();
+        let scope = update::install_scope();
+        let can_install = scope.is_some();
         let dir = update::updates_dir();
         let mut just_updated = None;
         if let Some(current) = update::current() {
@@ -115,6 +120,7 @@ impl Updates {
             dismissed: None,
             installing: None,
             can_install,
+            asks_permission: scope.is_none_or(Scope::asks_permission),
             automatic: !paths::no_prefs() && !flatpak,
             flatpak,
             just_updated,
@@ -158,6 +164,16 @@ fn sync_tray(svc: &mut Service) {
     {
         t.update = label;
         t.rebuild(&svc.settings, &svc.keys);
+    }
+}
+
+/// What happens when an update is installed, for a copy installed for everyone on this PC
+/// (`asks`: Windows asks for permission) or just for the owner (nothing is asked).
+fn install_note(asks: bool) -> &'static str {
+    if asks {
+        "Windows asks for permission, then ScreenGrabCraft starts again."
+    } else {
+        "ScreenGrabCraft closes while it installs, then starts again."
     }
 }
 
@@ -374,21 +390,17 @@ pub fn install_now(svc: &mut Service) {
         svc.updates.notice = None;
         return;
     };
+    let asks = svc.updates.asks_permission;
     if svc.updates.installing.is_some() {
-        svc.notify("The update is being installed", "Windows may be asking for permission.", None, None, false);
+        let detail = if asks { "Windows may be asking for permission." } else { "ScreenGrabCraft starts again when it's done." };
+        svc.notify("The update is being installed", detail, None, None, false);
         return;
     }
     svc.updates.notice = None;
     match update::install(&installer, &offer.version) {
         Ok(helper) => {
             svc.updates.installing = Some((helper, Instant::now()));
-            svc.notify(
-                format!("Installing ScreenGrabCraft {}", offer.version),
-                "Windows asks for permission first. ScreenGrabCraft starts again when it's done.",
-                None,
-                None,
-                false,
-            );
+            svc.notify(format!("Installing ScreenGrabCraft {}", offer.version), install_note(asks), None, None, false);
         }
         Err(e) => {
             log::warn!("installing the update: {e}");
@@ -450,7 +462,7 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     };
     let detail = match (&offer.problem, ready) {
         (Some(_), _) => format!("You have {}. The download didn't work, so get it from its release page.", current_text()),
-        (None, true) => format!("You have {}. Windows asks for permission, then ScreenGrabCraft starts again.", current_text()),
+        (None, true) => format!("You have {}. {}", current_text(), install_note(svc.updates.asks_permission)),
         (None, false) => format!("You have {}. Get it from its release page.", current_text()),
     };
     let mut act = None;
@@ -559,7 +571,7 @@ pub fn about(svc: &mut Service, ui: &mut Ui) {
                 }
                 ui.hyperlink_to("What's new", &offer.page);
             });
-            ui.label(RichText::new("Windows asks for permission, then ScreenGrabCraft starts again.").size(12.0).color(t.muted));
+            ui.label(RichText::new(install_note(svc.updates.asks_permission)).size(12.0).color(t.muted));
         }
         None => {
             ui.label(RichText::new(format!("ScreenGrabCraft {} is available.", offer.version)).strong());
@@ -588,5 +600,11 @@ mod tests {
         let page_only = Offer { installer: None, ..ready };
         assert_eq!(tray_label(Some(&page_only)).as_deref(), Some("Get Update 0.1.8…"));
         assert_eq!(tray_label(None), None);
+    }
+
+    #[test]
+    fn only_an_install_for_everyone_mentions_the_permission_prompt() {
+        assert!(install_note(Scope::Machine.asks_permission()).contains("permission"));
+        assert!(!install_note(Scope::User.asks_permission()).contains("permission"));
     }
 }
