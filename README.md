@@ -62,8 +62,9 @@ adds AV1. **Record Video** makes the MP4 as soon as you stop (no larger than 192
 you choose the full size). **Video Production** (the tray menu's video section, the Capture page,
 or its shortcut) opens the **Recorder**. Choose the area: a **region** you drag out, a **window**
 you click (where it was then; it isn't followed if it moves), one **full screen**, **all screens**
-in one video (made no larger than 3840 × 2160), or a **fixed size** (1920 × 1080, 1280 × 720,
-1080 × 1920, 1080 × 1080 or your own) placed with a click. Turn each input on or off: the screen,
+in one video (made no larger than 3840 × 2160), or a **fixed size** placed with a click: the usual
+monitor and video sizes, landscape, portrait and square, as many as fit on your monitors, or your
+own. Turn each input on or off: the screen,
 the camera, the microphone (with a level meter once you turn it on or press Test) and the
 computer's sound. With the screen off the camera's picture is the video. Press the red **Record**;
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source

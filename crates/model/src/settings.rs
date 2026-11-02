@@ -517,9 +517,42 @@ impl MonitorChoice {
     }
 }
 
-/// The fixed sizes the Recorder offers, in pixels, and what each is for.
-pub const FIXED_SIZES: [(u32, u32, &str); 4] =
-    [(1920, 1080, "Full HD"), (1280, 720, "HD"), (1080, 1920, "vertical, for phones"), (1080, 1080, "square")];
+/// The fixed sizes the Recorder offers, in pixels, and what each is: the usual monitor and video
+/// sizes, landscape, portrait and square, each largest first. The Recorder lists those that fit
+/// on one of the owner's monitors.
+pub const FIXED_SIZES: &[(u32, u32, &str)] = &[
+    (5120, 2880, "5K"),
+    (3840, 2160, "4K"),
+    (3440, 1440, "ultrawide 1440p"),
+    (2560, 1600, "16:10"),
+    (2560, 1440, "1440p"),
+    (2560, 1080, "ultrawide 1080p"),
+    (1920, 1200, "16:10"),
+    (1920, 1080, "Full HD"),
+    (1680, 1050, "16:10"),
+    (1600, 900, "HD+"),
+    (1440, 900, "16:10"),
+    (1366, 768, "laptop"),
+    (1280, 720, "HD"),
+    (854, 480, "480p"),
+    (640, 360, "360p"),
+    (2160, 3840, "4K, on end"),
+    (1600, 2560, "16:10, on end"),
+    (1440, 2560, "1440p, on end"),
+    (1200, 1920, "16:10, on end"),
+    (1080, 1920, "Full HD, for phones"),
+    (1080, 1350, "4:5, for posts"),
+    (900, 1600, "HD+, on end"),
+    (768, 1366, "laptop, on end"),
+    (720, 1280, "HD, for phones"),
+    (540, 960, "540p, for phones"),
+    (480, 854, "480p, for phones"),
+    (360, 640, "360p, for phones"),
+    (2160, 2160, "square, 4K"),
+    (1440, 1440, "square, 1440p"),
+    (1080, 1080, "square"),
+    (720, 720, "square, small"),
+];
 
 /// The smallest and largest side of a fixed-size recording.
 pub const FIXED_MIN: u32 = 64;
