@@ -35,6 +35,8 @@ beside them for scripts and agents.
 | Ctrl+Shift+Print Screen | — | **All screens** in one picture |
 | Ctrl+Alt+Print Screen | Ctrl+Shift+S | **Scrolling**: scroll a long page while ScreenGrabCraft joins it into one picture |
 | Alt+Shift+Print Screen | Ctrl+Shift+G | **Record GIF** of an area (press again, or click the tray icon, to stop) |
+| Ctrl+Alt+Shift+Print Screen | Ctrl+Shift+V | **Record Video**: a small MP4 of an area, with the computer's sound (press again to stop) |
+| — (set one in Settings) | Ctrl+Shift+P | **Video Production**: the screen, the computer's sound, the microphone and the camera, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
@@ -52,6 +54,32 @@ or Save. An open editor is hidden while you capture, which you can turn off too.
 A GIF recording runs at 30 frames a second unless you set it lower, is always saved, and opens in
 the editor like any capture, with a **Play** button under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
 not on the animation, and the GIF file itself is never changed.
+
+**Videos** are MP4 files with AV1 pictures and Opus sound: royalty-free, written in Rust, and
+small (a minute of a screen with some typing is a few megabytes). Windows 11, macOS 14 and every
+current browser play them; on Windows 10 the free AV1 Video Extension from the Microsoft Store
+adds AV1. **Record Video** makes the MP4 as soon as you stop (no larger than 1920 × 1080 unless
+you choose the full size). **Video Production** keeps a recording file (`.sgvideo`) with a track
+for each source and opens it in the editor, where you cut and edit it, then Export Video makes the
+MP4 beside it. What each takes in (the computer's sound, the microphone, the camera, and which
+ones) is in Settings › Video. The computer's sound can be recorded on Windows; the camera on
+Windows and macOS.
+
+## Editing a video
+
+A Video Production recording opens in the editor as a timeline with a row for each track:
+
+- **Play** (Space), click or drag on the ruler to move the playhead, arrows step a frame.
+- Drag across empty rows to choose a stretch; **Delete** (or Cut) takes it out of every track,
+  keeping them in step.
+- Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
+  clip's ends to trim it, or the clip to slide it along its track.
+- **S** splits at the playhead: the selected clip's track, or every track.
+- Each sound track has **Mute** and a volume slider; the camera's corner, size and shape
+  (square, rounded, circle) are on the right.
+- Undo and redo everything. The edits are saved into the recording file a moment after each
+  change (the recording itself is never changed), and File › Revert to Recording brings every
+  track back whole.
 
 ## Editing
 

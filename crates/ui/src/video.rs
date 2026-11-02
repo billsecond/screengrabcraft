@@ -672,7 +672,7 @@ impl VideoView {
             let area = ui.max_rect().shrink(16.0);
             if let Some(tex) = &self.texture {
                 let size = tex.size_vec2();
-                let f = (area.width() / size.x).min(area.height() / size.y).min(1.0).max(0.01);
+                let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
                 let r = Rect::from_center_size(area.center(), size * f);
                 ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);

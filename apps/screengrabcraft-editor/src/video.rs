@@ -1,6 +1,8 @@
 //! The desktop's part of the video editor: making the MP4 on a thread of its own, playing the
 //! sound through the speakers, and the strip's small pictures of videos.
 
+#![cfg_attr(not(any(target_os = "windows", target_os = "macos", target_os = "linux")), allow(unused_imports))]
+
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -8,6 +10,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use screengrabcraft_media::compose;
 use screengrabcraft_media::export::{self, ExportSettings};
@@ -82,7 +85,7 @@ fn play_sign() -> Option<Raster> {
         for x in 0..w {
             // The triangle: from (cx-22, cy-28) and (cx-22, cy+28) to (cx+30, cy).
             let (fx, fy) = (x as f32 - (cx - 22.0), (y as f32 - cy).abs());
-            if fx >= 0.0 && fx <= 52.0 && fy <= 28.0 * (1.0 - fx / 52.0) {
+            if (0.0..=52.0).contains(&fx) && fy <= 28.0 * (1.0 - fx / 52.0) {
                 let i = ((y * w + x) * 4) as usize;
                 if let Some(p) = px.get_mut(i..i + 3) {
                     p.copy_from_slice(&[0xF2, 0xF2, 0xF5]);
@@ -93,6 +96,7 @@ fn play_sign() -> Option<Raster> {
     Some(r)
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 /// The edited sound, playing through the speakers until it's dropped.
 pub struct Sound {
     from_us: u64,
@@ -103,6 +107,7 @@ pub struct Sound {
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl SoundOut for Sound {
     fn position_us(&self) -> Option<u64> {
         let played = self.played.load(Ordering::Relaxed);
@@ -110,6 +115,7 @@ impl SoundOut for Sound {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Drop for Sound {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
@@ -120,8 +126,10 @@ impl Drop for Sound {
 }
 
 /// Sound is mixed this far ahead of what's heard.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 const AHEAD_SECS: f64 = 0.25;
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Sound {
     pub fn start(rec: Arc<Recording>, timeline: Timeline, from_us: u64) -> Result<Sound, String> {
         let device = cpal::default_host().default_output_device().ok_or("there are no speakers")?;
@@ -193,7 +201,7 @@ impl Sound {
                         let n = 4800usize;
                         let mixed = compose::mix(&rec, &timeline, at48, n);
                         at48 += n as u64;
-                        let frames: Vec<[f32; 2]> = mixed.chunks_exact(2).map(|f| [f[0], f[1]]).collect();
+                        let frames: Vec<[f32; 2]> = mixed.as_chunks::<2>().0.to_vec();
                         let mut out = Vec::with_capacity((n as f64 / step) as usize + 2);
                         while pos < frames.len() as f64 {
                             let i = pos.floor() as usize;
@@ -221,6 +229,24 @@ impl Sound {
                 Err("the speakers didn't start".to_string())
             }
         }
+    }
+}
+
+/// The BSDs: no speakers yet (the video plays without its sound).
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub struct Sound;
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+impl Sound {
+    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _from_us: u64) -> Result<Sound, String> {
+        Err("sound can't be played on this system yet".to_string())
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+impl SoundOut for Sound {
+    fn position_us(&self) -> Option<u64> {
+        None
     }
 }
 

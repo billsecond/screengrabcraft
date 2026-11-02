@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, vec2};
 use screengrabcraft_desktop::{launch, paths, service};
 use screengrabcraft_model::settings::KEYS;
+use screengrabcraft_model::settings::VideoOptions;
 use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys, ImageFormat, Theme};
 use screengrabcraft_ui::icons::{self, Icon};
 use screengrabcraft_ui::theme::Tokens;
@@ -20,6 +21,7 @@ pub enum Tab {
     #[default]
     Capture,
     After,
+    Video,
     Shortcuts,
     General,
     About,
@@ -32,6 +34,8 @@ pub struct Home {
     status: Option<service::Status>,
     message: Option<(String, bool)>,
     delay: u32,
+    /// The microphones and cameras, once the Video page has looked.
+    devices: Option<Devices>,
 }
 
 pub fn show(svc: &mut Service, ctx: &egui::Context) {
@@ -122,6 +126,7 @@ fn contents(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match home.tab {
             Tab::Capture => capture_tab(svc, home, ui, close),
             Tab::After => after_tab(svc, ui),
+            Tab::Video => video_tab(svc, home, ui),
             Tab::Shortcuts => shortcuts_tab(svc, ui),
             Tab::General => general_tab(svc, home, ui),
             Tab::About => about_tab(svc, ui),
@@ -148,6 +153,7 @@ fn nav(ui: &mut Ui, tab: &mut Tab) {
             for (page, label) in [
                 (Tab::Capture, "Capture"),
                 (Tab::After, "After a capture"),
+                (Tab::Video, "Video"),
                 (Tab::Shortcuts, "Shortcuts"),
                 (Tab::General, "General"),
                 (Tab::About, "About"),
@@ -199,6 +205,8 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Gif, Icon::Gif, "Record an area as an animated GIF"),
+        (CaptureMode::Video, Icon::Play, "Record an area as a small MP4"),
+        (CaptureMode::Production, Icon::Edit, "Screen, sound, microphone and camera, to edit"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
     ];
     let mut chosen: Option<(CaptureMode, u32)> = None;
@@ -499,6 +507,102 @@ fn about_tab(svc: &mut Service, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.label(RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
     crate::update::about(svc, ui);
+}
+
+/// The microphones and cameras a recording can use (looked up when the Video page is first
+/// shown: nothing is turned on).
+pub struct Devices {
+    microphones: Vec<String>,
+    cameras: Vec<(u32, String)>,
+    system_sound: bool,
+}
+
+impl Devices {
+    fn find() -> Devices {
+        Devices {
+            microphones: screengrabcraft_capture::audio::microphones(),
+            cameras: screengrabcraft_capture::camera::cameras(),
+            system_sound: screengrabcraft_capture::audio::system_sound_supported(),
+        }
+    }
+}
+
+/// What a kind of video recording takes in: the computer's sound, a microphone, a camera.
+fn sources(ui: &mut Ui, id: &str, o: &mut VideoOptions, d: &Devices, camera: bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.add_enabled_ui(d.system_sound, |ui| {
+        ui.checkbox(&mut o.system_sound, "The computer's sound").on_disabled_hover_text("This system has no way to record what it plays");
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut o.microphone, "The microphone");
+        ui.add_enabled_ui(o.microphone, |ui| {
+            let shown = o.microphone_name.clone().unwrap_or_else(|| "The system's default".to_string());
+            egui::ComboBox::from_id_salt((id, "mic")).width(240.0).selected_text(shown).show_ui(ui, |ui| {
+                ui.selectable_value(&mut o.microphone_name, None, "The system's default");
+                for m in &d.microphones {
+                    ui.selectable_value(&mut o.microphone_name, Some(m.clone()), m);
+                }
+            });
+        });
+    });
+    if d.microphones.is_empty() && o.microphone {
+        ui.label(RichText::new("No microphone was found just now.").size(12.0).color(t.muted));
+    }
+    if camera {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut o.camera, "The camera");
+            ui.add_enabled_ui(o.camera, |ui| {
+                let shown = o
+                    .camera_index
+                    .and_then(|i| d.cameras.iter().find(|c| c.0 == i).map(|c| c.1.clone()))
+                    .unwrap_or_else(|| d.cameras.first().map(|c| c.1.clone()).unwrap_or_else(|| "The first one".to_string()));
+                egui::ComboBox::from_id_salt((id, "camera")).width(240.0).selected_text(shown).show_ui(ui, |ui| {
+                    for (i, name) in &d.cameras {
+                        ui.selectable_value(&mut o.camera_index, Some(*i), name);
+                    }
+                });
+            });
+        });
+        if d.cameras.is_empty() && o.camera {
+            ui.label(RichText::new("No camera was found just now.").size(12.0).color(t.muted));
+        }
+    }
+}
+
+fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let d = home.devices.get_or_insert_with(Devices::find);
+    let mut s = svc.settings.clone();
+    ui.heading("Video");
+    ui.add_space(8.0);
+    ui.label(RichText::new("Record Video").strong());
+    ui.label(RichText::new("A small MP4 of an area, made as soon as you stop.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    sources(ui, "video", &mut s.video, d, false);
+    ui.checkbox(&mut s.video_full_size, "Keep the full size (else no larger than 1920 × 1080, for smaller files)");
+    ui.add_space(14.0);
+    ui.label(RichText::new("Video Production").strong());
+    ui.label(RichText::new("Each on a track of its own, to cut and edit in the Editor before you make the MP4.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    sources(ui, "production", &mut s.production, d, true);
+    ui.add_space(14.0);
+    ui.label(RichText::new("Both").strong());
+    egui::Grid::new("video-both").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        ui.label("Frames a second");
+        ui.add(egui::Slider::new(&mut s.video_frame_rate, 5..=30));
+        ui.end_row();
+        ui.label("Longest recording");
+        ui.add(egui::DragValue::new(&mut s.video_max_mins).range(1..=240).suffix(" minutes"));
+        ui.end_row();
+    });
+    ui.add_space(6.0);
+    if widgets::button(ui, "Look for devices again").clicked() {
+        home.devices = None;
+    }
+    if s != svc.settings {
+        svc.settings = s;
+        svc.apply_settings();
+    }
 }
 
 #[cfg(test)]

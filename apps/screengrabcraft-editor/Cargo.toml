@@ -22,9 +22,11 @@ rfd = { workspace = true }
 pollster = { workspace = true }
 # Deleting a capture from the strip moves it to the Recycle Bin (the Trash), never for good.
 trash = "5.2"
-# Playing a video recording's sound while editing it.
-cpal = "0.18.2"
 
 [build-dependencies]
 # Icon + VERSIONINFO for the .exe; build.rs only uses it when the target is Windows.
 winresource = "0.1"
+
+# Playing a video recording's sound while editing it (not on the BSDs yet).
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+cpal = "0.18.2"

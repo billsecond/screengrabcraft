@@ -21,8 +21,15 @@ ScreenGrabCraft takes pictures of your screen, so here is exactly what it does w
 - **What is written about them:** the log (in the settings folder) records a capture's size and
   file name, never its content. The settings remember the last area captured, for Repeat Last
   Capture.
-- **Permissions:** on macOS ScreenGrabCraft asks for Screen Recording; on Wayland the desktop's
-  screenshot portal may ask. ScreenGrabCraft never works around either.
+- **Video recordings:** the microphone, the camera and the computer's sound are used only while
+  a video recording you started is running, and only the ones you chose (Settings › Video). The
+  camera's light is on for exactly that long. A Record Video recording is made into an MP4 in
+  your captures folder and its working file in your temporary folder is deleted; a Video
+  Production recording (`.sgvideo`, every track as recorded, with your edits added to its end) is
+  kept in your captures folder until you delete it. Nothing of either is sent anywhere.
+- **Permissions:** on macOS ScreenGrabCraft asks for Screen Recording, and the system asks you
+  before the microphone or the camera is first used; on Wayland the desktop's screenshot portal
+  may ask. ScreenGrabCraft never works around any of these.
 - **The web editor** runs entirely in your browser; pictures you open stay there, and its settings
   are kept in the browser's local storage.
 

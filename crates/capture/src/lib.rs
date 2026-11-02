@@ -36,6 +36,7 @@ mod none;
 #[cfg(not(any(target_os = "windows", unix)))]
 use none as backend;
 
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub mod audio;
 pub mod camera;
 pub mod compose;

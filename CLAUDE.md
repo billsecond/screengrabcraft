@@ -36,6 +36,7 @@ Snagit may be **observed** black-box: run it, use it, note how it behaves. Never
 |---|---|---|
 | L1 | `model` | the document (picture + annotations), shapes, styles, geometry, settings |
 | L2 | `render` | drawing annotations (tiny-skia), text (ab_glyph), effects, codecs, PDF, projects, stitching, GIFs |
+| L2 | `media` | video: the recording file (`.sgvideo`), the timeline of edits, composing a frame and mixing the sound, MP4 (AV1 by rav1e, Opus by rusty-opus; the encoders not in wasm) |
 | L3 | `capture` | monitors, windows and pixels: xcap (Windows, macOS), x11rb and the screenshot portal (Linux, BSD) |
 | L4 | `engine` | Session, undo, **command registry** |
 | L6 | `ui` | the egui editor and the capture overlay (builds for the browser) |

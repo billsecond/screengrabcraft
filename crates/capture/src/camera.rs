@@ -1,5 +1,5 @@
 //! The camera for a recording, through nokhwa: Media Foundation on Windows, AVFoundation on
-//! macOS, Video4Linux on Linux. Pictures are made at most 640 × 480 and kept as JPEGs: the
+//! macOS (Linux and the BSDs: not yet). Pictures are made at most 640 × 480 and kept as JPEGs: the
 //! camera sits in a corner of the video, so more would only make the recording bigger.
 
 use std::sync::Arc;
@@ -25,7 +25,7 @@ pub struct CameraFrame {
 }
 
 /// The cameras, by number and name.
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn cameras() -> Vec<(u32, String)> {
     allow();
     match nokhwa::query(nokhwa::utils::ApiBackend::Auto) {
@@ -43,7 +43,7 @@ pub fn cameras() -> Vec<(u32, String)> {
     }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn cameras() -> Vec<(u32, String)> {
     Vec::new()
 }
@@ -61,7 +61,7 @@ fn allow() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
 fn allow() {}
 
 pub struct CameraCapture {
@@ -81,9 +81,9 @@ impl CameraCapture {
         let thread = std::thread::Builder::new()
             .name("camera".into())
             .spawn(move || {
-                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 run(index, started, &tx, &ready_tx, &s);
-                #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 {
                     let _ = (index, started, &tx, &s);
                     let _ = ready_tx.send(Err("cameras can't be recorded on this system yet".to_string()));
@@ -121,7 +121,7 @@ impl Drop for CameraCapture {
     }
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 fn run(
     index: u32,
     started: Instant,

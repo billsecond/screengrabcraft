@@ -43,6 +43,8 @@ overrides:
       - libxkbcommon0
       - libxkbcommon-x11-0
       - libvulkan1 | libegl1
+      # Sound for video recordings (ALSA; Ubuntu 24.04 and Debian 13 call it libasound2t64).
+      - libasound2t64 | libasound2
     recommends:
       - libwayland-client0
       - libx11-6
@@ -57,6 +59,7 @@ overrides:
       - libxkbcommon
       - libxkbcommon-x11
       - (vulkan-loader or libglvnd-egl)
+      - alsa-lib
     recommends:
       - libwayland-client
       - libX11

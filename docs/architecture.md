@@ -22,6 +22,7 @@ L1                              model (document, shapes, styles, geometry, setti
 |---|---|---|
 | `model` | yes | `Document` (a `Raster` plus `Object`s in drawing order), `Shape` (15 kinds), `Style`, hit testing and handles, `Settings`/`EditorSettings`, hotkeys, file naming |
 | `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
+| `media` | yes (no encoders) | video: the recording file (`recording`: append-only chunks, a track per source), the `Timeline` of edits, the `Composer` (the frame at a moment, the camera in its corner) and `mix` (the sound), the MP4 writer, AV1 (rav1e) and Opus (rusty-opus) encoders and the parallel `export` |
 | `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
@@ -75,3 +76,26 @@ after 1, 2, 4, 8 and 16 seconds, giving up after five failures in two minutes.
 `screengrabcraft-editor` and `screengrabcraft-web` run the same `ui::Editor`; they differ only in
 their `Services`: native file dialogs, files, the clipboard and the recent captures on the desktop;
 the browser's file picker, downloads and local storage on the web.
+
+## Video
+
+A video recording (Record Video or Video Production, started from the service like a GIF) runs on
+a thread of its own: the screen is grabbed on a steady beat, and the sound devices (cpal: the
+computer's sound by WASAPI loopback on Windows, the microphone everywhere but the BSDs) and the
+camera (nokhwa: Media Foundation, AVFoundation) run on threads of theirs. Each sound block is
+placed in time by when it arrived, so a device that sends nothing while it's silent doesn't put
+the sound out of step. Everything goes into one **recording file** (`.sgvideo`), written as it
+comes by a writer thread: a chunk per screen picture (the whole picture every two seconds, else
+only the part that changed, LZ4), per camera picture (a JPEG) and per block of sound (16-bit at
+48 kHz). The file is only ever added to, so a recording cut short still opens.
+
+**Edits** are a `Timeline` (each track's clips: where on the timeline, which stretch of the
+recording) changed by the engine's `video.*` commands in a `VideoSession` (undo, redo, a drag as
+one step). The editor adds the timeline to the end of the recording file a moment after each
+change; the last one counts. The recording itself never changes.
+
+**Making the MP4** (`media::export`): the edited video is cut into two-second stretches, each
+starting with a key frame; several are encoded at once, one rav1e encoder each, and written in
+order with the mixed sound beside them (Opus, 20 ms packets) into an MP4 written by hand (`mp4`:
+`av01` and `Opus` sample entries, 64-bit chunk offsets, the index at the end). The file is
+written beside its name and moved into place when it's whole.

@@ -40,11 +40,12 @@ image = { workspace = true }
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGWindow"] }
 
 # Sound for video recordings: the microphone, and on Windows what the computer plays (WASAPI
-# loopback). ALSA on Linux and the BSDs.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# loopback). Core Audio on macOS, ALSA on Linux (libasound). Not on the BSDs yet.
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 cpal = "0.18.2"
 
-# The camera for video recordings: Media Foundation, AVFoundation, Video4Linux.
+# The camera for video recordings: Media Foundation on Windows, AVFoundation on macOS. (Linux's
+# Video4Linux backend needs clang at build time; not yet.)
 [target.'cfg(target_os = "windows")'.dependencies.nokhwa]
 version = "0.10.11"
 default-features = false
@@ -54,8 +55,3 @@ features = ["input-msmf"]
 version = "0.10.11"
 default-features = false
 features = ["input-avfoundation"]
-
-[target.'cfg(target_os = "linux")'.dependencies.nokhwa]
-version = "0.10.11"
-default-features = false
-features = ["input-v4l"]

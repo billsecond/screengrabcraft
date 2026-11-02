@@ -16,6 +16,7 @@ use std::sync::mpsc::{Receiver, Sender, channel, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use crate::CaptureError;
@@ -53,11 +54,13 @@ pub struct AudioCapture {
     thread: Option<JoinHandle<()>>,
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn device_name(d: &cpal::Device) -> String {
     d.description().map(|n| n.name().to_string()).unwrap_or_else(|_| "Sound device".to_string())
 }
 
 /// The microphones (and other sound inputs) by name.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn microphones() -> Vec<String> {
     let host = cpal::default_host();
     match host.input_devices() {
@@ -70,6 +73,7 @@ pub fn microphones() -> Vec<String> {
 }
 
 /// Whether what the computer plays can be recorded here.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn system_sound_supported() -> bool {
     cfg!(target_os = "windows") && cpal::default_host().default_output_device().is_some()
 }
@@ -137,6 +141,7 @@ impl Clock {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn to_f32(data: &cpal::Data) -> Option<Vec<f32>> {
     use cpal::SampleFormat as F;
     Some(match data.sample_format() {
@@ -207,6 +212,7 @@ impl Drop for AudioCapture {
     }
 }
 
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn run(
     source: AudioSource,
     started: Instant,
@@ -329,4 +335,27 @@ mod tests {
         // Late by a little only: joined up, no gap.
         assert_eq!(c.place(480, t0 + Duration::from_millis(1060)), first + 480);
     }
+}
+
+/// The BSDs: no sound devices yet.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn microphones() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn system_sound_supported() -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+fn run(
+    _source: AudioSource,
+    _started: Instant,
+    _tx: Sender<SoundBlock>,
+    ready: std::sync::mpsc::SyncSender<Result<(u8, String), String>>,
+    _stop: Arc<AtomicBool>,
+    _level: Arc<AtomicU32>,
+) {
+    let _ = ready.send(Err("sound can't be recorded on this system yet".to_string()));
 }

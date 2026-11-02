@@ -499,3 +499,56 @@ fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared) -> Result
     .map_err(|e| e.to_string())?;
     Ok(done.duration_us)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The real path on the real screen: 3 s of a small area and the computer's sound, made into
+    /// an MP4, then deleted unopened. Run by hand only: `cargo test -p screengrabcraft live_video
+    /// -- --ignored`.
+    #[test]
+    #[ignore]
+    fn live_video() {
+        let monitor = screengrabcraft_capture::monitors().unwrap().into_iter().next().unwrap();
+        let area = IRect { x: 0, y: 0, w: 320, h: 200 };
+        let out = std::env::temp_dir().join(format!("sgc-live-{}.mp4", std::process::id()));
+        let plan = VideoPlan {
+            kind: Kind::Video,
+            monitor: monitor.id,
+            area,
+            desktop: area,
+            fps: 30,
+            max_secs: 60,
+            options: VideoOptions { system_sound: true, microphone: false, microphone_name: None, camera: false, camera_index: None },
+            out: out.clone(),
+            max_size: (1920, 1080),
+            created: String::new(),
+        };
+        let mut rec = start_video(plan, egui::Context::default()).unwrap();
+        std::thread::sleep(Duration::from_secs(3));
+        rec.stop();
+        let started = Instant::now();
+        let result = loop {
+            if let Some(r) = rec.take() {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let frames = rec.progress.load(Ordering::SeqCst);
+        let sources = rec.sources.lock().unwrap().clone();
+        match result {
+            Ok(Output::Video(path, us)) => {
+                let size = std::fs::metadata(&path).unwrap().len();
+                println!(
+                    "{frames} frames in 3 s, {} µs long, {size} bytes, made {:.2} s after stopping, sources {sources:?}",
+                    us,
+                    started.elapsed().as_secs_f64()
+                );
+                std::fs::remove_file(&path).unwrap();
+                assert!(frames >= 80, "{frames} frames");
+            }
+            other => panic!("{:?}", other.err()),
+        }
+    }
+}

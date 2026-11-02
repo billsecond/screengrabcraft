@@ -28,6 +28,8 @@ finish-args:
   - --share=ipc
   # GPU access for the renderer.
   - --device=dri
+  # Sound: the microphone in video recordings, and a recording's sound played in the editor.
+  - --socket=pulseaudio
   # Captures are saved in Pictures/ScreenGrabCraft. Documents is granted so pictures and
   # projects passed by path (the command line, Open Recent, "Save" next to the original) work in
   # the usual places; Open/Save dialogs go through the file-chooser portal.
