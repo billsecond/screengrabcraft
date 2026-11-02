@@ -19,3 +19,5 @@
 *.webp binary
 *.pdf binary
 *.onnx binary
+# Model weights: binary, never touched by line-end conversion.
+*.onnx binary
