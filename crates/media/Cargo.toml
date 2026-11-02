@@ -1,0 +1,29 @@
+[package]
+name = "screengrabcraft-media"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "ScreenGrabCraft's video: the recording file, the timeline and its edits, and making MP4 videos (AV1 and Opus)"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+image = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+log = { workspace = true }
+lz4_flex = { workspace = true }
+crc32fast = { workspace = true }
+
+# The encoders: Rust all the way down, royalty-free. Not in the browser build.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rav1e = { workspace = true }
+rusty-opus = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

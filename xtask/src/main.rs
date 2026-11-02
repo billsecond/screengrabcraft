@@ -27,7 +27,7 @@ commands:
 ";
 
 /// The crates the browser build is made of: they must build for wasm32.
-const WASM: &[&str] = &["screengrabcraft-model", "screengrabcraft-render", "screengrabcraft-engine", "screengrabcraft-ui"];
+const WASM: &[&str] = &["screengrabcraft-model", "screengrabcraft-render", "screengrabcraft-media", "screengrabcraft-engine", "screengrabcraft-ui"];
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
