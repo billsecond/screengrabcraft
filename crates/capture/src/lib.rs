@@ -36,6 +36,8 @@ mod none;
 #[cfg(not(any(target_os = "windows", unix)))]
 use none as backend;
 
+pub mod audio;
+pub mod camera;
 pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
@@ -125,6 +127,9 @@ pub enum CaptureError {
     NotPermitted,
     #[error("the screenshot was cancelled")]
     Cancelled,
+    /// A sound device or a camera.
+    #[error("{0}")]
+    Device(String),
     #[error("this system has no way for ScreenGrabCraft to capture the screen")]
     Unsupported,
     #[error(transparent)]

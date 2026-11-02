@@ -38,3 +38,24 @@ image = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 # Whether the owner has allowed Screen Recording (`CGPreflightScreenCaptureAccess`), and asking.
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGWindow"] }
+
+# Sound for video recordings: the microphone, and on Windows what the computer plays (WASAPI
+# loopback). ALSA on Linux and the BSDs.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cpal = "0.18.2"
+
+# The camera for video recordings: Media Foundation, AVFoundation, Video4Linux.
+[target.'cfg(target_os = "windows")'.dependencies.nokhwa]
+version = "0.10.11"
+default-features = false
+features = ["input-msmf"]
+
+[target.'cfg(target_os = "macos")'.dependencies.nokhwa]
+version = "0.10.11"
+default-features = false
+features = ["input-avfoundation"]
+
+[target.'cfg(target_os = "linux")'.dependencies.nokhwa]
+version = "0.10.11"
+default-features = false
+features = ["input-v4l"]
