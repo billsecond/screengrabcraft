@@ -196,6 +196,21 @@ impl Widget for StandardButton<'_> {
     }
 }
 
+/// The look of the menus the menu bars open: egui's own (flat items, no outlines) with room to
+/// breathe, as the system's menus have: taller items, wider menus, a margin round them.
+pub fn menu_style(style: &mut egui::Style) {
+    egui::containers::menu::menu_style(style);
+    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    style.spacing.item_spacing.y = 2.0;
+    style.spacing.menu_margin = egui::Margin::same(6);
+    style.spacing.menu_width = 250.0;
+}
+
+/// The menu bar's settings: [`menu_style`] for every menu and submenu it opens.
+pub fn menu_config() -> egui::containers::menu::MenuConfig {
+    egui::containers::menu::MenuConfig::new().style(menu_style)
+}
+
 /// An outlined button, at least [`BUTTON_SIZE`].
 pub fn button(ui: &mut Ui, label: &str) -> Response {
     ui.add(StandardButton::new(label))

@@ -248,4 +248,22 @@ impl Session {
     pub fn select(&mut self, ids: Vec<ObjectId>) {
         self.selection = ids;
     }
+
+    /// The undo and redo steps, to keep in a file (the next to undo or redo last in each).
+    pub fn history(&self) -> screengrabcraft_render::project::History {
+        let step = |s: &Snapshot| screengrabcraft_render::project::Step { label: s.label.clone(), doc: s.doc.clone() };
+        screengrabcraft_render::project::History { undo: self.undo.iter().map(step).collect(), redo: self.redo.iter().map(step).collect() }
+    }
+
+    /// Takes back the steps a file kept, after [`Session::replace`] put its document in place:
+    /// Undo then goes back through what was done before the file was last closed.
+    pub fn restore_history(&mut self, history: screengrabcraft_render::project::History) {
+        let snap = |s: screengrabcraft_render::project::Step| Snapshot { doc: s.doc, selection: Vec::new(), label: s.label };
+        self.undo = history.undo.into_iter().map(snap).collect();
+        self.redo = history.redo.into_iter().map(snap).collect();
+        let over = self.undo.len().saturating_sub(MAX_UNDO);
+        self.undo.drain(..over);
+        self.redo.truncate(MAX_UNDO);
+        self.touch();
+    }
 }

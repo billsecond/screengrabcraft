@@ -98,7 +98,11 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
   contrast.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
-- Undo and redo for everything, copy and paste (a pasted picture lands as an editable object),
+- Whatever tool is chosen, a click on an annotation selects it and a drag moves it (the pen and
+  highlighter draw over things); its handles take hold even when the press is a little off.
+- Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
+- Undo and redo for everything, even after the editor is closed and the capture opened again
+  (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
   WebP, BMP, GIF or PDF.

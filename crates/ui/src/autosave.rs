@@ -43,6 +43,8 @@ pub struct SaveJob {
     /// The picture, written again with the annotations drawn in; none for a project on its own
     /// or a picture kept as it is (a GIF).
     pub picture: Option<(String, ImageFormat)>,
+    /// The undo and redo steps, kept in the side file so Undo works after the file is opened again.
+    pub history: Option<project::History>,
 }
 
 /// A save that finished.
@@ -60,7 +62,7 @@ impl SaveJob {
     }
 
     fn write(&self, write: &dyn Fn(&str, &[u8]) -> Result<(), String>) -> Result<(), String> {
-        let bytes = project::save_with_original(&self.doc, self.original.as_ref()).map_err(|e| e.to_string())?;
+        let bytes = project::save_full(&self.doc, self.original.as_ref(), self.history.as_ref()).map_err(|e| e.to_string())?;
         write(&self.project, &bytes).map_err(|e| format!("{}: {e}", file_name(&self.project)))?;
         let Some((path, format)) = &self.picture else { return Ok(()) };
         let flat = screengrabcraft_render::render(&self.doc).ok_or_else(|| "the picture could not be drawn".to_string())?;
@@ -322,7 +324,8 @@ impl Editor {
             }
         };
         let id = self.saver.start(revision);
-        let job = SaveJob { id, doc: self.session.doc.clone(), original: self.original.clone(), project, picture };
+        let job =
+            SaveJob { id, doc: self.session.doc.clone(), original: self.original.clone(), project, picture, history: Some(self.session.history()) };
         if let Some(done) = self.services.start_save(job) {
             self.saved(ctx, done);
         }

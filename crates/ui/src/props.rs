@@ -145,6 +145,13 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
         ui.add_space(8.0);
     }
 
+    // Shapes with an inside have their fill out in the open: none, the palette, or any colour.
+    let fill_shown = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout);
+    if fill_shown {
+        colour_row(ui, "Fill", &mut s.fill, true);
+        ui.add_space(8.0);
+    }
+
     ui.collapsing("Colours", |ui| {
         let (stroke_label, fill_label) = match kind {
             Kind::Text => ("Border", "Background"),
@@ -162,7 +169,7 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
                 matches!(kind, Kind::Text | Kind::Spotlight | Kind::Step | Kind::Stamp | Kind::Image | Kind::Callout | Kind::Magnify),
             );
         }
-        if matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Text | Kind::Callout | Kind::Step | Kind::Stamp) {
+        if matches!(kind, Kind::Text | Kind::Step | Kind::Stamp) && !fill_shown {
             colour_row(ui, fill_label, &mut s.fill, true);
         }
         if kind.has_text() {

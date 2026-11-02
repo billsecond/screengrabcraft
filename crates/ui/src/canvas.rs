@@ -119,7 +119,13 @@ pub struct Tile {
     pub area: Rect,
 }
 
-const HANDLE: f32 = 8.0;
+/// How big a handle is drawn, in screen points.
+const HANDLE: f32 = 10.0;
+/// How near a handle a press takes hold of it: well beyond what's drawn, so a press that's a
+/// little off still gets it rather than starting something new.
+const GRAB: f32 = 13.0;
+/// How near a line or a border a press takes hold of its annotation, in screen points.
+const NEAR: f32 = 6.0;
 
 fn snap_angle(from: Pt, to: Pt) -> Pt {
     let d = to.sub(from);
@@ -222,7 +228,7 @@ impl Editor {
         if !self.session.doc.bounds().contains(p) {
             return None;
         }
-        self.session.doc.object_at(p, 4.0 / self.view.scale())
+        self.session.doc.object_at(p, NEAR / self.view.scale())
     }
 
     /// The handle of a selected annotation under a screen point.
@@ -233,12 +239,13 @@ impl Editor {
         }
         let id = *sel.first()?;
         let o = self.session.doc.get(id)?;
-        o.shape.handles(&o.style).into_iter().find(|(_, p)| self.view.to_screen(*p).distance(s) <= HANDLE).map(|(h, _)| (id, h))
+        // The nearest one in reach, so two handles close together (a small box) both work.
+        nearest(o.shape.handles(&o.style), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
     }
 
     fn crop_handle_at(&self, s: Pos2) -> Option<Handle> {
         let r = self.crop?;
-        crop_handles(r).into_iter().find(|(_, p)| self.view.to_screen(*p).distance(s) <= HANDLE + 2.0).map(|(h, _)| h)
+        nearest(crop_handles(r), |p| self.view.to_screen(p).distance(s))
     }
 
     /// Starts typing into a text annotation.
@@ -426,6 +433,9 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 None if ed.crop.is_some_and(|c| c != ed.session.doc.bounds() && c.contains(to_img(h, &ed.view))) => CursorIcon::Move,
                 None => CursorIcon::Crosshair,
             },
+            // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
+            Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
+            Tool::Draw(k) if !matches!(k, Kind::Pen | Kind::Highlight) && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
             Tool::Draw(_) if !on_picture => CursorIcon::Default,
             Tool::Draw(Kind::Text) => CursorIcon::Text,
             Tool::Draw(_) => CursorIcon::Crosshair,
@@ -495,6 +505,17 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 if let Some((id, handle)) = ed.handle_at(start_s) {
                     ed.session.begin("Resize");
                     ed.drag = Some(Drag::Handle { id, handle });
+                    return;
+                }
+                // Starting on an annotation picks it up and moves it, whatever the tool, as a
+                // click selects it. Pen and highlighter strokes are drawn over things, so they
+                // always draw.
+                if !matches!(kind, Kind::Pen | Kind::Highlight)
+                    && let Some(id) = ed.object_under(start)
+                {
+                    ed.session.select(vec![id]);
+                    ed.session.begin("Move");
+                    ed.drag = Some(Drag::Move { ids: vec![id], last: start });
                     return;
                 }
                 let step = ed.session.doc.next_step_number();
@@ -926,4 +947,9 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     if done {
         ed.stop_editing();
     }
+}
+
+/// The handle nearest the pointer (`distance` in screen points), if it's within [`GRAB`].
+fn nearest(handles: Vec<(Handle, Pt)>, distance: impl Fn(Pt) -> f32) -> Option<Handle> {
+    handles.into_iter().map(|(h, p)| (h, distance(p))).filter(|(_, d)| *d <= GRAB).min_by(|a, b| a.1.total_cmp(&b.1)).map(|(h, _)| h)
 }

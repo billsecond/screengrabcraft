@@ -1008,7 +1008,8 @@ fn nothing_is_saved_in_the_middle_of_a_drag() {
     h.run_steps(5);
     disk.0.borrow_mut().writes.clear();
     // A slow drag, seconds long.
-    let (a, b) = (at(&h, 100.0, 100.0), at(&h, 300.0, 200.0));
+    // Away from the arrow (a press on it would move it).
+    let (a, b) = (at(&h, 20.0, 220.0), at(&h, 300.0, 290.0));
     h.state_mut().set_tool(Tool::Draw(Kind::Rect));
     h.hover_at(a);
     h.run_steps(1);
@@ -1072,6 +1073,12 @@ fn the_original_is_kept_through_a_crop_and_reverting_is_one_undo_step() {
     assert!(h.state_mut().session.undo());
     assert_eq!(h.state().session.doc.width(), 200);
     assert_eq!(h.state().session.doc.objects.len(), 1);
+    // And goes on back through what was done before the capture was opened again.
+    assert_eq!(h.state().session.undo_label(), Some("Crop"));
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.width(), 400);
+    assert!(h.state_mut().session.undo());
+    assert!(h.state().session.doc.objects.is_empty());
     assert!(!h.state().session.can_undo());
 }
 
@@ -1466,4 +1473,113 @@ fn the_view_still_pans_from_outside_the_picture() {
     h.run_steps(2);
     assert!(h.state().view.center.distance(before) > 10.0, "{:?}", h.state().view.center);
     assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn undo_still_works_after_the_editor_is_closed_and_the_capture_opened_again() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.state_mut().session.execute("image.flip", &serde_json::json!({"horizontal": true})).unwrap();
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").history.undo.len(), 2);
+    // A new editor, as after closing it: the capture opens with its two steps to undo.
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert!(h.state().session.can_undo());
+    assert_eq!(h.state().session.undo_label(), Some("Flip"));
+    h.state_mut().session.execute("edit.undo", &serde_json::json!({})).unwrap();
+    h.state_mut().session.execute("edit.undo", &serde_json::json!({})).unwrap();
+    assert!(h.state().session.doc.objects.is_empty(), "the arrow is undone too");
+    assert!(!h.state().session.can_undo());
+    // And redone.
+    h.state_mut().session.execute("edit.redo", &serde_json::json!({})).unwrap();
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}
+
+/// A rectangle drawn across the middle; the Rectangle tool stays chosen.
+fn draw_rect(h: &mut Harness<'_, Editor>) -> screengrabcraft_model::ObjectId {
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    let (a, b) = (at(h, 100.0, 80.0), at(h, 260.0, 200.0));
+    drag(h, a, b);
+    *h.state().session.selected().first().expect("the new box is selected")
+}
+
+fn rect_of(h: &Harness<'_, Editor>, id: screengrabcraft_model::ObjectId) -> screengrabcraft_model::Rect {
+    match h.state().session.doc.get(id).map(|o| o.shape.clone()) {
+        Some(Shape::Rect { rect, .. }) => rect,
+        other => panic!("not a box: {other:?}"),
+    }
+}
+
+#[test]
+fn with_the_box_tool_a_drag_on_a_box_moves_it_instead_of_drawing_another() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    let before = rect_of(&h, id);
+    // On its border (a hollow box is held by its line), with the Rectangle tool still chosen.
+    let (a, b) = (at(&h, 130.0, 80.0), at(&h, 160.0, 110.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "no second box");
+    let after = rect_of(&h, id);
+    assert!((after.x - before.x - 30.0).abs() < 2.0 && (after.y - before.y - 30.0).abs() < 2.0, "{before:?} → {after:?}");
+}
+
+#[test]
+fn a_handle_takes_hold_even_when_the_press_is_a_little_off() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    let corner = at(&h, 260.0, 200.0);
+    // Ten points off the bottom right handle, outside what's drawn of it.
+    let from = egui::pos2(corner.x + 7.0, corner.y + 7.0);
+    drag(&mut h, from, egui::pos2(from.x + 40.0, from.y + 20.0));
+    assert_eq!(h.state().session.doc.objects.len(), 1, "it didn't draw a new box");
+    let r = rect_of(&h, id);
+    assert!(r.w > 170.0 && r.h > 125.0, "the box grew: {r:?}");
+}
+
+#[test]
+fn a_click_on_a_box_selects_it_whatever_the_tool() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    h.state_mut().session.select(Vec::new());
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let p = at(&h, 100.0, 140.0);
+    click_at(&mut h, p);
+    h.run_steps(2);
+    assert_eq!(h.state().session.selected(), vec![id]);
+}
+
+#[test]
+fn boxes_ellipses_and_callouts_show_their_fill_without_opening_anything() {
+    for tool in [Kind::Rect, Kind::Ellipse, Kind::Callout] {
+        let mut h = harness(editor());
+        h.state_mut().set_tool(Tool::Draw(tool));
+        h.run_steps(2);
+        assert!(h.query_by_label("Fill").is_some(), "{tool:?}");
+    }
+    let mut h = harness(editor());
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    h.run_steps(2);
+    assert!(h.query_by_label("Fill").is_none());
+}
+
+#[test]
+fn the_file_menu_has_room_between_its_items() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    let open = h.get_by_label("New from Clipboard").rect();
+    let save = h.get_by_label("Close Window").rect();
+    assert!(open.height() >= 26.0, "an item is {} points tall", open.height());
+    assert!(open.width() >= 180.0, "the menu is {} points wide", open.width());
+    assert!(save.min.y > open.max.y);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/file-menu.png"));
+    }
 }

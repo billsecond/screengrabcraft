@@ -381,7 +381,7 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         egui::Panel::top("video_menu").frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 3))).show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
+            egui::MenuBar::new().config(crate::widgets::menu_config()).ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         ed.services.request_open();

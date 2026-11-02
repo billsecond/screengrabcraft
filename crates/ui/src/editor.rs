@@ -276,6 +276,7 @@ impl Editor {
             match project::read(&file.bytes) {
                 Ok(p) => {
                     self.replace_document(p.doc, stem, file.path.clone(), None, p.original);
+                    self.session.restore_history(p.history);
                     if p.skipped > 0 {
                         self.error(ctx, format!("{} annotation(s) in the file could not be read and were left out", p.skipped));
                     }
@@ -305,6 +306,8 @@ impl Editor {
                             // beside it was never written again, so it still is the original.
                             let original = if p.tells_original { p.original } else { Some(r) };
                             self.replace_document(p.doc, stem, side, file.path.clone(), original);
+                            // Undo goes on back through what was done before it was closed.
+                            self.session.restore_history(p.history);
                             self.offer_playback(player);
                             self.toast(ctx, "Opened with the annotations saved for it");
                         }
@@ -477,7 +480,7 @@ impl Editor {
         if self.services.has_paths() {
             self.saving_project = true;
             self.services.request_save(&name, &[("ScreenGrabCraft project", &[PROJECT_EXT])]);
-        } else if let Ok(bytes) = project::save_with_original(&self.session.doc, self.original.as_ref()) {
+        } else if let Ok(bytes) = project::save_full(&self.session.doc, self.original.as_ref(), Some(&self.session.history())) {
             let _ = self.services.download(&name, &bytes);
             self.session.dirty = false;
         }
@@ -506,7 +509,7 @@ impl Editor {
 
     /// Save As… to a project: from now on the document is that project, saved as it changes.
     fn write_project(&mut self, ctx: &egui::Context, path: &str) {
-        match project::save_with_original(&self.session.doc, self.original.as_ref()) {
+        match project::save_full(&self.session.doc, self.original.as_ref(), Some(&self.session.history())) {
             Ok(bytes) => match self.services.write_file(path, &bytes) {
                 Ok(()) => {
                     // Saved somewhere else, it leaves the picture it came from as it is.
@@ -798,7 +801,7 @@ impl Editor {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
         egui::Panel::top("menu_bar").frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 3))).show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
+            egui::MenuBar::new().config(crate::widgets::menu_config()).ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.add(egui::Button::new("New Capture").shortcut_text("Ctrl+Shift+N")).clicked() {
                         if let Err(e) = self.services.new_capture(CaptureMode::Region) {
