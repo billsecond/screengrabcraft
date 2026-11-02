@@ -58,6 +58,8 @@ modules:
       - install -Dm644 packaging/linux/io.github.billsecond.screengrabcraft.editor.desktop /app/share/applications/io.github.billsecond.screengrabcraft.editor.desktop
       - install -Dm644 packaging/linux/io.github.billsecond.screengrabcraft.mime.xml /app/share/mime/packages/io.github.billsecond.screengrabcraft.xml
       - mkdir -p /app/share/icons && cp -R assets/app-icon/hicolor /app/share/icons/
+      # Remove Background's model, where the editor looks for it (../share/screengrabcraft/models).
+      - install -Dm644 assets/models/isnet-general-use-int8.onnx /app/share/screengrabcraft/models/isnet-general-use-int8.onnx
       # The Flatpak is one app (the capture service's id), so only its metainfo goes in.
       - >-
         version=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml);

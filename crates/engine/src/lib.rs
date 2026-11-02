@@ -8,7 +8,7 @@ pub mod registry;
 pub mod session;
 
 pub use registry::{COMMANDS, CommandSpec, describe, find, merge_style, parse_object};
-pub use session::Session;
+pub use session::{Background, Session};
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {

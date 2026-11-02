@@ -5,10 +5,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use screengrabcraft_desktop::{clipboard, launch, paths, store};
 use screengrabcraft_model::{CaptureMode, EditorSettings, PROJECT_EXT, Raster, Stamp};
+use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{DialogResult, Filter, OpenedFile, RecentItem, Services};
 
 /// Files larger than this are not opened.
@@ -22,6 +23,8 @@ pub struct DesktopServices {
     rx: Receiver<DialogResult>,
     thumbs: Arc<Mutex<HashMap<String, Option<Raster>>>>,
     thumb_tx: Sender<String>,
+    /// Remove Background's model, looked for once.
+    model: OnceLock<Result<Arc<dyn Matting>, String>>,
 }
 
 impl DesktopServices {
@@ -40,7 +43,7 @@ impl DesktopServices {
         if let Err(e) = spawned {
             log::warn!("no thumbnail worker: {e}");
         }
-        DesktopServices { ctx, tx, rx, thumbs, thumb_tx }
+        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, model: OnceLock::new() }
     }
 }
 
@@ -190,5 +193,9 @@ impl Services for DesktopServices {
 
     fn open_url(&self, url: &str) {
         let _ = launch::open_url(url);
+    }
+
+    fn background_model(&self) -> Result<Arc<dyn Matting>, String> {
+        self.model.get_or_init(screengrabcraft_desktop::models::background_model).clone()
     }
 }

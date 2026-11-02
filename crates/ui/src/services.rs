@@ -3,6 +3,7 @@
 //! provide their own; anything a host can't do has a default that says so.
 
 use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
+use screengrabcraft_render::matte::Matting;
 
 /// A file the owner picked to open (or dropped on the window).
 #[derive(Clone, Debug)]
@@ -105,6 +106,12 @@ pub trait Services {
     /// A file dropped on the window that only the host can read (in a browser, reading is
     /// asynchronous); it comes back through [`Services::poll_dialog`] as opened.
     fn read_dropped(&self, _file: egui::DroppedFileHandle) {}
+
+    /// The model Remove Background runs (on a thread of the editor's own; reading its file is
+    /// left to the model's first use), or why there is none here.
+    fn background_model(&self) -> Result<std::sync::Arc<dyn Matting>, String> {
+        Err("Remove Background needs ScreenGrabCraft Editor on the desktop: its model doesn't run in the browser".to_string())
+    }
 }
 
 /// A host with nothing: for tests.

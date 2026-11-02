@@ -1,0 +1,27 @@
+[package]
+name = "screengrabcraft-matte"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Telling a picture's subject from its background with a salient-object model (ONNX), run by tract in Rust"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-model = { workspace = true }
+screengrabcraft-render = { workspace = true }
+# The ONNX runtime written in Rust (no onnxruntime, no C++; its matrix kernels are assembly it
+# builds itself). 0.23 is the first to run U²-Net and BiRefNet, and runs IS-Net four times as
+# fast as 0.22. It needs Rust 1.91.
+tract-onnx = { version = "0.23.9", default-features = false }
+# tract's matrix kernels, on every core (rayon).
+tract-linalg = { version = "0.23.9", features = ["multithread-mm"] }
+log = { workspace = true }
+
+[dev-dependencies]
+tiny-skia = { workspace = true }
+# Reading and writing ONNX files in the tests and `examples/shrink_model.rs` (the version tract
+# reads them with).
+prost = "0.14"

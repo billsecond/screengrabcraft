@@ -18,3 +18,4 @@
 *.jpg binary
 *.webp binary
 *.pdf binary
+*.onnx binary

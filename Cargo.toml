@@ -7,7 +7,7 @@ default-members = ["crates/*", "apps/screengrabcraft", "apps/screengrabcraft-edi
 version = "0.1.7"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.90"
+rust-version = "1.91"
 repository = "https://github.com/billsecond/screengrabcraft"
 
 [workspace.dependencies]
@@ -15,6 +15,7 @@ repository = "https://github.com/billsecond/screengrabcraft"
 screengrabcraft-model = { path = "crates/model" }
 screengrabcraft-render = { path = "crates/render" }
 screengrabcraft-capture = { path = "crates/capture" }
+screengrabcraft-matte = { path = "crates/matte" }
 screengrabcraft-engine = { path = "crates/engine" }
 screengrabcraft-ui = { path = "crates/ui" }
 screengrabcraft-desktop = { path = "crates/desktop" }

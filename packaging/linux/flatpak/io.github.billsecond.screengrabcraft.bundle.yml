@@ -52,6 +52,8 @@ modules:
       - install -Dm644 share/metainfo/io.github.billsecond.screengrabcraft.metainfo.xml /app/share/metainfo/io.github.billsecond.screengrabcraft.metainfo.xml
       # Docs include the licences of the embedded fonts (OFL-*.txt).
       - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/screengrabcraft /app/share/doc/
+      # Remove Background's model, where the editor looks for it (../share/screengrabcraft/models).
+      - install -Dm644 share/screengrabcraft/models/isnet-general-use-int8.onnx /app/share/screengrabcraft/models/isnet-general-use-int8.onnx
     sources:
       - type: dir
         path: stage

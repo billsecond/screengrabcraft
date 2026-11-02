@@ -1,4 +1,5 @@
 use screengrabcraft_model::{Color, Document, Kind, ObjectId, Pt, Raster, Rect, Shape};
+use screengrabcraft_render::matte::{Matte, MatteError};
 use serde_json::{Value, json};
 
 use crate::{COMMANDS, EngineError, Session};
@@ -234,6 +235,148 @@ fn a_duplicate_with_room_is_where_it_always_was() {
     let copy = *s.selection.first().unwrap();
     assert!((area(&s, copy).x - area(&s, a).x - 16.0).abs() < 0.01);
     assert!((area(&s, copy).y - area(&s, a).y - 16.0).abs() < 0.01);
+}
+
+/// A blue page with a red square in the middle.
+fn square_on_blue() -> Session {
+    let mut r = Raster::filled(60, 40, Color::rgb(30, 90, 200)).unwrap();
+    for y in 10..30 {
+        for x in 20..40 {
+            let i = (y * 60 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[229, 57, 53, 255]);
+        }
+    }
+    Session::new(Document::new(r))
+}
+
+#[test]
+fn a_solid_background_goes_in_one_undo_step() {
+    let mut s = square_on_blue();
+    let before = s.doc.base.clone();
+    let out = s.execute("image.removeSolidBackground", &json!({})).unwrap();
+    assert_eq!(out["color"], "#1E5AC8");
+    assert_eq!(out["cleared"], 60 * 40 - 400);
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
+    assert_eq!(s.doc.base.pixel(30, 20), Some(Color::rgb(229, 57, 53)));
+    assert_eq!(s.undo_label(), Some("Remove Solid Background"));
+    assert!(s.undo());
+    assert_eq!(s.doc.base, before);
+    // A colour of its own, and how close is close enough.
+    s.execute("image.removeSolidBackground", &json!({"color": "#1E5AC8", "tolerance": 0})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
+}
+
+#[test]
+fn nothing_to_take_away_is_an_error_that_changes_nothing() {
+    // All one colour: nothing would be left.
+    let mut s = session();
+    assert!(matches!(s.execute("image.removeSolidBackground", &json!({})), Err(EngineError::Failed(_))));
+    assert!(!s.can_undo() && s.doc.base.pixel(5, 5) == Some(Color::WHITE));
+    // A colour that isn't there.
+    let mut s = square_on_blue();
+    assert!(s.execute("image.removeSolidBackground", &json!({"color": "#00FF00", "tolerance": 3})).is_err());
+    assert!(s.execute("image.makeColorTransparent", &json!({"color": "#00FF00", "tolerance": 3})).is_err());
+    assert!(!s.can_undo());
+    // A picture of one pixel.
+    let mut one = Session::new(Document::new(Raster::single(Color::RED)));
+    assert!(one.execute("image.removeSolidBackground", &json!({})).is_err());
+    assert!(one.execute("image.makeColorTransparent", &json!({"x": 0, "y": 0})).is_err());
+    assert!(one.execute("image.makeColorTransparent", &json!({"color": "#000000"})).is_err());
+}
+
+#[test]
+fn a_colour_goes_everywhere_or_from_a_pixel() {
+    let mut s = square_on_blue();
+    s.execute("image.makeColorTransparent", &json!({"x": 30, "y": 20})).unwrap();
+    assert_eq!(s.doc.base.pixel(30, 20).map(|c| c.a), Some(0), "the red square went");
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(255), "the blue stayed");
+    s.undo();
+    s.execute("image.makeColorTransparent", &json!({"color": "#1E5AC8", "contiguous": true, "x": 0, "y": 0})).unwrap();
+    assert_eq!(s.doc.base.pixel(59, 39).map(|c| c.a), Some(0));
+    for bad in [
+        json!({}),
+        json!({"x": 5}),
+        json!({"x": 500, "y": 5}),
+        json!({"x": "left", "y": 0}),
+        json!({"color": "#1E5AC8", "contiguous": true}),
+        json!({"color": 12}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("image.makeColorTransparent", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+/// A model that calls the left half of any picture background.
+struct LeftIsBackground;
+
+impl screengrabcraft_render::matte::Matting for LeftIsBackground {
+    fn name(&self) -> &str {
+        "halves"
+    }
+
+    fn matte(&self, picture: &Raster, progress: &mut dyn FnMut(f32) -> bool) -> Result<Matte, MatteError> {
+        if !progress(0.5) {
+            return Err(MatteError::Cancelled);
+        }
+        let (w, h) = (picture.width(), picture.height());
+        let alpha = (0..h).flat_map(|_| (0..w).map(move |x| if x < w / 2 { 0 } else { 255 })).collect();
+        Ok(Matte::new(w, h, alpha)?)
+    }
+}
+
+/// A model that falls over.
+struct Broken;
+
+impl screengrabcraft_render::matte::Matting for Broken {
+    fn name(&self) -> &str {
+        "broken"
+    }
+
+    fn matte(&self, _: &Raster, _: &mut dyn FnMut(f32) -> bool) -> Result<Matte, MatteError> {
+        panic!("a model that falls over")
+    }
+}
+
+#[test]
+fn the_background_goes_with_a_model() {
+    let mut s = session();
+    assert!(matches!(s.execute("image.removeBackground", &json!({})), Err(EngineError::Failed(_))), "no model, no change");
+    s.background.set_model(Some(std::sync::Arc::new(LeftIsBackground)));
+    assert!(matches!(s.execute("image.removeBackground", &json!({"model": "other"})), Err(EngineError::Params(_))));
+    let out = s.execute("image.removeBackground", &json!({"model": "halves"})).unwrap();
+    assert_eq!(out["model"], "halves");
+    assert_eq!(s.doc.base.pixel(10, 50).map(|c| c.a), Some(0));
+    assert_eq!(s.doc.base.pixel(190, 50).map(|c| c.a), Some(255));
+    assert_eq!(s.undo_label(), Some("Remove Background"));
+    assert!(s.undo());
+    assert_eq!(s.doc.base.pixel(10, 50).map(|c| c.a), Some(255));
+}
+
+#[test]
+fn a_matte_worked_out_ahead_is_used_for_its_picture_only() {
+    let mut s = session();
+    let matte = Matte::new(200, 100, vec![0; 200 * 100]).unwrap();
+    // Worked out for the picture as it is: used, without a model.
+    s.background.prepare(s.doc.base.clone(), "ahead", matte.clone());
+    assert_eq!(s.execute("image.removeBackground", &json!({})).unwrap()["model"], "ahead");
+    assert_eq!(s.doc.base.pixel(100, 50).map(|c| c.a), Some(0));
+    s.undo();
+    // Worked out for a picture that has changed since: not used.
+    s.background.prepare(s.doc.base.clone(), "ahead", matte);
+    s.execute("effect.invert", &json!({})).unwrap();
+    assert!(s.execute("image.removeBackground", &json!({})).is_err());
+    assert_eq!(s.doc.base.pixel(100, 50).map(|c| c.a), Some(255));
+}
+
+#[test]
+fn a_model_that_falls_over_changes_nothing() {
+    let mut s = session();
+    s.background.set_model(Some(std::sync::Arc::new(Broken)));
+    let before = s.doc.clone();
+    assert!(matches!(s.execute("image.removeBackground", &json!({})), Err(EngineError::Panicked(_))));
+    assert_eq!(s.doc, before);
+    assert!(!s.can_undo());
 }
 
 #[test]
