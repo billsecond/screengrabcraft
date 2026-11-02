@@ -2,6 +2,8 @@
 //! recent captures and the capture service. The desktop program and the browser build each
 //! provide their own; anything a host can't do has a default that says so.
 
+use screengrabcraft_media::recording::{Recording, Source};
+use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
 
 pub use crate::autosave::{SaveJob, Saved};
@@ -36,6 +38,35 @@ pub struct RecentItem {
 
 /// File types offered in a save dialog: a name and its extensions.
 pub type Filter = (&'static str, &'static [&'static str]);
+
+/// A video the host is making (an MP4 from a recording, as edited).
+#[derive(Clone, Default)]
+pub struct VideoExport {
+    /// 0 to 1000.
+    pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// Set to stop it; nothing is left behind.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The file made, or why not, once it's done.
+    pub done: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+}
+
+/// What to make a video from.
+#[derive(Clone)]
+pub struct VideoJob {
+    pub recording: std::sync::Arc<Recording>,
+    pub timeline: Timeline,
+    /// Where it's wanted; the host picks a free name beside it if that one is taken.
+    pub out: String,
+    /// The largest it's made.
+    pub max_size: (u32, u32),
+    pub fps: u32,
+}
+
+/// Sound the host is playing; dropping it stops it.
+pub trait SoundOut {
+    /// Where on the timeline the sound heard now is (µs), when the device says.
+    fn position_us(&self) -> Option<u64>;
+}
 
 pub trait Services {
     /// Puts a picture on the clipboard.
@@ -134,6 +165,31 @@ pub trait Services {
     /// A file dropped on the window that only the host can read (in a browser, reading is
     /// asynchronous); it comes back through [`Services::poll_dialog`] as opened.
     fn read_dropped(&self, _file: egui::DroppedFileHandle) {}
+
+    // ---- video ----
+
+    /// A video recording file, read where it's needed (they can be large).
+    fn open_recording(&self, _path: &str) -> Result<Box<dyn Source>, String> {
+        Err("video recordings are opened by the editor on the desktop".to_string())
+    }
+
+    /// Adds bytes to the end of a file (a recording's edits).
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("files are not available here".to_string())
+    }
+
+    /// Starts making an MP4 (on a thread of the host's).
+    fn export_video(&self, _job: VideoJob) -> Result<VideoExport, String> {
+        Err("videos are made by the editor on the desktop".to_string())
+    }
+
+    /// Plays the edited sound from `from_us`, until it's dropped.
+    fn play_sound(&self, _recording: std::sync::Arc<Recording>, _timeline: Timeline, _from_us: u64) -> Option<Box<dyn SoundOut>> {
+        None
+    }
+
+    /// Opens a file in the program the system uses for it (a video in its player).
+    fn open_with_system(&self, _path: &str) {}
 }
 
 /// A host with nothing, not even paths (nothing is saved by itself): for tests.

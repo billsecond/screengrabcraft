@@ -258,10 +258,22 @@ impl<W: Write> RecordingWriter<W> {
 
 /// Adds the edits to a finished recording file (opened for appending).
 pub fn append_edit(out: &mut impl Write, timeline: &Timeline) -> Result<(), RecordingError> {
-    let json = serde_json::to_vec(timeline).map_err(|e| RecordingError::Damaged(e.to_string()))?;
-    chunk(out, b"EDIT", &json)?;
+    out.write_all(&edit_bytes(timeline)?)?;
     out.flush()?;
     Ok(())
+}
+
+/// The edits as the chunk to add to the end of a recording file.
+pub fn edit_bytes(timeline: &Timeline) -> Result<Vec<u8>, RecordingError> {
+    let json = serde_json::to_vec(timeline).map_err(|e| RecordingError::Damaged(e.to_string()))?;
+    let mut out = Vec::with_capacity(json.len() + 12);
+    chunk(&mut out, b"EDIT", &json)?;
+    Ok(out)
+}
+
+/// Whether these bytes start like a recording file.
+pub fn sniff(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
 }
 
 // ---- reading ----

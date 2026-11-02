@@ -16,6 +16,7 @@ pub mod props;
 pub mod services;
 pub mod strip;
 pub mod theme;
+pub mod video;
 pub mod widgets;
 
 use std::sync::Arc;
@@ -59,3 +60,5 @@ pub fn setup(ctx: &egui::Context, theme: screengrabcraft_model::Theme) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod video_tests;

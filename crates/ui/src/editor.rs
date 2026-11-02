@@ -96,6 +96,10 @@ pub struct Editor {
     pub(crate) drag: Option<Drag>,
     /// The animated GIF the document came from, to play.
     pub playback: Option<crate::playback::Playback>,
+    /// A video recording, when one is open (the window shows the video editor instead).
+    pub video: Option<crate::video::VideoView>,
+    /// Counts what was opened, so the video editor knows when it has been replaced.
+    pub(crate) video_epoch: u64,
     /// The text annotation being typed into, and its text as typed.
     pub(crate) editing: Option<ObjectId>,
     pub(crate) edit_buffer: String,
@@ -153,6 +157,8 @@ impl Editor {
             checker: None,
             drag: None,
             playback: None,
+            video: None,
+            video_epoch: 0,
             editing: None,
             edit_buffer: String::new(),
             last_dark: None,
@@ -208,6 +214,8 @@ impl Editor {
     }
 
     fn replace_document(&mut self, doc: Document, name: String, project: Option<String>, picture: Option<String>, original: Option<Raster>) {
+        self.video = None;
+        self.video_epoch += 1;
         self.session.replace(doc);
         self.name = name;
         self.project_path = project;
@@ -247,6 +255,19 @@ impl Editor {
     }
 
     pub(crate) fn open_now(&mut self, ctx: &egui::Context, mut file: OpenedFile) {
+        // A video recording: read where it is (they can be large), or from its bytes.
+        if screengrabcraft_media::recording::sniff(&file.bytes) {
+            let name = file.name.clone();
+            self.open_video(ctx, Box::new(std::mem::take(&mut file.bytes)), file.path.clone(), name);
+            return;
+        }
+        if file.bytes.is_empty()
+            && let Some(p) = file.path.as_deref().filter(|p| is_recording_path(p))
+        {
+            let p = p.to_string();
+            self.open_video_path(ctx, &p);
+            return;
+        }
         let stem = std::path::Path::new(&file.name).file_stem().and_then(|s| s.to_str()).unwrap_or("Untitled").to_string();
         if project::sniff(&file.bytes) {
             match project::read(&file.bytes) {
@@ -301,8 +322,44 @@ impl Editor {
         }
     }
 
+    /// Opens a video recording: the window becomes the video editor.
+    pub fn open_video(&mut self, ctx: &egui::Context, source: Box<dyn screengrabcraft_media::recording::Source>, path: Option<String>, name: String) {
+        match screengrabcraft_media::recording::Recording::open(source) {
+            Ok(rec) => {
+                if let Some(mut old) = self.video.take() {
+                    old.save_now(self, ctx);
+                }
+                let stem = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
+                self.video = Some(crate::video::VideoView::new(rec, path.clone(), stem));
+                self.video_epoch += 1;
+                if let Some(p) = &path {
+                    self.settings.remember(p);
+                    self.services.save_settings(&self.settings);
+                }
+            }
+            Err(e) => self.error(ctx, format!("{name}: {e}")),
+        }
+    }
+
+    fn open_video_path(&mut self, ctx: &egui::Context, path: &str) {
+        match self.services.open_recording(path) {
+            Ok(source) => self.open_video(ctx, source, Some(path.to_string()), file_name(path)),
+            Err(e) => self.error(ctx, format!("{path}: {e}")),
+        }
+    }
+
     /// Opens a file by path through the host.
     pub fn open_path(&mut self, ctx: &egui::Context, path: &str) {
+        // A made video plays in the system's own player.
+        if std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("mp4")) {
+            self.services.open_with_system(path);
+            return;
+        }
+        if is_recording_path(path) {
+            let file = OpenedFile { name: file_name(path), path: Some(path.to_string()), bytes: Vec::new() };
+            self.open_file(ctx, file);
+            return;
+        }
         match self.services.read_file(path) {
             Ok(bytes) => {
                 let name = std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path).to_string();
@@ -518,6 +575,11 @@ impl Editor {
     /// Asked to close the window: true when it may close now. Otherwise the last changes are
     /// being saved, and the window closes once they are (`quit_requested`).
     pub fn close_requested(&mut self) -> bool {
+        // A video's edits are written at once (they're small).
+        if let Some(mut v) = self.video.take() {
+            v.save_now(self, &egui::Context::default());
+            self.video = Some(v);
+        }
         if self.close_confirmed || self.ready_to_leave() {
             return true;
         }
@@ -564,13 +626,22 @@ impl Editor {
         }
         // The dot while changes are still to be written.
         let unsaved = self.session.dirty || self.saver.writing();
-        let title = format!("{}{} — {}", if unsaved { "• " } else { "" }, self.name, screengrabcraft_model::EDITOR_NAME);
+        let title = match &self.video {
+            Some(v) => format!("{}{} — {}", if v.session.dirty { "• " } else { "" }, v.name, screengrabcraft_model::EDITOR_NAME),
+            None => format!("{}{} — {}", if unsaved { "• " } else { "" }, self.name, screengrabcraft_model::EDITOR_NAME),
+        };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 
     /// The window's contents.
     pub fn ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        if self.video.is_some() {
+            crate::video::show(self, ui);
+            crate::dialogs::show(self, &ctx);
+            self.paint_toast(&ctx);
+            return;
+        }
         self.shortcuts(&ctx);
         self.menu_bar(ui);
         self.tool_bar(ui);
@@ -1167,4 +1238,9 @@ pub fn sibling_project(picture: &str) -> String {
 
 pub fn file_name(path: &str) -> String {
     std::path::Path::new(path).file_name().and_then(|s| s.to_str()).unwrap_or(path).to_string()
+}
+
+/// Whether a path is a video recording (`.sgvideo`).
+pub fn is_recording_path(path: &str) -> bool {
+    std::path::Path::new(path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(screengrabcraft_media::recording::EXT))
 }
