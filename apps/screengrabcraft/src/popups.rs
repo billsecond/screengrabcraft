@@ -1,17 +1,22 @@
 //! The service's small windows: the countdown before a delayed capture, the control of a running
 //! recording, and the notice after a capture is kept.
+//!
+//! Each is a borderless window drawn as a standard popup (`screengrabcraft_ui::widgets`): the
+//! panel colour of the light or dark look, a 1 px border all round, its buttons at the right.
+//! What each shows is drawn by a function of its own (`notice_ui`, …) that only says what was
+//! pressed, so it can be drawn and tested headless.
 
+use std::path::Path;
 use std::time::Instant;
 
-use egui::{Color32, RichText, ViewportBuilder, ViewportId, pos2, vec2};
+use egui::{RichText, Ui, Vec2, ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_desktop::launch;
 use screengrabcraft_model::IRect;
-use screengrabcraft_ui::icons::{self, Icon};
+use screengrabcraft_ui::theme::Tokens;
+use screengrabcraft_ui::widgets::{self, FooterButton};
 
 use crate::app::{APP_ID, Service};
 use crate::record::Kind;
-
-const DARK: Color32 = Color32::from_rgb(0x1F, 0x1F, 0x25);
 
 fn popup(title: &str, at: egui::Pos2, size: egui::Vec2, active: bool) -> ViewportBuilder {
     ViewportBuilder::default()
@@ -31,14 +36,27 @@ fn points(x: f32, y: f32, scale: f32) -> egui::Pos2 {
     if cfg!(target_os = "macos") { pos2(x, y) } else { pos2(x / scale.max(0.5), y / scale.max(0.5)) }
 }
 
-fn frame() -> egui::Frame {
-    egui::Frame::NONE.fill(DARK).inner_margin(egui::Margin::same(12))
+// ---- the countdown ----
+
+const COUNTDOWN_SIZE: Vec2 = vec2(184.0, 196.0);
+
+/// The countdown's face: the seconds left, and Cancel. True when Cancel was pressed.
+fn countdown_ui(ui: &mut Ui, left: u32) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let mut cancel = false;
+    ui.vertical_centered(|ui| {
+        ui.label(RichText::new(left.max(1).to_string()).font(widgets::strong_font(ui.ctx(), 84.0)).color(t.text));
+        ui.label(RichText::new("Capturing…").color(t.muted));
+        ui.add_space(10.0);
+        cancel = widgets::button(ui, "Cancel").clicked();
+    });
+    cancel
 }
 
 pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
     let Some(c) = &svc.countdown else { return };
     let left = c.until.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u32;
-    let size = vec2(180.0, 180.0);
+    let size = COUNTDOWN_SIZE;
     let at = match c.on {
         Some((r, s)) => {
             let center = points(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0, s);
@@ -48,21 +66,100 @@ pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
     };
     let mut cancel = false;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("countdown"), popup("ScreenGrabCraft countdown", at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(frame().corner_radius(16)).show(ui, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new(left.max(1).to_string()).size(84.0).color(Color32::WHITE).strong());
-                ui.label(RichText::new("Capturing…").color(Color32::from_gray(200)));
-                ui.add_space(4.0);
-                if ui.button("Cancel").clicked() {
-                    cancel = true;
-                }
-            });
+        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
+            cancel = countdown_ui(ui, left);
         });
     });
     if cancel {
         svc.countdown = None;
     }
+}
+
+// ---- the recording control ----
+
+/// What the recording control's buttons do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingChoice {
+    Stop,
+    Cancel,
+}
+
+fn recording_size(kind: Kind) -> Vec2 {
+    let w = match kind {
+        Kind::Scrolling => 470.0,
+        Kind::Video | Kind::Production => 520.0,
+        Kind::Gif => 390.0,
+    };
+    vec2(w, 54.0)
+}
+
+/// What the recording control shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct RecordingView {
+    secs: u64,
+    /// Frames (GIF, video) or the picture's height (scrolling).
+    progress: u32,
+    lost: u32,
+    /// A video being made after the recording: 1 to 1001 (its progress + 1), else 0.
+    saving: u32,
+    /// The computer's sound and the microphone, if they're recorded, and how loud they are.
+    sound: Option<f32>,
+    mic: Option<f32>,
+    /// What was asked for and couldn't be had (`No camera: …`).
+    missing: Vec<String>,
+}
+
+/// A red light that blinks every second, and the time.
+fn red_light(ui: &mut Ui, secs: u64, text: egui::Color32) {
+    let (dot, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+    let red = if secs.is_multiple_of(2) { egui::Color32::from_rgb(0xE5, 0x39, 0x35) } else { egui::Color32::from_rgb(0x99, 0x22, 0x22) };
+    ui.painter().circle_filled(dot.center(), 6.0, red);
+    ui.label(RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60)).monospace().size(16.0).color(text));
+}
+
+/// The recording control's face: how far it has got, then [Stop] [Cancel] at the right.
+fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingChoice> {
+    let t = Tokens::get(ui.ctx());
+    let mut choice = None;
+    let making = matches!(kind, Kind::Video | Kind::Production) && v.saving > 0;
+    ui.horizontal_centered(|ui| {
+        match kind {
+            Kind::Gif => {
+                red_light(ui, v.secs, t.text);
+                ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
+            }
+            Kind::Scrolling => {
+                let text = if v.lost > 2 { "Scroll more slowly…".to_string() } else { format!("Scroll the area — {} px", v.progress) };
+                ui.label(RichText::new(text).color(if v.lost > 2 { t.danger } else { t.text }));
+            }
+            Kind::Video | Kind::Production if making => {
+                let done = v.saving.saturating_sub(1).min(1000) as f32 / 1000.0;
+                ui.label(RichText::new("Making the video…").color(t.text));
+                ui.add(egui::ProgressBar::new(done).desired_width(150.0).show_percentage());
+            }
+            Kind::Video | Kind::Production => {
+                red_light(ui, v.secs, t.text);
+                // A meter for each sound, so the owner sees it's being heard.
+                for (name, level) in [("Sound", v.sound), ("Mic", v.mic)] {
+                    if let Some(l) = level {
+                        ui.label(RichText::new(name).size(12.0).color(t.muted));
+                        ui.add(egui::ProgressBar::new(l.clamp(0.0, 1.0)).desired_width(44.0).desired_height(6.0));
+                    }
+                }
+                if !v.missing.is_empty() {
+                    ui.label(RichText::new("⚠").color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B))).on_hover_text(v.missing.join("\n"));
+                }
+            }
+        }
+        let (stop, tip) = match kind {
+            Kind::Scrolling => ("Done", "Stop scrolling and keep the picture"),
+            _ => ("Stop", "Stop and save"),
+        };
+        let buttons: Vec<FooterButton<'_>> =
+            if making { vec![FooterButton::cancel("Cancel")] } else { vec![FooterButton::primary(stop).tip(tip), FooterButton::cancel("Cancel")] };
+        choice = widgets::footer(ui, &buttons).map(|i| if i == 0 && !making { RecordingChoice::Stop } else { RecordingChoice::Cancel });
+    });
+    choice
 }
 
 pub fn recording(svc: &mut Service, ctx: &egui::Context) {
@@ -75,22 +172,19 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         .ok()
         .and_then(|ms| ms.into_iter().find(|m| m.rect.contains(i64::from(d.x), i64::from(d.y))).map(|m| (m.scale, m.rect)))
         .unwrap_or((1.0, d));
-    let saving = rec.saving.load(std::sync::atomic::Ordering::SeqCst);
     let level = |i: usize| rec.levels.get(i).map(|l| f32::from_bits(l.load(std::sync::atomic::Ordering::Relaxed))).unwrap_or(0.0);
-    let (sound, mic) = (level(0), level(1));
     let sources = rec.sources.lock().map(|s| s.clone()).unwrap_or_default();
     let has = |prefix: &str| sources.iter().any(|s| s.starts_with(prefix));
-    let (with_sound, with_mic) = (has("Computer sound"), has("Microphone:"));
-    let missing: Vec<String> = sources.iter().filter(|s| s.starts_with("No ")).cloned().collect();
-    let video = matches!(kind, Kind::Video | Kind::Production);
-    let size = vec2(
-        match kind {
-            Kind::Scrolling => 420.0,
-            Kind::Video | Kind::Production => 460.0,
-            Kind::Gif => 300.0,
-        },
-        52.0,
-    );
+    let view = RecordingView {
+        secs,
+        progress,
+        lost,
+        saving: rec.saving.load(std::sync::atomic::Ordering::SeqCst),
+        sound: has("Computer sound").then(|| level(0)),
+        mic: has("Microphone:").then(|| level(1)),
+        missing: sources.iter().filter(|s| s.starts_with("No ")).cloned().collect(),
+    };
+    let size = recording_size(kind);
     // Below the area, else above it, else inside its top.
     let (s, mon) = scale;
     let below = d.bottom() as f32 + 10.0;
@@ -102,69 +196,21 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         d.y as f32 + 10.0
     };
     let at = points(d.x as f32, y, s);
-    let mut stop = false;
-    let mut cancel = false;
+    let mut choice = None;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup("ScreenGrabCraft recording", at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(frame().corner_radius(10).inner_margin(egui::Margin::symmetric(12, 8))).show(ui, |ui| {
-            ui.style_mut().visuals = egui::Visuals::dark();
-            ui.horizontal_centered(|ui| {
-                match kind {
-                    Kind::Gif => {
-                        let blink = (secs % 2 == 0) as u8;
-                        ui.label(RichText::new("●").size(18.0).color(if blink == 1 {
-                            Color32::from_rgb(0xEF, 0x44, 0x44)
-                        } else {
-                            Color32::from_rgb(0x99, 0x22, 0x22)
-                        }));
-                        ui.label(RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60)).monospace().size(16.0).color(Color32::WHITE));
-                        ui.label(RichText::new(format!("{progress} frames")).color(Color32::from_gray(170)));
-                    }
-                    Kind::Scrolling => {
-                        let text = if lost > 2 { "Scroll more slowly…".to_string() } else { format!("Scroll the area — {progress} px") };
-                        ui.label(RichText::new(text).color(Color32::WHITE));
-                    }
-                    Kind::Video | Kind::Production if saving > 0 => {
-                        let done = saving.saturating_sub(1).min(1000) as f32 / 1000.0;
-                        ui.label(RichText::new("Making the video…").color(Color32::WHITE));
-                        ui.add(egui::ProgressBar::new(done).desired_width(140.0).show_percentage());
-                    }
-                    Kind::Video | Kind::Production => {
-                        let blink = secs % 2 == 0;
-                        let red = if blink { Color32::from_rgb(0xEF, 0x44, 0x44) } else { Color32::from_rgb(0x99, 0x22, 0x22) };
-                        ui.label(RichText::new("●").size(18.0).color(red));
-                        ui.label(RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60)).monospace().size(16.0).color(Color32::WHITE));
-                        // A meter for each sound, so the owner sees it's being heard.
-                        for (on, name, v) in [(with_sound, "Sound", sound), (with_mic, "Mic", mic)] {
-                            if on {
-                                ui.label(RichText::new(name).size(12.0).color(Color32::from_gray(170)));
-                                ui.add(egui::ProgressBar::new(v.clamp(0.0, 1.0)).desired_width(44.0).desired_height(6.0));
-                            }
-                        }
-                        if !missing.is_empty() {
-                            ui.label(RichText::new("⚠").color(Color32::from_rgb(0xF5, 0x9E, 0x0B))).on_hover_text(missing.join("\n"));
-                        }
-                    }
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if icons::button(ui, Icon::Close, "Cancel", false, true).clicked() {
-                        cancel = true;
-                    }
-                    let tip = if kind == Kind::Scrolling { "Done" } else { "Stop and save" };
-                    if !(video && saving > 0) && icons::button(ui, Icon::Check, tip, false, true).clicked() {
-                        stop = true;
-                    }
-                });
-            });
+        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
+            choice = recording_ui(ui, kind, &view);
         });
     });
     ctx.request_repaint_after(std::time::Duration::from_millis(250));
-    if stop {
-        svc.stop_recording(false);
-    }
-    if cancel {
-        svc.stop_recording(true);
+    match choice {
+        Some(RecordingChoice::Stop) => svc.stop_recording(false),
+        Some(RecordingChoice::Cancel) => svc.stop_recording(true),
+        None => {}
     }
 }
+
+// ---- the notice after a capture ----
 
 /// An MP4: it plays in the system's own player.
 fn is_video(path: &std::path::Path) -> bool {
@@ -184,6 +230,92 @@ fn editor_button(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+/// What the notice after a capture shows.
+struct NoticeView<'a> {
+    text: &'a str,
+    detail: &'a str,
+    path: Option<&'a Path>,
+    /// The capture, small, and its size.
+    thumb: Option<(egui::TextureId, Vec2)>,
+    error: bool,
+}
+
+/// What the notice's buttons do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoticeChoice {
+    /// Edit it, or play it (a GIF).
+    Open,
+    Reveal,
+    CopyPath,
+    Close,
+}
+
+/// The notice's buttons, left to right on Windows, and what each does: the editor's (the default
+/// one), Show in folder and Copy path. A PDF, which doesn't open in the editor, has Show in folder
+/// as its default.
+fn notice_buttons(path: Option<&Path>) -> Vec<(FooterButton<'static>, NoticeChoice)> {
+    let Some(p) = path else { return Vec::new() };
+    let mut buttons = Vec::with_capacity(3);
+    match editor_button(p) {
+        Some(label) => {
+            buttons.push((FooterButton::primary(label), NoticeChoice::Open));
+            buttons.push((FooterButton::plain("Show in folder"), NoticeChoice::Reveal));
+        }
+        None => buttons.push((FooterButton::primary("Show in folder"), NoticeChoice::Reveal)),
+    }
+    buttons.push((FooterButton::plain("Copy path"), NoticeChoice::CopyPath));
+    buttons
+}
+
+fn notice_size(n: &NoticeView<'_>) -> Vec2 {
+    vec2(400.0, if n.path.is_some() { 134.0 } else { 92.0 })
+}
+
+/// The notice's face: the capture, what became of it, an X at the top right, and its buttons at
+/// the bottom right.
+fn notice_ui(ui: &mut Ui, n: &NoticeView<'_>) -> Option<NoticeChoice> {
+    let t = Tokens::get(ui.ctx());
+    let area = ui.max_rect();
+    let mut choice = None;
+    let x = egui::Rect::from_min_size(pos2(area.max.x - 22.0, area.min.y - 6.0), vec2(28.0, 26.0));
+    if widgets::close_button(ui, x).clicked() {
+        choice = Some(NoticeChoice::Close);
+    }
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        if let Some((id, s)) = n.thumb {
+            let f = (96.0 / s.x.max(1.0)).min(64.0 / s.y.max(1.0)).min(1.0);
+            let r = ui.add(egui::Image::new((id, s * f))).rect;
+            ui.painter().rect_stroke(r, 0.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Outside);
+        } else if n.error {
+            let (r, _) = ui.allocate_exact_size(vec2(28.0, 28.0), egui::Sense::hover());
+            ui.painter().circle_filled(r.center(), 13.0, t.danger);
+            ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "!", widgets::strong_font(ui.ctx(), 17.0), t.panel);
+        }
+        ui.vertical(|ui| {
+            // Clear of the X.
+            ui.set_max_width((ui.available_width() - 30.0).max(40.0));
+            let title = RichText::new(n.text).font(widgets::strong_font(ui.ctx(), 14.5)).color(if n.error { t.danger } else { t.text });
+            ui.add(egui::Label::new(title).truncate());
+            if !n.detail.is_empty() {
+                ui.add(egui::Label::new(RichText::new(n.detail).size(12.0).color(t.muted)).truncate());
+            }
+        });
+    });
+    let buttons = notice_buttons(n.path);
+    if !buttons.is_empty() {
+        let room = ui.available_height() - widgets::BUTTON_SIZE.y;
+        if room > 0.0 {
+            ui.add_space(room);
+        }
+        let row: Vec<FooterButton<'_>> = buttons.iter().map(|(b, _)| *b).collect();
+        if let Some(i) = widgets::footer(ui, &row) {
+            choice = buttons.get(i).map(|(_, c)| *c);
+        }
+    }
+    choice
+}
+
 pub fn notice(svc: &mut Service, ctx: &egui::Context) {
     let Some(n) = svc.notice.as_mut() else { return };
     if n.texture.is_none()
@@ -192,55 +324,39 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
         let img = egui::ColorImage::from_rgba_unmultiplied([t.width() as usize, t.height() as usize], t.pixels());
         n.texture = Some(ctx.load_texture("notice-thumb", img, egui::TextureOptions::LINEAR));
     }
-    let size = vec2(380.0, 96.0);
+    let (text, detail, path, tex, error) =
+        (n.text.clone(), n.detail.clone(), n.path.clone(), n.texture.as_ref().map(|t| (t.id(), t.size_vec2())), n.error);
+    let view = NoticeView { text: &text, detail: &detail, path: path.as_deref(), thumb: tex, error };
+    let size = notice_size(&view);
     let at = screengrabcraft_capture::monitors()
         .ok()
         .and_then(|ms| ms.into_iter().next())
         .map(|m| points(m.rect.right() as f32 - 24.0 * m.scale, m.rect.bottom() as f32 - 72.0 * m.scale, m.scale) - size)
         .unwrap_or(pos2(40.0, 40.0));
-    let (text, detail, path, tex, error) =
-        (n.text.clone(), n.detail.clone(), n.path.clone(), n.texture.as_ref().map(|t| (t.id(), t.size_vec2())), n.error);
-    let mut close = false;
+    let mut choice = None;
     let mut hold = false;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("notice"), popup("ScreenGrabCraft", at, size, false), |ui, _| {
-        let fill = if error { Color32::from_rgb(0x5A, 0x1D, 0x22) } else { DARK };
-        egui::CentralPanel::default().frame(frame().fill(fill).corner_radius(10)).show(ui, |ui| {
-            ui.style_mut().visuals = egui::Visuals::dark();
+        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
             hold = ui.ui_contains_pointer();
-            ui.horizontal(|ui| {
-                if let Some((id, s)) = tex {
-                    let f = (96.0 / s.x).min(64.0 / s.y).min(1.0);
-                    ui.add(egui::Image::new((id, s * f)));
-                }
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&text).strong().size(15.0).color(Color32::WHITE));
-                    if !detail.is_empty() {
-                        ui.add(egui::Label::new(RichText::new(&detail).size(12.0).color(Color32::from_gray(190))).truncate());
-                    }
-                    ui.horizontal(|ui| {
-                        if let Some(p) = &path {
-                            if let Some(label) = editor_button(p)
-                                && ui.small_button(label).clicked()
-                            {
-                                let _ = if is_video(p) { launch::open_file(p) } else { launch::open_editor(&[p.to_string_lossy().to_string()]) };
-                                close = true;
-                            }
-                            if ui.small_button("Show in folder").clicked() {
-                                let _ = launch::reveal(p);
-                                close = true;
-                            }
-                            if ui.small_button("Copy path").clicked() {
-                                let _ = screengrabcraft_desktop::clipboard::copy_text(&p.to_string_lossy());
-                            }
-                        }
-                        if ui.small_button("Close").clicked() {
-                            close = true;
-                        }
-                    });
-                });
-            });
+            choice = notice_ui(ui, &view);
         });
     });
+    let close = match (choice, &path) {
+        (Some(NoticeChoice::Open), Some(p)) => {
+            let _ = if is_video(p) { launch::open_file(p) } else { launch::open_editor(&[p.to_string_lossy().to_string()]) };
+            true
+        }
+        (Some(NoticeChoice::Reveal), Some(p)) => {
+            let _ = launch::reveal(p);
+            true
+        }
+        (Some(NoticeChoice::CopyPath), Some(p)) => {
+            let _ = screengrabcraft_desktop::clipboard::copy_text(&p.to_string_lossy());
+            false
+        }
+        (Some(NoticeChoice::Close), _) => true,
+        _ => false,
+    };
     if close {
         svc.notice = None;
     } else if hold && let Some(n) = svc.notice.as_mut() {
@@ -253,6 +369,10 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
 mod tests {
     use std::path::Path;
 
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable as _;
+    use screengrabcraft_model::Theme;
+
     use super::*;
 
     #[test]
@@ -263,5 +383,104 @@ mod tests {
         assert_eq!(editor_button(Path::new("Capture.pdf")), None);
         assert_eq!(editor_button(Path::new("Video.MP4")), Some("Play"));
         assert!(is_video(Path::new("Video.mp4")) && !is_video(Path::new("Capture.png")));
+    }
+
+    /// Where the harness puts its contents.
+    const ROOT: f32 = 8.0;
+
+    /// A popup's face drawn headless the way the service draws it, and what was pressed.
+    fn popup_harness<T: 'static>(size: Vec2, theme: Theme, mut face: impl FnMut(&mut Ui) -> Option<T> + 'static) -> Harness<'static, Option<T>> {
+        Harness::builder().with_size(size + vec2(2.0 * ROOT, 2.0 * ROOT)).build_ui_state(
+            move |ui, pressed: &mut Option<T>| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), theme);
+                egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
+                    if let Some(p) = face(ui) {
+                        *pressed = Some(p);
+                    }
+                });
+            },
+            None,
+        )
+    }
+
+    fn notice_harness(path: Option<&'static str>) -> Harness<'static, Option<NoticeChoice>> {
+        let view = move || NoticeView { text: "Saved and copied", detail: "Capture.png", path: path.map(Path::new), thumb: None, error: false };
+        popup_harness(notice_size(&view()), Theme::Light, move |ui| notice_ui(ui, &view()))
+    }
+
+    #[test]
+    fn the_notice_has_its_actions_at_the_bottom_right_and_an_x_to_close_it() {
+        let mut h = notice_harness(Some("Capture.png"));
+        h.run_steps(2);
+        let (edit, show, copy, x) = (
+            h.get_by_label("Edit").rect(),
+            h.get_by_label("Show in folder").rect(),
+            h.get_by_label("Copy path").rect(),
+            h.get_by_label("Close window").rect(),
+        );
+        let size = notice_size(&NoticeView { text: "", detail: "", path: Some(Path::new("a.png")), thumb: None, error: false });
+        // The last of the row ends at the right, as far in as the X.
+        let last = if cfg!(target_os = "macos") { edit } else { copy };
+        assert!(size.x + ROOT - last.max.x < 16.0 && size.y + ROOT - last.max.y < 16.0, "{last:?}");
+        assert!(x.min.y - ROOT < 12.0 && size.x + ROOT - x.max.x < 12.0, "the X at the top right: {x:?}");
+        if cfg!(target_os = "macos") {
+            assert!(show.max.x < copy.min.x && copy.max.x < edit.min.x);
+        } else {
+            assert!(edit.max.x < show.min.x && show.max.x < copy.min.x);
+        }
+        for r in [edit, show, copy] {
+            assert!(r.width() >= widgets::BUTTON_SIZE.x && r.height() >= widgets::BUTTON_SIZE.y - 0.5, "{r:?}");
+        }
+        h.get_by_label("Close window").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(NoticeChoice::Close));
+    }
+
+    #[test]
+    fn the_notice_buttons_say_what_they_do() {
+        for (label, wanted) in [("Edit", NoticeChoice::Open), ("Show in folder", NoticeChoice::Reveal), ("Copy path", NoticeChoice::CopyPath)] {
+            let mut h = notice_harness(Some("Capture.png"));
+            h.run_steps(2);
+            h.get_by_label(label).click();
+            h.run_steps(1);
+            assert_eq!(*h.state(), Some(wanted), "{label}");
+        }
+        // A PDF isn't opened in the editor; an error has nothing to do but close.
+        let mut h = notice_harness(Some("Capture.pdf"));
+        h.run_steps(2);
+        assert!(h.query_by_label("Edit").is_none());
+        h.get_by_label("Show in folder");
+        let mut h = notice_harness(None);
+        h.run_steps(2);
+        assert!(h.query_by_label("Show in folder").is_none());
+        h.get_by_label("Close window");
+    }
+
+    #[test]
+    fn the_recording_control_stops_and_cancels_from_the_right() {
+        for kind in [Kind::Gif, Kind::Scrolling, Kind::Video, Kind::Production] {
+            let stop = if kind == Kind::Scrolling { "Done" } else { "Stop" };
+            for (label, wanted) in [(stop, RecordingChoice::Stop), ("Cancel", RecordingChoice::Cancel)] {
+                let view = RecordingView { secs: 7, progress: 212, ..RecordingView::default() };
+                let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
+                h.run_steps(2);
+                let r = h.get_by_label(label).rect();
+                assert!(r.max.x <= recording_size(kind).x + ROOT && r.min.x > recording_size(kind).x * 0.4, "{label} {r:?}");
+                h.get_by_label(label).click();
+                h.run_steps(1);
+                assert_eq!(*h.state(), Some(wanted), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_countdown_can_be_cancelled() {
+        let mut h = popup_harness(COUNTDOWN_SIZE, Theme::Light, |ui| countdown_ui(ui, 3).then_some(()));
+        h.run_steps(2);
+        let r = h.get_by_label("Cancel").rect();
+        assert!(r.max.y <= COUNTDOWN_SIZE.y + ROOT && r.width() >= widgets::BUTTON_SIZE.x, "{r:?}");
+        h.get_by_label("Cancel").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(()));
     }
 }

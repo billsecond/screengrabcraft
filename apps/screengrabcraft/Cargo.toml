@@ -32,3 +32,7 @@ winresource = "0.1"
 # The event loop's activation policy (Accessory: a menu-bar program, no Dock icon); the same winit
 # eframe runs on.
 winit = { version = "0.30", default-features = false }
+
+[dev-dependencies]
+# The small windows and the settings window, driven headless in tests.
+egui_kittest = { workspace = true }
