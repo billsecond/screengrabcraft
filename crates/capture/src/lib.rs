@@ -43,6 +43,25 @@ pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
 
+/// How long a device's thread is waited for when it's stopped.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits for a device's thread to end, for at most `wait`. A thread held up in its driver (a camera
+/// that sends no pictures waits for one for ever) is left to end on its own, so stopping a
+/// recording never hangs. True when it ended.
+fn join_within(thread: std::thread::JoinHandle<()>, wait: std::time::Duration, what: &str) -> bool {
+    let until = std::time::Instant::now() + wait;
+    while !thread.is_finished() {
+        if std::time::Instant::now() >= until {
+            log::warn!("{what} didn't stop within {} s; it's left to stop on its own", wait.as_secs());
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = thread.join();
+    true
+}
+
 /// One monitor.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Monitor {
@@ -294,5 +313,22 @@ mod tests {
         assert_eq!(both.pixel(15, 0), Some(Color::WHITE));
         let nowhere = Frozen { pointer: None, ..frozen };
         assert_eq!(nowhere.current_monitor().map(|(m, _)| m.id), Some(1));
+    }
+
+    #[test]
+    fn a_device_thread_that_never_ends_isnt_waited_for() {
+        use std::time::{Duration, Instant};
+        // Like a camera waiting for a picture that never comes.
+        let (keep, never) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = never.recv();
+        });
+        let t = Instant::now();
+        assert!(!join_within(stuck, Duration::from_millis(200), "a test device"));
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        drop(keep);
+        // One that ends is waited for.
+        let quick = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)));
+        assert!(join_within(quick, Duration::from_secs(5), "a test device"));
     }
 }

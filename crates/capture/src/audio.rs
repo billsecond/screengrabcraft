@@ -196,11 +196,12 @@ impl AudioCapture {
         f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 
-    /// Stops the device; what came in up to now is returned.
+    /// Stops the device; what came in up to now is returned. A device stuck in its driver isn't
+    /// waited for longer than a moment.
     pub fn stop(mut self) -> Vec<SoundBlock> {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            crate::join_within(t, crate::STOP_WAIT, "a sound device");
         }
         self.take()
     }

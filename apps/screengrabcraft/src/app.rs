@@ -672,12 +672,17 @@ impl Service {
     }
 
     pub fn stop_recording(&mut self, cancel: bool) {
-        if let Some(r) = &self.recording {
-            if cancel {
-                r.cancel();
-            } else {
-                r.stop();
-            }
+        let Some(r) = self.recording.as_mut() else { return };
+        if !cancel {
+            r.stop();
+            return;
+        }
+        r.cancel();
+        // Nothing is kept, so nothing is waited for: the control goes at once, and the recording
+        // ends on its own and throws its file away.
+        self.recording = None;
+        if let Some(t) = &mut self.tray {
+            t.set_recording(false);
         }
     }
 
@@ -801,7 +806,7 @@ impl Service {
             self.quit = true;
         }
         if self.quit {
-            if let Some(r) = &self.recording {
+            if let Some(r) = &mut self.recording {
                 r.stop();
             }
             self.guard.close();

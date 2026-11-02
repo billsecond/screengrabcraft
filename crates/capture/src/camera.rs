@@ -105,11 +105,12 @@ impl CameraCapture {
         self.rx.try_iter().collect()
     }
 
-    /// Stops the camera (its light goes off); what came in up to now is returned.
+    /// Stops the camera (its light goes off); what came in up to now is returned. A camera stuck
+    /// waiting for a picture isn't waited for longer than a moment.
     pub fn stop(mut self) -> Vec<CameraFrame> {
         self.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
-            let _ = t.join();
+            crate::join_within(t, crate::STOP_WAIT, "the camera");
         }
         self.take()
     }

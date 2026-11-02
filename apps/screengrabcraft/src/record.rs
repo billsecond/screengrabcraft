@@ -60,23 +60,32 @@ pub struct Recording {
     pub levels: Arc<[AtomicU32; 2]>,
     /// What the recording takes in, or couldn't, for the owner (`Computer sound`, `No camera`…).
     pub sources: Arc<Mutex<Vec<String>>>,
+    /// When it was asked to stop.
+    stopped: Option<Instant>,
     handle: Option<JoinHandle<Result<Output, String>>>,
 }
 
 impl Recording {
+    /// How long it has recorded: up to now, or to when it was asked to stop.
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        self.stopped.map_or_else(|| self.started.elapsed(), |at| at.saturating_duration_since(self.started))
+    }
+
+    /// Whether it has been asked to stop and is finishing.
+    pub fn stopping(&self) -> bool {
+        self.stopped.is_some()
     }
 
     /// Asks it to stop and keep what it has.
-    pub fn stop(&self) {
+    pub fn stop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.stopped.get_or_insert_with(Instant::now);
     }
 
     /// Asks it to stop and throw away what it has.
-    pub fn cancel(&self) {
+    pub fn cancel(&mut self) {
         self.cancel.store(true, Ordering::SeqCst);
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop();
     }
 
     pub fn finished(&self) -> bool {
@@ -123,6 +132,7 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
+        stopped: None,
         handle: Some(handle),
     })
 }
@@ -361,6 +371,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
+        stopped: None,
         handle: None,
     };
     let (stop, cancel, progress, saving, levels, sources) =
@@ -405,6 +416,9 @@ enum Item {
 
 /// Screen pictures waiting to be written, at most (a slow disk loses pictures, not memory).
 const WAITING: usize = 8;
+
+/// How long a camera may send nothing before the owner is told.
+const CAMERA_SILENT: Duration = Duration::from_secs(5);
 
 /// The sound devices and the camera a recording asked for, those that started.
 struct Devices {
@@ -680,6 +694,9 @@ fn record_screen(
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
     let mut due = Instant::now();
     let mut frames = 0u32;
+    // A camera that started but sends nothing is said so, once.
+    let mut camera_pictures = 0u32;
+    let mut camera_told = false;
     while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
         let at = started.elapsed();
         if let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab) {
@@ -702,7 +719,13 @@ fn record_screen(
         }
         if let Some(c) = &d.camera {
             for f in c.take() {
+                camera_pictures = camera_pictures.saturating_add(1);
                 let _ = tx.send(Item::Camera(f.at.as_micros() as u64, f.jpeg));
+            }
+            if camera_pictures == 0 && !camera_told && at >= CAMERA_SILENT {
+                camera_told = true;
+                log::warn!("the camera has sent no pictures");
+                s.note(format!("No camera pictures: {} has sent none (is another program using it?)", c.name));
             }
         }
         s.wake.request_repaint_after(Duration::from_millis(250));
@@ -906,6 +929,37 @@ mod tests {
         assert!(all_screens_size(&[]).is_none());
         let big = all_screens_size(&[IRect::new(0, 0, 3840, 2160), IRect::new(3840, 0, 3840, 2160)]).unwrap().1;
         assert!(big.0 <= ALL_SCREENS_MAX.0 && big.1 <= ALL_SCREENS_MAX.1, "{big:?}");
+    }
+
+    #[test]
+    fn stopping_stops_the_clock_at_once() {
+        let off = VideoOptions { system_sound: false, microphone: false, microphone_name: None, camera: false, camera_index: None };
+        let plan = VideoPlan {
+            kind: Kind::Production,
+            screen: Screen::Off,
+            desktop: IRect::new(0, 0, 10, 10),
+            fps: 30,
+            max_secs: 60,
+            options: off,
+            out: std::env::temp_dir().join(format!("sgc-nothing-{}.sgvideo", std::process::id())),
+            max_size: (1920, 1080),
+            created: String::new(),
+        };
+        let mut rec = start_video(plan, egui::Context::default()).unwrap();
+        assert!(!rec.stopping());
+        rec.stop();
+        let at = rec.elapsed();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(rec.stopping());
+        assert_eq!(rec.elapsed(), at, "the time shown stays where Stop was pressed");
+        // Nothing was chosen, so it ends with that.
+        let result = loop {
+            if let Some(r) = rec.take() {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert!(result.is_err());
     }
 
     /// The real path on the real screen: 3 s of a small area and the computer's sound, made into

@@ -102,6 +102,8 @@ struct RecordingView {
     lost: u32,
     /// A video being made after the recording: 1 to 1001 (its progress + 1), else 0.
     saving: u32,
+    /// Stop was pressed and it's finishing.
+    stopping: bool,
     /// The computer's sound and the microphone, if they're recorded, and how loud they are.
     sound: Option<f32>,
     mic: Option<f32>,
@@ -117,13 +119,20 @@ fn red_light(ui: &mut Ui, secs: u64, text: egui::Color32) {
     ui.label(RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60)).monospace().size(16.0).color(text));
 }
 
-/// The recording control's face: how far it has got, then [Stop] [Cancel] at the right.
+/// The recording control's face: how far it has got, then [Stop] [Cancel] at the right. Once
+/// Stop is pressed it says so at once, and only Cancel is left.
 fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingChoice> {
     let t = Tokens::get(ui.ctx());
     let mut choice = None;
     let making = matches!(kind, Kind::Video | Kind::Production) && v.saving > 0;
+    let finishing = making || v.stopping;
     ui.horizontal_centered(|ui| {
         match kind {
+            _ if v.stopping && !making => {
+                ui.add(egui::Spinner::new().size(16.0).color(t.text));
+                let secs = v.secs;
+                ui.label(RichText::new(format!("Stopping… ({:02}:{:02} recorded)", secs / 60, secs % 60)).color(t.text));
+            }
             Kind::Gif => {
                 red_light(ui, v.secs, t.text);
                 ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
@@ -155,9 +164,12 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
             Kind::Scrolling => ("Done", "Stop scrolling and keep the picture"),
             _ => ("Stop", "Stop and save"),
         };
-        let buttons: Vec<FooterButton<'_>> =
-            if making { vec![FooterButton::cancel("Cancel")] } else { vec![FooterButton::primary(stop).tip(tip), FooterButton::cancel("Cancel")] };
-        choice = widgets::footer(ui, &buttons).map(|i| if i == 0 && !making { RecordingChoice::Stop } else { RecordingChoice::Cancel });
+        let buttons: Vec<FooterButton<'_>> = if finishing {
+            vec![FooterButton::cancel("Cancel").tip("Stop waiting and throw the recording away")]
+        } else {
+            vec![FooterButton::primary(stop).tip(tip), FooterButton::cancel("Cancel")]
+        };
+        choice = widgets::footer(ui, &buttons).map(|i| if i == 0 && !finishing { RecordingChoice::Stop } else { RecordingChoice::Cancel });
     });
     choice
 }
@@ -178,6 +190,7 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         progress,
         lost,
         saving: rec.saving.load(std::sync::atomic::Ordering::SeqCst),
+        stopping: rec.stopping(),
         sound: has("Computer sound").then(|| level(0)),
         mic: has("Microphone:").then(|| level(1)),
         missing: sources.iter().filter(|s| s.starts_with("No ")).cloned().collect(),
@@ -519,6 +532,26 @@ mod tests {
                 assert_eq!(*h.state(), Some(wanted), "{label}");
             }
         }
+    }
+
+    #[test]
+    fn once_stop_is_pressed_the_control_says_so_and_only_cancel_is_left() {
+        for kind in [Kind::Gif, Kind::Scrolling, Kind::Video, Kind::Production] {
+            let view = RecordingView { secs: 14, stopping: true, ..RecordingView::default() };
+            let mut h = popup_harness(recording_size(kind), Theme::Light, move |ui| recording_ui(ui, kind, &view));
+            h.run_steps(2);
+            h.get_by_label_contains("Stopping… (00:14 recorded)");
+            assert!(h.query_by_label("Stop").is_none() && h.query_by_label("Done").is_none(), "{kind:?}");
+            h.get_by_label("Cancel").click();
+            h.run_steps(1);
+            assert_eq!(*h.state(), Some(RecordingChoice::Cancel), "{kind:?}");
+        }
+        // Making the video after: its progress, not "Stopping".
+        let view = RecordingView { stopping: true, saving: 501, ..RecordingView::default() };
+        let mut h = popup_harness(recording_size(Kind::Video), Theme::Light, move |ui| recording_ui(ui, Kind::Video, &view));
+        h.run_steps(2);
+        h.get_by_label("Making the video…");
+        assert!(h.query_by_label_contains("Stopping").is_none());
     }
 
     #[test]
