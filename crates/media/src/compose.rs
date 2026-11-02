@@ -58,7 +58,12 @@ impl Composer {
             && let Some(src) = timeline.source_time(i, t)
             && let Some(cam) = self.camera_at(stream, src)
         {
-            overlay_camera(&mut out, &cam, timeline);
+            if self.screen.is_some() {
+                overlay_camera(&mut out, &cam, timeline);
+            } else {
+                // Recorded without the screen: the camera is the picture.
+                fill_camera(&mut out, &cam);
+            }
         }
         out
     }
@@ -137,6 +142,28 @@ fn coverage(shape: CameraShape, x: f32, y: f32, w: f32, h: f32) -> f32 {
             let qy = (cy - h / 2.0).abs() - (h / 2.0 - r);
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
             (0.5 - outside).clamp(0.0, 1.0)
+        }
+    }
+}
+
+/// Draws the camera's picture over the whole of `out`, as large as fits, keeping its shape (a
+/// recording with no screen).
+pub fn fill_camera(out: &mut Raster, cam: &Raster) {
+    let (ow, oh) = (out.width(), out.height());
+    let f = (f64::from(ow) / f64::from(cam.width().max(1))).min(f64::from(oh) / f64::from(cam.height().max(1)));
+    let cw = ((f64::from(cam.width()) * f).round() as u32).clamp(1, ow.max(1));
+    let ch = ((f64::from(cam.height()) * f).round() as u32).clamp(1, oh.max(1));
+    let Some(small) = (if (cw, ch) == (cam.width(), cam.height()) { Some(cam.clone()) } else { scale(cam, cw, ch) }) else { return };
+    let (x0, y0) = ((ow.saturating_sub(cw) / 2) as usize, (oh.saturating_sub(ch) / 2) as usize);
+    let (sw, ow_px) = (small.width() as usize, ow as usize);
+    if sw == 0 {
+        return;
+    }
+    let dst = out.pixels_mut();
+    for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
+        let i = ((y0 + y) * ow_px + x0) * 4;
+        if let Some(d) = dst.get_mut(i..i + row.len()) {
+            d.copy_from_slice(row);
         }
     }
 }
@@ -294,6 +321,32 @@ mod tests {
         assert_eq!(fit(3840, 2160, 1920, 1080), (1920, 1080));
         assert_eq!(fit(1201, 961, 1920, 1080), (1200, 960));
         assert_eq!(fit(5000, 100, 1920, 1080), (1920, 38));
+    }
+
+    #[test]
+    fn without_the_screen_the_camera_is_the_picture() {
+        // Recorded with the camera only: its pictures fill the video, as large as fits.
+        let streams = vec![StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let jpeg =
+            screengrabcraft_render::encode(&Raster::filled(32, 18, Color::WHITE).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 90).unwrap();
+        for t in 0..10u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap());
+        let tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let f = c.frame(&tl, 300_000);
+        // 32 × 18 made 64 × 36, in the middle: black above and below, white across.
+        assert!(f.pixel(0, 24).unwrap().r > 200 && f.pixel(63, 24).unwrap().r > 200);
+        assert_eq!(f.pixel(32, 2).unwrap().r, 0);
+        assert_eq!(f.pixel(32, 46).unwrap().r, 0);
+        // And on its own: a picture of any shape, into a picture of any size.
+        for (cw, ch, ow, oh) in [(1, 1, 7, 3), (640, 480, 2, 2), (3, 900, 1280, 720), (16, 9, 1, 1)] {
+            let mut out = Raster::filled(ow, oh, Color::BLACK).unwrap();
+            fill_camera(&mut out, &Raster::filled(cw, ch, Color::WHITE).unwrap());
+            assert!(out.pixels().as_chunks::<4>().0.iter().any(|p| p[0] == 255), "{cw}x{ch} into {ow}x{oh}");
+        }
     }
 
     #[test]

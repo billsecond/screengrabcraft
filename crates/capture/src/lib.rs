@@ -212,6 +212,15 @@ pub fn grabber(id: u32, pixels: IRect) -> Result<Grabber, CaptureError> {
     Ok(Box::new(move || grab_on_monitor(id, pixels)))
 }
 
+/// A grabber for the whole of one monitor, in its own pixels (a full-screen recording, and each
+/// monitor of an all-screens one). On Windows the monitor is looked up once, not at every frame.
+pub fn monitor_grabber(id: u32) -> Result<Grabber, CaptureError> {
+    #[cfg(target_os = "windows")]
+    return backend::monitor_grabber(id);
+    #[cfg(not(target_os = "windows"))]
+    Ok(Box::new(move || grab_monitor(id).map(|(_, pic)| pic)))
+}
+
 /// A picture of an area of the desktop, now, put together from the monitors it lies on (in
 /// desktop units: a Retina monitor's part is reduced to its points).
 pub fn grab_area(area: IRect) -> Result<Raster, CaptureError> {

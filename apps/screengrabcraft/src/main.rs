@@ -23,6 +23,7 @@ mod home;
 mod hotkeys;
 mod popups;
 mod record;
+mod recorder;
 mod tray;
 mod update;
 

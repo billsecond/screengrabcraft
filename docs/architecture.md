@@ -103,6 +103,13 @@ comes by a writer thread: a chunk per screen picture (the whole picture every tw
 only the part that changed, LZ4), per camera picture (a JPEG) and per block of sound (16-bit at
 48 kHz). The file is only ever added to, so a recording cut short still opens.
 
+Video Production starts at the **Recorder** (`apps/screengrabcraft/src/recorder.rs`, drawn by
+`ui::recorder`), whose choices are settings (`RecorderOptions`). They come to a `record::Screen`
+(`production_screen`, a pure function): part of a monitor (a region, a window's rectangle, a fixed
+size, chosen on the overlay), one monitor whole, every monitor (each grabbed on its own and put
+together each frame, made no larger than 3840 × 2160), or none: then the camera's picture is the
+video (`media::compose::fill_camera`).
+
 **Edits** are a `Timeline` (each track's clips: where on the timeline, which stretch of the
 recording) changed by the engine's `video.*` commands in a `VideoSession` (undo, redo, a drag as
 one step). The editor adds the timeline to the end of the recording file a moment after each

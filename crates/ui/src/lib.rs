@@ -14,6 +14,7 @@ pub mod icons;
 pub mod overlay;
 pub mod playback;
 pub mod props;
+pub mod recorder;
 pub mod services;
 pub mod strip;
 pub mod theme;

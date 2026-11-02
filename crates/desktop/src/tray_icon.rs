@@ -84,9 +84,66 @@ pub fn pixels(size: u32, look: Look) -> Vec<u8> {
     out
 }
 
+/// The red of a recording, as the tray icon's dot.
+const RECORD_RED: [u8; 3] = [0xE5, 0x39, 0x35];
+
+/// The mark of Video Production's menu item: a red record dot with a thin darker rim, on clear,
+/// as `size`×`size` RGBA pixels (4×4 samples a pixel, so its edge is smooth).
+pub fn record_dot(size: u32) -> Vec<u8> {
+    const SS: u32 = 4;
+    let size = size.clamp(1, 256);
+    let mut out = Vec::with_capacity((size * size * 4) as usize);
+    let (r, rim) = (0.40f32, 0.06f32);
+    for py in 0..size {
+        for px in 0..size {
+            let (mut cover, mut inner) = (0u32, 0u32);
+            for sy in 0..SS {
+                for sx in 0..SS {
+                    let x = (px as f32 + (sx as f32 + 0.5) / SS as f32) / size as f32 - 0.5;
+                    let y = (py as f32 + (sy as f32 + 0.5) / SS as f32) / size as f32 - 0.5;
+                    let d = (x * x + y * y).sqrt();
+                    if d <= r {
+                        cover += 1;
+                        if d <= r - rim {
+                            inner += 1;
+                        }
+                    }
+                }
+            }
+            if cover == 0 {
+                out.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            // The rim is the red darkened, so the dot reads on a light menu and a dark one.
+            let f = inner as f32 / cover as f32;
+            let shade = 0.72 + 0.28 * f;
+            out.extend(RECORD_RED.iter().map(|c| (f32::from(*c) * shade).round() as u8));
+            out.push(((cover * 255) / (SS * SS)) as u8);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_record_dot_is_red_round_and_smooth() {
+        let d = record_dot(32);
+        assert_eq!(d.len(), 32 * 32 * 4);
+        let px = |x: usize, y: usize| &d[(y * 32 + x) * 4..(y * 32 + x) * 4 + 4];
+        assert_eq!(px(16, 16), &[0xE5, 0x39, 0x35, 255], "red in the middle");
+        assert_eq!(px(0, 0)[3], 0, "clear in the corners");
+        assert_eq!(px(31, 31)[3], 0);
+        // Its edge is partly covered, not stepped.
+        assert!((0..32).any(|x| (1..255).contains(&px(x, 16)[3])), "anti-aliased");
+        // Round: as wide as it's tall.
+        let wide = (0..32).filter(|x| px(*x, 16)[3] > 127).count();
+        let tall = (0..32).filter(|y| px(16, *y)[3] > 127).count();
+        assert_eq!(wide, tall);
+        assert_eq!(record_dot(0).len(), 4, "never empty, never a panic");
+    }
 
     #[test]
     fn icons_have_their_parts() {
