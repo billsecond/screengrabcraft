@@ -15,6 +15,7 @@ pub mod props;
 pub mod services;
 pub mod strip;
 pub mod theme;
+pub mod widgets;
 
 use std::sync::Arc;
 

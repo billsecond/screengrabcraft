@@ -1,12 +1,13 @@
-//! Pictures of the interface, drawn headless with the GPU: the editor with annotations, the
-//! capture overlay while choosing (crosshair and magnifier) and while adjusting (handles and the
-//! capture bar). For looking at the interface without a desktop session:
+//! Pictures of the interface, drawn headless with the GPU: the editor with annotations, one of its
+//! dialogs, the capture overlay while choosing (crosshair and magnifier) and while adjusting
+//! (handles and the capture bar). For looking at the interface without a desktop session:
 //!
 //! `cargo run -p screengrabcraft-ui --example shots -- <out dir> [light|dark]`
 
 use egui::{pos2, vec2};
 use egui_kittest::Harness;
 use screengrabcraft_model::{ArrowHeads, Color, Document, EditorSettings, IRect, Pt, Raster, Rect, Shape, Theme};
+use screengrabcraft_ui::dialogs::Dialog;
 use screengrabcraft_ui::overlay::{Overlay, OverlayMonitor, OverlayWindow, Purpose};
 use screengrabcraft_ui::{Editor, NoServices, Tool};
 
@@ -76,6 +77,12 @@ fn main() -> Result<(), String> {
     );
     h.run_steps(6);
     save(&mut h, &dir.join("editor.png"))?;
+
+    // ---- a dialog (`widgets`: title and X, settings, [Apply] [Cancel] at the bottom right) ----
+    let doc = h.state().session.doc.clone();
+    screengrabcraft_ui::dialogs::open(h.state_mut(), Dialog::resize(&doc));
+    h.run_steps(4);
+    save(&mut h, &dir.join("dialog.png"))?;
 
     // ---- the overlay, choosing ----
     let m = OverlayMonitor { rect: IRect::new(0, 0, 1280, 800), picture: picture(1280, 800), name: "Main".into() };

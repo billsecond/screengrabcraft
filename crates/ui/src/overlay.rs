@@ -13,6 +13,7 @@ use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Sense, Stroke, StrokeKind,
 use screengrabcraft_model::{IRect, Raster, Rect};
 
 use crate::icons::{self, Icon};
+use crate::widgets::{CONTROL_RADIUS, WINDOW_RADIUS, strong_font};
 
 /// One monitor as the overlay shows it.
 pub struct OverlayMonitor {
@@ -126,13 +127,6 @@ struct BarButton {
     action: Option<Action>,
 }
 
-/// The bar's heavy type, or the plain one where the fonts aren't installed (egui panics on a
-/// family it doesn't know).
-fn heavy(ctx: &egui::Context, size: f32) -> FontId {
-    let family = egui::FontFamily::Name("sans-bold".into());
-    if ctx.fonts(|f| f.definitions().families.contains_key(&family)) { FontId::new(size, family) } else { FontId::proportional(size) }
-}
-
 fn bar_button(ui: &mut Ui, b: &BarButton, width: f32, font: &FontId) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(width, BAR_BUTTON), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, b.label));
@@ -143,7 +137,9 @@ fn bar_button(ui: &mut Ui, b: &BarButton, width: f32, font: &FontId) -> egui::Re
         Weight::Quiet => (if hot { Color32::from_rgb(0x2C, 0x30, 0x3A) } else { Color32::TRANSPARENT }, Color32::from_rgb(0xD5, 0xD9, 0xE0)),
     };
     let p = ui.painter();
-    p.rect_filled(rect, 9.0, fill);
+    // Outlined as well, so Cancel reads as a button too.
+    let edge = if b.weight == Weight::Quiet { Color32::from_rgb(0x4A, 0x52, 0x60) } else { fill };
+    p.rect(rect, CONTROL_RADIUS, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
     let icon = egui::Rect::from_center_size(pos2(rect.min.x + 25.0, rect.center().y), vec2(24.0, 24.0));
     icons::paint(p, icon, b.icon, ink);
     let x = rect.min.x + BAR_TEXT;
@@ -440,7 +436,7 @@ impl Overlay {
         let cancel = button(Icon::Close, "Cancel", "Esc", Weight::Quiet, None);
         let enter = self.enter;
         let keys = |action, own: &'static str| if enter == action { "Enter" } else { own };
-        let buttons = match self.purpose {
+        let mut buttons = match self.purpose {
             Purpose::Gif => vec![button(Icon::Gif, "Record GIF", "Enter", Weight::Main, Some(Action::Start)), cancel],
             Purpose::Scrolling => vec![button(Icon::Scrolling, "Start scrolling capture", "Enter", Weight::Main, Some(Action::Start)), cancel],
             _ => {
@@ -457,7 +453,11 @@ impl Overlay {
                 bar
             }
         };
-        let font = heavy(ui.ctx(), 17.0);
+        // The platform's order: the default first and Cancel last, or the other way round on a Mac.
+        if cfg!(target_os = "macos") {
+            buttons.reverse();
+        }
+        let font = strong_font(ui.ctx(), 17.0);
         let widths: Vec<f32> = buttons
             .iter()
             .map(|b| {
@@ -484,7 +484,7 @@ impl Overlay {
             egui::Frame::NONE
                 .fill(Color32::from_rgb(0x14, 0x16, 0x1C))
                 .stroke(Stroke::new(2.0, ACCENT))
-                .corner_radius(14)
+                .corner_radius(WINDOW_RADIUS)
                 .inner_margin(egui::Margin::same(PAD))
                 .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 2, color: Color32::from_black_alpha(170) })
                 .show(ui, |ui| {
