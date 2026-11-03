@@ -275,7 +275,7 @@ fn area_section(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions,
                     (n, None) => format!("All {n} monitors in one video."),
                 },
             ),
-            RecordArea::Fixed => fixed_choice(ui, view, rec),
+            RecordArea::Fixed => fixed_choice(ui, view, rec, devices),
         }
     });
     if !rec.screen {
@@ -302,35 +302,69 @@ fn monitor_choice(ui: &mut Ui, rec: &mut RecorderOptions, devices: &RecorderDevi
     });
 }
 
-fn fixed_choice(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions) {
-    let preset = FIXED_SIZES.iter().position(|(w, h, _)| (*w, *h) == (rec.width, rec.height));
+/// Whether a frame of this size fits on one of the monitors (on any, when none was found).
+fn fits(w: u32, h: u32, monitors: &[RecorderMonitor]) -> bool {
+    monitors.is_empty() || monitors.iter().any(|m| w <= m.width && h <= m.height)
+}
+
+/// The fixed sizes the Recorder lists: those of [`FIXED_SIZES`] that fit on one of the monitors,
+/// under Landscape, Portrait and Square.
+pub fn listed_sizes(monitors: &[RecorderMonitor]) -> [(&'static str, Vec<(u32, u32, &'static str)>); 3] {
+    let shape = |keep: fn(u32, u32) -> bool| -> Vec<(u32, u32, &'static str)> {
+        FIXED_SIZES.iter().copied().filter(|&(w, h, _)| keep(w, h) && fits(w, h, monitors)).collect()
+    };
+    [("Landscape", shape(|w, h| w > h)), ("Portrait", shape(|w, h| w < h)), ("Square", shape(|w, h| w == h))]
+}
+
+/// The largest size of one's own: as wide as the widest monitor and as tall as the tallest.
+fn largest(monitors: &[RecorderMonitor]) -> (u32, u32) {
+    let side = |v: Option<u32>| v.unwrap_or(FIXED_MAX).clamp(FIXED_MIN, FIXED_MAX);
+    (side(monitors.iter().map(|m| m.width).max()), side(monitors.iter().map(|m| m.height).max()))
+}
+
+fn fixed_choice(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions, devices: &RecorderDevices) {
+    let t = Tokens::get(ui.ctx());
+    let preset = FIXED_SIZES.iter().find(|(w, h, _)| (*w, *h) == (rec.width, rec.height));
     let custom = view.custom.get_or_insert(preset.is_none());
     let shown = match (preset, *custom) {
-        (Some(i), false) => FIXED_SIZES.get(i).map(|(w, h, what)| format!("{w} × {h} — {what}")).unwrap_or_default(),
+        (Some((w, h, what)), false) => format!("{w} × {h} — {what}"),
         _ => "A size of your own".to_string(),
     };
+    let (max_w, max_h) = largest(&devices.monitors);
     ui.horizontal(|ui| {
         ui.label("Size");
-        egui::ComboBox::from_id_salt("recorder-size").width(240.0).selected_text(shown).show_ui(ui, |ui| {
-            for (w, h, what) in FIXED_SIZES {
-                if ui.selectable_label(!*custom && (w, h) == (rec.width, rec.height), format!("{w} × {h} — {what}")).clicked() {
-                    (rec.width, rec.height) = (w, h);
-                    *custom = false;
+        // Short enough to stay in the window: the list scrolls.
+        egui::ComboBox::from_id_salt("recorder-size").width(250.0).height(300.0).selected_text(shown).show_ui(ui, |ui| {
+            for (group, sizes) in listed_sizes(&devices.monitors) {
+                if sizes.is_empty() {
+                    continue;
                 }
+                ui.label(RichText::new(group).size(12.5).color(t.muted));
+                for (w, h, what) in sizes {
+                    if ui.selectable_label(!*custom && (w, h) == (rec.width, rec.height), format!("{w} × {h} — {what}")).clicked() {
+                        (rec.width, rec.height) = (w, h);
+                        *custom = false;
+                    }
+                }
+                ui.separator();
             }
             if ui.selectable_label(*custom, "A size of your own").clicked() {
                 *custom = true;
             }
         });
         if *custom {
-            ui.add(egui::DragValue::new(&mut rec.width).range(FIXED_MIN..=FIXED_MAX).speed(2.0));
+            ui.add(egui::DragValue::new(&mut rec.width).range(FIXED_MIN..=max_w).speed(2.0));
             ui.label("×");
-            ui.add(egui::DragValue::new(&mut rec.height).range(FIXED_MIN..=FIXED_MAX).speed(2.0));
+            ui.add(egui::DragValue::new(&mut rec.height).range(FIXED_MIN..=max_h).speed(2.0));
             ui.label("pixels");
         }
     });
     ui.add_space(4.0);
-    note(ui, "Click where the frame goes after you press Record. On a smaller monitor it's made smaller, keeping its shape.");
+    if fits(rec.width, rec.height, &devices.monitors) {
+        note(ui, "Click where the frame goes after you press Record. Only the sizes that fit on your monitors are listed.");
+    } else {
+        note(ui, "This is bigger than your monitors, so it's made smaller, keeping its shape. Click where the frame goes after you press Record.");
+    }
 }
 
 /// The microphone's meter, or a Test button that asks for it.
@@ -587,6 +621,83 @@ mod tests {
         let back = Settings::from_json(&serde_json::to_string(s).unwrap_or_default());
         assert_eq!((back.recorder, back.production), (s.recorder.clone(), s.production.clone()));
         assert!(h.state().pressed.is_none(), "choosing records nothing");
+    }
+
+    fn monitor(width: u32, height: u32) -> RecorderMonitor {
+        RecorderMonitor { name: "Screen".into(), x: 0, y: 0, width, height, primary: true }
+    }
+
+    fn listed(monitors: &[RecorderMonitor]) -> Vec<(u32, u32)> {
+        listed_sizes(monitors).into_iter().flat_map(|(_, sizes)| sizes).map(|(w, h, _)| (w, h)).collect()
+    }
+
+    #[test]
+    fn the_sizes_are_each_once_and_in_range() {
+        let mut seen = std::collections::HashSet::new();
+        for &(w, h, what) in FIXED_SIZES {
+            assert!((FIXED_MIN..=FIXED_MAX).contains(&w) && (FIXED_MIN..=FIXED_MAX).contains(&h), "{w} × {h}");
+            assert!(seen.insert((w, h)), "{w} × {h} twice");
+            assert!(!what.is_empty());
+        }
+        // Each size is listed once, under its shape.
+        let [land, tall, square] = listed_sizes(&[]);
+        assert!(land.1.iter().all(|s| s.0 > s.1) && tall.1.iter().all(|s| s.0 < s.1) && square.1.iter().all(|s| s.0 == s.1));
+        assert_eq!(listed(&[]).len(), FIXED_SIZES.len(), "no monitor found: every size");
+    }
+
+    #[test]
+    fn only_the_sizes_that_fit_on_a_monitor_are_listed() {
+        // A Full HD monitor: nothing wider or taller, but some landscape, portrait and square.
+        let hd = listed(&[monitor(1920, 1080)]);
+        assert!(hd.iter().all(|&(w, h)| w <= 1920 && h <= 1080), "{hd:?}");
+        for size in [(1920, 1080), (1366, 768), (1280, 720), (540, 960), (1080, 1080)] {
+            assert!(hd.contains(&size), "{size:?}");
+        }
+        // With a second one turned on end, its tall sizes too.
+        let both = listed(&[monitor(1920, 1080), RecorderMonitor { x: 1920, ..monitor(1080, 1920) }]);
+        assert!(both.contains(&(1080, 1920)) && both.contains(&(1080, 1350)) && !both.contains(&(1200, 1920)));
+        // A 4K monitor: up to 4K, not 5K.
+        let uhd = listed(&[monitor(3840, 2160)]);
+        assert!(uhd.contains(&(3840, 2160)) && uhd.contains(&(2160, 2160)) && !uhd.contains(&(5120, 2880)));
+        assert_eq!(largest(&[monitor(1920, 1080), monitor(1080, 1920)]), (1920, 1920));
+        assert_eq!(largest(&[]), (FIXED_MAX, FIXED_MAX));
+    }
+
+    #[test]
+    fn a_size_is_picked_from_the_list() {
+        let mut s = Settings::default();
+        s.recorder.area = RecordArea::Fixed;
+        let d = RecorderDevices { monitors: vec![monitor(1920, 1080)], ..devices() };
+        let mut h = harness(s, d);
+        h.run_steps(2);
+        h.get_by_value("1920 × 1080 — Full HD").click();
+        h.run_steps(2);
+        for group in ["Landscape", "Portrait", "Square"] {
+            h.get_by_label(group);
+        }
+        assert!(h.query_by_label("2560 × 1440 — 1440p").is_none(), "too big for the monitor");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-sizes.png"));
+        }
+        h.get_by_label("540 × 960 — 540p, for phones").click();
+        h.run_steps(2);
+        let r = &h.state().settings.recorder;
+        assert_eq!((r.width, r.height), (540, 960));
+        h.get_by_label_contains("Only the sizes that fit on your monitors are listed.");
+    }
+
+    #[test]
+    fn a_size_bigger_than_the_monitors_says_so() {
+        let mut s = Settings::default();
+        s.recorder.area = RecordArea::Fixed;
+        (s.recorder.width, s.recorder.height) = (2560, 1440);
+        let d = RecorderDevices { monitors: vec![monitor(1920, 1080)], ..devices() };
+        let mut h = harness(s, d);
+        h.run_steps(2);
+        h.get_by_value("2560 × 1440 — 1440p");
+        h.get_by_label_contains("bigger than your monitors");
     }
 
     #[test]
