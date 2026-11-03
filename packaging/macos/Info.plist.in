@@ -47,6 +47,11 @@
   <true/>
   <key>NSRequiresAquaSystemAppearance</key>
   <false/>
+  <!-- What macOS shows when it asks the owner, the first time a video recording uses them. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>ScreenGrabCraft records your microphone into video recordings when you choose it.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>ScreenGrabCraft records your camera into Video Production recordings when you choose it.</string>
   <key>NSHumanReadableCopyright</key>
   <string>Copyright © the ScreenGrabCraft contributors. MIT OR Apache-2.0.</string>
 </dict>

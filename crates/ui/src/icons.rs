@@ -20,6 +20,7 @@ pub enum Icon {
     Spotlight,
     Magnify,
     Stamp,
+    Fill,
     Crop,
     Undo,
     Redo,
@@ -44,6 +45,8 @@ pub enum Icon {
     Close,
     Check,
     Timer,
+    Play,
+    Pause,
 }
 
 /// Draws `icon` in `rect` (square-ish) in `color`.
@@ -144,6 +147,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pts.push(at(10.0 + a.cos() * r, 10.5 + a.sin() * r));
             }
             poly(pts, true);
+        }
+        Icon::Fill => {
+            // A pail tipped to the right, half full, with a drop running off its lip.
+            let pail = [at(2.5, 9.0), at(8.5, 3.0), at(15.0, 9.5), at(9.0, 15.5)];
+            fill_poly(vec![pail[0], pail[2], pail[3]], color.gamma_multiply(0.55));
+            poly(pail.to_vec(), true);
+            line(at(8.5, 3.0), at(6.0, 0.8));
+            fill_poly(vec![at(16.5, 10.5), at(18.3, 14.5), at(14.7, 14.5)], color);
+            p.circle_filled(at(16.5, 15.0), 1.8 * u, color);
         }
         Icon::Crop => {
             poly(vec![at(6.0, 2.0), at(6.0, 14.0), at(18.0, 14.0)], false);
@@ -258,6 +270,11 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(at(10.0, 11.0), at(13.0, 13.0));
             line(at(8.0, 2.5), at(12.0, 2.5));
         }
+        Icon::Play => fill_poly(vec![at(5.5, 3.0), at(16.5, 10.0), at(5.5, 17.0)], color),
+        Icon::Pause => {
+            p.rect_filled(rect_at(5.0, 3.5, 8.5, 16.5), 0.8 * u, color);
+            p.rect_filled(rect_at(11.5, 3.5, 15.0, 16.5), 0.8 * u, color);
+        }
     }
 }
 
@@ -268,8 +285,13 @@ fn contrast(c: Color32) -> Color32 {
 
 /// A square icon button with a tooltip; `on` draws it as selected.
 pub fn button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
+    button_sized(ui, icon, tip, on, enabled, 30.0)
+}
+
+/// [`button`], `side` points square (the icon grows with it).
+pub fn button_sized(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool, side: f32) -> egui::Response {
     let t = crate::theme::Tokens::get(ui.ctx());
-    let size = vec2(30.0, 30.0);
+    let size = vec2(side, side);
     let (rect, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
     let bg = if on {
         t.selected
@@ -291,6 +313,6 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool)
     } else {
         t.text
     };
-    paint(ui.painter(), rect.shrink(6.0), icon, color);
+    paint(ui.painter(), rect.shrink(side * 0.2), icon, color);
     resp.on_hover_text(tip)
 }

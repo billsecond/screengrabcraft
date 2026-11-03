@@ -4,11 +4,14 @@
 //! It has to run in the owner's session (it captures their screen and lives in their tray), so
 //! it is a sign-in service rather than a system service:
 //!
-//! - **Windows:** the installer adds a `Run` entry for every user
-//!   (`HKLM\…\CurrentVersion\Run\ScreenGrabCraft`, `screengrabcraft.exe --background`), and
-//!   `--background` is the [`supervise`] loop below. The owner's own switch is Windows' own:
+//! - **Windows:** the installer adds a `Run` entry (`…\CurrentVersion\Run\ScreenGrabCraft`,
+//!   `screengrabcraft.exe --background`): in `HKLM` for every user when it installed for everyone
+//!   on this PC, in `HKCU` for the owner alone when it installed just for them (its App Paths entry
+//!   is then in `HKCU` too, naming the same program). `--background` is the [`supervise`] loop
+//!   below. The owner's own switch for the installer's entry is Windows' own:
 //!   `HKCU\…\Explorer\StartupApproved\Run` (`Run32` for a 32-bit install on 64-bit Windows),
-//!   which is what Task Manager and Settings › Apps › Startup change. Without the installer (the
+//!   which is what Task Manager and Settings › Apps › Startup change; the entry itself is never
+//!   deleted (it is the installer's: Windows would put it back). Without the installer (the
 //!   portable zip) the switch is a `Run` entry of the owner's own (`HKCU`).
 //! - **macOS:** a LaunchAgent (`~/Library/LaunchAgents/io.github.billsecond.screengrabcraft.plist`)
 //!   with `KeepAlive` on an unsuccessful exit, so launchd itself restarts a crash.
@@ -34,6 +37,22 @@ pub struct Status {
     pub how: String,
 }
 
+/// The program a sign-in command starts: its first word, quoted (`"C:\…\x.exe" --background`) or
+/// not.
+pub fn command_program(command: &str) -> &str {
+    let c = command.trim_start();
+    match c.strip_prefix('"') {
+        Some(rest) => rest.split('"').next().unwrap_or_default(),
+        None => c.split_whitespace().next().unwrap_or_default(),
+    }
+}
+
+/// Whether a `Run` command in HKCU is the installer's own (installed just for the owner): it
+/// starts the program the installer's App Paths entry in HKCU names (`installed`).
+pub fn installers_own(run: &str, installed: &str) -> bool {
+    crate::update::same_program(installed, Path::new(command_program(run)))
+}
+
 /// The program to register: the AppImage itself when running from one (its own path is inside
 /// a temporary mount), else this executable.
 pub fn program() -> Option<PathBuf> {
@@ -53,9 +72,12 @@ mod imp {
 
     const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
     const APPROVED: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved";
+    const APP_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe";
 
-    /// Where the installer's entry is: the 64-bit view (`Run`) or the 32-bit one (`Run32`).
-    fn machine_entry() -> Option<&'static str> {
+    /// Where the installer's entry is, as the StartupApproved list that switches it: an install
+    /// for everyone's, in HKLM (the 64-bit view, `Run`, or the 32-bit one, `Run32`), or else an
+    /// install just for the owner's, in HKCU (`Run`).
+    fn installer_entry() -> Option<&'static str> {
         let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
         for (flag, approved) in [(KEY_WOW64_64KEY, "Run"), (KEY_WOW64_32KEY, "Run32")] {
             if let Ok(k) = hklm.open_subkey_with_flags(RUN, KEY_READ | flag)
@@ -64,7 +86,10 @@ mod imp {
                 return Some(approved);
             }
         }
-        None
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu.open_subkey(RUN).and_then(|k| k.get_value::<String, _>(NAME)).ok()?;
+        let installed = hkcu.open_subkey(APP_PATH).and_then(|k| k.get_value::<String, _>("")).ok()?;
+        installers_own(&run, &installed).then_some("Run")
     }
 
     fn approval(list: &str) -> Option<bool> {
@@ -82,7 +107,7 @@ mod imp {
     }
 
     pub fn status() -> Status {
-        if let Some(list) = machine_entry() {
+        if let Some(list) = installer_entry() {
             let on = approval(list).unwrap_or(true);
             return Status { enabled: on, how: "the installer's sign-in entry (Settings › Apps › Startup)".to_string() };
         }
@@ -91,7 +116,7 @@ mod imp {
     }
 
     pub fn enable(exe: &Path) -> Result<String, String> {
-        if let Some(list) = machine_entry() {
+        if let Some(list) = installer_entry() {
             set_approval(list, true)?;
             return Ok("ScreenGrabCraft starts when you sign in (the installer's entry, switched on)".to_string());
         }
@@ -102,7 +127,7 @@ mod imp {
     }
 
     pub fn disable() -> Result<String, String> {
-        if let Some(list) = machine_entry() {
+        if let Some(list) = installer_entry() {
             set_approval(list, false)?;
             return Ok("ScreenGrabCraft no longer starts when you sign in (switched off for you)".to_string());
         }
@@ -385,6 +410,28 @@ mod tests {
         // Long after, failures count afresh.
         let later = t0 + WINDOW + Duration::from_secs(1);
         assert_eq!(after(Some(1), &mut recent, later), After::Restart(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn a_per_user_install_s_sign_in_entry_is_the_installer_s() {
+        let exe = r"C:\Users\Ann Lee\AppData\Local\Programs\ScreenGrabCraft\screengrabcraft.exe";
+        // What the per-user MSI writes: the Run value and the App Paths entry name the same program.
+        let run = format!("\"{exe}\" --background");
+        assert_eq!(command_program(&run), exe);
+        assert!(installers_own(&run, exe));
+        assert!(installers_own(&run, &format!("\"{}\"", exe.to_uppercase())), "any case, quoted");
+        // The owner's own entry for a portable copy, beside a per-user install: not the installer's.
+        assert!(!installers_own(r#""D:\Tools\ScreenGrabCraft\screengrabcraft.exe" --background"#, exe));
+        // Unquoted, and odd values.
+        assert_eq!(command_program(r"C:\x\screengrabcraft.exe --background"), r"C:\x\screengrabcraft.exe");
+        assert_eq!(command_program(r#"  "C:\x y\a.exe""#), r"C:\x y\a.exe");
+        assert_eq!(command_program(r#""C:\unterminated"#), r"C:\unterminated");
+        for odd in ["", " ", "\"", "\"\" --background"] {
+            assert_eq!(command_program(odd), "", "{odd:?}");
+            assert!(!installers_own(odd, exe), "{odd:?}");
+            assert!(!installers_own(odd, ""), "{odd:?}");
+        }
+        assert!(!installers_own(&run, ""));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "What ScreenGrabCraft's two desktop programs share: settings files, logging, one instance at a time, the clipboard, starting at sign-in, the supervisor that keeps the capture service running, and opening the other program"
+description = "What ScreenGrabCraft's two desktop programs share: settings files, logging, one instance at a time, the clipboard, starting at sign-in, the supervisor that keeps the capture service running, opening the other program, and updates"
 build = "build.rs"
 
 [lints]
@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 screengrabcraft-model = { workspace = true }
+# Remove Background's model, which the editor and the command-line program lend their sessions.
+screengrabcraft-matte = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -24,7 +26,14 @@ webbrowser = { workspace = true }
 jiff = "0.2.38"
 eframe = { workspace = true, features = ["wgpu"] }
 pollster = { workspace = true }
+# The update check (update.rs): the latest release from GitHub, versions compared, the installer's
+# SHA-256 checked.
+ureq = { workspace = true }
+semver = { workspace = true }
+ring = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The sign-in entries (Run, StartupApproved) are in the registry.
 winreg = "0.56"
+# The update check goes through the proxy Windows is set to use, if any.
+ureq = { workspace = true, features = ["win-system-proxy"] }

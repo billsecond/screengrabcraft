@@ -172,6 +172,20 @@ impl Document {
             .collect()
     }
 
+    /// `d` cut down so that these annotations, moved by it together, stay on the picture.
+    pub fn limit_move(&self, ids: &[ObjectId], d: Pt) -> Pt {
+        let area = ids.iter().filter_map(|id| self.get(*id)).map(|o| o.shape.bounds(&o.style)).reduce(Rect::union);
+        area.map_or(d, |a| a.limit_move(d, self.bounds()))
+    }
+
+    /// Moves an annotation onto the picture, as little as it takes.
+    pub fn bring_inside(&mut self, id: ObjectId) {
+        let bounds = self.bounds();
+        if let Some(o) = self.get_mut(id) {
+            o.shape.translate(o.shape.bounds(&o.style).way_into(bounds));
+        }
+    }
+
     /// The number the next step badge gets: one more than the highest so far.
     pub fn next_step_number(&self) -> u32 {
         self.objects
@@ -251,6 +265,30 @@ mod tests {
 
     fn rect(x: f32) -> Shape {
         Shape::Rect { rect: Rect::new(x, 0.0, 10.0, 10.0), radius: 0.0 }
+    }
+
+    #[test]
+    fn annotations_moved_together_stop_at_the_edge_together() {
+        let mut d = doc();
+        let a = d.add(rect(0.0), Style::default()).unwrap();
+        let b = d.add(rect(80.0), Style::default()).unwrap();
+        let moved = d.limit_move(&[a, b], Pt::new(500.0, 0.0));
+        assert!(moved.x < 10.0, "the one nearest the edge decides: {moved:?}");
+        assert_eq!(d.limit_move(&[], Pt::new(500.0, 0.0)), Pt::new(500.0, 0.0), "nothing to stop");
+        assert_eq!(d.limit_move(&[ObjectId(99)], Pt::new(500.0, 0.0)), Pt::new(500.0, 0.0));
+    }
+
+    #[test]
+    fn bringing_inside_moves_all_of_it_and_no_more() {
+        let mut d = doc();
+        let a = d.add(rect(95.0), Style::default()).unwrap();
+        d.bring_inside(a);
+        let o = d.get(a).unwrap();
+        assert!(d.bounds().encloses(o.shape.bounds(&o.style)), "{:?}", o.shape);
+        let before = o.shape.clone();
+        d.bring_inside(a);
+        assert_eq!(d.get(a).unwrap().shape, before, "already inside");
+        d.bring_inside(ObjectId(99));
     }
 
     #[test]

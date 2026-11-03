@@ -1,4 +1,4 @@
-//! Changes to the whole picture: crop, resize, turn, flip, more canvas, trim, and the effects
+//! Changes to the whole picture: crop, resize, turn, flip, more canvas, trim, fill, and the effects
 //! (border, drop shadow, torn edge, round corners, greyscale, invert, brightness and contrast).
 //!
 //! Each returns a new raster; the engine moves the annotations to match.
@@ -243,6 +243,43 @@ pub fn round_corners(r: &Raster, radius: f32) -> Result<Raster, RasterError> {
     Ok(out)
 }
 
+/// How far apart two colours are: the largest difference of a channel, alpha included. Two
+/// transparent pixels are the same, whatever colour they hold.
+fn colour_distance(a: Color, b: Color) -> u8 {
+    if a.a == 0 && b.a == 0 {
+        return 0;
+    }
+    a.r.abs_diff(b.r).max(a.g.abs_diff(b.g)).max(a.b.abs_diff(b.b)).max(a.a.abs_diff(b.a))
+}
+
+/// The picture with the area round the pixel at `x`, `y` filled with `colour`: the pixels joined
+/// to it (side by side) whose colour is within `tolerance` (0 to 255 a channel) of its colour are
+/// replaced by `colour`, so a transparent one clears the area. Also how many pixels changed (none
+/// when the point is outside the picture or the area is that colour already).
+pub fn fill(r: &Raster, x: u32, y: u32, colour: Color, tolerance: u8) -> Result<(Raster, u64), RasterError> {
+    let Some(seed) = r.pixel(x, y) else { return Ok((r.clone(), 0)) };
+    let n = screengrabcraft_model::raster::checked_len(r.width(), r.height())? / 4;
+    let px = r.pixels();
+    let near = |i: usize| match px.get(i * 4..i * 4 + 4) {
+        Some([cr, cg, cb, ca]) => colour_distance(Color::rgba(*cr, *cg, *cb, *ca), seed) <= tolerance,
+        _ => false,
+    };
+    let mut taken = vec![0u8; n];
+    crate::matte::flood(r.width() as usize, r.height() as usize, &[(x as usize, y as usize)], &near, &mut taken);
+    let new = [colour.r, colour.g, colour.b, colour.a];
+    let changes = taken.iter().zip(px.as_chunks::<4>().0).filter(|(t, p)| **t != 0 && **p != new).count() as u64;
+    if changes == 0 {
+        return Ok((r.clone(), 0));
+    }
+    let mut out = r.clone();
+    for (p, t) in out.pixels_mut().as_chunks_mut::<4>().0.iter_mut().zip(&taken) {
+        if *t != 0 {
+            *p = new;
+        }
+    }
+    Ok((out, changes))
+}
+
 /// Greys (by luminance).
 pub fn grayscale(r: &Raster) -> Raster {
     let mut out = r.clone();
@@ -350,5 +387,47 @@ mod tests {
         assert_eq!(invert(&r).pixel(0, 0), Some(Color::rgb(0x1A, 0xC6, 0xCA)));
         let bright = brightness_contrast(&Raster::filled(1, 1, Color::rgb(100, 100, 100)).unwrap(), 50.0, 0.0);
         assert!(bright.pixel(0, 0).is_some_and(|c| c.r > 200));
+    }
+
+    /// A white picture split by a black line down the middle, a little off-white at the top left.
+    fn halves() -> Raster {
+        let mut r = Raster::filled(10, 6, Color::WHITE).unwrap();
+        let px = r.pixels_mut();
+        for y in 0..6 {
+            let i = (y * 10 + 5) * 4;
+            px[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+        px[..4].copy_from_slice(&[240, 240, 240, 255]);
+        r
+    }
+
+    #[test]
+    fn fill_stops_at_another_colour() {
+        let r = halves();
+        let (out, n) = fill(&r, 2, 3, Color::RED, 0).unwrap();
+        assert_eq!(n, 5 * 6 - 1, "the left half but the off-white pixel");
+        assert_eq!(out.pixel(2, 3), Some(Color::RED));
+        assert_eq!(out.pixel(0, 0), Some(Color::rgb(240, 240, 240)), "too far from white with no tolerance");
+        assert_eq!(out.pixel(5, 3), Some(Color::BLACK), "the line stays");
+        assert_eq!(out.pixel(8, 3), Some(Color::WHITE), "the other side of the line isn't reached");
+        // With some tolerance, the off-white goes too.
+        let (out, n) = fill(&r, 2, 3, Color::RED, 20).unwrap();
+        assert_eq!((n, out.pixel(0, 0)), (5 * 6, Some(Color::RED)));
+        // A transparent colour clears the area.
+        let (out, _) = fill(&r, 8, 0, Color::TRANSPARENT, 0).unwrap();
+        assert_eq!(out.pixel(8, 0).map(|c| c.a), Some(0));
+        assert_eq!(out.pixel(2, 0).map(|c| c.a), Some(255));
+    }
+
+    #[test]
+    fn fill_changes_nothing_when_there_is_nothing_to_change() {
+        let r = halves();
+        let (same, n) = fill(&r, 8, 3, Color::WHITE, 0).unwrap();
+        assert_eq!(n, 0, "it's white already");
+        assert!(same.same_pixels(&r), "and no copy was made");
+        assert_eq!(fill(&r, 10, 0, Color::RED, 0).unwrap().1, 0, "outside the picture");
+        assert_eq!(fill(&r, u32::MAX, u32::MAX, Color::RED, 255).unwrap().1, 0);
+        // Everything is within the largest tolerance.
+        assert_eq!(fill(&r, 0, 0, Color::RED, 255).unwrap().1, 60);
     }
 }

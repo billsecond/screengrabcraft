@@ -140,6 +140,54 @@ impl Rect {
         p.x >= self.x && p.y >= self.y && p.x <= self.right() && p.y <= self.bottom()
     }
 
+    /// Whether all of `o` is inside this rectangle.
+    pub fn encloses(self, o: Rect) -> bool {
+        self.contains(o.min()) && self.contains(o.max())
+    }
+
+    /// The point inside this rectangle nearest to `p`.
+    pub fn nearest(self, p: Pt) -> Pt {
+        Pt { x: p.x.max(self.x).min(self.right()), y: p.y.max(self.y).min(self.bottom()) }
+    }
+
+    /// As far as a line from `from` (inside this rectangle) to `to` gets before it reaches the
+    /// edge, in the same direction.
+    pub fn stop_at_edge(self, from: Pt, to: Pt) -> Pt {
+        let room = |at: f32, by: f32, lo: f32, hi: f32| {
+            if by > 0.0 {
+                (hi - at) / by
+            } else if by < 0.0 {
+                (lo - at) / by
+            } else {
+                1.0
+            }
+        };
+        let d = to.sub(from);
+        let t = room(from.x, d.x, self.x, self.right()).min(room(from.y, d.y, self.y, self.bottom()));
+        from.lerp(to, t.clamp(0.0, 1.0))
+    }
+
+    /// `d` cut down so that this rectangle, moved by it, stays inside `area`. One that is already
+    /// partly outside can move in and no further out; one bigger than `area` can slide as long as
+    /// it still covers it.
+    pub fn limit_move(self, d: Pt, area: Rect) -> Pt {
+        let along = |d: f32, lo: f32, hi: f32, area_lo: f32, area_hi: f32| {
+            let (to_lo, to_hi) = (area_lo - lo, area_hi - hi);
+            d.max(to_lo.min(to_hi).min(0.0)).min(to_lo.max(to_hi).max(0.0))
+        };
+        let d = d.finite();
+        Pt { x: along(d.x, self.x, self.right(), area.x, area.right()), y: along(d.y, self.y, self.bottom(), area.y, area.bottom()) }
+    }
+
+    /// The shortest move that brings this rectangle inside `area`. One too big for it starts at
+    /// its top left.
+    pub fn way_into(self, area: Rect) -> Pt {
+        let along = |lo: f32, hi: f32, area_lo: f32, area_hi: f32| {
+            if lo < area_lo || hi - lo > area_hi - area_lo { area_lo - lo } else { (area_hi - hi).min(0.0) }
+        };
+        Pt { x: along(self.x, self.right(), area.x, area.right()), y: along(self.y, self.bottom(), area.y, area.bottom()) }
+    }
+
     /// Grown by `d` on every side (shrunk when negative, never past nothing).
     pub fn inflate(self, d: f32) -> Rect {
         let w = (self.w + 2.0 * d).max(0.0);
@@ -299,5 +347,62 @@ mod tests {
         assert_eq!(IRect::spanning(10, 10, 5, 2), IRect::new(5, 2, 6, 9));
         assert!(a.contains(-1, 1079));
         assert!(!a.contains(0, 0));
+    }
+
+    const AREA: Rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+
+    #[test]
+    fn nearest_is_the_point_itself_or_the_edge() {
+        assert_eq!(AREA.nearest(Pt::new(10.0, 20.0)), Pt::new(10.0, 20.0));
+        assert_eq!(AREA.nearest(Pt::new(-5.0, 80.0)), Pt::new(0.0, 50.0));
+        assert_eq!(AREA.nearest(Pt::new(f32::NAN, f32::INFINITY)), Pt::new(0.0, 50.0));
+    }
+
+    #[test]
+    fn a_line_stopped_at_the_edge_keeps_its_direction() {
+        let from = Pt::new(50.0, 25.0);
+        assert_eq!(AREA.stop_at_edge(from, Pt::new(60.0, 30.0)), Pt::new(60.0, 30.0), "inside: untouched");
+        assert_eq!(AREA.stop_at_edge(from, Pt::new(250.0, 25.0)), Pt::new(100.0, 25.0));
+        assert_eq!(AREA.stop_at_edge(from, Pt::new(100.0, 75.0)), Pt::new(75.0, 50.0), "the nearer edge counts");
+        assert_eq!(AREA.stop_at_edge(from, Pt::new(0.0, -25.0)), Pt::new(25.0, 0.0));
+        assert_eq!(AREA.stop_at_edge(from, from), from, "no line at all");
+    }
+
+    #[test]
+    fn a_move_stays_inside() {
+        let r = Rect::new(10.0, 10.0, 20.0, 20.0);
+        assert_eq!(r.limit_move(Pt::new(5.0, -5.0), AREA), Pt::new(5.0, -5.0));
+        assert_eq!(r.limit_move(Pt::new(500.0, 500.0), AREA), Pt::new(70.0, 20.0));
+        assert_eq!(r.limit_move(Pt::new(-500.0, -500.0), AREA), Pt::new(-10.0, -10.0));
+    }
+
+    #[test]
+    fn a_rectangle_already_outside_moves_in_and_not_further_out() {
+        let r = Rect::new(-10.0, 10.0, 20.0, 20.0);
+        assert_eq!(r.limit_move(Pt::new(-5.0, 0.0), AREA), Pt::ZERO, "no further out");
+        assert_eq!(r.limit_move(Pt::new(5.0, 0.0), AREA), Pt::new(5.0, 0.0), "no jump");
+        assert_eq!(Rect::new(500.0, 10.0, 20.0, 20.0).limit_move(Pt::new(5.0, 0.0), AREA), Pt::ZERO);
+    }
+
+    #[test]
+    fn a_rectangle_bigger_than_the_area_slides_and_still_covers_it() {
+        let r = Rect::new(-20.0, 0.0, 130.0, 10.0);
+        assert_eq!(r.limit_move(Pt::new(500.0, 0.0), AREA), Pt::new(20.0, 0.0));
+        assert_eq!(r.limit_move(Pt::new(-500.0, 0.0), AREA), Pt::new(-10.0, 0.0));
+    }
+
+    #[test]
+    fn hostile_moves_are_harmless() {
+        let r = Rect::new(10.0, 10.0, 20.0, 20.0);
+        assert_eq!(r.limit_move(Pt::new(f32::NAN, f32::INFINITY), AREA), Pt::ZERO);
+        assert_eq!(r.limit_move(Pt::new(1e30, -1e30), Rect::default()), Pt::new(0.0, -30.0));
+    }
+
+    #[test]
+    fn the_way_in_is_the_shortest() {
+        assert_eq!(Rect::new(10.0, 10.0, 20.0, 20.0).way_into(AREA), Pt::ZERO);
+        assert_eq!(Rect::new(90.0, 40.0, 20.0, 20.0).way_into(AREA), Pt::new(-10.0, -10.0));
+        assert_eq!(Rect::new(-5.0, -7.0, 20.0, 20.0).way_into(AREA), Pt::new(5.0, 7.0));
+        assert_eq!(Rect::new(30.0, 30.0, 200.0, 80.0).way_into(AREA), Pt::new(-30.0, -30.0), "too big: from the top left");
     }
 }

@@ -78,21 +78,66 @@ ScreenGrabCraft, and where each part stands:
 | An icon in the Craft style, for each program | `cargo xtask icon` (`packaging/icons.sh`) draws both into `assets/app-icon/`; `packaging/check-icons.sh` checks every size the packages use |
 | A row in the launcher's catalog (`crates/core/src/catalog.rs` in `storytold/craft-launcher`): id, name, tagline, colours, `owner/repo`; for an app outside the organisation also its own reverse-DNS id (`io.github.billsecond.screengrabcraft`) and publisher (the "community apps" group) | A pull request on that repository, after the first release; the 128 px icon goes with it |
 
+## Automatic updates
+
+The capture service checks `GET /repos/billsecond/screengrabcraft/releases/latest` a minute after
+it starts and every six hours (never during a capture; "Check for updates automatically" in About
+turns it off; `crates/desktop/src/update.rs`). It relies on what the workflow above produces, so
+keep it so:
+
+- The tag is `v<version>` and the version is semver. Drafts and pre-releases are never offered
+  (GitHub's "latest" skips them anyway).
+- The Windows MSIs are named `screengrabcraft-<ver>-windows-{x64,x86,arm64}.msi`, and
+  `SHA256SUMS.txt` lists them. A copy the MSI installed downloads the MSI of its own architecture
+  into `%TEMP%\ScreenGrabCraft\updates`, checks it against `SHA256SUMS.txt` (and GitHub's own
+  digest of the file, when it gives one), and deletes it on a mismatch. A file that isn't
+  listed, or a release without `SHA256SUMS.txt`, is never installed.
+- Update now runs `msiexec /i <msi> /passive /norestart /l*v install.log` through a detached
+  `cmd.exe` that then starts `screengrabcraft.exe --background` from where this copy is installed:
+  the MSI closes the service while it installs (`util:CloseApplication`), and a passive install
+  shows no finish page to start it again. An update keeps the copy's scope, read from where the
+  program is: in `%LocalAppData%\Programs` it was installed just for the owner, so `msiexec` gets
+  `ALLUSERS=2 MSIINSTALLPERUSER=1` and nothing is asked; anywhere else it is everyone's, and
+  Windows asks for permission (UAC). If the owner says no, nothing was closed, the new start hands
+  over to the running service and ends, and the update stays offered.
+- macOS, Linux, FreeBSD, the portable zip and builds in `target/` only tell the owner and open the
+  release page. The Flatpak has no network permission and never checks.
+
+`cargo run -p screengrabcraft-desktop --example update_check -- --as 0.1.6 --download <folder>`
+asks the real API as an older version and downloads and checks the x64 MSI, without installing.
+
 ## What the installers do
 
-- **Windows (`.msi`, WiX 5, `packaging/windows/screengrabcraft.wxs`):** per-machine install into
-  Program Files\ScreenGrabCraft; Start Menu shortcuts "ScreenGrabCraft" (the capture service) and
+- **Windows (`.msi`, WiX 5, `packaging/windows/screengrabcraft.wxs`):** one package that installs
+  either for everyone on this PC (per-machine: Program Files\ScreenGrabCraft, the all-users Start
+  menu, HKLM; an administrator has to allow it) or just for one person (per-user:
+  `%LocalAppData%\Programs\ScreenGrabCraft`, their Start menu, HKCU; no administrator). The first
+  page shows the licence and two buttons, "Just for me" and "Everyone on this PC"; when an earlier
+  version is installed only its way is offered, since Windows upgrades only a product installed
+  the same way. On the command line:
+
+  | | Command |
+  |---|---|
+  | Everyone on this PC (the default, as before) | `msiexec /i screengrabcraft-<ver>-windows-x64.msi` (add `/passive` or `/qn`) |
+  | Just for me, no administrator | `msiexec /i screengrabcraft-<ver>-windows-x64.msi ALLUSERS=2 MSIINSTALLPERUSER=1` (add `/passive` or `/qn`) |
+
+  Both properties are needed for a per-user install (the package's own `ALLUSERS` is 1, and
+  Windows reads `MSIINSTALLPERUSER` only when `ALLUSERS` is 2). A silent install the other way than
+  the installed copy stops with a message instead of installing a second copy beside it; to
+  switch, uninstall first. Start Menu shortcuts "ScreenGrabCraft" (the capture service) and
   "ScreenGrabCraft Editor"; App Paths entries for both. The capture service starts at every
-  sign-in through the `ScreenGrabCraft` value under
-  `HKLM\Software\Microsoft\Windows\CurrentVersion\Run` (`"…\screengrabcraft.exe" --background`),
-  removed on uninstall; each person can turn it off in the app or in Task Manager › Startup apps.
+  sign-in through the `ScreenGrabCraft` value under `Software\Microsoft\Windows\CurrentVersion\Run`
+  (`"…\screengrabcraft.exe" --background`), in HKLM per-machine and HKCU per-user, removed on
+  uninstall; each person can turn it off in the app or in Task Manager › Startup apps (the app
+  switches it through `StartupApproved` and never deletes the installer's value).
   The finish page's "Launch ScreenGrabCraft" (ticked) starts it the same way. Upgrading or
   uninstalling closes it first: WM_CLOSE to every `screengrabcraft.exe`, then whatever is left
   (the windowless supervisor) is terminated, with exit code 0 and no reboot prompt; that step is
   moved to the start of the install script so it runs before any file is removed. The editor is
   offered in "Open with" and in Settings › Default apps for `.png`, `.jpg`, `.jpeg`, `.gif`,
   `.bmp` and `.webp` without taking any of them over; `.sgcraft` projects are ScreenGrabCraft's
-  own (`ScreenGrabCraft.Project`) and open in the editor. The licence page is built from
+  own (`ScreenGrabCraft.Project`) and open in the editor (every registry value is `HKMU`: HKLM
+  per-machine, HKCU per-user). The licence page is built from
   `LICENSE-MIT`, `LICENSE-APACHE` and the fonts' OFL. The portable `.zip` holds the three programs
   and the docs and registers nothing.
 - **macOS (`.dmg`):** `ScreenGrabCraft.app` (`io.github.billsecond.screengrabcraft`, a menu-bar
@@ -201,6 +246,22 @@ before the programs were finished:
   files, the MIME type, the icons and the docs; the `.rpm` the same, the autostart entry as
   `%config`; the tarball the layout above.
 
+Checked on 2026-11-02 for the per-user choice (on a Windows 11 machine with ScreenGrabCraft 0.1.9
+installed per-machine, which was left alone: nothing was installed, repaired or removed):
+`wix build` for x64, x86 and arm64 without warnings; `wix msi validate` shows ICE61 and ICE69 as
+before and ICE57 for the App Paths values beside the programs (HKMU in a component whose key path
+is a file: expected in a package that installs either way); an administrative extract
+(`msiexec /a`) lays out the programs and the model under `ScreenGrabCraft\models`. The tables:
+`ALLUSERS` 1 and no `MSIINSTALLPERUSER` (per-machine stays the default), Word Count 2 (no "no
+elevation" flag, which would stop Windows asking for permission per-machine), every Registry row
+HKMU or HKCR, the earlier-install searches in the package's own registry view, AppSearch before
+FindRelatedProducts in the UI sequence, the first page's buttons and their events. The 0.1.9
+install's HKLM App Paths value is the one the search finds. The `package.yml` x64 job now also
+installs per-user on its runner and uninstalls. Not checked: the dialog on screen, a per-user
+install or update by a standard user (no UAC prompt is expected, as Windows documents for
+dual-purpose packages), and updating an earlier per-user install from the full UI (where Windows
+looks for it in the UI process, switched to per-user first).
+
 Not checked yet: anything built from the real programs; the MSI installed and uninstalled for
 real (it needs an administrator; the workflow does it on its runner, with the capture service
 running, and checks the uninstall closed it); the finish page's launch; the x86 and arm64 Windows
@@ -214,3 +275,5 @@ under Xvfb); signing; the release workflow on GitHub, which will need fixing on 
 | Date | Change |
 |---|---|
 | 2026-10-14 | First version: packaging for Windows, macOS, Linux, FreeBSD and the web from MailCraft's; the persistent capture service on each platform; the editor's file types; a release workflow of ScreenGrabCraft's own; what has and hasn't been checked |
+| 2026-11-02 | Automatic updates: what the update check relies on in a release, and how Windows installs one and starts the service again |
+| 2026-11-02 | The MSI installs just for one person (no administrator) or for everyone on this PC; the command lines, how upgrades keep the scope, what was checked |

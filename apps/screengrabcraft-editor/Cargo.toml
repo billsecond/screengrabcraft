@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 screengrabcraft-model = { workspace = true }
 screengrabcraft-render = { workspace = true }
+screengrabcraft-media = { workspace = true }
 screengrabcraft-ui = { workspace = true }
 screengrabcraft-desktop = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
@@ -19,7 +20,13 @@ egui = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }
 pollster = { workspace = true }
+# Deleting a capture from the strip moves it to the Recycle Bin (the Trash), never for good.
+trash = "5.2"
 
 [build-dependencies]
 # Icon + VERSIONINFO for the .exe; build.rs only uses it when the target is Windows.
 winresource = "0.1"
+
+# Playing a video recording's sound while editing it (not on the BSDs yet).
+[target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
+cpal = "0.18.2"

@@ -1,0 +1,987 @@
+//! The video editor: a Video Production recording opened in the editor. The picture at the
+//! playhead fills the middle; below it the timeline has a row for each track (the screen, the
+//! camera, the computer's sound, the microphone), each edited on its own.
+//!
+//! - Click the ruler (or anywhere empty) to move the playhead; drag across empty rows to choose
+//!   a stretch, then Delete (or Cut) takes it out of every track.
+//! - Click a clip to select it: Delete leaves a gap on that track only; drag its ends to trim
+//!   it, or the clip itself to slide it. S splits at the playhead (the selected clip's track, or
+//!   every track).
+//! - Each sound track has its own mute and volume; the camera's corner, size and shape are on
+//!   the right.
+//!
+//! Every edit is a `video.*` command of the engine's [`VideoSession`]; the edits are added to
+//! the recording file a moment after each change, and Export Video makes the MP4 beside it.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
+
+use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use screengrabcraft_engine::VideoSession;
+use screengrabcraft_media::compose::{self, Composer};
+use screengrabcraft_media::recording::{self, Recording, StreamKind};
+use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
+use serde_json::{Value, json};
+
+use crate::editor::Editor;
+use crate::icons::{self, Icon};
+use crate::services::{SoundOut, VideoExport, VideoJob};
+use crate::theme::Tokens;
+use crate::widgets;
+
+const HEADER_W: f32 = 176.0;
+const RULER_H: f32 = 26.0;
+const ROW_H: f32 = 48.0;
+/// How near a clip's end the pointer must be to trim it.
+const EDGE: f32 = 7.0;
+/// Edits are written this long after the last change.
+const SAVE_AFTER: f64 = 1.0;
+/// The preview is made no larger than this (the export has its own size).
+const PREVIEW_MAX: (u32, u32) = (1920, 1080);
+/// Sound waves are kept as peaks per 10 ms.
+const WAVE_STEP: u64 = 480;
+
+/// What a drag on the timeline is doing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Drag {
+    /// Moving the playhead.
+    Scrub,
+    /// Choosing a stretch, from here.
+    Range(u64),
+    Trim {
+        track: usize,
+        clip: usize,
+        start: bool,
+    },
+    /// Sliding a clip; the pointer is this far (µs) into it.
+    Move {
+        track: usize,
+        clip: usize,
+        grab: u64,
+    },
+}
+
+struct Playing {
+    /// When it started (egui's clock) and from where.
+    since: f64,
+    from: u64,
+    sound: Option<Box<dyn SoundOut>>,
+}
+
+pub struct VideoView {
+    pub rec: Arc<Recording>,
+    pub session: VideoSession,
+    /// The recording file, when it has one (edits are added to it).
+    pub path: Option<String>,
+    pub name: String,
+    pub playhead: u64,
+    playing: Option<Playing>,
+    composer: Composer,
+    texture: Option<egui::TextureHandle>,
+    /// What the texture shows: (playhead, revision).
+    shown: Option<(u64, u64)>,
+    pub selected: Option<(usize, usize)>,
+    /// A stretch chosen on the timeline.
+    pub range: Option<(u64, u64)>,
+    /// The timeline's zoom: pixels a second (0 until it's first fitted).
+    pps: f32,
+    scroll: f32,
+    drag: Option<Drag>,
+    /// The last revision written to the file, and when the edits last changed.
+    saved: u64,
+    seen: u64,
+    changed_at: f64,
+    export: Option<VideoExport>,
+    /// The last video made.
+    pub exported: Option<String>,
+    waves: BTreeMap<u8, Vec<(i16, i16)>>,
+    /// The volume slider being dragged.
+    volume_drag: bool,
+}
+
+fn kind_colour(kind: StreamKind) -> Color32 {
+    match kind {
+        StreamKind::Screen => Color32::from_rgb(0x6E, 0x5A, 0xD6),
+        StreamKind::Camera => Color32::from_rgb(0x1F, 0x9D, 0x8B),
+        StreamKind::SystemSound => Color32::from_rgb(0x2F, 0x80, 0xED),
+        StreamKind::Microphone => Color32::from_rgb(0xE6, 0x7E, 0x22),
+    }
+}
+
+/// `m:ss.t`
+pub fn clock(us: u64) -> String {
+    let tenths = us / 100_000;
+    format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
+}
+
+/// Each sound track's peaks per 10 ms (for drawing its wave), the first two hours at most.
+fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
+    let mut out = BTreeMap::new();
+    for s in rec.header.streams.iter().filter(|s| !s.kind.is_video()) {
+        let total = compose::to_samples(rec.stream_duration(s.id)).min(48_000 * 7200);
+        let ch = usize::from(s.channels.clamp(1, 2));
+        let mut peaks = Vec::with_capacity((total / WAVE_STEP) as usize + 1);
+        let mut at = 0u64;
+        while at < total {
+            let n = (total - at).min(48_000 * 10) as usize;
+            let block = rec.sound(s.id, at, n);
+            for step in block.chunks(WAVE_STEP as usize * ch) {
+                let lo = step.iter().copied().min().unwrap_or(0);
+                let hi = step.iter().copied().max().unwrap_or(0);
+                peaks.push((lo, hi));
+            }
+            at += n as u64;
+        }
+        out.insert(s.id, peaks);
+    }
+    out
+}
+
+impl VideoView {
+    pub fn new(rec: Recording, path: Option<String>, name: String) -> VideoView {
+        let session = VideoSession::new(&rec);
+        let (w, h) = rec
+            .header
+            .streams
+            .iter()
+            .find(|s| s.kind == StreamKind::Screen)
+            .or_else(|| rec.header.streams.iter().find(|s| s.kind == StreamKind::Camera))
+            .map(|s| compose::fit(s.width, s.height, PREVIEW_MAX.0, PREVIEW_MAX.1))
+            .unwrap_or((1280, 720));
+        let waves = waves(&rec);
+        let rec = Arc::new(rec);
+        let composer = Composer::new(rec.clone(), &session.timeline, w, h);
+        VideoView {
+            rec,
+            session,
+            path,
+            name,
+            playhead: 0,
+            playing: None,
+            composer,
+            texture: None,
+            shown: None,
+            selected: None,
+            range: None,
+            pps: 0.0,
+            scroll: 0.0,
+            drag: None,
+            saved: 0,
+            seen: 0,
+            changed_at: 0.0,
+            export: None,
+            exported: None,
+            waves,
+            volume_drag: false,
+        }
+    }
+
+    fn length(&self) -> u64 {
+        self.session.timeline.length()
+    }
+
+    fn fps(&self) -> u64 {
+        u64::from(self.rec.header.fps.clamp(1, 60))
+    }
+
+    pub fn is_playing(&self) -> bool {
+        self.playing.is_some()
+    }
+
+    /// Runs a command; a failure is said in the editor's message.
+    fn run(&mut self, ed: &mut Editor, ctx: &egui::Context, id: &str, params: Value) {
+        if let Err(e) = self.session.execute(id, &params) {
+            ed.error(ctx, e.to_string());
+        }
+        self.fix_selection();
+    }
+
+    fn fix_selection(&mut self) {
+        if let Some((t, c)) = self.selected
+            && self.session.timeline.tracks.get(t).is_none_or(|tr| c >= tr.clips.len())
+        {
+            self.selected = None;
+        }
+    }
+
+    pub fn play(&mut self, ed: &Editor, now: f64) {
+        if self.playhead >= self.length() {
+            self.playhead = 0;
+        }
+        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.playhead);
+        self.playing = Some(Playing { since: now, from: self.playhead, sound });
+    }
+
+    pub fn pause(&mut self) {
+        self.playing = None;
+    }
+
+    fn seek(&mut self, ed: &Editor, us: u64, now: f64) {
+        self.playhead = us.min(self.length());
+        if self.playing.is_some() {
+            self.play(ed, now);
+        }
+    }
+
+    /// Splits at the playhead: the selected clip's track, or every track.
+    pub fn split(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let track = self.selected.map(|(t, _)| t);
+        let p = match track {
+            Some(t) => json!({"at": self.playhead, "track": t}),
+            None => json!({"at": self.playhead}),
+        };
+        self.run(ed, ctx, "video.split", p);
+    }
+
+    /// Delete: the chosen stretch out of every track, else the selected clip.
+    pub fn delete(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        if let Some((a, b)) = self.range.take() {
+            self.run(ed, ctx, "video.cut", json!({"from": a, "to": b}));
+            self.playhead = a.min(self.length());
+        } else if let Some((t, c)) = self.selected.take() {
+            self.run(ed, ctx, "video.deleteClip", json!({"track": t, "clip": c}));
+        }
+    }
+
+    /// Writes the edits now if there are some to write.
+    pub fn save_now(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        if self.session.revision() == self.saved {
+            return;
+        }
+        let Some(path) = self.path.clone() else { return };
+        match recording::edit_bytes(&self.session.timeline).map_err(|e| e.to_string()).and_then(|b| ed.services.append_file(&path, &b)) {
+            Ok(()) => {
+                self.saved = self.session.revision();
+                self.session.dirty = false;
+            }
+            Err(e) => {
+                // Not tried again until the next change.
+                self.saved = self.session.revision();
+                ed.error(ctx, format!("The edits could not be saved: {e}"));
+            }
+        }
+    }
+
+    pub fn start_export(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        if self.export.is_some() {
+            return;
+        }
+        let Some(path) = &self.path else {
+            ed.error(ctx, "Only a recording opened from a file can be made into a video here");
+            return;
+        };
+        let out = std::path::Path::new(path).with_extension("mp4").to_string_lossy().to_string();
+        let job = VideoJob {
+            recording: self.rec.clone(),
+            timeline: self.session.timeline.clone(),
+            out,
+            max_size: (1920, 1080),
+            fps: self.rec.header.fps.clamp(5, 60),
+        };
+        match ed.services.export_video(job) {
+            Ok(x) => self.export = Some(x),
+            Err(e) => ed.error(ctx, e),
+        }
+    }
+
+    /// Work done every frame: the playhead while playing, saving edits, the export.
+    fn tick(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let now = ctx.input(|i| i.time);
+        if let Some(p) = &self.playing {
+            let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from + ((now - p.since).max(0.0) * 1e6) as u64);
+            if at >= self.length() {
+                self.playhead = self.length();
+                self.playing = None;
+            } else {
+                self.playhead = at;
+                ctx.request_repaint();
+            }
+        }
+        if self.session.revision() != self.seen {
+            self.seen = self.session.revision();
+            self.changed_at = now;
+        }
+        if self.session.revision() != self.saved && self.drag.is_none() && !self.volume_drag && now - self.changed_at >= SAVE_AFTER {
+            self.save_now(ed, ctx);
+        } else if self.session.revision() != self.saved {
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        if let Some(x) = &self.export {
+            let done = x.done.lock().ok().and_then(|mut d| d.take());
+            match done {
+                Some(Ok(path)) => {
+                    ed.toast(ctx, format!("Video saved: {}", crate::editor::file_name(&path)));
+                    self.exported = Some(path);
+                    self.export = None;
+                }
+                Some(Err(e)) => {
+                    if !x.cancel.load(Ordering::SeqCst) {
+                        ed.error(ctx, format!("The video could not be made: {e}"));
+                    }
+                    self.export = None;
+                }
+                None => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
+            }
+        }
+    }
+
+    fn keys(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        if ed.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+            return;
+        }
+        let now = ctx.input(|i| i.time);
+        let cmd = |k: Key| KeyboardShortcut::new(Modifiers::COMMAND, k);
+        let pressed = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
+        let plain = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)) || pressed(cmd(Key::Y)) {
+            self.run(ed, ctx, "edit.redo", json!({}));
+        } else if pressed(cmd(Key::Z)) {
+            self.run(ed, ctx, "edit.undo", json!({}));
+        }
+        if pressed(cmd(Key::O)) {
+            ed.services.request_open();
+        }
+        if pressed(cmd(Key::E)) {
+            self.start_export(ed, ctx);
+        }
+        if pressed(cmd(Key::X)) && self.range.is_some() {
+            self.delete(ed, ctx);
+        }
+        if plain(Key::Space) {
+            if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
+        }
+        if plain(Key::S) {
+            self.split(ed, ctx);
+        }
+        if plain(Key::Delete) || plain(Key::Backspace) {
+            self.delete(ed, ctx);
+        }
+        if plain(Key::Escape) {
+            self.range = None;
+            self.selected = None;
+        }
+        let frame = 1_000_000 / self.fps();
+        if plain(Key::ArrowLeft) {
+            self.seek(ed, self.playhead.saturating_sub(frame), now);
+        }
+        if plain(Key::ArrowRight) {
+            self.seek(ed, self.playhead + frame, now);
+        }
+        if plain(Key::Home) {
+            self.seek(ed, 0, now);
+        }
+        if plain(Key::End) {
+            self.seek(ed, self.length(), now);
+        }
+    }
+
+    fn menu_bar(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        egui::Panel::top("video_menu").frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 3))).show(ui, |ui| {
+            egui::MenuBar::new().config(crate::widgets::menu_config()).ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
+                        ed.services.request_open();
+                        ui.close();
+                    }
+                    if ui.button("New Capture").clicked() {
+                        if let Err(e) = ed.services.new_capture(screengrabcraft_model::CaptureMode::Region) {
+                            ed.error(&ctx, e);
+                        }
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video").shortcut_text("Ctrl+E")).clicked() {
+                        self.start_export(ed, &ctx);
+                        ui.close();
+                    }
+                    if let Some(p) = &self.path
+                        && ui.button("Show in Folder").clicked()
+                    {
+                        ed.services.open_folder(Some(p));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .add_enabled(self.session.edited(), egui::Button::new("Revert to Recording"))
+                        .on_hover_text("Every track whole, as recorded")
+                        .clicked()
+                    {
+                        self.run(ed, &ctx, "video.revert", json!({}));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Close Window").clicked() {
+                        ed.quit_requested = true;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Edit", |ui| {
+                    let undo = format!("Undo {}", self.session.undo_label().unwrap_or(""));
+                    if ui.add_enabled(self.session.can_undo(), egui::Button::new(undo.trim()).shortcut_text("Ctrl+Z")).clicked() {
+                        self.run(ed, &ctx, "edit.undo", json!({}));
+                        ui.close();
+                    }
+                    let redo = format!("Redo {}", self.session.redo_label().unwrap_or(""));
+                    if ui.add_enabled(self.session.can_redo(), egui::Button::new(redo.trim()).shortcut_text("Ctrl+Y")).clicked() {
+                        self.run(ed, &ctx, "edit.redo", json!({}));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new("Split at the Playhead").shortcut_text("S")).clicked() {
+                        self.split(ed, &ctx);
+                        ui.close();
+                    }
+                    let what = if self.range.is_some() { "Cut the Stretch" } else { "Delete the Clip" };
+                    if ui.add_enabled(self.range.is_some() || self.selected.is_some(), egui::Button::new(what).shortcut_text("Del")).clicked() {
+                        self.delete(ed, &ctx);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Play", |ui| {
+                    let label = if self.playing.is_some() { "Pause" } else { "Play" };
+                    if ui.add(egui::Button::new(label).shortcut_text("Space")).clicked() {
+                        if self.playing.is_some() {
+                            self.pause()
+                        } else {
+                            self.play(ed, now)
+                        }
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Go to the Start").shortcut_text("Home")).clicked() {
+                        self.seek(ed, 0, now);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Go to the End").shortcut_text("End")).clicked() {
+                        self.seek(ed, self.length(), now);
+                        ui.close();
+                    }
+                });
+                ui.menu_button("View", |ui| {
+                    if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
+                        ed.services.save_settings(&ed.settings);
+                    }
+                    if ui.button("Fit the Timeline").clicked() {
+                        self.pps = 0.0;
+                        ui.close();
+                    }
+                });
+                ui.menu_button("Help", |ui| {
+                    if ui.button(format!("About {}", screengrabcraft_model::EDITOR_NAME)).clicked() {
+                        ed.dialog = Some(crate::dialogs::Dialog::About);
+                        ui.close();
+                    }
+                });
+            });
+        });
+    }
+
+    fn tool_bar(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        egui::Panel::top("video_tools")
+            .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 5)))
+            .show_separator_line(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                    if icons::button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                        ed.services.request_open();
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    let (icon, tip) = if self.playing.is_some() { (Icon::Pause, "Pause (Space)") } else { (Icon::Play, "Play (Space)") };
+                    if icons::button(ui, icon, tip, false, self.length() > 0).clicked() {
+                        if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
+                    }
+                    ui.label(RichText::new(format!("{} / {}", clock(self.playhead), clock(self.length()))).monospace().size(14.0).color(t.text));
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    if widgets::button(ui, "Split").on_hover_text("Split at the playhead (S): the selected clip's track, or all of them").clicked() {
+                        self.split(ed, &ctx);
+                    }
+                    let tip = if self.range.is_some() {
+                        "Take the chosen stretch out of every track (Del)"
+                    } else {
+                        "Delete the selected clip, leaving a gap (Del)"
+                    };
+                    let any = self.range.is_some() || self.selected.is_some();
+                    if ui
+                        .add_enabled_ui(any, |ui| widgets::button(ui, if self.range.is_some() { "Cut" } else { "Delete" }))
+                        .inner
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        self.delete(ed, &ctx);
+                    }
+                    ui.add_space(6.0);
+                    let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
+                    if icons::button(ui, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
+                        self.run(ed, &ctx, "edit.undo", json!({}));
+                    }
+                    let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
+                    if icons::button(ui, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
+                        self.run(ed, &ctx, "edit.redo", json!({}));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
+                        match &self.export {
+                            Some(x) => {
+                                if widgets::button(ui, "Cancel").clicked() {
+                                    x.cancel.store(true, Ordering::SeqCst);
+                                }
+                                let p = x.progress.load(Ordering::SeqCst).min(1000) as f32 / 1000.0;
+                                ui.add(egui::ProgressBar::new(p).desired_width(160.0).show_percentage());
+                                ui.label(RichText::new("Making the video…").color(t.muted));
+                            }
+                            None => {
+                                if widgets::primary_button(ui, "Export Video").on_hover_text("Make an MP4 of the video as edited (Ctrl+E)").clicked()
+                                {
+                                    self.start_export(ed, &ctx);
+                                }
+                                if let Some(p) = self.exported.clone() {
+                                    if widgets::button(ui, "Show in folder").clicked() {
+                                        ed.services.open_folder(Some(&p));
+                                    }
+                                    if widgets::button(ui, "Play video").on_hover_text(crate::editor::file_name(&p)).clicked() {
+                                        ed.services.open_with_system(&p);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+            });
+    }
+
+    fn status_bar(&self, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        egui::Panel::bottom("video_status")
+            .exact_size(24.0)
+            .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(10, 0)))
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing = vec2(16.0, 0.0);
+                    let small = |s: String| RichText::new(s).size(12.0).color(t.muted);
+                    let screen = self.rec.header.streams.iter().find(|s| s.kind == StreamKind::Screen);
+                    if let Some(s) = screen {
+                        ui.label(small(format!("{} × {} px, {} frames a second", s.width, s.height, self.rec.header.fps)));
+                    }
+                    ui.label(small(format!("{} long", clock(self.length()))));
+                    if let Some((a, b)) = self.range {
+                        ui.label(small(format!("Chosen: {} to {} — Delete takes it out", clock(a), clock(b))));
+                    }
+                    if !self.rec.finished {
+                        ui.label(small("This recording stopped early: it's what was saved".to_string()));
+                    }
+                    let saved = if self.session.revision() == self.saved { "Edits saved" } else { "Saving…" };
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(small(saved.to_string()));
+                    });
+                });
+            });
+    }
+
+    /// The camera's place in the picture.
+    fn camera_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let Some(track) = self.session.timeline.find(StreamKind::Camera) else { return };
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let cam = self.session.timeline.camera;
+        egui::Panel::right("video_camera")
+            .exact_size(236.0)
+            .resizable(false)
+            .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
+            .show(ui, |ui| {
+                ui.label(RichText::new("Camera").size(16.0).color(t.text));
+                ui.add_space(8.0);
+                ui.label(RichText::new("Corner").color(t.muted));
+                egui::Grid::new("camera_corners").spacing([6.0, 6.0]).show(ui, |ui| {
+                    for (i, (corner, label)) in [
+                        (Corner::TopLeft, "Top left"),
+                        (Corner::TopRight, "Top right"),
+                        (Corner::BottomLeft, "Bottom left"),
+                        (Corner::BottomRight, "Bottom right"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        if ui.add(egui::Button::new(label).selected(cam.corner == corner).min_size(vec2(96.0, 28.0))).clicked() {
+                            self.run(ed, &ctx, "video.camera", json!({"corner": corner}));
+                        }
+                        if i % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("Shape").color(t.muted));
+                ui.horizontal(|ui| {
+                    for (shape, label) in [(CameraShape::Rectangle, "Square"), (CameraShape::Rounded, "Rounded"), (CameraShape::Circle, "Circle")] {
+                        if ui.add(egui::Button::new(label).selected(cam.shape == shape)).clicked() {
+                            self.run(ed, &ctx, "video.camera", json!({"shape": shape}));
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label(RichText::new("Size (share of the width)").color(t.muted));
+                let mut size = cam.size * 100.0;
+                let r = ui.add(egui::Slider::new(&mut size, 10.0..=50.0).suffix("%")).on_hover_text("Its width, as a share of the video's");
+                if r.drag_started() {
+                    self.session.begin("Camera");
+                }
+                if r.changed() {
+                    let p = json!({"size": size / 100.0});
+                    if r.dragged() {
+                        let _ = self.session.drag("video.camera", &p);
+                    } else {
+                        self.run(ed, &ctx, "video.camera", p)
+                    }
+                }
+                if r.drag_stopped() {
+                    self.session.commit();
+                }
+                ui.add_space(12.0);
+                let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
+                if hidden {
+                    ui.label(RichText::new("The camera's clips were all deleted.").color(t.muted));
+                }
+            });
+    }
+
+    /// The picture at the playhead, fitted to the space.
+    fn preview(&mut self, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let key = (self.playhead, self.session.revision());
+        if self.shown != Some(key) {
+            let pic = self.composer.frame(&self.session.timeline, self.playhead);
+            let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
+            match &mut self.texture {
+                Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+                None => self.texture = Some(ui.ctx().load_texture("video-frame", img, egui::TextureOptions::LINEAR)),
+            }
+            self.shown = Some(key);
+        }
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
+            let area = ui.max_rect().shrink(16.0);
+            if let Some(tex) = &self.texture {
+                let size = tex.size_vec2();
+                let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
+                let r = Rect::from_center_size(area.center(), size * f);
+                ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+            }
+        });
+    }
+
+    fn header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect, i: usize, track: &Track) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+        ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, kind_colour(track.kind));
+        let painter = ui.painter_at(row);
+        painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), t.text);
+        if track.kind.is_video() {
+            let device = self.rec.stream(track.stream).map(|s| s.name.clone()).unwrap_or_default();
+            if !device.is_empty() && device != name {
+                painter.text(row.min + vec2(14.0, 25.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
+            }
+            return;
+        }
+        let mute = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(56.0, 20.0));
+        let mut muted = track.muted;
+        if ui.put(mute, egui::Checkbox::new(&mut muted, "Mute")).changed() {
+            self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": muted}));
+        }
+        let vol = Rect::from_min_size(row.min + vec2(70.0, 24.0), vec2(row.width() - 78.0, 20.0));
+        let mut v = track.volume * 100.0;
+        let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
+        if r.drag_started() {
+            self.session.begin("Volume");
+            self.volume_drag = true;
+        }
+        if r.changed() {
+            let p = json!({"track": i, "volume": v / 100.0});
+            if self.volume_drag {
+                let _ = self.session.drag("video.volume", &p);
+            } else {
+                self.run(ed, &ctx, "video.volume", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+            self.volume_drag = false;
+        }
+    }
+
+    fn timeline(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let now = ctx.input(|i| i.time);
+        let tracks = self.session.timeline.tracks.clone();
+        let rows = tracks.len().max(1);
+        let height = RULER_H + rows as f32 * ROW_H + 10.0;
+        egui::Panel::bottom("video_timeline")
+            .exact_size(height)
+            .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(0, 4)))
+            .show(ui, |ui| {
+                let full = ui.max_rect();
+                let lane = Rect::from_min_max(pos2(full.min.x + HEADER_W, full.min.y), full.max);
+                let length = self.length().max(1_000_000);
+                if self.pps <= 0.0 {
+                    self.pps = ((lane.width() - 24.0) / (length as f32 / 1e6)).clamp(2.0, 400.0);
+                    self.scroll = 0.0;
+                }
+                let (pps, scroll) = (self.pps, self.scroll);
+                let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(pps)) as f32 - scroll;
+                let us_of = |x: f32| (f64::from((x - lane.min.x + scroll).max(0.0)) / f64::from(pps) * 1e6) as u64;
+                let row_rect =
+                    |i: usize| Rect::from_min_size(pos2(full.min.x, full.min.y + RULER_H + i as f32 * ROW_H), vec2(full.width(), ROW_H - 4.0));
+                // The lane takes the pointer first; the headers have their own controls.
+                let resp = ui.interact(lane, ui.id().with("lane"), Sense::click_and_drag());
+                let painter = ui.painter_at(full);
+                // The ruler.
+                let ruler = Rect::from_min_max(pos2(lane.min.x, full.min.y), pos2(lane.max.x, full.min.y + RULER_H));
+                painter.rect_filled(ruler, 0.0, t.toolbar);
+                let step = [1u64, 2, 5, 10, 15, 30, 60, 120, 300, 600].into_iter().find(|s| *s as f32 * pps >= 70.0).unwrap_or(1200);
+                let first = us_of(lane.min.x) / 1_000_000 / step * step;
+                let mut s = first;
+                while x_of(s * 1_000_000) < lane.max.x {
+                    let x = x_of(s * 1_000_000);
+                    painter.line_segment([pos2(x, ruler.max.y - 8.0), pos2(x, ruler.max.y)], Stroke::new(1.0, t.muted));
+                    painter.text(
+                        pos2(x + 3.0, ruler.min.y + 4.0),
+                        egui::Align2::LEFT_TOP,
+                        format!("{}:{:02}", s / 60, s % 60),
+                        egui::FontId::proportional(11.0),
+                        t.muted,
+                    );
+                    s += step;
+                }
+                // The rows and their clips.
+                for (i, track) in tracks.iter().enumerate() {
+                    let row = row_rect(i);
+                    let lane_row = Rect::from_min_max(pos2(lane.min.x, row.min.y), pos2(lane.max.x, row.max.y));
+                    painter.rect_filled(lane_row, 0.0, if i % 2 == 0 { t.window } else { t.panel });
+                    let colour = if track.muted { Color32::from_gray(140) } else { kind_colour(track.kind) };
+                    for (c, clip) in track.clips.iter().enumerate() {
+                        let r = Rect::from_min_max(pos2(x_of(clip.at), row.min.y + 3.0), pos2(x_of(clip.end()), row.max.y - 3.0));
+                        if r.max.x < lane.min.x || r.min.x > lane.max.x {
+                            continue;
+                        }
+                        painter.rect_filled(r, 4.0, colour.gamma_multiply(0.35));
+                        painter.rect_stroke(r, 4.0, Stroke::new(1.0, colour), StrokeKind::Inside);
+                        if let Some(peaks) = self.waves.get(&track.stream) {
+                            let mid = r.center().y;
+                            let half = r.height() / 2.0 - 3.0;
+                            let (x0, x1) = (r.min.x.max(lane.min.x) as i32, r.max.x.min(lane.max.x) as i32);
+                            for x in x0..x1 {
+                                let (a, b) = (us_of(x as f32), us_of(x as f32 + 1.0));
+                                let src = |us: u64| (clip.from + us.saturating_sub(clip.at)) * 48 / 1000 / WAVE_STEP;
+                                let (i0, i1) = (src(a) as usize, (src(b) as usize).max(src(a) as usize + 1));
+                                let (lo, hi) = peaks
+                                    .get(i0..i1.min(peaks.len()))
+                                    .unwrap_or_default()
+                                    .iter()
+                                    .fold((0i16, 0i16), |(l, h), (a, b)| (l.min(*a), h.max(*b)));
+                                let g = track.volume.clamp(0.0, 2.0) / 32768.0 * half;
+                                let (top, bottom) = ((mid - f32::from(hi) * g).max(r.min.y + 2.0), (mid - f32::from(lo) * g).min(r.max.y - 2.0));
+                                painter
+                                    .line_segment([pos2(x as f32 + 0.5, top), pos2(x as f32 + 0.5, bottom.max(top + 1.0))], Stroke::new(1.0, colour));
+                            }
+                        } else {
+                            painter.text(
+                                r.min + vec2(8.0, 6.0),
+                                egui::Align2::LEFT_TOP,
+                                track.kind.label(),
+                                egui::FontId::proportional(12.0),
+                                t.text,
+                            );
+                        }
+                        if self.selected == Some((i, c)) {
+                            painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
+                        }
+                    }
+                }
+                // The chosen stretch.
+                if let Some((a, b)) = self.range {
+                    let band = Rect::from_min_max(pos2(x_of(a), full.min.y), pos2(x_of(b), full.max.y));
+                    painter.rect_filled(band, 0.0, t.accent.gamma_multiply(0.18));
+                    painter.rect_stroke(band, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+                }
+                // The playhead.
+                let px = x_of(self.playhead);
+                if px >= lane.min.x && px <= lane.max.x {
+                    let red = Color32::from_rgb(0xE5, 0x39, 0x35);
+                    painter.line_segment([pos2(px, full.min.y), pos2(px, full.max.y)], Stroke::new(2.0, red));
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![pos2(px - 6.0, full.min.y), pos2(px + 6.0, full.min.y), pos2(px, full.min.y + 9.0)],
+                        red,
+                        Stroke::NONE,
+                    ));
+                }
+                // The headers, over the left of the rows.
+                painter.rect_filled(Rect::from_min_max(full.min, pos2(lane.min.x, full.max.y)), 0.0, t.panel);
+                painter.line_segment([pos2(lane.min.x, full.min.y), pos2(lane.min.x, full.max.y)], Stroke::new(1.0, t.border));
+                for (i, track) in tracks.iter().enumerate() {
+                    let row = row_rect(i);
+                    self.header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), i, track);
+                }
+                // The pointer on the lane.
+                let row_at = |y: f32| -> Option<usize> {
+                    let r = ((y - full.min.y - RULER_H) / ROW_H).floor();
+                    (r >= 0.0 && (r as usize) < tracks.len()).then_some(r as usize)
+                };
+                let clip_at = |track: usize, x: f32| -> Option<(usize, Option<bool>)> {
+                    let tr = tracks.get(track)?;
+                    tr.clips.iter().enumerate().find_map(|(c, clip)| {
+                        let (a, b) = (x_of(clip.at), x_of(clip.end()));
+                        if x < a - EDGE || x > b + EDGE {
+                            return None;
+                        }
+                        let edge = if (x - a).abs() <= EDGE {
+                            Some(true)
+                        } else if (x - b).abs() <= EDGE {
+                            Some(false)
+                        } else {
+                            None
+                        };
+                        Some((c, edge))
+                    })
+                };
+                if let Some(p) = resp.hover_pos()
+                    && let Some(track) = row_at(p.y)
+                    && let Some((_, Some(_))) = clip_at(track, p.x)
+                {
+                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
+                if resp.drag_started()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    self.drag = Some(if p.y < ruler.max.y {
+                        Drag::Scrub
+                    } else if let Some(track) = row_at(p.y) {
+                        match clip_at(track, p.x) {
+                            Some((clip, Some(start))) => {
+                                self.selected = Some((track, clip));
+                                self.session.begin("Trim");
+                                Drag::Trim { track, clip, start }
+                            }
+                            Some((clip, None)) => {
+                                self.selected = Some((track, clip));
+                                self.session.begin("Move Clip");
+                                let at = tracks.get(track).and_then(|tr| tr.clips.get(clip)).map(|c| c.at).unwrap_or(0);
+                                Drag::Move { track, clip, grab: us_of(p.x).saturating_sub(at) }
+                            }
+                            None => Drag::Range(us_of(p.x).min(self.length())),
+                        }
+                    } else {
+                        Drag::Range(us_of(p.x).min(self.length()))
+                    });
+                }
+                if resp.dragged()
+                    && let (Some(p), Some(d)) = (resp.interact_pointer_pos(), self.drag)
+                {
+                    let us = us_of(p.x);
+                    match d {
+                        Drag::Scrub => self.seek(ed, us, now),
+                        Drag::Range(from) => {
+                            let to = us.min(self.length());
+                            self.range = (from.abs_diff(to) > 0).then_some((from.min(to), from.max(to)));
+                            self.selected = None;
+                        }
+                        Drag::Trim { track, clip, start } => {
+                            let id = if start { "video.trimStart" } else { "video.trimEnd" };
+                            let _ = self.session.drag(id, &json!({"track": track, "clip": clip, "to": us}));
+                        }
+                        Drag::Move { track, clip, grab } => {
+                            let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": us.saturating_sub(grab)}));
+                        }
+                    }
+                    // Near the edges, the timeline scrolls along.
+                    if p.x > lane.max.x - 20.0 {
+                        self.scroll += 8.0;
+                    } else if p.x < lane.min.x + 20.0 {
+                        self.scroll = (self.scroll - 8.0).max(0.0);
+                    }
+                }
+                if resp.drag_stopped() {
+                    if matches!(self.drag, Some(Drag::Trim { .. } | Drag::Move { .. })) {
+                        self.session.commit();
+                    }
+                    self.drag = None;
+                }
+                if resp.clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    match row_at(p.y).and_then(|track| clip_at(track, p.x).map(|(c, _)| (track, c))) {
+                        Some(sel) if p.y >= ruler.max.y => self.selected = Some(sel),
+                        _ => {
+                            self.selected = None;
+                            self.range = None;
+                            self.seek(ed, us_of(p.x), now);
+                        }
+                    }
+                }
+                // The wheel scrolls; with Ctrl it zooms around the pointer.
+                if resp.hovered() {
+                    let (dy, dx, zoom) = ctx.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.command));
+                    if zoom && dy != 0.0 {
+                        let at = resp.hover_pos().map(|p| p.x).unwrap_or(lane.center().x);
+                        let us = us_of(at);
+                        self.pps = (self.pps * (1.0 + dy * 0.002)).clamp(2.0, 800.0);
+                        self.scroll = ((us as f64 / 1e6 * f64::from(self.pps)) as f32 - (at - lane.min.x)).max(0.0);
+                    } else if dy != 0.0 || dx != 0.0 {
+                        self.scroll = (self.scroll - dy - dx).max(0.0);
+                    }
+                }
+                // The playhead stays in view while playing.
+                if self.playing.is_some() && (px > lane.max.x - 40.0 || px < lane.min.x) {
+                    self.scroll = ((self.playhead as f64 / 1e6 * f64::from(self.pps)) as f32 - 60.0).max(0.0);
+                }
+                self.fix_selection();
+            });
+    }
+}
+
+/// Shows the video editor in the editor's window (when a recording is open).
+pub fn show(ed: &mut Editor, ui: &mut Ui) {
+    let Some(mut v) = ed.video.take() else { return };
+    let epoch = ed.video_epoch;
+    let ctx = ui.ctx().clone();
+    v.keys(ed, &ctx);
+    v.tick(ed, &ctx);
+    v.menu_bar(ed, ui);
+    v.tool_bar(ed, ui);
+    v.status_bar(ui);
+    if ed.settings.show_tray {
+        crate::strip::show(ed, ui);
+    }
+    v.timeline(ed, ui);
+    v.camera_panel(ed, ui);
+    v.preview(ui);
+    // Something else was opened meanwhile (from the strip): this one's edits are written first.
+    if ed.video_epoch == epoch && ed.video.is_none() {
+        ed.video = Some(v);
+    } else {
+        v.save_now(ed, &ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_clock_reads_minutes_seconds_and_tenths() {
+        assert_eq!(clock(0), "0:00.0");
+        assert_eq!(clock(61_250_000), "1:01.2");
+        assert_eq!(clock(3_600_000_000), "60:00.0");
+    }
+}

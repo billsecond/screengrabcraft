@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, vec2};
 use screengrabcraft_desktop::{launch, paths, service};
 use screengrabcraft_model::settings::KEYS;
+use screengrabcraft_model::settings::VideoOptions;
 use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys, ImageFormat, Theme};
 use screengrabcraft_ui::icons::{self, Icon};
 use screengrabcraft_ui::theme::Tokens;
+use screengrabcraft_ui::widgets::{self, FooterButton};
 
 use crate::app::{APP_ID, ICON, Service};
 use crate::hotkeys::logo_name;
@@ -19,6 +21,7 @@ pub enum Tab {
     #[default]
     Capture,
     After,
+    Video,
     Shortcuts,
     General,
     About,
@@ -31,6 +34,8 @@ pub struct Home {
     status: Option<service::Status>,
     message: Option<(String, bool)>,
     delay: u32,
+    /// The microphones and cameras, once the Video page has looked.
+    devices: Option<Devices>,
 }
 
 pub fn show(svc: &mut Service, ctx: &egui::Context) {
@@ -65,50 +70,63 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     }
 }
 
+/// What the buttons along the window's bottom do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Leave {
+    Quit,
+    Close,
+}
+
+/// The window's footer, across its bottom: Quit set apart at the left, Close at the right.
+fn footer(ui: &mut Ui) -> Option<Leave> {
+    let t = Tokens::get(ui.ctx());
+    let mut leave = None;
+    egui::Panel::bottom("home-footer")
+        .resizable(false)
+        .frame(egui::Frame::NONE.fill(t.footer).inner_margin(egui::Margin::symmetric(widgets::PADDING, 12)))
+        .show(ui, |ui| {
+            let buttons =
+                [FooterButton::aside("Quit ScreenGrabCraft"), FooterButton::primary("Close").tip("ScreenGrabCraft keeps running in the tray")];
+            leave = widgets::footer(ui, &buttons).map(|i| if i == 0 { Leave::Quit } else { Leave::Close });
+        });
+    leave
+}
+
+/// A page's entry in the list on the left: highlighted, with a mark of the accent colour, when it
+/// is the page shown (as the system's settings do).
+fn nav_item(ui: &mut Ui, label: &str, selected: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label));
+    let p = ui.painter();
+    if selected || resp.hovered() {
+        p.rect_filled(rect, widgets::CONTROL_RADIUS, if selected { t.selected } else { t.hover });
+    }
+    if selected {
+        let mark = egui::Rect::from_center_size(egui::pos2(rect.min.x + 2.5, rect.center().y), vec2(3.0, 16.0));
+        p.rect_filled(mark, 1.5, t.accent);
+    }
+    p.text(egui::pos2(rect.min.x + 14.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), t.text);
+    resp
+}
+
 fn contents(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
     let t = Tokens::get(ui.ctx());
     if home.status.is_none() {
         home.status = Some(service::status());
         home.delay = svc.settings.delay_secs.max(1);
     }
-    egui::Panel::left("home-nav")
-        .exact_size(170.0)
-        .resizable(false)
-        .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::same(10)))
-        .show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                icons::paint(ui.painter(), egui::Rect::from_min_size(ui.cursor().min, vec2(22.0, 22.0)), Icon::Capture, t.accent);
-                ui.add_space(26.0);
-                ui.label(RichText::new("ScreenGrabCraft").strong().size(15.0));
-            });
-            ui.add_space(14.0);
-            for (tab, label) in [
-                (Tab::Capture, "Capture"),
-                (Tab::After, "After a capture"),
-                (Tab::Shortcuts, "Shortcuts"),
-                (Tab::General, "General"),
-                (Tab::About, "About"),
-            ] {
-                let selected = home.tab == tab;
-                let b = egui::Button::new(RichText::new(label).size(14.0)).selected(selected).frame(selected).min_size(vec2(150.0, 30.0));
-                if ui.add(b).clicked() {
-                    home.tab = tab;
-                }
-            }
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-                if ui.button("Quit ScreenGrabCraft").clicked() {
-                    svc.quit = true;
-                }
-                if ui.button("Close this window").on_hover_text("ScreenGrabCraft keeps running in the tray").clicked() {
-                    *close = true;
-                }
-            });
-        });
+    match footer(ui) {
+        Some(Leave::Quit) => svc.quit = true,
+        Some(Leave::Close) => *close = true,
+        None => {}
+    }
+    nav(ui, &mut home.tab);
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(18))).show(ui, |ui| {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match home.tab {
             Tab::Capture => capture_tab(svc, home, ui, close),
             Tab::After => after_tab(svc, ui),
+            Tab::Video => video_tab(svc, home, ui),
             Tab::Shortcuts => shortcuts_tab(svc, ui),
             Tab::General => general_tab(svc, home, ui),
             Tab::About => about_tab(svc, ui),
@@ -116,20 +134,66 @@ fn contents(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
     });
 }
 
-fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
+/// The list of pages on the left.
+fn nav(ui: &mut Ui, tab: &mut Tab) {
     let t = Tokens::get(ui.ctx());
-    if !svc.settings.welcomed {
-        egui::Frame::NONE.fill(t.selected).corner_radius(8).inner_margin(egui::Margin::same(12)).show(ui, |ui| {
-            ui.label(RichText::new("ScreenGrabCraft is running").strong().size(16.0));
-            ui.label("It lives in the tray (the menu bar on a Mac) and waits for your shortcut. Closing this window keeps it running; it starts again when you sign in, and if it ever stops, it is started again.");
-            if let Some(k) = svc.settings.hotkeys.region.as_ref() {
-                ui.label(format!("Press {} to capture an area.", k.display(logo_name())));
-            }
-            if ui.button("Got it").clicked() {
-                svc.settings.welcomed = true;
-                svc.apply_settings();
+    egui::Panel::left("home-nav")
+        .exact_size(170.0)
+        .resizable(false)
+        .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::same(10)))
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                icons::paint(ui.painter(), egui::Rect::from_min_size(ui.cursor().min, vec2(22.0, 22.0)), Icon::Capture, t.accent);
+                ui.add_space(26.0);
+                ui.label(RichText::new("ScreenGrabCraft").strong().size(15.0));
+            });
+            ui.add_space(14.0);
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for (page, label) in [
+                (Tab::Capture, "Capture"),
+                (Tab::After, "After a capture"),
+                (Tab::Video, "Video"),
+                (Tab::Shortcuts, "Shortcuts"),
+                (Tab::General, "General"),
+                (Tab::About, "About"),
+            ] {
+                if nav_item(ui, label, *tab == page).clicked() {
+                    *tab = page;
+                }
             }
         });
+}
+
+/// The first-run hint: what ScreenGrabCraft does from now on, and [Got it] at its bottom right.
+/// True when Got it was pressed.
+fn welcome(ui: &mut Ui, region_key: Option<String>) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let mut seen = false;
+    egui::Frame::NONE
+        .fill(t.hover)
+        .stroke(egui::Stroke::new(1.0, t.border))
+        .corner_radius(widgets::WINDOW_RADIUS)
+        .inner_margin(egui::Margin::same(14))
+        .show(ui, |ui| {
+            ui.label(RichText::new("ScreenGrabCraft is running").font(widgets::strong_font(ui.ctx(), 15.0)));
+            ui.add_space(2.0);
+            ui.label("It lives in the tray (the menu bar on a Mac) and waits for your shortcut. Closing this window keeps it running; it starts again when you sign in, and if it ever stops, it is started again.");
+            if let Some(k) = region_key {
+                ui.label(format!("Press {k} to capture an area."));
+            }
+            ui.add_space(6.0);
+            seen = widgets::footer(ui, &[FooterButton::primary("Got it")]).is_some();
+        });
+    seen
+}
+
+fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
+    if !svc.settings.welcomed {
+        if welcome(ui, svc.settings.hotkeys.region.as_ref().map(|k| k.display(logo_name()))) {
+            svc.settings.welcomed = true;
+            svc.apply_settings();
+        }
         ui.add_space(12.0);
     }
     ui.heading("Capture");
@@ -141,6 +205,8 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Gif, Icon::Gif, "Record an area as an animated GIF"),
+        (CaptureMode::Video, Icon::Play, "Record an area as a small MP4"),
+        (CaptureMode::Production, Icon::Edit, "Choose the area, camera, mic and sound, to edit"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
     ];
     let mut chosen: Option<(CaptureMode, u32)> = None;
@@ -159,17 +225,18 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     ui.horizontal(|ui| {
         ui.label("After a delay of");
         ui.add(egui::DragValue::new(&mut home.delay).range(1..=60).suffix(" s"));
-        if ui.button("Capture Region").clicked() {
+        if widgets::button(ui, "Capture Region").clicked() {
             chosen = Some((CaptureMode::Region, home.delay));
         }
     });
     ui.add_space(14.0);
     ui.separator();
+    ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if ui.button("Open the Editor").clicked() {
+        if widgets::button(ui, "Open the Editor").clicked() {
             let _ = launch::open_editor(&[]);
         }
-        if ui.button("Open the captures folder").clicked() {
+        if widgets::button(ui, "Open the captures folder").clicked() {
             let d = paths::captures_dir(&svc.settings);
             let _ = std::fs::create_dir_all(&d);
             let _ = launch::reveal(&d);
@@ -178,7 +245,10 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     if let Some((mode, delay)) = chosen {
         // The window goes first, so it isn't in the picture.
         *close = true;
-        if delay > 0 {
+        if mode == CaptureMode::Production {
+            // Its Recorder first, where the area and the inputs are chosen.
+            svc.open_recorder();
+        } else if delay > 0 {
             svc.start(mode, delay);
         } else {
             svc.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
@@ -212,12 +282,18 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     let mut s = svc.settings.clone();
     ui.heading("After a capture");
     ui.add_space(8.0);
-    ui.checkbox(&mut s.after_capture.preview, "Keep the area adjustable, with a bar to choose Edit, Copy or Save");
-    ui.label(RichText::new("Enter (or a double-click) then does what is ticked below.").size(12.0).color(t.muted));
-    ui.add_space(6.0);
-    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Editor");
+    ui.label(RichText::new("The default").strong());
+    ui.label(RichText::new("What happens to a capture once you have chosen the area.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
     ui.checkbox(&mut s.after_capture.copy, "Copy it to the clipboard");
+    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Editor");
     ui.checkbox(&mut s.after_capture.save, "Save it in the captures folder");
+    ui.add_space(12.0);
+    ui.checkbox(&mut s.after_capture.show_bar, "Stop first, with a bar to adjust the area or choose Edit, Copy or Save");
+    ui.label(RichText::new("Enter (or a double-click) then does the default. Off, the default happens at once.").size(12.0).color(t.muted));
+    ui.add_space(6.0);
+    ui.checkbox(&mut s.hide_editor, "Hide the Editor while capturing");
+    ui.label(RichText::new("So it isn't in the picture. It comes back with the new capture.").size(12.0).color(t.muted));
     ui.add_space(12.0);
     ui.label(RichText::new("Captures folder").strong());
     let dir = paths::captures_dir(&s);
@@ -225,15 +301,15 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
         ui.label(RichText::new(dir.to_string_lossy()).monospace().size(12.0));
     });
     ui.horizontal(|ui| {
-        if ui.button("Change…").clicked()
+        if widgets::button(ui, "Change…").clicked()
             && let Some(p) = rfd::FileDialog::new().set_directory(&dir).pick_folder()
         {
             s.folder = Some(p.to_string_lossy().to_string());
         }
-        if s.folder.is_some() && ui.button("Use Pictures/ScreenGrabCraft").clicked() {
+        if s.folder.is_some() && widgets::button(ui, "Use Pictures/ScreenGrabCraft").clicked() {
             s.folder = None;
         }
-        if ui.button("Open").clicked() {
+        if widgets::button(ui, "Open").clicked() {
             let _ = std::fs::create_dir_all(&dir);
             let _ = launch::reveal(&dir);
         }
@@ -343,7 +419,7 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
     if cfg!(target_os = "windows") {
         ui.add_space(10.0);
         ui.label(RichText::new("If Print Screen opens the Snipping Tool instead, turn off “Use the Print screen key to open screen capture” in Windows' keyboard settings.").size(12.0).color(t.muted));
-        if ui.button("Open Windows keyboard settings").clicked() {
+        if widgets::button(ui, "Open Windows keyboard settings").clicked() {
             let _ = launch::open_url("ms-settings:easeofaccess-keyboard");
         }
     }
@@ -392,7 +468,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.label(RichText::new("GIF recordings").strong());
     egui::Grid::new("gif").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Frames a second");
-        ui.add(egui::Slider::new(&mut s.gif_fps, 1..=30));
+        ui.add(egui::Slider::new(&mut s.gif_frame_rate, 1..=30));
         ui.end_row();
         ui.label("Longest recording");
         ui.add(egui::Slider::new(&mut s.gif_max_secs, 5..=600).suffix(" s"));
@@ -407,7 +483,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
         }
     }
     ui.add_space(14.0);
-    if ui.button("Open the log folder").clicked()
+    if widgets::button(ui, "Open the log folder").clicked()
         && let Some(d) = paths::log_dir()
     {
         let _ = std::fs::create_dir_all(&d);
@@ -416,7 +492,7 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     let _ = Color32::WHITE;
 }
 
-fn about_tab(_svc: &mut Service, ui: &mut Ui) {
+fn about_tab(svc: &mut Service, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.heading("ScreenGrabCraft");
     ui.label(screengrabcraft_desktop::version::line("ScreenGrabCraft"));
@@ -432,5 +508,182 @@ fn about_tab(_svc: &mut Service, ui: &mut Ui) {
     ui.add_space(8.0);
     ui.hyperlink_to("github.com/billsecond/screengrabcraft", screengrabcraft_model::HOMEPAGE);
     ui.add_space(8.0);
-    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: Inter and JetBrains Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
+    ui.label(RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").size(12.0).color(t.muted));
+    crate::update::about(svc, ui);
+}
+
+/// The microphones and cameras a recording can use (looked up when the Video page is first
+/// shown: nothing is turned on).
+pub struct Devices {
+    microphones: Vec<String>,
+    cameras: Vec<(u32, String)>,
+    system_sound: bool,
+}
+
+impl Devices {
+    fn find() -> Devices {
+        Devices {
+            microphones: screengrabcraft_capture::audio::microphones(),
+            cameras: screengrabcraft_capture::camera::cameras(),
+            system_sound: screengrabcraft_capture::audio::system_sound_supported(),
+        }
+    }
+}
+
+/// What a kind of video recording takes in: the computer's sound, a microphone, a camera.
+fn sources(ui: &mut Ui, id: &str, o: &mut VideoOptions, d: &Devices, camera: bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.add_enabled_ui(d.system_sound, |ui| {
+        ui.checkbox(&mut o.system_sound, "The computer's sound").on_disabled_hover_text("This system has no way to record what it plays");
+    });
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut o.microphone, "The microphone");
+        ui.add_enabled_ui(o.microphone, |ui| {
+            let shown = o.microphone_name.clone().unwrap_or_else(|| "The system's default".to_string());
+            egui::ComboBox::from_id_salt((id, "mic")).width(240.0).selected_text(shown).show_ui(ui, |ui| {
+                ui.selectable_value(&mut o.microphone_name, None, "The system's default");
+                for m in &d.microphones {
+                    ui.selectable_value(&mut o.microphone_name, Some(m.clone()), m);
+                }
+            });
+        });
+    });
+    if d.microphones.is_empty() && o.microphone {
+        ui.label(RichText::new("No microphone was found just now.").size(12.0).color(t.muted));
+    }
+    if camera {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut o.camera, "The camera");
+            ui.add_enabled_ui(o.camera, |ui| {
+                let shown = o
+                    .camera_index
+                    .and_then(|i| d.cameras.iter().find(|c| c.0 == i).map(|c| c.1.clone()))
+                    .unwrap_or_else(|| d.cameras.first().map(|c| c.1.clone()).unwrap_or_else(|| "The first one".to_string()));
+                egui::ComboBox::from_id_salt((id, "camera")).width(240.0).selected_text(shown).show_ui(ui, |ui| {
+                    for (i, name) in &d.cameras {
+                        ui.selectable_value(&mut o.camera_index, Some(*i), name);
+                    }
+                });
+            });
+        });
+        if d.cameras.is_empty() && o.camera {
+            ui.label(RichText::new("No camera was found just now.").size(12.0).color(t.muted));
+        }
+    }
+}
+
+fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let d = home.devices.get_or_insert_with(Devices::find);
+    let mut s = svc.settings.clone();
+    ui.heading("Video");
+    ui.add_space(8.0);
+    ui.label(RichText::new("Record Video").strong());
+    ui.label(RichText::new("A small MP4 of an area, made as soon as you stop.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    sources(ui, "video", &mut s.video, d, false);
+    ui.checkbox(&mut s.video_full_size, "Keep the full size (else no larger than 1920 × 1080, for smaller files)");
+    ui.add_space(14.0);
+    ui.label(RichText::new("Video Production").strong());
+    ui.label(RichText::new("Each on a track of its own, to cut and edit in the Editor before you make the MP4.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    sources(ui, "production", &mut s.production, d, true);
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("Video Production opens the Recorder, where you choose the area (a region, a window, a whole screen, all screens or a fixed size), turn the screen and each of these on or off, and press Record. These are the same choices.")
+            .size(12.0)
+            .color(t.muted),
+    );
+    let mut open_recorder = false;
+    if widgets::button(ui, "Open the Recorder").clicked() {
+        open_recorder = true;
+    }
+    ui.add_space(14.0);
+    ui.label(RichText::new("Both").strong());
+    egui::Grid::new("video-both").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        ui.label("Frames a second");
+        ui.add(egui::Slider::new(&mut s.video_frame_rate, 5..=30));
+        ui.end_row();
+        ui.label("Longest recording");
+        ui.add(egui::DragValue::new(&mut s.video_max_mins).range(1..=240).suffix(" minutes"));
+        ui.end_row();
+    });
+    ui.add_space(6.0);
+    if widgets::button(ui, "Look for devices again").clicked() {
+        home.devices = None;
+    }
+    if s != svc.settings {
+        svc.settings = s;
+        svc.apply_settings();
+    }
+    if open_recorder {
+        svc.open_recorder();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable as _;
+    use screengrabcraft_model::Theme;
+
+    use super::*;
+
+    /// The settings window's frame: its footer, its pages, and what was pressed.
+    fn window() -> Harness<'static, (Option<Leave>, Tab)> {
+        Harness::builder().with_size(vec2(760.0, 600.0)).build_ui_state(
+            |ui, (leave, tab): &mut (Option<Leave>, Tab)| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                if let Some(l) = footer(ui) {
+                    *leave = Some(l);
+                }
+                nav(ui, tab);
+                egui::CentralPanel::default().show(ui, |_| {});
+            },
+            (None, Tab::Capture),
+        )
+    }
+
+    #[test]
+    fn quit_sits_apart_at_the_bottom_left_and_close_at_the_bottom_right() {
+        let mut h = window();
+        h.run_steps(2);
+        let (quit, close) = (h.get_by_label("Quit ScreenGrabCraft").rect(), h.get_by_label("Close").rect());
+        assert!(quit.min.x < 30.0 && close.max.x > 730.0, "{quit:?} {close:?}");
+        assert!(quit.max.y > 560.0 && (quit.center().y - close.center().y).abs() < 0.5, "both along the bottom: {quit:?} {close:?}");
+        assert!(close.width() >= widgets::BUTTON_SIZE.x);
+        h.get_by_label("Close").click();
+        h.run_steps(1);
+        assert_eq!(h.state().0, Some(Leave::Close));
+        h.get_by_label("Quit ScreenGrabCraft").click();
+        h.run_steps(1);
+        assert_eq!(h.state().0, Some(Leave::Quit));
+    }
+
+    #[test]
+    fn the_pages_are_chosen_from_the_left() {
+        let mut h = window();
+        h.run_steps(2);
+        h.get_by_label("Shortcuts").click();
+        h.run_steps(1);
+        assert_eq!(h.state().1, Tab::Shortcuts);
+        assert!(h.get_by_label("About").rect().max.x <= 170.0);
+    }
+
+    #[test]
+    fn got_it_is_at_the_bottom_right_of_the_welcome() {
+        let mut h = Harness::builder().with_size(vec2(560.0, 300.0)).build_ui_state(
+            |ui, seen: &mut bool| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Dark);
+                *seen |= welcome(ui, Some("Print Screen".into()));
+            },
+            false,
+        );
+        h.run_steps(2);
+        let got = h.get_by_label("Got it").rect();
+        assert!(got.max.x > 520.0 && got.width() >= widgets::BUTTON_SIZE.x, "{got:?}");
+        h.get_by_label("Got it").click();
+        h.run_steps(1);
+        assert!(*h.state());
+    }
 }

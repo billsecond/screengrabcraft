@@ -53,7 +53,7 @@ warn() {
 # licences of the fonts the programs embed (assets/fonts/OFL-*.txt).
 copy_docs() {
   local dest="$1" f
-  for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE COPYRIGHT ATTRIBUTION.md; do
+  for f in README.md LICENSE LICENSE-MIT LICENSE-APACHE COPYRIGHT ATTRIBUTION.md NOTICE; do
     if [ -f "$ROOT/$f" ]; then cp "$ROOT/$f" "$dest/"; fi
   done
   for f in "$ROOT"/assets/fonts/OFL-*.txt; do

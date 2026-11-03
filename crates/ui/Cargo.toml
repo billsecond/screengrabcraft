@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 screengrabcraft-model = { workspace = true }
 screengrabcraft-render = { workspace = true }
+screengrabcraft-media = { workspace = true }
 screengrabcraft-engine = { workspace = true }
 egui = { workspace = true }
 serde_json = { workspace = true }

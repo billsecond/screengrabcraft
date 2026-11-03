@@ -1,12 +1,13 @@
-//! Pictures of the interface, drawn headless with the GPU: the editor with annotations, the
-//! capture overlay while choosing (crosshair and magnifier) and while adjusting (handles and the
-//! capture bar). For looking at the interface without a desktop session:
+//! Pictures of the interface, drawn headless with the GPU: the editor with annotations, one of its
+//! dialogs, the capture overlay while choosing (crosshair and magnifier) and while adjusting
+//! (handles and the capture bar). For looking at the interface without a desktop session:
 //!
 //! `cargo run -p screengrabcraft-ui --example shots -- <out dir> [light|dark]`
 
 use egui::{pos2, vec2};
 use egui_kittest::Harness;
 use screengrabcraft_model::{ArrowHeads, Color, Document, EditorSettings, IRect, Pt, Raster, Rect, Shape, Theme};
+use screengrabcraft_ui::dialogs::Dialog;
 use screengrabcraft_ui::overlay::{Overlay, OverlayMonitor, OverlayWindow, Purpose};
 use screengrabcraft_ui::{Editor, NoServices, Tool};
 
@@ -77,6 +78,12 @@ fn main() -> Result<(), String> {
     h.run_steps(6);
     save(&mut h, &dir.join("editor.png"))?;
 
+    // ---- a dialog (`widgets`: title and X, settings, [Apply] [Cancel] at the bottom right) ----
+    let doc = h.state().session.doc.clone();
+    screengrabcraft_ui::dialogs::open(h.state_mut(), Dialog::resize(&doc));
+    h.run_steps(4);
+    save(&mut h, &dir.join("dialog.png"))?;
+
     // ---- the overlay, choosing ----
     let m = OverlayMonitor { rect: IRect::new(0, 0, 1280, 800), picture: picture(1280, 800), name: "Main".into() };
     let win = OverlayWindow { rect: IRect::new(60, 80, 240, 320), title: "Panel".into() };
@@ -96,5 +103,68 @@ fn main() -> Result<(), String> {
     screengrabcraft_ui::install_fonts(&h.ctx);
     h.run_steps(4);
     save(&mut h, &dir.join("overlay-adjusting.png"))?;
+
+    // ---- the overlay, placing a fixed size ----
+    let m = OverlayMonitor { rect: IRect::new(0, 0, 1280, 800), picture: picture(1280, 800), name: "Main".into() };
+    let o = Overlay::new(vec![m], Vec::new(), Purpose::VideoFixed(640, 360));
+    let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).build_ui_state(|ui, o: &mut Overlay| o.show_monitor(ui, 0), o);
+    screengrabcraft_ui::install_fonts(&h.ctx);
+    h.run_steps(2);
+    h.hover_at(pos2(1200.0, 700.0));
+    h.run_steps(3);
+    save(&mut h, &dir.join("overlay-fixed.png"))?;
+
+    // ---- the Recorder (Video Production's window) ----
+    recorder_shots(&dir, theme)?;
+    Ok(())
+}
+
+/// The Recorder as the capture service shows it: an area dragged out with every input on and the
+/// microphone's meter; a fixed size of one's own; the camera alone.
+fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
+    use screengrabcraft_model::{RecordArea, Settings};
+    use screengrabcraft_ui::recorder::{self, MicLevel, RecorderDevices, RecorderMonitor, RecorderView};
+    let devices = RecorderDevices {
+        monitors: vec![
+            RecorderMonitor { name: "DELL U2720Q".into(), x: 0, y: 0, width: 3840, height: 2160, primary: true },
+            RecorderMonitor { name: "Built-in display".into(), x: -1920, y: 540, width: 1920, height: 1080, primary: false },
+        ],
+        all_screens: Some((3840, 1620)),
+        microphones: vec!["Headset microphone".into(), "Webcam microphone".into()],
+        cameras: Some(vec![(0, "Integrated Webcam".into())]),
+        camera_supported: true,
+        system_sound: true,
+        system_sound_platform: true,
+    };
+    let mut fixed = Settings::default();
+    fixed.recorder.area = RecordArea::Fixed;
+    (fixed.recorder.width, fixed.recorder.height) = (1000, 640);
+    fixed.production.camera = false;
+    let mut camera_only = Settings::default();
+    camera_only.recorder.screen = false;
+    camera_only.production.system_sound = false;
+    let mut all = Settings::default();
+    all.recorder.area = RecordArea::AllScreens;
+    let mut listening = RecorderView::default();
+    listening.listen = true;
+    for (name, settings, view, mic) in [
+        ("recorder.png", Settings::default(), listening.clone(), MicLevel::Level(0.35)),
+        ("recorder-fixed.png", fixed, RecorderView::default(), MicLevel::Off),
+        ("recorder-camera-only.png", camera_only, RecorderView::default(), MicLevel::Off),
+        ("recorder-all-screens.png", all, listening, MicLevel::Failed("there is no microphone".into())),
+    ] {
+        let state = (settings, view, mic);
+        let d = devices.clone();
+        let mut h = Harness::builder().with_size(recorder::SIZE).build_ui_state(
+            move |ui, (s, v, m): &mut (Settings, RecorderView, MicLevel)| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), theme);
+                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m);
+            },
+            state,
+        );
+        screengrabcraft_ui::install_fonts(&h.ctx);
+        h.run_steps(4);
+        save(&mut h, &dir.join(name))?;
+    }
     Ok(())
 }

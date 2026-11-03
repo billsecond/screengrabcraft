@@ -33,5 +33,5 @@ jobs:
       # Linux (X11 through x11rb, D-Bus through zbus, the tray through ksni, the clipboard) is Rust.
       - name: Linux build dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev libasound2-dev
       - run: cargo xtask ci

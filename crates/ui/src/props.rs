@@ -97,6 +97,24 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             ui.label("Drag the frame's edges or corners, or drag out a new frame. Hold Shift for a square.");
             ui.add_space(8.0);
             ui.label("Enter or Apply Crop keeps what is inside; Esc cancels.");
+            ui.add_space(12.0);
+            // Here rather than on the tool bar, which has no room for them beside its bigger buttons.
+            let ctx = ui.ctx().clone();
+            ui.horizontal(|ui| {
+                let tall = egui::vec2(0.0, 32.0);
+                let label = egui::RichText::new("Apply Crop").color(t.accent_text);
+                if ui.add(egui::Button::new(label).fill(t.accent).min_size(tall)).clicked() {
+                    ed.apply_crop(&ctx);
+                }
+                if ui.add(egui::Button::new("Cancel").min_size(tall)).clicked() {
+                    ed.crop = None;
+                    ed.tool = Tool::Select;
+                }
+            });
+            return;
+        }
+        (None, Tool::Fill) => {
+            fill_settings(ed, ui);
             return;
         }
         (None, Tool::Select) => {
@@ -131,6 +149,13 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
         ui.add_space(8.0);
     }
 
+    // Shapes with an inside have their fill out in the open: none, the palette, or any colour.
+    let fill_shown = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout);
+    if fill_shown {
+        colour_row(ui, "Fill", &mut s.fill, true);
+        ui.add_space(8.0);
+    }
+
     ui.collapsing("Colours", |ui| {
         let (stroke_label, fill_label) = match kind {
             Kind::Text => ("Border", "Background"),
@@ -148,7 +173,7 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
                 matches!(kind, Kind::Text | Kind::Spotlight | Kind::Step | Kind::Stamp | Kind::Image | Kind::Callout | Kind::Magnify),
             );
         }
-        if matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Text | Kind::Callout | Kind::Step | Kind::Stamp) {
+        if matches!(kind, Kind::Text | Kind::Step | Kind::Stamp) && !fill_shown {
             colour_row(ui, fill_label, &mut s.fill, true);
         }
         if kind.has_text() {
@@ -258,7 +283,40 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     }
 }
 
-fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
+/// The Fill tool's panel: what it does, the colour and the tolerance.
+fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Fill");
+    ui.add_space(6.0);
+    ui.label("Click the picture to fill the area round that spot that is all one colour.");
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Click a box, ellipse, callout or text box to fill it instead.").color(t.muted));
+    ui.add_space(10.0);
+    let mut f = ed.settings.fill;
+    colour_row(ui, "Colour", &mut f.color, true);
+    ui.label(egui::RichText::new("None makes the area see-through.").size(12.0).color(t.muted));
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Tolerance").size(12.0).color(t.muted));
+    let mut pct = (f32::from(f.tolerance) / 2.55).round();
+    if ui
+        .add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(1.0).suffix("%"))
+        .on_hover_text("How close a colour must be to the one clicked to be filled too")
+        .changed()
+    {
+        f.tolerance = (pct * 2.55).round().clamp(0.0, 255.0) as u8;
+    }
+    if f != ed.settings.fill {
+        ed.settings.fill = f;
+        ed.props_editing = true;
+    }
+    // Saved once a slider is let go.
+    if ed.props_editing && !ui.ctx().input(|i| i.pointer.any_down()) {
+        ed.props_editing = false;
+        ed.services.save_settings(&ed.settings);
+    }
+}
+
+pub(crate) fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
     // The tool keeps the look for the next one, too.
     let mut remembered = ed.tool_style(kind);
     apply_changes(old, new, &mut remembered);
@@ -268,10 +326,15 @@ fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_select
             ed.session.begin("Change Style");
             ed.props_editing = true;
         }
+        let picture = ed.session.doc.bounds();
         for id in ed.session.selected() {
-            if let Some(o) = ed.session.doc.get_mut(id) {
-                apply_changes(old, new, &mut o.style);
-                o.style = o.style.clamped();
+            let Some(o) = ed.session.doc.get_mut(id) else { continue };
+            let was_inside = picture.encloses(o.shape.bounds(&o.style));
+            apply_changes(old, new, &mut o.style);
+            o.style = o.style.clamped();
+            // A thicker line or a bigger badge doesn't push it over the edge.
+            if was_inside {
+                ed.session.doc.bring_inside(id);
             }
         }
         ed.session.touch();
@@ -345,6 +408,9 @@ fn shape_options(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>
                         let mut style = ed.tool_style(Kind::Stamp);
                         style.fill = screengrabcraft_render::stamp::default_fill(k);
                         ed.settings.styles.insert(Kind::Stamp, style);
+                        // The stamp picked is the one the editor starts with next time.
+                        ed.settings.stamp = Some(k);
+                        ed.services.save_settings(&ed.settings);
                         set_on_selection(ed, &|s| {
                             if let Shape::Stamp { stamp, .. } = s {
                                 *stamp = k;

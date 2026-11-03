@@ -19,6 +19,8 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/macos"
 ICONS="$ROOT/assets/app-icon"
+# Remove Background's model (IS-Net, Apache-2.0; assets/models/README.md).
+MODEL="$ROOT/assets/models/isnet-general-use-int8.onnx"
 
 ARCH=universal
 SKIP_BUILD=0
@@ -104,14 +106,19 @@ notarize() {
 }
 
 # ---- the two apps ------------------------------------------------------------------------------
-# make_app <bundle> <display name> <binary> <icns> <Info.plist template>
-# The executable and the icon carry the display name (CFBundleExecutable / CFBundleIconFile).
+# make_app <bundle> <display name> <binary> <icns> <Info.plist template> [model]
+# The executable and the icon carry the display name (CFBundleExecutable / CFBundleIconFile). A
+# model (Remove Background's) goes in Resources/models, where the program looks for it.
 make_app() {
-  local bundle="$1" name="$2" bin="$3" icns="$4" plist="$5"
+  local bundle="$1" name="$2" bin="$3" icns="$4" plist="$5" model="${6:-}"
   echo "==> assembling $bundle"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   cp "$WORK/bin/$bin" "$bundle/Contents/MacOS/$name"
   cp "$icns" "$bundle/Contents/Resources/$name.icns"
+  if [ -n "$model" ]; then
+    mkdir -p "$bundle/Contents/Resources/models"
+    cp "$model" "$bundle/Contents/Resources/models/"
+  fi
   sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
     -e "s/@BUILD_SHA@/${SCREENGRABCRAFT_BUILD_SHA:-unknown}/g" \
     "$plist" >"$bundle/Contents/Info.plist"
@@ -124,7 +131,7 @@ make_app() {
   codesign --verify --strict --deep --verbose=2 "$bundle"
 }
 make_app "$APP" "ScreenGrabCraft" screengrabcraft "$ICONS/screengrabcraft.icns" "$HERE/Info.plist.in"
-make_app "$EDITOR_APP" "ScreenGrabCraft Editor" screengrabcraft-editor "$ICONS/screengrabcraft-editor.icns" "$HERE/Editor-Info.plist.in"
+make_app "$EDITOR_APP" "ScreenGrabCraft Editor" screengrabcraft-editor "$ICONS/screengrabcraft-editor.icns" "$HERE/Editor-Info.plist.in" "$MODEL"
 
 if [ "$NOTARIZE" = 1 ]; then
   ditto -c -k --keepParent "$APPS" "$WORK/ScreenGrabCraft-notarize.zip"
@@ -184,6 +191,8 @@ echo "==> building $CLI_ZIP"
 CLI_DIR="$WORK/screengrabcraft-cli-$VERSION-macos-$ARCH"
 mkdir -p "$CLI_DIR"
 cp "$WORK/bin/screengrabcraft-cli" "$CLI_DIR/"
+mkdir -p "$CLI_DIR/models"
+cp "$MODEL" "$CLI_DIR/models/"
 copy_docs "$CLI_DIR"
 sign --options runtime "$CLI_DIR/screengrabcraft-cli"
 codesign --verify --strict --verbose=2 "$CLI_DIR/screengrabcraft-cli"

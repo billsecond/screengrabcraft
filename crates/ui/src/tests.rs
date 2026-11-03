@@ -3,10 +3,10 @@
 use egui::{Pos2, pos2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable as _;
-use screengrabcraft_model::{Color, Document, EditorSettings, Kind, Raster, Shape};
+use screengrabcraft_model::{Color, Document, EditorSettings, ImageFormat, Kind, Raster, Shape};
 
 use crate::editor::{Editor, Tool};
-use crate::services::NoServices;
+use crate::services::{NoServices, OpenedFile};
 
 fn editor() -> Editor {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
@@ -139,6 +139,20 @@ fn select_move_and_delete() {
     assert!(h.state().session.doc.objects.is_empty());
 }
 
+/// Drags out the area from (100, 100) to (300, 250).
+fn drag_out_area(h: &mut Harness<'_, crate::overlay::Overlay>) {
+    h.hover_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    h.drag_at(pos2(100.0, 100.0));
+    h.run_steps(1);
+    for i in 1..=5 {
+        h.hover_at(pos2(100.0 + i as f32 * 40.0, 100.0 + i as f32 * 30.0));
+        h.run_steps(1);
+    }
+    h.drop_at(pos2(300.0, 250.0));
+    h.run_steps(2);
+}
+
 #[test]
 fn the_overlay_chooses_an_area() {
     use crate::overlay::{Action, Outcome, Overlay, OverlayMonitor, Purpose};
@@ -153,16 +167,7 @@ fn the_overlay_chooses_an_area() {
         o,
     );
     h.run_steps(2);
-    h.hover_at(pos2(100.0, 100.0));
-    h.run_steps(1);
-    h.drag_at(pos2(100.0, 100.0));
-    h.run_steps(1);
-    for i in 1..=5 {
-        h.hover_at(pos2(100.0 + i as f32 * 40.0, 100.0 + i as f32 * 30.0));
-        h.run_steps(1);
-    }
-    h.drop_at(pos2(300.0, 250.0));
-    h.run_steps(2);
+    drag_out_area(&mut h);
     match h.state().outcome() {
         Outcome::Chosen { area, action, .. } => {
             assert_eq!(*action, Action::Default);
@@ -195,10 +200,38 @@ fn overlay_with_bar(
 }
 
 #[test]
+fn a_recording_still_waits_to_be_started() {
+    use crate::overlay::{Outcome, Overlay, OverlayMonitor, Purpose};
+    use screengrabcraft_model::IRect;
+    // Going straight to the default is for pictures; a recording would start before the owner is ready.
+    for (purpose, label) in [(Purpose::Gif, "Record GIF"), (Purpose::Scrolling, "Start scrolling capture")] {
+        let m = OverlayMonitor { rect: IRect::new(0, 0, 800, 600), picture: Raster::filled(800, 600, Color::WHITE).unwrap(), name: "Main".into() };
+        let mut o = Overlay::new(vec![m], Vec::new(), purpose);
+        o.preview = false;
+        let mut h = Harness::builder().with_size(egui::vec2(800.0, 600.0)).build_ui_state(
+            |ui, o: &mut Overlay| {
+                egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+            },
+            o,
+        );
+        h.run_steps(2);
+        drag_out_area(&mut h);
+        assert_eq!(*h.state().outcome(), Outcome::Pending);
+        h.get_by_label(label);
+    }
+}
+
+#[test]
 fn the_capture_bar_buttons_say_what_they_do_and_do_it() {
     use crate::overlay::{Action, Outcome, Purpose};
     use screengrabcraft_model::IRect;
-    for (label, wanted) in [("Edit", Some(Action::Edit)), ("Copy", Some(Action::Copy)), ("Save", Some(Action::Save)), ("Cancel", None)] {
+    for (label, wanted) in [
+        ("Copy & Edit", Some(Action::Default)),
+        ("Edit", Some(Action::Edit)),
+        ("Copy", Some(Action::Copy)),
+        ("Save", Some(Action::Save)),
+        ("Cancel", None),
+    ] {
         let mut h = overlay_with_bar(800, 600, IRect::new(100, 100, 300, 200), Purpose::Picture);
         h.get_by_label(label).click();
         h.run_steps(3);
@@ -217,12 +250,23 @@ fn the_capture_bar_stays_big_and_on_screen() {
     // Under the area, over the area's own bottom, and with the whole screen chosen.
     for area in [IRect::new(100, 100, 300, 200), IRect::new(500, 560, 280, 40), IRect::new(0, 0, 800, 600)] {
         let h = overlay_with_bar(800, 600, area, Purpose::Picture);
-        for label in ["Edit", "Copy", "Save", "Cancel"] {
+        for label in ["Copy & Edit", "Edit", "Copy", "Save", "Cancel"] {
             let r = h.get_by_label(label).rect();
             assert!(r.height() >= 48.0 && r.width() >= 100.0, "{label} {r:?}");
             assert!(r.min.x >= 0.0 && r.min.y >= 0.0 && r.max.x <= 800.0 && r.max.y <= 600.0, "{label} {area:?} {r:?}");
         }
     }
+}
+
+#[test]
+fn the_default_has_a_button_only_when_no_other_does_the_same() {
+    use crate::overlay::{Action, Purpose};
+    use screengrabcraft_model::IRect;
+    let mut h = overlay_with_bar(800, 600, IRect::new(100, 100, 300, 200), Purpose::Picture);
+    h.state_mut().enter = Action::Copy;
+    h.run_steps(2);
+    assert!(h.query_by_label("Copy & Edit").is_none());
+    h.get_by_label("Copy");
 }
 
 #[test]
@@ -259,4 +303,1417 @@ fn ctrl_v_pastes_a_picture_from_its_key_release() {
     assert_eq!(doc.objects.len(), 1, "the picture was placed");
     assert_eq!(doc.objects.first().map(|o| o.shape.kind()), Some(Kind::Image));
     assert_eq!(doc.images.len(), 1);
+}
+
+/// The editor with an animated GIF open: three frames, a tenth of a second each.
+fn with_a_gif() -> Harness<'static, Editor> {
+    let mut w = screengrabcraft_render::anim::GifWriter::new(Vec::new(), 40, 30).unwrap();
+    for (color, delay) in [(Color::RED, 0), (Color::rgb(0, 0, 255), 100), (Color::rgb(0, 255, 0), 100)] {
+        w.push(Raster::filled(40, 30, color).unwrap(), delay).unwrap();
+    }
+    let bytes = w.finish(100).unwrap().0;
+    let mut h = harness(editor());
+    h.run_steps(3);
+    let ctx = h.ctx.clone();
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Recording.gif".to_string(), path: None, bytes });
+    h.run_steps(3);
+    h
+}
+
+fn playing(h: &Harness<'_, Editor>) -> bool {
+    h.state().playback.as_ref().is_some_and(|p| p.playing())
+}
+
+fn frame_up(h: &Harness<'_, Editor>) -> bool {
+    h.state().playback.as_ref().is_some_and(|p| p.frame().is_some())
+}
+
+#[test]
+fn a_gif_opens_as_its_first_frame_with_a_play_button() {
+    let h = with_a_gif();
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (40, 30));
+    h.get_by_label("Play");
+    assert!(!playing(&h) && !frame_up(&h), "nothing plays until asked");
+}
+
+#[test]
+fn a_picture_has_no_play_button() {
+    let mut h = harness(editor());
+    h.run_steps(3);
+    assert!(h.query_by_label("Play").is_none());
+    let bytes = screengrabcraft_render::encode(&Raster::filled(40, 30, Color::RED).unwrap(), ImageFormat::Png, 90).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Capture.png".to_string(), path: None, bytes });
+    h.run_steps(3);
+    assert!(h.query_by_label("Play").is_none());
+}
+
+#[test]
+fn play_runs_the_frames_and_pause_holds_one() {
+    let mut h = with_a_gif();
+    h.get_by_label("Play").click();
+    h.run_steps(2);
+    assert!(playing(&h) && frame_up(&h));
+    let was = h.state().playback.as_ref().map(|p| p.elapsed_ms());
+    h.run_steps(1);
+    assert_ne!(h.state().playback.as_ref().map(|p| p.elapsed_ms()), was, "the frames move on");
+
+    h.get_by_label("Pause").click();
+    h.run_steps(2);
+    assert!(!playing(&h));
+    assert!(frame_up(&h), "the frame stays up");
+    let held = h.state().playback.as_ref().map(|p| p.elapsed_ms());
+    h.run_steps(3);
+    assert_eq!(h.state().playback.as_ref().map(|p| p.elapsed_ms()), held);
+    h.get_by_label("Play");
+}
+
+#[test]
+fn a_gif_keeps_playing_round_and_round() {
+    let mut h = with_a_gif();
+    h.get_by_label("Play").click();
+    h.run_steps(20);
+    assert!(playing(&h), "it loops");
+}
+
+#[test]
+fn a_change_to_the_picture_goes_back_to_it_from_the_frames() {
+    let mut h = with_a_gif();
+    h.get_by_label("Play").click();
+    h.run_steps(2);
+    assert!(playing(&h));
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let (a, b) = (at(&h, 5.0, 5.0), at(&h, 35.0, 25.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert!(!playing(&h) && !frame_up(&h), "the annotation is drawn on the picture, in view");
+    h.get_by_label("Play");
+}
+
+#[test]
+fn a_gif_cropped_to_something_else_stops_offering_to_play() {
+    let mut h = with_a_gif();
+    h.get_by_label("Play").click();
+    h.run_steps(2);
+    h.state_mut().session.execute("image.crop", &serde_json::json!({"x": 0, "y": 0, "w": 20, "h": 15})).unwrap();
+    h.run_steps(3);
+    assert!(h.query_by_label("Play").is_none() && h.query_by_label("Pause").is_none());
+    assert!(!frame_up(&h));
+    assert!(h.state_mut().session.undo());
+    h.run_steps(3);
+    h.get_by_label("Play");
+}
+
+#[test]
+fn opening_something_else_leaves_the_gif_behind() {
+    let mut h = with_a_gif();
+    h.state_mut().open_picture(Raster::filled(40, 30, Color::RED).unwrap(), None);
+    h.run_steps(3);
+    assert!(h.state().playback.is_none());
+    assert!(h.query_by_label("Play").is_none());
+}
+
+// ---- staying on the picture ----
+
+/// Every drawing tool.
+fn draw_tools() -> Vec<(Tool, Kind)> {
+    Tool::BAR.into_iter().filter_map(|(tool, _, _, _)| if let Tool::Draw(kind) = tool { Some((tool, kind)) } else { None }).collect()
+}
+
+fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(tool);
+    h.run_steps(1);
+    h
+}
+
+fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    h.drag_at(p);
+    h.run_steps(1);
+    h.drop_at(p);
+    h.run_steps(3);
+}
+
+fn filled_rect(ed: &mut Editor, x: f32, y: f32, w: f32, h: f32) -> screengrabcraft_model::ObjectId {
+    let style = screengrabcraft_model::Style { fill: Color::RED, ..Kind::Rect.default_style() };
+    ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(x, y, w, h), radius: 0.0 }, style).unwrap()
+}
+
+/// The picture with a hair of room for rounding.
+fn picture(ed: &Editor) -> screengrabcraft_model::Rect {
+    ed.session.doc.bounds().inflate(0.01)
+}
+
+#[test]
+fn a_drag_from_outside_the_picture_draws_nothing() {
+    for (tool, kind) in draw_tools() {
+        let mut h = ready(editor(), tool);
+        let (a, b) = (at(&h, -40.0, 100.0), at(&h, 200.0, 160.0));
+        drag(&mut h, a, b);
+        assert!(h.state().session.doc.objects.is_empty(), "{kind:?} drew from outside");
+        assert!(h.state().editing.is_none(), "{kind:?} started typing");
+        assert!(h.state().session.undo_label().is_none(), "{kind:?} left an undo step");
+    }
+}
+
+#[test]
+fn a_click_outside_the_picture_places_nothing() {
+    for (tool, kind) in draw_tools() {
+        let mut h = ready(editor(), tool);
+        let p = at(&h, 200.0, -30.0);
+        click_at(&mut h, p);
+        assert!(h.state().session.doc.objects.is_empty(), "{kind:?} placed something outside");
+        assert!(h.state().editing.is_none(), "{kind:?} started typing");
+    }
+}
+
+#[test]
+fn a_click_outside_the_picture_stops_typing_and_clears_the_selection() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Text));
+    let p = at(&h, 80.0, 80.0);
+    click_at(&mut h, p);
+    h.event(egui::Event::Text("Hello".to_string()));
+    h.run_steps(3);
+    let out = at(&h, -30.0, 80.0);
+    click_at(&mut h, out);
+    assert!(h.state().editing.is_none(), "typing stopped");
+    assert_eq!(h.state().session.doc.objects.len(), 1, "the text is kept and nothing new was placed");
+    click_at(&mut h, out);
+    assert!(h.state().session.selected().is_empty(), "the selection is cleared");
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}
+
+#[test]
+fn drawing_stops_at_the_edge_of_the_picture() {
+    for (tool, kind) in draw_tools() {
+        for (x, y) in [(480.0, 390.0), (-80.0, -90.0), (480.0, 180.0), (230.0, 390.0)] {
+            let mut h = ready(editor(), tool);
+            let (a, b) = (at(&h, 200.0, 150.0), at(&h, x, y));
+            drag(&mut h, a, b);
+            let ed = h.state();
+            assert_eq!(ed.session.doc.objects.len(), 1, "{kind:?} to {x},{y}");
+            for o in &ed.session.doc.objects {
+                assert!(picture(ed).encloses(o.shape.extent()), "{kind:?} to {x},{y}: {:?}", o.shape);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_pen_stroke_runs_along_the_edge() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Pen));
+    let (a, b) = (at(&h, 300.0, 100.0), at(&h, 520.0, 200.0));
+    drag(&mut h, a, b);
+    let Some(Shape::Pen { points }) = h.state().session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no pen stroke") };
+    let last = points.last().unwrap();
+    assert!((last.x - 400.0).abs() < 0.01, "on the edge: {last:?}");
+    assert!((last.y - 200.0).abs() < 3.0, "and still following the pointer: {last:?}");
+}
+
+#[test]
+fn a_step_badge_stays_whole_at_the_edge() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Step));
+    let (a, b) = (at(&h, 300.0, 100.0), at(&h, 520.0, 100.0));
+    drag(&mut h, a, b);
+    let ed = h.state();
+    let o = ed.session.doc.objects.first().unwrap();
+    assert!(picture(ed).encloses(o.shape.bounds(&o.style)), "{:?}", o.shape.bounds(&o.style));
+}
+
+/// A drag with Shift held.
+fn shift_drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.run_steps(1);
+    drag(h, from, to);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(1);
+}
+
+#[test]
+fn a_shift_square_stops_at_the_edge_and_stays_square() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Rect));
+    let (a, b) = (at(&h, 200.0, 150.0), at(&h, 480.0, 200.0));
+    shift_drag(&mut h, a, b);
+    let ed = h.state();
+    let r = ed.session.doc.objects.first().and_then(|o| o.shape.rect()).unwrap();
+    assert!(picture(ed).encloses(r), "{r:?}");
+    assert!((r.w - r.h).abs() < 0.1, "square: {r:?}");
+    assert!(r.w > 100.0, "as big as it fits: {r:?}");
+}
+
+#[test]
+fn a_snapped_line_stops_at_the_edge_on_its_angle() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Line));
+    let (a, b) = (at(&h, 200.0, 150.0), at(&h, 470.0, 400.0));
+    shift_drag(&mut h, a, b);
+    let ed = h.state();
+    let Some(Shape::Line { from, to }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
+    assert!(picture(ed).contains(to), "{to:?}");
+    assert!(((to.x - from.x).abs() - (to.y - from.y).abs()).abs() < 0.5, "still at 45 degrees: {from:?} to {to:?}");
+}
+
+#[test]
+fn a_move_stops_at_the_edge_and_waits_for_the_pointer() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 100.0, 100.0, 80.0, 60.0);
+    let mut h = ready(ed, Tool::Select);
+    let a = at(&h, 140.0, 130.0);
+    h.hover_at(a);
+    h.run_steps(2);
+    h.drag_at(a);
+    h.run_steps(2);
+    for x in [200.0, 300.0, 400.0, 500.0, 620.0] {
+        let p = at(&h, x, 130.0);
+        h.hover_at(p);
+        h.run_steps(1);
+    }
+    let bounds = |h: &Harness<'_, Editor>| h.state().session.doc.get(id).map(|o| o.shape.bounds(&o.style)).unwrap();
+    let stopped = bounds(&h);
+    assert!(picture(h.state()).encloses(stopped), "{stopped:?}");
+    assert!(stopped.right() > 399.0, "right up to the edge: {stopped:?}");
+    // Coming back, it doesn't move until the pointer is back where it took hold.
+    let p = at(&h, 500.0, 130.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    assert_eq!(bounds(&h), stopped);
+    let p = at(&h, 240.0, 130.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    h.drop_at(p);
+    h.run_steps(3);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.x - 200.0).abs() < 3.0, "under the pointer again: {r:?}");
+    assert_eq!(h.state().session.undo_label(), Some("Move"));
+}
+
+#[test]
+fn an_annotation_over_the_edge_moves_in_without_jumping() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, -50.0, 100.0, 80.0, 60.0);
+    let mut h = ready(ed, Tool::Select);
+    let (a, b) = (at(&h, 10.0, 130.0), at(&h, 20.0, 130.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.x - -40.0).abs() < 3.0, "moved by what the pointer moved: {r:?}");
+    let (a, b) = (at(&h, 10.0, 130.0), at(&h, -60.0, 130.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!(r.x >= -40.0 - 3.0, "no further out: {r:?}");
+}
+
+#[test]
+fn an_annotation_over_the_edge_is_not_picked_up_from_outside() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, -50.0, 100.0, 80.0, 60.0);
+    let mut h = ready(ed, Tool::Select);
+    let (a, b) = (at(&h, -20.0, 130.0), at(&h, 100.0, 130.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert_eq!(r.x, -50.0, "{r:?}");
+}
+
+#[test]
+fn a_handle_stops_at_the_edge() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 100.0, 100.0, 80.0, 60.0);
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    let (a, b) = (at(&h, 180.0, 160.0), at(&h, 520.0, 420.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.right() - 400.0).abs() < 0.01 && (r.bottom() - 300.0).abs() < 0.01, "{r:?}");
+    assert_eq!(h.state().session.undo_label(), Some("Resize"));
+}
+
+#[test]
+fn a_square_handle_stops_short_of_the_edge_rather_than_going_over() {
+    let mut ed = editor();
+    let style = Kind::Stamp.default_style();
+    let stamp = screengrabcraft_model::StampKind::default();
+    let rect = screengrabcraft_model::Rect::new(300.0, 100.0, 60.0, 60.0);
+    let id = ed.session.doc.add(Shape::Stamp { rect, stamp }, style).unwrap();
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    let (a, b) = (at(&h, 360.0, 160.0), at(&h, 500.0, 170.0));
+    drag(&mut h, a, b);
+    let ed = h.state();
+    let r = ed.session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!(picture(ed).encloses(r), "{r:?}");
+}
+
+#[test]
+fn a_handle_on_the_edge_can_be_taken_from_just_outside() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 300.0, 100.0, 100.0, 60.0);
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    let scale = h.state().view.scale();
+    let (a, b) = (at(&h, 400.0 + 4.0 / scale, 130.0), at(&h, 350.0, 130.0));
+    drag(&mut h, a, b);
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.w - 50.0).abs() < 8.0, "{r:?}");
+}
+
+#[test]
+fn a_rubber_band_starts_on_the_picture_and_stays_on_it() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 300.0, 200.0, 40.0, 40.0);
+    let mut h = ready(ed, Tool::Select);
+    // From outside: nothing.
+    let (a, b) = (at(&h, 250.0, -30.0), at(&h, 390.0, 290.0));
+    h.hover_at(a);
+    h.run_steps(2);
+    h.drag_at(a);
+    h.run_steps(2);
+    h.hover_at(b);
+    h.run_steps(2);
+    assert!(h.state().drag.is_none(), "no band from outside");
+    h.drop_at(b);
+    h.run_steps(3);
+    assert!(h.state().session.selected().is_empty());
+    // From inside: as far as the edge, and it still selects.
+    let (a, b) = (at(&h, 250.0, 150.0), at(&h, 500.0, 420.0));
+    h.hover_at(a);
+    h.run_steps(2);
+    h.drag_at(a);
+    h.run_steps(2);
+    h.hover_at(b);
+    h.run_steps(2);
+    let Some(crate::canvas::Drag::Rubber { now, .. }) = h.state().drag.clone() else { panic!("no rubber band") };
+    assert!(picture(h.state()).contains(now), "{now:?}");
+    h.drop_at(b);
+    h.run_steps(3);
+    assert_eq!(h.state().session.selected(), vec![id]);
+}
+
+#[test]
+fn a_crop_starts_on_the_picture_or_on_a_handle() {
+    let mut h = ready(editor(), Tool::Crop);
+    let whole = h.state().crop;
+    let (a, b) = (at(&h, 200.0, -40.0), at(&h, 300.0, 200.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().crop, whole, "a drag from outside leaves the frame alone");
+    // The frame's corner sits on the picture's: it can be taken from just outside.
+    let scale = h.state().view.scale();
+    let (a, b) = (at(&h, -3.0 / scale, -3.0 / scale), at(&h, 100.0, 50.0));
+    drag(&mut h, a, b);
+    let c = h.state().crop.expect("a crop frame");
+    assert!((c.x - 100.0).abs() < 8.0 && (c.y - 50.0).abs() < 8.0, "{c:?}");
+    let (a, b) = (at(&h, 400.0, 300.0), at(&h, 600.0, 500.0));
+    drag(&mut h, a, b);
+    let c = h.state().crop.expect("a crop frame");
+    assert!(picture(h.state()).encloses(c), "{c:?}");
+}
+
+#[test]
+fn what_a_click_places_near_an_edge_is_all_on_the_picture() {
+    for kind in [Kind::Text, Kind::Callout, Kind::Step, Kind::Stamp, Kind::Magnify] {
+        for (x, y) in [(398.0, 298.0), (2.0, 2.0), (398.0, 2.0), (2.0, 298.0)] {
+            let mut h = ready(editor(), Tool::Draw(kind));
+            let p = at(&h, x, y);
+            click_at(&mut h, p);
+            let ed = h.state();
+            assert_eq!(ed.session.doc.objects.len(), 1, "{kind:?} at {x},{y}");
+            let o = ed.session.doc.objects.first().unwrap();
+            assert!(picture(ed).encloses(o.shape.bounds(&o.style)), "{kind:?} at {x},{y}: {:?}", o.shape.bounds(&o.style));
+        }
+    }
+}
+
+#[test]
+fn what_a_click_places_fits_on_a_tiny_picture() {
+    for kind in [Kind::Callout, Kind::Stamp, Kind::Magnify] {
+        let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+        ed.session.replace(Document::new(Raster::filled(60, 40, Color::WHITE).unwrap()));
+        ed.view.fit_pending = true;
+        let mut h = ready(ed, Tool::Draw(kind));
+        let p = at(&h, 30.0, 20.0);
+        click_at(&mut h, p);
+        let ed = h.state();
+        let o = ed.session.doc.objects.first().unwrap();
+        assert!(ed.session.doc.bounds().inflate(o.style.width).encloses(o.shape.extent()), "{kind:?}: {:?}", o.shape.extent());
+    }
+}
+
+#[test]
+fn a_text_box_growing_past_the_bottom_moves_up() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Text));
+    let p = at(&h, 100.0, 280.0);
+    click_at(&mut h, p);
+    assert!(h.state().editing.is_some());
+    h.event(egui::Event::Text("one\ntwo\nthree\nfour\nfive".to_string()));
+    h.run_steps(3);
+    let ed = h.state();
+    let o = ed.session.doc.objects.first().unwrap();
+    let r = o.shape.rect().unwrap();
+    assert!(r.h > 60.0, "it grew: {r:?}");
+    assert!(picture(ed).encloses(o.shape.bounds(&o.style)), "{r:?}");
+}
+
+#[test]
+fn pasted_text_is_all_on_the_picture() {
+    let mut h = ready(editor(), Tool::Select);
+    h.state_mut().view.center = screengrabcraft_model::Pt::new(200.0, 295.0);
+    h.event(egui::Event::Paste("one\ntwo\nthree\nfour\nfive\nsix".to_string()));
+    h.run_steps(3);
+    let ed = h.state();
+    let o = ed.session.doc.objects.first().expect("the pasted text");
+    assert!(picture(ed).encloses(o.shape.bounds(&o.style)), "{:?}", o.shape.bounds(&o.style));
+}
+
+#[test]
+fn the_arrow_keys_stop_at_the_edge() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 330.0, 100.0, 60.0, 60.0);
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    for _ in 0..30 {
+        h.key_press(egui::Key::ArrowRight);
+        h.run_steps(1);
+    }
+    let ed = h.state();
+    let o = ed.session.doc.get(id).unwrap();
+    assert!(picture(ed).encloses(o.shape.bounds(&o.style)), "{:?}", o.shape.bounds(&o.style));
+}
+
+#[test]
+fn a_thicker_line_or_bigger_badge_stays_on_the_picture() {
+    let mut ed = editor();
+    let style = Kind::Step.default_style();
+    let center = screengrabcraft_model::Pt::new(385.0, 150.0);
+    let id = ed.session.doc.add(Shape::Step { center, number: 1 }, style).unwrap();
+    ed.session.doc.bring_inside(id);
+    ed.session.select(vec![id]);
+    let bigger = screengrabcraft_model::Style { font_size: 60.0, ..style };
+    crate::props::commit_style(&mut ed, Kind::Step, &style, &bigger, true);
+    let o = ed.session.doc.get(id).unwrap();
+    assert_eq!(o.style.font_size, 60.0);
+    assert!(picture(&ed).encloses(o.shape.bounds(&o.style)), "{:?}", o.shape.bounds(&o.style));
+}
+
+#[test]
+fn a_new_colour_leaves_an_annotation_over_the_edge_where_it_is() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 380.0, 100.0, 80.0, 60.0);
+    ed.session.select(vec![id]);
+    let style = ed.session.doc.get(id).unwrap().style;
+    let blue = screengrabcraft_model::Style { stroke: Color::rgba(0, 0, 255, 255), ..style };
+    crate::props::commit_style(&mut ed, Kind::Rect, &style, &blue, true);
+    assert_eq!(ed.session.doc.get(id).and_then(|o| o.shape.rect()).map(|r| r.x), Some(380.0));
+}
+
+#[test]
+fn the_cursor_says_nothing_can_be_drawn_outside_the_picture() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Rect));
+    let p = at(&h, 200.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Crosshair);
+    let p = at(&h, -30.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default);
+}
+
+// ---- saving as the owner works, and deleting from the strip ----
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use crate::autosave::{SaveJob, Saved, Status, TRASH};
+use crate::services::{RecentItem, Services};
+
+/// What a fake disk holds and what was done to it.
+#[derive(Default)]
+struct DiskState {
+    files: BTreeMap<String, Vec<u8>>,
+    /// How many times each file was written (its "modified" time).
+    stamps: BTreeMap<String, u64>,
+    writes: Vec<String>,
+    trashed: Vec<String>,
+    /// Saves are kept until `finish_saves` (a save under way on another thread).
+    hold: bool,
+    held: Vec<SaveJob>,
+    done: Vec<Saved>,
+    fail_writes: bool,
+    fail_trash: bool,
+    made: u32,
+    thumbs_asked: Vec<(String, u64)>,
+}
+
+/// A host with a fake disk, shared with the test.
+#[derive(Clone, Default)]
+struct Disk(Rc<RefCell<DiskState>>);
+
+impl Disk {
+    fn with(files: &[(&str, Vec<u8>)]) -> Disk {
+        let d = Disk::default();
+        for (p, b) in files {
+            d.put(p, b.clone());
+        }
+        d.0.borrow_mut().writes.clear();
+        d
+    }
+
+    fn put(&self, path: &str, bytes: Vec<u8>) {
+        let mut s = self.0.borrow_mut();
+        s.files.insert(path.to_string(), bytes);
+        *s.stamps.entry(path.to_string()).or_default() += 1;
+        s.writes.push(path.to_string());
+    }
+
+    fn get(&self, path: &str) -> Option<Vec<u8>> {
+        self.0.borrow().files.get(path).cloned()
+    }
+
+    fn writes(&self) -> Vec<String> {
+        self.0.borrow().writes.clone()
+    }
+
+    /// The saves held back are written now.
+    fn finish_saves(&self) {
+        let jobs = std::mem::take(&mut self.0.borrow_mut().held);
+        for job in jobs {
+            let done = job.run(&|p, b| self.write_file(p, b));
+            self.0.borrow_mut().done.push(done);
+        }
+    }
+}
+
+impl Services for Disk {
+    fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.get(path).ok_or_else(|| "no such file".to_string())
+    }
+
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        if self.0.borrow().fail_writes {
+            return Err("the disk is full".to_string());
+        }
+        self.put(path, bytes.to_vec());
+        Ok(())
+    }
+
+    fn start_save(&self, job: SaveJob) -> Option<Saved> {
+        if self.0.borrow().hold {
+            self.0.borrow_mut().held.push(job);
+            return None;
+        }
+        Some(job.run(&|p, b| self.write_file(p, b)))
+    }
+
+    fn poll_saved(&self) -> Option<Saved> {
+        let mut s = self.0.borrow_mut();
+        (!s.done.is_empty()).then(|| s.done.remove(0))
+    }
+
+    fn new_picture_path(&self, _source: &str) -> Result<String, String> {
+        let mut s = self.0.borrow_mut();
+        s.made += 1;
+        Ok(format!("captures/Capture {}.png", s.made))
+    }
+
+    fn trash(&self, path: &str) -> Result<(), String> {
+        let mut s = self.0.borrow_mut();
+        if s.fail_trash {
+            return Err("the bin is not there".to_string());
+        }
+        if s.files.remove(path).is_some() {
+            s.trashed.push(path.to_string());
+        }
+        Ok(())
+    }
+
+    fn recent(&self) -> Vec<RecentItem> {
+        let s = self.0.borrow();
+        s.files
+            .keys()
+            .filter(|p| !p.ends_with(".sgcraft"))
+            .map(|p| RecentItem { path: p.clone(), name: crate::editor::file_name(p), modified: s.stamps.get(p).copied().unwrap_or_default() })
+            .collect()
+    }
+
+    fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {
+        self.0.borrow_mut().thumbs_asked.push((path.to_string(), modified));
+        Raster::filled(20, 10, Color::rgb(0, 0, 255)).ok()
+    }
+}
+
+fn png(w: u32, h: u32, color: Color) -> Vec<u8> {
+    screengrabcraft_render::encode(&Raster::filled(w, h, color).unwrap(), ImageFormat::Png, 100).unwrap()
+}
+
+/// The editor on a fake disk, the strip showing, with `path` open.
+fn on_disk(disk: &Disk, path: Option<&str>) -> Harness<'static, Editor> {
+    let settings = EditorSettings { show_tray: true, ..EditorSettings::default() };
+    let mut h = harness(Editor::new(Box::new(disk.clone()), settings));
+    h.run_steps(2);
+    if let Some(p) = path {
+        let ctx = h.ctx.clone();
+        h.state_mut().open_path(&ctx, p);
+        h.run_steps(2);
+    }
+    disk.0.borrow_mut().writes.clear();
+    h
+}
+
+/// Draws an arrow across the middle of the picture.
+fn draw_arrow(h: &mut Harness<'_, Editor>) {
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let (w, ht) = (h.state().session.doc.width() as f32, h.state().session.doc.height() as f32);
+    let (a, b) = (at(h, w * 0.2, ht * 0.3), at(h, w * 0.7, ht * 0.6));
+    drag(h, a, b);
+}
+
+/// The side file as written.
+fn side(disk: &Disk, path: &str) -> screengrabcraft_render::project::Project {
+    screengrabcraft_render::project::read(&disk.get(path).expect("a side file")).unwrap()
+}
+
+#[test]
+fn a_change_is_saved_a_second_later_with_no_prompt() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    assert!(disk.writes().is_empty(), "nothing yet: {:?}", disk.writes());
+    h.run_steps(5);
+    assert_eq!(disk.writes(), vec!["captures/a.sgcraft".to_string(), "captures/a.png".to_string()]);
+    // Each step is a quarter of a second: the save comes a second after the change, not before.
+    disk.0.borrow_mut().writes.clear();
+    h.state_mut().session.execute("image.flip", &serde_json::json!({"horizontal": true})).unwrap();
+    h.run_steps(4);
+    assert!(disk.writes().is_empty(), "three quarters of a second later, still nothing");
+    h.run_steps(1);
+    assert_eq!(disk.writes().len(), 2);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1);
+    // The picture itself has the arrow drawn in.
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_ne!(flat, Raster::filled(400, 300, Color::WHITE).unwrap());
+    assert_eq!(h.state().saver.status, Status::Saved);
+    assert!(!h.state().session.dirty);
+    h.run_steps(8);
+    assert_eq!(disk.writes().len(), 2, "written once");
+    // The side file says what the picture was before the flip.
+    assert_eq!(side(&disk, "captures/a.sgcraft").original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()));
+}
+
+#[test]
+fn nothing_is_saved_in_the_middle_of_a_drag() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    disk.0.borrow_mut().writes.clear();
+    // A slow drag, seconds long.
+    // Away from the arrow (a press on it would move it).
+    let (a, b) = (at(&h, 20.0, 220.0), at(&h, 300.0, 290.0));
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    h.hover_at(a);
+    h.run_steps(1);
+    h.drag_at(a);
+    h.run_steps(1);
+    for i in 1..=12 {
+        let t = i as f32 / 12.0;
+        h.hover_at(pos2(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+        h.run_steps(1);
+    }
+    assert!(disk.writes().is_empty(), "three seconds of dragging, nothing written");
+    h.drop_at(b);
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 2);
+}
+
+#[test]
+fn nothing_is_saved_while_text_is_typed() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    h.state_mut().set_tool(Tool::Draw(Kind::Text));
+    let p = at(&h, 80.0, 80.0);
+    click_at(&mut h, p);
+    h.event(egui::Event::Text("Hello".to_string()));
+    h.run_steps(8);
+    assert!(h.state().editing.is_some());
+    assert!(disk.writes().is_empty(), "{:?}", disk.writes());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.first().and_then(|o| o.shape.text().map(str::to_string)), Some("Hello".into()));
+}
+
+#[test]
+fn the_original_is_kept_through_a_crop_and_reverting_is_one_undo_step() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.state_mut().session.execute("image.crop", &serde_json::json!({"x": 0, "y": 0, "w": 200, "h": 150})).unwrap();
+    h.run_steps(6);
+    let p = side(&disk, "captures/a.sgcraft");
+    assert_eq!((p.doc.width(), p.doc.height()), (200, 150));
+    assert_eq!(p.original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()), "the picture as captured");
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_eq!((flat.width(), flat.height()), (200, 150), "the picture is the cropped one");
+
+    // Opened again, it still knows its original.
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert_eq!(h.state().session.doc.width(), 200);
+    assert!(h.state().can_revert());
+    h.state_mut().revert_to_original();
+    h.run_steps(1);
+    let ed = h.state();
+    assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (400, 300));
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.session.undo_label(), Some("Revert to Original"));
+    assert!(!ed.can_revert());
+    h.run_steps(6);
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert_eq!(flat, Raster::filled(400, 300, Color::WHITE).unwrap(), "the picture as captured again");
+    // Undo brings the changes back, in one step.
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.width(), 200);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    // And goes on back through what was done before the capture was opened again.
+    assert_eq!(h.state().session.undo_label(), Some("Crop"));
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.width(), 400);
+    assert!(h.state_mut().session.undo());
+    assert!(h.state().session.doc.objects.is_empty());
+    assert!(!h.state().session.can_undo());
+}
+
+#[test]
+fn a_side_file_from_before_still_opens_and_the_picture_is_its_original() {
+    // Saved by an older version: no original in it, and the picture beside it never rewritten.
+    let mut doc = Document::new(Raster::filled(200, 100, Color::WHITE).unwrap());
+    doc.add(
+        Shape::Arrow { from: screengrabcraft_model::Pt::new(5.0, 5.0), to: screengrabcraft_model::Pt::new(50.0, 50.0), heads: Default::default() },
+        Kind::Arrow.default_style(),
+    )
+    .unwrap();
+    let mut v: serde_json::Value = serde_json::from_slice(&screengrabcraft_render::project::save(&doc).unwrap()).unwrap();
+    v["version"] = serde_json::json!(1);
+    let disk = Disk::with(&[("captures/old.png", png(400, 300, Color::WHITE)), ("captures/old.sgcraft", serde_json::to_vec(&v).unwrap())]);
+    let h = on_disk(&disk, Some("captures/old.png"));
+    let ed = h.state();
+    assert_eq!(ed.session.doc.objects.len(), 1);
+    assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (200, 100));
+    assert_eq!(ed.original, Some(Raster::filled(400, 300, Color::WHITE).unwrap()));
+    assert!(ed.can_revert());
+}
+
+#[test]
+fn an_animated_gif_is_never_written_again() {
+    let mut w = screengrabcraft_render::anim::GifWriter::new(Vec::new(), 40, 30).unwrap();
+    for color in [Color::RED, Color::rgb(0, 0, 255)] {
+        w.push(Raster::filled(40, 30, color).unwrap(), 100).unwrap();
+    }
+    let gif = w.finish(100).unwrap().0;
+    let disk = Disk::with(&[("captures/rec.gif", gif.clone())]);
+    let mut h = on_disk(&disk, Some("captures/rec.gif"));
+    h.get_by_label("Play");
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(disk.writes(), vec!["captures/rec.sgcraft".to_string()]);
+    assert_eq!(disk.get("captures/rec.gif"), Some(gif.clone()), "the recording is as it was");
+    let note = h.state().saver.note.clone().unwrap_or_default();
+    assert!(note.contains("rec.gif is kept as it is"), "{note}");
+    h.get_by_label(&note);
+    // Said once: the next save is just "Saved".
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert!(h.state().saver.note.is_none());
+    h.get_by_label("Saved");
+    assert_eq!(disk.get("captures/rec.gif"), Some(gif));
+}
+
+#[test]
+fn a_pasted_picture_gets_a_file_on_its_first_change() {
+    let disk = Disk::default();
+    let mut h = on_disk(&disk, None);
+    h.state_mut().open_picture(Raster::filled(300, 200, Color::WHITE).unwrap(), None);
+    h.run_steps(6);
+    assert!(disk.writes().is_empty(), "not until it changes");
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 1.png"));
+    assert_eq!(h.state().name, "Capture 1");
+    assert!(disk.get("captures/Capture 1.png").is_some());
+    assert_eq!(side(&disk, "captures/Capture 1.sgcraft").original, Some(Raster::filled(300, 200, Color::WHITE).unwrap()));
+}
+
+#[test]
+fn ctrl_s_saves_at_once_without_a_dialog() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::S);
+    h.run_steps(1);
+    assert!(disk.writes().contains(&"captures/a.sgcraft".to_string()), "{:?}", disk.writes());
+    assert!(!h.state().saving_project, "no dialog");
+}
+
+#[test]
+fn closing_finishes_the_save_first_and_asks_nothing() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    disk.0.borrow_mut().hold = true;
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    assert!(!h.state_mut().close_requested(), "the change isn't written yet");
+    h.run_steps(2);
+    assert!(h.query_by_label("Save your changes?").is_none());
+    assert!(!h.state().quit_requested, "still being written");
+    disk.finish_saves();
+    h.run_steps(2);
+    assert!(h.state().quit_requested && h.state().close_confirmed);
+    assert!(h.state_mut().close_requested());
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1);
+}
+
+#[test]
+fn a_failed_save_keeps_the_window_open_and_offers_save_as() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    disk.0.borrow_mut().fail_writes = true;
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert!(matches!(h.state().saver.status, Status::Failed(_)));
+    assert!(!h.state_mut().close_requested());
+    h.run_steps(3);
+    assert!(!h.state().quit_requested, "the window stays open");
+    h.get_by_label("Save As…");
+    h.get_by_label("Discard Changes").click();
+    h.run_steps(3);
+    assert!(h.state().quit_requested, "let go on the owner's word");
+}
+
+#[test]
+fn opening_another_picture_saves_this_one_first() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    let ctx = h.ctx.clone();
+    h.state_mut().open_path(&ctx, "captures/b.png");
+    h.run_steps(2);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/b.png"));
+    assert_eq!(side(&disk, "captures/a.sgcraft").doc.objects.len(), 1, "a's arrow was saved on the way");
+}
+
+/// Hovers the thumbnail of `name` in the strip and clicks its delete button.
+fn delete_from_strip(h: &mut Harness<'_, Editor>, name: &str) {
+    let thumb = h.get_by_label(name).rect().center();
+    h.hover_at(thumb);
+    h.run_steps(2);
+    h.get_by_label(&crate::strip::delete_label(name)).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn a_capture_is_deleted_from_the_strip_with_its_side_file() {
+    let disk = Disk::with(&[
+        ("captures/a.png", png(400, 300, Color::WHITE)),
+        ("captures/b.png", png(100, 80, Color::RED)),
+        ("captures/b.sgcraft", screengrabcraft_render::project::save(&Document::new(Raster::filled(100, 80, Color::RED).unwrap())).unwrap()),
+    ]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert!(h.query_by_label(&crate::strip::delete_label("b.png")).is_none(), "only on the one under the pointer");
+    delete_from_strip(&mut h, "b.png");
+    assert_eq!(disk.0.borrow().trashed, vec!["captures/b.png".to_string(), "captures/b.sgcraft".to_string()]);
+    assert!(h.state().recent.iter().all(|r| r.path != "captures/b.png"));
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/a.png"), "the open one stays open");
+    h.get_by_label(&format!("Moved b.png to the {TRASH}"));
+}
+
+#[test]
+fn deleting_the_open_capture_opens_the_next_and_never_writes_it_back() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    // Another change, its save under way on another thread when the delete comes.
+    disk.0.borrow_mut().hold = true;
+    draw_arrow(&mut h);
+    h.run_steps(5);
+    assert_eq!(disk.0.borrow().held.len(), 1);
+    delete_from_strip(&mut h, "a.png");
+    assert!(disk.0.borrow().trashed.is_empty(), "not while a save could write it back");
+    disk.finish_saves();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().trashed, vec!["captures/a.png".to_string(), "captures/a.sgcraft".to_string()]);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/b.png"), "the next one opens");
+    disk.0.borrow_mut().hold = false;
+    h.run_steps(12);
+    assert!(disk.get("captures/a.png").is_none() && disk.get("captures/a.sgcraft").is_none(), "nothing written back");
+}
+
+#[test]
+fn deleting_the_last_capture_leaves_an_empty_document() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    delete_from_strip(&mut h, "a.png");
+    let ed = h.state();
+    assert!(ed.picture_path.is_none() && ed.project_path.is_none());
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.name, "Untitled");
+}
+
+#[test]
+fn a_capture_the_bin_refuses_stays_where_it_is() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    disk.0.borrow_mut().fail_trash = true;
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    delete_from_strip(&mut h, "a.png");
+    assert!(disk.get("captures/a.png").is_some());
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/a.png"));
+    h.get_by_label(&format!("a.png couldn't be moved to the {TRASH}: the bin is not there"));
+}
+
+#[test]
+fn a_picture_written_again_gets_a_new_thumbnail() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    let asked = |d: &Disk| d.0.borrow().thumbs_asked.iter().filter(|(p, _)| p == "captures/a.png").map(|(_, m)| *m).collect::<Vec<_>>();
+    assert_eq!(asked(&disk), vec![1]);
+    draw_arrow(&mut h);
+    h.run_steps(6);
+    assert_eq!(asked(&disk), vec![1, 2], "asked again once rewritten");
+}
+
+// ---- the tool remembered, the bigger tool bar and strip ----
+
+/// A host that keeps the settings it's given, as the settings file would.
+struct KeepsSettings(Rc<RefCell<Option<EditorSettings>>>);
+
+impl Services for KeepsSettings {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn save_settings(&self, settings: &EditorSettings) {
+        *self.0.borrow_mut() = Some(settings.clone());
+    }
+}
+
+#[test]
+fn the_last_drawing_tool_and_stamp_are_there_after_a_restart() {
+    let kept = Rc::new(RefCell::new(None));
+    let ed = Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default());
+    assert_eq!(ed.tool, Tool::Draw(Kind::Arrow), "the first time, the arrow");
+    let mut h = ready(ed, Tool::Draw(Kind::Callout));
+    // Picking the stamp, and one of the stamps, in the properties.
+    h.key_press(egui::Key::G);
+    h.run_steps(2);
+    h.get_by_label("Cross").click();
+    h.run_steps(2);
+    // Selecting isn't drawing: the stamp tool stays the one remembered.
+    h.state_mut().set_tool(Tool::Select);
+    let saved = kept.borrow().clone().expect("settings saved");
+    assert_eq!(saved.tool, Some(Kind::Stamp));
+    assert_eq!(saved.stamp, Some(screengrabcraft_model::StampKind::Cross));
+
+    // Closed and opened again: through the settings file's text, as on the disk.
+    let reread = EditorSettings::from_json(&serde_json::to_string(&saved).unwrap());
+    let ed = Editor::new(Box::new(NoServices), reread);
+    assert_eq!(ed.tool, Tool::Draw(Kind::Stamp));
+    assert_eq!(ed.stamp, screengrabcraft_model::StampKind::Cross);
+
+    // A rectangle picked with its key.
+    let mut h = ready(Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default()), Tool::Select);
+    h.key_press(egui::Key::R);
+    h.run_steps(1);
+    assert_eq!(kept.borrow().as_ref().and_then(|s| s.tool), Some(Kind::Rect));
+}
+
+#[test]
+fn a_tool_no_longer_on_the_bar_starts_as_the_arrow() {
+    let settings = EditorSettings { tool: Some(Kind::Image), ..EditorSettings::default() };
+    assert_eq!(Editor::new(Box::new(NoServices), settings).tool, Tool::Draw(Kind::Arrow));
+}
+
+#[test]
+fn the_bigger_tool_bar_fits_a_1280_window_even_while_cropping() {
+    let mut ed = editor();
+    ed.tool = Tool::Crop;
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(4);
+    let last = h.get_by_label("Delete the selection (Del)").rect();
+    let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
+    assert!(last.max.x + 8.0 <= zoom_out.min.x, "{last:?} runs into {zoom_out:?}");
+    let arrow = h.get_by_label("Arrow (A)").rect();
+    assert!(arrow.width() >= 30.0 * 1.25 && arrow.height() >= 30.0 * 1.25, "{arrow:?}");
+    // The crop's own buttons are in its panel, clear of the canvas and the tool bar.
+    let apply = h.get_by_label("Apply Crop").rect();
+    assert!(apply.min.y > last.max.y && apply.min.x >= h.state().view.canvas.max.x, "{apply:?}");
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Select);
+    assert!(h.query_by_label("Apply Crop").is_none());
+}
+
+#[test]
+fn the_strip_has_bigger_thumbnails_with_room_between_them() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE)), ("captures/b.png", png(100, 80, Color::RED))]);
+    let h = on_disk(&disk, None);
+    let (a, b) = (h.get_by_label("a.png").rect(), h.get_by_label("b.png").rect());
+    assert!(a.height() >= crate::strip::THUMB - 0.5 && a.height() >= 72.0 * 1.25 - 0.5, "{a:?}");
+    assert!((b.min.x - a.max.x).abs() >= 12.0, "room between: {a:?} {b:?}");
+}
+
+// ---- fitting the picture to the window ----
+
+/// Where the picture's middle is on the screen, against the canvas's middle.
+fn off_centre(h: &Harness<'_, Editor>) -> f32 {
+    let ed = h.state();
+    let (w, ht) = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
+    ed.view.to_screen(screengrabcraft_model::Pt::new(w / 2.0, ht / 2.0)).distance(ed.view.canvas.center())
+}
+
+/// Whether the whole picture is in the canvas.
+fn all_in_view(h: &Harness<'_, Editor>) -> bool {
+    let ed = h.state();
+    ed.view.canvas.expand(0.5).contains_rect(ed.view.rect_to_screen(ed.session.doc.bounds()))
+}
+
+fn with_picture(w: u32, h: u32) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(w, h, Color::WHITE).unwrap()));
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h
+}
+
+#[test]
+fn a_small_picture_shows_at_actual_size_in_the_middle() {
+    let mut h = with_picture(200, 100);
+    assert_eq!(h.state().view.zoom, 1.0, "never zoomed in past 100%");
+    assert!(off_centre(&h) < 1.0, "{}", off_centre(&h));
+    // Zoom to Fit keeps to the same rule.
+    h.state_mut().view.zoom_by(3.0, None);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0);
+    assert!(off_centre(&h) < 1.0);
+}
+
+#[test]
+fn a_big_picture_fits_the_window_and_fits_again_when_it_is_resized() {
+    let mut h = with_picture(3000, 2000);
+    assert!(h.state().view.zoom < 1.0 && all_in_view(&h));
+    let before = h.state().view.zoom;
+    // The owner's own zoom holds, until the window changes.
+    h.state_mut().view.zoom_by(2.0, None);
+    h.run_steps(2);
+    assert!((h.state().view.zoom - before * 2.0).abs() < 1e-4);
+    h.set_size(egui::vec2(900.0, 650.0));
+    h.run_steps(3);
+    assert!(h.state().view.zoom < before, "zoomed out for the smaller window");
+    assert!(all_in_view(&h) && off_centre(&h) < 1.0);
+    h.set_size(egui::vec2(1600.0, 1000.0));
+    h.run_steps(3);
+    assert!(h.state().view.zoom > before && all_in_view(&h) && off_centre(&h) < 1.0);
+}
+
+#[test]
+fn a_cropped_picture_is_centred_and_fitted_again_and_so_is_its_undo() {
+    let mut h = with_picture(3000, 2000);
+    let fitted = h.state().view.zoom;
+    // Moved aside and zoomed in by the owner.
+    h.state_mut().view.zoom_by(4.0, None);
+    h.state_mut().view.center = screengrabcraft_model::Pt::new(100.0, 100.0);
+    h.state_mut().session.execute("image.crop", &serde_json::json!({"x": 0, "y": 0, "w": 300, "h": 200})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0, "small now: actual size, no more");
+    assert!(off_centre(&h) < 1.0);
+    assert!(h.state_mut().session.undo());
+    h.run_steps(2);
+    assert!((h.state().view.zoom - fitted).abs() < 1e-4 && off_centre(&h) < 1.0 && all_in_view(&h));
+    // A rotation and a resize are fitted too.
+    h.state_mut().session.execute("image.rotate", &serde_json::json!({"degrees": 90})).unwrap();
+    h.run_steps(2);
+    assert!(all_in_view(&h) && off_centre(&h) < 1.0);
+    h.state_mut().view.zoom_by(5.0, None);
+    h.state_mut().session.execute("image.resize", &serde_json::json!({"width": 150, "height": 225})).unwrap();
+    h.run_steps(2);
+    assert_eq!(h.state().view.zoom, 1.0);
+    assert!(off_centre(&h) < 1.0);
+}
+
+#[test]
+fn drawing_leaves_the_owners_zoom_alone() {
+    let mut h = with_picture(400, 300);
+    h.state_mut().view.zoom_by(1.5, None);
+    h.run_steps(1);
+    let (zoom, centre) = (h.state().view.zoom, h.state().view.center);
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    let (a, b) = (at(&h, 150.0, 120.0), at(&h, 250.0, 180.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert_eq!((h.state().view.zoom, h.state().view.center), (zoom, centre));
+}
+
+#[test]
+fn the_view_still_pans_from_outside_the_picture() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Rect));
+    let before = h.state().view.center;
+    let (a, b) = (at(&h, -30.0, 150.0), at(&h, 20.0, 180.0));
+    h.hover_at(a);
+    h.run_steps(2);
+    let middle = |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Middle, pressed, modifiers: egui::Modifiers::NONE };
+    h.event(middle(a, true));
+    h.run_steps(2);
+    h.hover_at(b);
+    h.run_steps(2);
+    h.event(middle(b, false));
+    h.run_steps(2);
+    assert!(h.state().view.center.distance(before) > 10.0, "{:?}", h.state().view.center);
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn undo_still_works_after_the_editor_is_closed_and_the_capture_opened_again() {
+    let disk = Disk::with(&[("captures/a.png", png(400, 300, Color::WHITE))]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    draw_arrow(&mut h);
+    h.state_mut().session.execute("image.flip", &serde_json::json!({"horizontal": true})).unwrap();
+    h.run_steps(6);
+    assert_eq!(side(&disk, "captures/a.sgcraft").history.undo.len(), 2);
+    // A new editor, as after closing it: the capture opens with its two steps to undo.
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    assert!(h.state().session.can_undo());
+    assert_eq!(h.state().session.undo_label(), Some("Flip"));
+    h.state_mut().session.execute("edit.undo", &serde_json::json!({})).unwrap();
+    h.state_mut().session.execute("edit.undo", &serde_json::json!({})).unwrap();
+    assert!(h.state().session.doc.objects.is_empty(), "the arrow is undone too");
+    assert!(!h.state().session.can_undo());
+    // And redone.
+    h.state_mut().session.execute("edit.redo", &serde_json::json!({})).unwrap();
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}
+
+/// A rectangle drawn across the middle; the Rectangle tool stays chosen.
+fn draw_rect(h: &mut Harness<'_, Editor>) -> screengrabcraft_model::ObjectId {
+    h.state_mut().set_tool(Tool::Draw(Kind::Rect));
+    let (a, b) = (at(h, 100.0, 80.0), at(h, 260.0, 200.0));
+    drag(h, a, b);
+    *h.state().session.selected().first().expect("the new box is selected")
+}
+
+fn rect_of(h: &Harness<'_, Editor>, id: screengrabcraft_model::ObjectId) -> screengrabcraft_model::Rect {
+    match h.state().session.doc.get(id).map(|o| o.shape.clone()) {
+        Some(Shape::Rect { rect, .. }) => rect,
+        other => panic!("not a box: {other:?}"),
+    }
+}
+
+#[test]
+fn with_the_box_tool_a_drag_on_a_box_moves_it_instead_of_drawing_another() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    let before = rect_of(&h, id);
+    // On its border (a hollow box is held by its line), with the Rectangle tool still chosen.
+    let (a, b) = (at(&h, 130.0, 80.0), at(&h, 160.0, 110.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "no second box");
+    let after = rect_of(&h, id);
+    assert!((after.x - before.x - 30.0).abs() < 2.0 && (after.y - before.y - 30.0).abs() < 2.0, "{before:?} → {after:?}");
+}
+
+#[test]
+fn a_handle_takes_hold_even_when_the_press_is_a_little_off() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    let corner = at(&h, 260.0, 200.0);
+    // Ten points off the bottom right handle, outside what's drawn of it.
+    let from = egui::pos2(corner.x + 7.0, corner.y + 7.0);
+    drag(&mut h, from, egui::pos2(from.x + 40.0, from.y + 20.0));
+    assert_eq!(h.state().session.doc.objects.len(), 1, "it didn't draw a new box");
+    let r = rect_of(&h, id);
+    assert!(r.w > 170.0 && r.h > 125.0, "the box grew: {r:?}");
+}
+
+#[test]
+fn a_click_on_a_box_selects_it_whatever_the_tool() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    let id = draw_rect(&mut h);
+    h.state_mut().session.select(Vec::new());
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    let p = at(&h, 100.0, 140.0);
+    click_at(&mut h, p);
+    h.run_steps(2);
+    assert_eq!(h.state().session.selected(), vec![id]);
+}
+
+#[test]
+fn boxes_ellipses_and_callouts_show_their_fill_without_opening_anything() {
+    for tool in [Kind::Rect, Kind::Ellipse, Kind::Callout] {
+        let mut h = harness(editor());
+        h.state_mut().set_tool(Tool::Draw(tool));
+        h.run_steps(2);
+        assert!(h.query_by_label("Fill").is_some(), "{tool:?}");
+    }
+    let mut h = harness(editor());
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    h.run_steps(2);
+    assert!(h.query_by_label("Fill").is_none());
+}
+
+#[test]
+fn the_file_menu_has_room_between_its_items() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    let open = h.get_by_label("New from Clipboard").rect();
+    let save = h.get_by_label("Close Window").rect();
+    assert!(open.height() >= 26.0, "an item is {} points tall", open.height());
+    assert!(open.width() >= 180.0, "the menu is {} points wide", open.width());
+    assert!(save.min.y > open.max.y);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/file-menu.png"));
+    }
+}
+
+#[test]
+fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_another() {
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.state_mut().set_tool(Tool::Draw(Kind::Stamp));
+    let p = at(&h, 150.0, 120.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "a click puts a stamp down");
+    let id = h.state().session.doc.objects[0].id;
+    // Clicked again, still with the Stamp tool: selected, not a second stamp.
+    h.state_mut().session.select(Vec::new());
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+    assert_eq!(h.state().session.selected(), vec![id]);
+    // Dragged: it moves, and there's still one.
+    let before = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    let to = at(&h, 220.0, 160.0);
+    drag(&mut h, p, to);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "no stamp added by the drag");
+    let after = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((after.x - before.x - 70.0).abs() < 2.0 && (after.y - before.y - 40.0).abs() < 2.0, "{before:?} → {after:?}");
+    // A slight wobble while clicking on it (a press that moves a few points) doesn't add one either.
+    let q = at(&h, 220.0, 160.0);
+    drag(&mut h, q, egui::pos2(q.x + 6.0, q.y + 4.0));
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}
+
+/// The editor on a white picture with a blue square in the middle.
+fn square_picture() -> Editor {
+    let mut r = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..200 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 200, 255]);
+        }
+    }
+    let mut ed = editor();
+    ed.session.replace(Document::new(r));
+    ed
+}
+
+#[test]
+fn the_fill_tool_is_on_the_bar_and_on_its_key() {
+    let mut h = harness(square_picture());
+    h.run_steps(4);
+    h.get_by_label("Fill (F)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill);
+    h.get_by_label("Tolerance");
+    h.state_mut().set_tool(Tool::Select);
+    h.run_steps(1);
+    h.key_press(egui::Key::F);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill, "F picks it");
+}
+
+#[test]
+fn the_fill_tool_fills_the_area_clicked_and_leaves_the_view_where_it_is() {
+    let mut h = ready(square_picture(), Tool::Fill);
+    h.state_mut().view.set_zoom(1.5, None);
+    h.run_steps(2);
+    let (zoom, center) = (h.state().view.zoom, h.state().view.center);
+    let p = at(&h, 200.0, 150.0);
+    click_at(&mut h, p);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.base.pixel(200, 150), Some(ed.settings.fill.color), "the square is filled");
+    assert_eq!(ed.session.doc.base.pixel(160, 110), Some(ed.settings.fill.color), "all of it");
+    assert_eq!(ed.session.doc.base.pixel(20, 20), Some(Color::WHITE), "the white round it isn't");
+    assert_eq!(ed.session.undo_label(), Some("Fill"));
+    assert_eq!((ed.view.zoom, ed.view.center), (zoom, center), "no jump: the view stays as it was");
+    assert!(ed.session.doc.objects.is_empty(), "no annotation, the picture itself");
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.base.pixel(200, 150), Some(Color::rgb(30, 90, 200)));
+    // A press that wobbles a little is still a fill, and only one.
+    let q = at(&h, 20.0, 20.0);
+    drag(&mut h, q, pos2(q.x + 6.0, q.y + 4.0));
+    assert_eq!(h.state().session.doc.base.pixel(20, 20), Some(h.state().settings.fill.color));
+    assert!(h.state_mut().session.undo());
+    assert!(!h.state().session.can_undo(), "one step for the wobbly press");
+    if let Ok(dir) = std::env::var("SGC_SHOTS") {
+        let p = at(&h, 200.0, 150.0);
+        click_at(&mut h, p);
+        if let Ok(img) = h.render() {
+            let _ = img.save(format!("{dir}/fill-tool.png"));
+        }
+    }
+}
+
+#[test]
+fn the_fill_tool_fills_a_shape_clicked_inside() {
+    let mut ed = square_picture();
+    let empty = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 100.0, 60.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    let mut h = ready(ed, Tool::Fill);
+    let base = h.state().session.doc.base.clone();
+    let p = at(&h, 70.0, 50.0);
+    click_at(&mut h, p);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.get(empty).map(|o| o.style.fill), Some(ed.settings.fill.color), "the box without a fill has one now");
+    assert!(ed.session.doc.base.same_pixels(&base), "the picture under it isn't touched");
+    assert!(ed.session.selected().is_empty(), "nothing is selected: the tool stays the Fill tool");
+    assert_eq!(ed.tool, Tool::Fill);
+    // None, for the next click, takes the fill away again.
+    h.state_mut().settings.fill.color = Color::TRANSPARENT;
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.get(empty).map(|o| o.style.fill), Some(Color::TRANSPARENT));
+}
+
+#[test]
+fn the_tool_bar_buttons_get_smaller_rather_than_run_into_the_zoom() {
+    for width in [1000.0, 1100.0, 1200.0, 1280.0, 1400.0] {
+        let mut h = Harness::builder().with_size(egui::vec2(width, 800.0)).build_ui_state(
+            |ui, ed: &mut Editor| {
+                let ctx = ui.ctx().clone();
+                ed.logic(&ctx);
+                ed.ui(ui);
+            },
+            editor(),
+        );
+        h.run_steps(4);
+        let last = h.get_by_label("Delete the selection (Del)").rect();
+        let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
+        assert!(last.max.x + 4.0 <= zoom_out.min.x, "at {width}: {last:?} runs into {zoom_out:?}");
+        let fill = h.get_by_label("Fill (F)").rect();
+        assert!(fill.width() >= crate::editor::BAR_BUTTON_MIN - 0.5, "at {width}: {fill:?}");
+        if width >= 1400.0 {
+            assert!((fill.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "full size when there's room: {fill:?}");
+        }
+    }
 }

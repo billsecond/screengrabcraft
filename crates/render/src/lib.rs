@@ -13,6 +13,7 @@ pub mod canvas;
 pub mod codec;
 pub mod draw;
 pub mod effects;
+pub mod matte;
 pub mod pdf;
 pub mod pointer;
 pub mod project;

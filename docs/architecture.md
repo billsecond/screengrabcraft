@@ -1,8 +1,8 @@
 # Architecture
 
-> **Last updated:** 2026-10-14 · **Change:** first version
+> **Last updated:** 2026-11-02 · **Change:** the `matte` crate and making the background transparent
 
-ScreenGrabCraft is a Cargo workspace of six library crates in layers and four programs. A crate
+ScreenGrabCraft is a Cargo workspace of seven library crates in layers and four programs. A crate
 may depend only on crates in lower layers (`cargo xtask layers` checks it), and nothing below L6
 knows about a user interface.
 
@@ -13,7 +13,7 @@ L6   desktop ─────────────┤                         
      (settings, log,      │                           │   (editor, overlay)    │                   │
       instance, service)  │                           │                        │                   │
 L4                        │                     engine (Session, undo, command registry)           │
-L3   capture (monitors, windows, pixels: xcap · x11rb · portal)                                    │
+L3   capture (monitors, windows, pixels: xcap · x11rb · portal)   matte (background model: tract)│
 L2                              render (tiny-skia drawing, text, effects, codecs, PDF, projects, stitching, GIF)
 L1                              model (document, shapes, styles, geometry, settings)
 ```
@@ -22,10 +22,12 @@ L1                              model (document, shapes, styles, geometry, setti
 |---|---|---|
 | `model` | yes | `Document` (a `Raster` plus `Object`s in drawing order), `Shape` (15 kinds), `Style`, hit testing and handles, `Settings`/`EditorSettings`, hotkeys, file naming |
 | `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
-| `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grab_area`, permission |
+| `media` | yes (no encoders) | video: the recording file (`recording`: append-only chunks, a track per source), the `Timeline` of edits, the `Composer` (the frame at a moment, the camera in its corner) and `mix` (the sound), the MP4 writer, AV1 (rav1e) and Opus (rusty-opus) encoders and the parallel `export` |
+| `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
+| `matte` | no | Remove Background's model: an ONNX salient-object model (IS-Net, U²-Net, BiRefNet) run by tract, the runtime written in Rust; the picture shrunk to the model's square, its answer stretched back as a soft matte. The host reads the model file; `desktop::models` finds it |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
-| `desktop` | no | paths, settings files, logging, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend |
+| `desktop` | no | paths, settings files, logging, the background model's file, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend, the update check (the only network code: HTTPS to GitHub's releases, the installer downloaded, checked and run on Windows) |
 
 ## The document
 
@@ -46,6 +48,19 @@ Every editing action is a `CommandSpec` (id, label, group, shortcut, parameter d
 snapshot becomes the undo step if the document changed. A drag on the canvas is bracketed by
 `Session::begin` and `commit`, so it is one undo step however many frames it took. Pictures are
 shared between snapshots (`Arc`), so undo costs little memory unless the picture itself changed.
+
+## Making the background transparent
+
+Three commands in the Image menu, each one undo step. `image.removeSolidBackground` and
+`image.makeColorTransparent` are picture work in `render::matte`: the colour is flooded in from the
+edges (or taken everywhere) within a tolerance, compared with the colour itself so a gradient isn't
+eaten; the pixels at the edge of what went are unmixed (as transparent as they were mixed, the old
+colour taken out), and a soft shadow becomes see-through black. `image.removeBackground` applies a
+matte from a model the host lends the session (`Session::background`). The model takes seconds,
+so the editor runs it on a thread of its own (`ui::background`, with a progress window and Stop),
+hands the matte to the session for that picture, and then runs the command; the command-line
+program runs it in place. The model is IS-Net, its weights in 8 bits (`assets/models`), installed
+beside the programs and never downloaded; the browser build has none, and says so.
 
 ## The capture service
 
@@ -75,3 +90,33 @@ after 1, 2, 4, 8 and 16 seconds, giving up after five failures in two minutes.
 `screengrabcraft-editor` and `screengrabcraft-web` run the same `ui::Editor`; they differ only in
 their `Services`: native file dialogs, files, the clipboard and the recent captures on the desktop;
 the browser's file picker, downloads and local storage on the web.
+
+## Video
+
+A video recording (Record Video or Video Production, started from the service like a GIF) runs on
+a thread of its own: the screen is grabbed on a steady beat, and the sound devices (cpal: the
+computer's sound by WASAPI loopback on Windows, the microphone everywhere but the BSDs) and the
+camera (nokhwa: Media Foundation, AVFoundation) run on threads of theirs. Each sound block is
+placed in time by when it arrived, so a device that sends nothing while it's silent doesn't put
+the sound out of step. Everything goes into one **recording file** (`.sgvideo`), written as it
+comes by a writer thread: a chunk per screen picture (the whole picture every two seconds, else
+only the part that changed, LZ4), per camera picture (a JPEG) and per block of sound (16-bit at
+48 kHz). The file is only ever added to, so a recording cut short still opens.
+
+Video Production starts at the **Recorder** (`apps/screengrabcraft/src/recorder.rs`, drawn by
+`ui::recorder`), whose choices are settings (`RecorderOptions`). They come to a `record::Screen`
+(`production_screen`, a pure function): part of a monitor (a region, a window's rectangle, a fixed
+size, chosen on the overlay), one monitor whole, every monitor (each grabbed on its own and put
+together each frame, made no larger than 3840 × 2160), or none: then the camera's picture is the
+video (`media::compose::fill_camera`).
+
+**Edits** are a `Timeline` (each track's clips: where on the timeline, which stretch of the
+recording) changed by the engine's `video.*` commands in a `VideoSession` (undo, redo, a drag as
+one step). The editor adds the timeline to the end of the recording file a moment after each
+change; the last one counts. The recording itself never changes.
+
+**Making the MP4** (`media::export`): the edited video is cut into two-second stretches, each
+starting with a key frame; several are encoded at once, one rav1e encoder each, and written in
+order with the mixed sound beside them (Opus, 20 ms packets) into an MP4 written by hand (`mp4`:
+`av01` and `Opus` sample entries, 64-bit chunk offsets, the index at the end). The file is
+written beside its name and moved into place when it's whole.

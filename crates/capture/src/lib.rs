@@ -36,9 +36,31 @@ mod none;
 #[cfg(not(any(target_os = "windows", unix)))]
 use none as backend;
 
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos", target_os = "linux")), allow(dead_code))]
+pub mod audio;
+pub mod camera;
 pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
+
+/// How long a device's thread is waited for when it's stopped.
+const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Waits for a device's thread to end, for at most `wait`. A thread held up in its driver (a camera
+/// that sends no pictures waits for one for ever) is left to end on its own, so stopping a
+/// recording never hangs. True when it ended.
+fn join_within(thread: std::thread::JoinHandle<()>, wait: std::time::Duration, what: &str) -> bool {
+    let until = std::time::Instant::now() + wait;
+    while !thread.is_finished() {
+        if std::time::Instant::now() >= until {
+            log::warn!("{what} didn't stop within {} s; it's left to stop on its own", wait.as_secs());
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let _ = thread.join();
+    true
+}
 
 /// One monitor.
 #[derive(Clone, Debug, PartialEq)]
@@ -125,6 +147,9 @@ pub enum CaptureError {
     NotPermitted,
     #[error("the screenshot was cancelled")]
     Cancelled,
+    /// A sound device or a camera.
+    #[error("{0}")]
+    Device(String),
     #[error("this system has no way for ScreenGrabCraft to capture the screen")]
     Unsupported,
     #[error(transparent)]
@@ -192,6 +217,27 @@ pub fn grab_on_monitor(id: u32, pixels: IRect) -> Result<Raster, CaptureError> {
     let (_, pic) = backend::grab_monitor(id)?;
     let (x, y) = (u32::try_from(pixels.x.max(0)).unwrap_or(0), u32::try_from(pixels.y.max(0)).unwrap_or(0));
     pic.crop(x, y, pixels.w, pixels.h).ok_or(CaptureError::Failed("the area is not on that monitor any more".to_string()))
+}
+
+/// The same part of one monitor, grabbed anew at each call: the frames of a recording.
+pub type Grabber = Box<dyn FnMut() -> Result<Raster, CaptureError>>;
+
+/// A grabber for part of one monitor, in that monitor's own pixels. On Windows a frame costs only
+/// the area; elsewhere it's the whole monitor, cut down.
+pub fn grabber(id: u32, pixels: IRect) -> Result<Grabber, CaptureError> {
+    #[cfg(target_os = "windows")]
+    return backend::grabber(id, pixels);
+    #[cfg(not(target_os = "windows"))]
+    Ok(Box::new(move || grab_on_monitor(id, pixels)))
+}
+
+/// A grabber for the whole of one monitor, in its own pixels (a full-screen recording, and each
+/// monitor of an all-screens one). On Windows the monitor is looked up once, not at every frame.
+pub fn monitor_grabber(id: u32) -> Result<Grabber, CaptureError> {
+    #[cfg(target_os = "windows")]
+    return backend::monitor_grabber(id);
+    #[cfg(not(target_os = "windows"))]
+    Ok(Box::new(move || grab_monitor(id).map(|(_, pic)| pic)))
 }
 
 /// A picture of an area of the desktop, now, put together from the monitors it lies on (in
@@ -267,5 +313,22 @@ mod tests {
         assert_eq!(both.pixel(15, 0), Some(Color::WHITE));
         let nowhere = Frozen { pointer: None, ..frozen };
         assert_eq!(nowhere.current_monitor().map(|(m, _)| m.id), Some(1));
+    }
+
+    #[test]
+    fn a_device_thread_that_never_ends_isnt_waited_for() {
+        use std::time::{Duration, Instant};
+        // Like a camera waiting for a picture that never comes.
+        let (keep, never) = std::sync::mpsc::channel::<()>();
+        let stuck = std::thread::spawn(move || {
+            let _ = never.recv();
+        });
+        let t = Instant::now();
+        assert!(!join_within(stuck, Duration::from_millis(200), "a test device"));
+        assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+        drop(keep);
+        // One that ends is waited for.
+        let quick = std::thread::spawn(|| std::thread::sleep(Duration::from_millis(20)));
+        assert!(join_within(quick, Duration::from_secs(5), "a test device"));
     }
 }

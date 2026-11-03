@@ -28,7 +28,9 @@ impl Class {
 pub const TABLE: &[(&str, Class)] = &[
     ("model", Class::Layer(1)),
     ("render", Class::Layer(2)),
+    ("media", Class::Layer(2)),
     ("capture", Class::Layer(3)),
+    ("matte", Class::Layer(3)),
     ("engine", Class::Layer(4)),
     ("ui", Class::Layer(6)),
     ("desktop", Class::Layer(6)),
@@ -40,8 +42,9 @@ pub const TABLE: &[(&str, Class)] = &[
     ("xtask", Class::Exempt),
 ];
 
-/// Explicit orderings *within* a layer (earlier may be used by later). None so far.
-pub const INTRA_LAYER_ORDER: &[&[&str]] = &[];
+/// Explicit orderings *within* a layer (earlier may be used by later): video is drawn with the
+/// picture code.
+pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["render", "media"]];
 
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));

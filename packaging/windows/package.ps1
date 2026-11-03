@@ -4,7 +4,8 @@
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    screengrabcraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
+    screengrabcraft-<version>-windows-<arch>.msi            installer (WiX v5): for everyone on this PC
+                                                            (the default) or just for one person
     screengrabcraft-<version>-windows-<arch>-portable.zip   the three programs + docs
 
   The three programs:
@@ -100,6 +101,11 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 $Exes = $Programs | ForEach-Object { Join-Path $Stage $_[0] }
 foreach ($check in $Programs) { Copy-Item (Join-Path $Bin $check[0]) $Stage }
+# Remove Background's model, in models\ beside the programs (where they look for it).
+$Model = Join-Path $Root 'assets\models\isnet-general-use-int8.onnx'
+if (-not (Test-Path $Model)) { throw "the background model is missing: $Model" }
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'models') | Out-Null
+Copy-Item $Model (Join-Path $Stage 'models')
 
 & (Join-Path $PSScriptRoot 'sign.ps1') @Exes
 
@@ -119,7 +125,7 @@ function ConvertTo-RtfText([string] $Text) {
 }
 $paragraphs = [System.Collections.Generic.List[string]]::new()
 $paragraphs.Add('\b ScreenGrabCraft\b0')
-$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (Inter and JetBrains Mono) are under the SIL Open Font License 1.1, which follows them; every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
+$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (PatroneOS Sans and PatroneOS Mono, https://patroneos.com/fonts) are under the SIL Open Font License 1.1, which follows them. The background model Remove Background runs (IS-Net general use, Xuebin Qin et al., https://github.com/xuebinqin/DIS, its weights kept in 8 bits) is under the Apache License, Version 2.0. Every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
 $LicenseFiles = @((Join-Path $Root 'LICENSE-MIT'), (Join-Path $Root 'LICENSE-APACHE')) +
   @(Get-ChildItem -Path (Join-Path $Root 'assets\fonts\OFL-*.txt') -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
 foreach ($file in $LicenseFiles) {
@@ -158,7 +164,8 @@ $Portable = Join-Path $TargetDir "windows-package\screengrabcraft-$Version-windo
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item $Exes $Portable
-foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'ATTRIBUTION.md') {
+Copy-Item -Recurse (Join-Path $Stage 'models') $Portable
+foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'ATTRIBUTION.md', 'NOTICE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }
 }

@@ -28,6 +28,8 @@ finish-args:
   - --share=ipc
   # GPU access for the renderer.
   - --device=dri
+  # Sound: the microphone in video recordings, and a recording's sound played in the editor.
+  - --socket=pulseaudio
   # Captures are saved in Pictures/ScreenGrabCraft. Documents is granted so pictures and
   # projects passed by path (the command line, Open Recent, "Save" next to the original) work in
   # the usual places; Open/Save dialogs go through the file-chooser portal.
@@ -52,6 +54,8 @@ modules:
       - install -Dm644 share/metainfo/io.github.billsecond.screengrabcraft.metainfo.xml /app/share/metainfo/io.github.billsecond.screengrabcraft.metainfo.xml
       # Docs include the licences of the embedded fonts (OFL-*.txt).
       - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/screengrabcraft /app/share/doc/
+      # Remove Background's model, where the editor looks for it (../share/screengrabcraft/models).
+      - install -Dm644 share/screengrabcraft/models/isnet-general-use-int8.onnx /app/share/screengrabcraft/models/isnet-general-use-int8.onnx
     sources:
       - type: dir
         path: stage

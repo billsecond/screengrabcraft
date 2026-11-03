@@ -24,5 +24,10 @@ License, Version 2.0:
   shape of the logger and the one-instance hand-over;
 - the app icon pipeline's tile geometry (xtask/src/icon.rs).
 
-Bundled fonts: Inter (Rasmus Andersson and the Inter Project Authors) and JetBrains Mono (the
-JetBrains Mono Project Authors), under the SIL Open Font License 1.1 (assets/fonts/).
+Bundled fonts: PatroneOS Sans and PatroneOS Mono, Copyright 2026 William Daugherty
+(https://patroneos.com/fonts), under the SIL Open Font License 1.1 (assets/fonts/).
+
+Bundled model: IS-Net "general use" (Xuebin Qin, Hang Dai, Xiaobin Hu, Deng-Ping Fan, Ling Shao,
+Luc Van Gool; https://github.com/xuebinqin/DIS), under the Apache License, Version 2.0, as ONNX
+by rembg (Daniel Gatis, https://github.com/danielgatis/rembg). Modified: its weights are kept in
+8 bits (assets/models/README.md).

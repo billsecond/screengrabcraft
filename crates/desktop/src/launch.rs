@@ -12,6 +12,10 @@ pub const EDITOR_BIN: &str = "screengrabcraft-editor";
 pub const SERVICE_BIN: &str = "screengrabcraft";
 pub const EDITOR_BUNDLE_ID: &str = "io.github.billsecond.screengrabcraft.editor";
 pub const SERVICE_BUNDLE_ID: &str = "io.github.billsecond.screengrabcraft";
+/// What the capture service tells a running editor before a capture ([`tell_editor`]).
+pub const EDITOR_HIDE: &str = "--hide-for-capture";
+/// What it tells the editor once a capture is over, if no picture came of it for the editor.
+pub const EDITOR_SHOW: &str = "--show-after-capture";
 
 fn exe_name(bin: &str) -> String {
     if cfg!(target_os = "windows") { format!("{bin}.exe") } else { bin.to_string() }
@@ -59,6 +63,11 @@ pub fn open_editor(args: &[String]) -> Result<(), String> {
     spawn(Path::new(EDITOR_BIN), args)
 }
 
+/// Tells the editor something if one is running, without starting one; `true` if one took it.
+pub fn tell_editor(word: &str) -> bool {
+    crate::instance::tell("editor", &[word.to_string()])
+}
+
 /// Asks the capture service for something (`--capture region`); a running one takes it over,
 /// else it starts.
 pub fn ask_service(args: &[String]) -> Result<(), String> {
@@ -83,6 +92,18 @@ pub fn reveal(path: &Path) -> Result<(), String> {
     } else {
         let dir = if is_dir { path } else { path.parent().unwrap_or(path) };
         Command::new("xdg-open").arg(dir).spawn()
+    };
+    result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Opens a file in the program the system uses for it (a video in its player).
+pub fn open_file(path: &Path) -> Result<(), String> {
+    let result = if cfg!(target_os = "windows") {
+        Command::new("explorer").arg(path).spawn()
+    } else if cfg!(target_os = "macos") {
+        Command::new("open").arg(path).spawn()
+    } else {
+        Command::new("xdg-open").arg(path).spawn()
     };
     result.map(|_| ()).map_err(|e| e.to_string())
 }

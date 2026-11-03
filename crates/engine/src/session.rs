@@ -5,7 +5,10 @@
 //! a snapshot of the document is kept before the change, so undo puts back exactly what was
 //! there; the picture's pixels are shared between snapshots unless a command changed them.
 
-use screengrabcraft_model::{Document, ObjectId};
+use std::sync::Arc;
+
+use screengrabcraft_model::{Document, ObjectId, Raster};
+use screengrabcraft_render::matte::{Matte, Matting};
 use serde_json::Value;
 
 use crate::EngineError;
@@ -31,11 +34,64 @@ pub struct Session {
     pub dirty: bool,
     revision: u64,
     pending: Option<Snapshot>,
+    /// What `image.removeBackground` works with. It isn't part of the document or its history.
+    pub background: Background,
+}
+
+/// What `image.removeBackground` works with: a model the host lent the session, and a matte
+/// worked out ahead of time for the picture as it was then.
+///
+/// A model takes seconds, so the editor works the matte out on a thread of its own and hands it
+/// over ([`Background::prepare`]) before running the command, which then only applies it. With
+/// no matte ready, the command runs the model in place (the command-line program, scripts).
+#[derive(Clone, Default)]
+pub struct Background {
+    model: Option<Arc<dyn Matting>>,
+    prepared: Option<(Raster, String, Matte)>,
+}
+
+impl std::fmt::Debug for Background {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Background").field("model", &self.model.as_ref().map(|m| m.name())).field("prepared", &self.prepared.is_some()).finish()
+    }
+}
+
+impl Background {
+    /// Lends a model, or takes it back.
+    pub fn set_model(&mut self, model: Option<Arc<dyn Matting>>) {
+        self.model = model;
+    }
+
+    pub fn model(&self) -> Option<&Arc<dyn Matting>> {
+        self.model.as_ref()
+    }
+
+    /// Hands over the matte `model` worked out for `picture`. It is used by the next
+    /// `image.removeBackground` if the picture is still that one.
+    pub fn prepare(&mut self, picture: Raster, model: &str, matte: Matte) {
+        self.prepared = Some((picture, model.to_string(), matte));
+    }
+
+    /// The matte prepared for `picture` (by `model`, if one is named), taken.
+    pub(crate) fn take_prepared(&mut self, picture: &Raster, model: Option<&str>) -> Option<(String, Matte)> {
+        let (for_picture, name, matte) = self.prepared.take()?;
+        let same = for_picture.same_pixels(picture) && (for_picture.width(), for_picture.height()) == (picture.width(), picture.height());
+        (same && model.is_none_or(|m| m == name)).then_some((name, matte))
+    }
 }
 
 impl Session {
     pub fn new(doc: Document) -> Session {
-        Session { doc, selection: Vec::new(), undo: Vec::new(), redo: Vec::new(), dirty: false, revision: 1, pending: None }
+        Session {
+            doc,
+            selection: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+            dirty: false,
+            revision: 1,
+            pending: None,
+            background: Background::default(),
+        }
     }
 
     /// Counts up whenever the document changes (the editor draws the picture again when it
@@ -174,6 +230,7 @@ impl Session {
 
     /// Replaces the whole document (a new capture or an opened file): history starts over.
     pub fn replace(&mut self, doc: Document) {
+        self.background.prepared = None;
         self.doc = doc;
         self.selection.clear();
         self.undo.clear();
@@ -190,5 +247,23 @@ impl Session {
 
     pub fn select(&mut self, ids: Vec<ObjectId>) {
         self.selection = ids;
+    }
+
+    /// The undo and redo steps, to keep in a file (the next to undo or redo last in each).
+    pub fn history(&self) -> screengrabcraft_render::project::History {
+        let step = |s: &Snapshot| screengrabcraft_render::project::Step { label: s.label.clone(), doc: s.doc.clone() };
+        screengrabcraft_render::project::History { undo: self.undo.iter().map(step).collect(), redo: self.redo.iter().map(step).collect() }
+    }
+
+    /// Takes back the steps a file kept, after [`Session::replace`] put its document in place:
+    /// Undo then goes back through what was done before the file was last closed.
+    pub fn restore_history(&mut self, history: screengrabcraft_render::project::History) {
+        let snap = |s: screengrabcraft_render::project::Step| Snapshot { doc: s.doc, selection: Vec::new(), label: s.label };
+        self.undo = history.undo.into_iter().map(snap).collect();
+        self.redo = history.redo.into_iter().map(snap).collect();
+        let over = self.undo.len().saturating_sub(MAX_UNDO);
+        self.undo.drain(..over);
+        self.redo.truncate(MAX_UNDO);
+        self.touch();
     }
 }

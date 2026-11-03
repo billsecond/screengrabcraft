@@ -165,10 +165,15 @@ pub enum CaptureMode {
     Gif,
     /// An area captured while it scrolls, stitched into one long picture.
     Scrolling,
+    /// An area recorded as a small video (MP4).
+    Video,
+    /// An area recorded with the computer's sound, the microphone and the camera, each on a
+    /// track of its own, to edit in the editor.
+    Production,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 7] = [
+    pub const ALL: [CaptureMode; 9] = [
         CaptureMode::Region,
         CaptureMode::Window,
         CaptureMode::Screen,
@@ -176,6 +181,8 @@ impl CaptureMode {
         CaptureMode::Repeat,
         CaptureMode::Scrolling,
         CaptureMode::Gif,
+        CaptureMode::Video,
+        CaptureMode::Production,
     ];
 
     pub fn label(self) -> &'static str {
@@ -187,6 +194,8 @@ impl CaptureMode {
             CaptureMode::Repeat => "Repeat Last Capture",
             CaptureMode::Gif => "Record GIF",
             CaptureMode::Scrolling => "Scrolling Capture",
+            CaptureMode::Video => "Record Video",
+            CaptureMode::Production => "Video Production",
         }
     }
 
@@ -200,6 +209,8 @@ impl CaptureMode {
             CaptureMode::Repeat => "repeat",
             CaptureMode::Gif => "gif",
             CaptureMode::Scrolling => "scrolling",
+            CaptureMode::Video => "video",
+            CaptureMode::Production => "production",
         }
     }
 
@@ -219,6 +230,8 @@ pub struct Hotkeys {
     pub repeat: Option<Hotkey>,
     pub scrolling: Option<Hotkey>,
     pub gif: Option<Hotkey>,
+    pub video: Option<Hotkey>,
+    pub production: Option<Hotkey>,
     pub editor: Option<Hotkey>,
 }
 
@@ -237,6 +250,8 @@ impl Hotkeys {
                 repeat: k("R"),
                 scrolling: k("S"),
                 gif: k("G"),
+                video: k("V"),
+                production: k("P"),
                 editor: k("E"),
             }
         } else {
@@ -244,10 +259,13 @@ impl Hotkeys {
                 region: Some(Hotkey::new(false, false, false, false, "PrintScreen")),
                 window: Some(Hotkey::new(false, true, false, false, "PrintScreen")),
                 screen: Some(Hotkey::new(true, false, false, false, "PrintScreen")),
-                all_screens: Some(Hotkey::new(true, false, true, false, "PrintScreen")),
+                // Ctrl+Shift+Print Screen is Windows' own; every other Print Screen key is taken.
+                all_screens: None,
                 repeat: Some(Hotkey::new(false, false, true, false, "PrintScreen")),
-                scrolling: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
-                gif: Some(Hotkey::new(false, true, true, false, "PrintScreen")),
+                scrolling: Some(Hotkey::new(false, true, true, false, "PrintScreen")),
+                gif: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
+                video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
+                production: None,
                 editor: None,
             }
         }
@@ -262,6 +280,23 @@ impl Hotkeys {
             CaptureMode::Repeat => self.repeat.as_ref(),
             CaptureMode::Gif => self.gif.as_ref(),
             CaptureMode::Scrolling => self.scrolling.as_ref(),
+            CaptureMode::Video => self.video.as_ref(),
+            CaptureMode::Production => self.production.as_ref(),
+        }
+    }
+
+    /// The 0.1.9 changes, each only where the shortcut still is what it was by default before,
+    /// so nothing the owner chose is lost: Record GIF moved to Ctrl+Alt+Print Screen and
+    /// Scrolling Capture to Alt+Shift+Print Screen (they swapped), and Capture All Screens lost
+    /// Ctrl+Shift+Print Screen, which Windows uses itself.
+    fn bring_up_to_0_1_9(&mut self) {
+        let old_gif = Some(Hotkey::new(false, true, true, false, "PrintScreen"));
+        let old_scrolling = Some(Hotkey::new(true, true, false, false, "PrintScreen"));
+        if self.gif == old_gif && self.scrolling == old_scrolling {
+            std::mem::swap(&mut self.gif, &mut self.scrolling);
+        }
+        if self.all_screens == Some(Hotkey::new(true, false, true, false, "PrintScreen")) {
+            self.all_screens = None;
         }
     }
 
@@ -274,6 +309,8 @@ impl Hotkeys {
             CaptureMode::Repeat => &mut self.repeat,
             CaptureMode::Gif => &mut self.gif,
             CaptureMode::Scrolling => &mut self.scrolling,
+            CaptureMode::Video => &mut self.video,
+            CaptureMode::Production => &mut self.production,
         };
         *slot = key;
     }
@@ -365,13 +402,15 @@ impl ImageFormat {
     }
 }
 
-/// What happens once a picture is captured. Several may be on; with none, the editor opens.
+/// What happens once a picture is captured: the default action, of which several parts may be
+/// on; with none, the editor opens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AfterCapture {
-    /// Keep the capture's handles and its bar of actions on screen, so the area can be adjusted
-    /// and an action picked (Edit, Copy, Save); Enter takes the default.
-    pub preview: bool,
+    /// Stop with the capture's handles and its bar of actions on screen, so the area can be
+    /// adjusted and an action picked (Edit, Copy, Save); Enter takes the default. Off, the default
+    /// runs as soon as the area is chosen.
+    pub show_bar: bool,
     pub open_editor: bool,
     pub copy: bool,
     pub save: bool,
@@ -379,7 +418,7 @@ pub struct AfterCapture {
 
 impl Default for AfterCapture {
     fn default() -> AfterCapture {
-        AfterCapture { preview: true, open_editor: true, copy: true, save: true }
+        AfterCapture { show_bar: false, open_editor: true, copy: true, save: true }
     }
 }
 
@@ -392,11 +431,182 @@ pub enum Theme {
     Dark,
 }
 
+/// What a video recording takes in besides the screen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct VideoOptions {
+    /// What the computer plays (Windows only).
+    pub system_sound: bool,
+    pub microphone: bool,
+    /// The microphone by name; `None` is the system's default one.
+    pub microphone_name: Option<String>,
+    pub camera: bool,
+    /// The camera by number; `None` is the first one.
+    pub camera_index: Option<u32>,
+}
+
+impl Default for VideoOptions {
+    /// A quick video: the screen and what the computer plays.
+    fn default() -> VideoOptions {
+        VideoOptions { system_sound: true, microphone: false, microphone_name: None, camera: false, camera_index: None }
+    }
+}
+
+impl VideoOptions {
+    /// Video Production: everything, each on its own track.
+    pub fn production() -> VideoOptions {
+        VideoOptions { system_sound: true, microphone: true, microphone_name: None, camera: true, camera_index: None }
+    }
+}
+
+/// What a Video Production recording shows of the screen: the Recorder's Area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordArea {
+    /// An area dragged out on the overlay.
+    #[default]
+    Region,
+    /// A window clicked on the overlay: where it was then (it isn't followed if it moves).
+    Window,
+    /// One monitor, whole ([`RecorderOptions::monitor`]).
+    Screen,
+    /// Every monitor in one picture.
+    AllScreens,
+    /// A frame of a set size ([`RecorderOptions::width`] × [`RecorderOptions::height`] pixels),
+    /// placed with a click on the overlay.
+    Fixed,
+}
+
+impl RecordArea {
+    pub const ALL: [RecordArea; 5] = [RecordArea::Region, RecordArea::Window, RecordArea::Screen, RecordArea::AllScreens, RecordArea::Fixed];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RecordArea::Region => "Region",
+            RecordArea::Window => "Window",
+            RecordArea::Screen => "Full screen",
+            RecordArea::AllScreens => "All screens",
+            RecordArea::Fixed => "Fixed size",
+        }
+    }
+
+    /// Whether the area is chosen on the overlay once Record is pressed.
+    pub fn chosen_on_screen(self) -> bool {
+        matches!(self, RecordArea::Region | RecordArea::Window | RecordArea::Fixed)
+    }
+}
+
+/// A monitor as the Recorder remembers it: its name, and where its top left corner is on the
+/// desktop (two monitors of the same model have the same name).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MonitorChoice {
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+}
+
+impl MonitorChoice {
+    /// Which of `monitors` (each its name and top left corner) this is: the one with its name
+    /// where it was, else one with its name (moved), else one where it was (renamed); none when
+    /// no monitor is like it.
+    pub fn pick(&self, monitors: &[(&str, i32, i32)]) -> Option<usize> {
+        let at = |m: &(&str, i32, i32)| m.1 == self.x && m.2 == self.y;
+        let named = |m: &(&str, i32, i32)| m.0 == self.name;
+        monitors.iter().position(|m| named(m) && at(m)).or_else(|| monitors.iter().position(named)).or_else(|| monitors.iter().position(at))
+    }
+}
+
+/// The fixed sizes the Recorder offers, in pixels, and what each is: the usual monitor and video
+/// sizes, landscape, portrait and square, each largest first. The Recorder lists those that fit
+/// on one of the owner's monitors.
+pub const FIXED_SIZES: &[(u32, u32, &str)] = &[
+    (5120, 2880, "5K"),
+    (3840, 2160, "4K"),
+    (3440, 1440, "ultrawide 1440p"),
+    (2560, 1600, "16:10"),
+    (2560, 1440, "1440p"),
+    (2560, 1080, "ultrawide 1080p"),
+    (1920, 1200, "16:10"),
+    (1920, 1080, "Full HD"),
+    (1680, 1050, "16:10"),
+    (1600, 900, "HD+"),
+    (1440, 900, "16:10"),
+    (1366, 768, "laptop"),
+    (1280, 720, "HD"),
+    (854, 480, "480p"),
+    (640, 360, "360p"),
+    (2160, 3840, "4K, on end"),
+    (1600, 2560, "16:10, on end"),
+    (1440, 2560, "1440p, on end"),
+    (1200, 1920, "16:10, on end"),
+    (1080, 1920, "Full HD, for phones"),
+    (1080, 1350, "4:5, for posts"),
+    (900, 1600, "HD+, on end"),
+    (768, 1366, "laptop, on end"),
+    (720, 1280, "HD, for phones"),
+    (540, 960, "540p, for phones"),
+    (480, 854, "480p, for phones"),
+    (360, 640, "360p, for phones"),
+    (2160, 2160, "square, 4K"),
+    (1440, 1440, "square, 1440p"),
+    (1080, 1080, "square"),
+    (720, 720, "square, small"),
+];
+
+/// The smallest and largest side of a fixed-size recording.
+pub const FIXED_MIN: u32 = 64;
+pub const FIXED_MAX: u32 = 7680;
+
+/// The Recorder's choices for a Video Production recording: the area, and whether the screen is
+/// recorded at all. What it takes in besides is [`Settings::production`] (the computer's sound,
+/// the microphone and the camera).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RecorderOptions {
+    pub area: RecordArea,
+    /// Full screen: the monitor; none is the main one.
+    pub monitor: Option<MonitorChoice>,
+    /// Fixed size, in the monitor's pixels.
+    pub width: u32,
+    pub height: u32,
+    /// Record the screen (off: only the camera and the sound).
+    pub screen: bool,
+}
+
+impl Default for RecorderOptions {
+    fn default() -> RecorderOptions {
+        RecorderOptions { area: RecordArea::Region, monitor: None, width: 1920, height: 1080, screen: true }
+    }
+}
+
+impl RecorderOptions {
+    /// Every number in its range.
+    pub fn clamped(mut self) -> RecorderOptions {
+        self.width = self.width.clamp(FIXED_MIN, FIXED_MAX);
+        self.height = self.height.clamp(FIXED_MIN, FIXED_MAX);
+        self
+    }
+
+    /// Whether anything at all is recorded: the screen, or one of `sources`. What this system
+    /// can't record (the computer's sound where `system_sound` is false, the camera where `camera`
+    /// is) doesn't count.
+    pub fn records_anything(&self, sources: &VideoOptions, system_sound: bool, camera: bool) -> bool {
+        self.screen || (sources.camera && camera) || sources.microphone || (sources.system_sound && system_sound)
+    }
+}
+
+/// The shortcuts' defaults as of this version: 1 is 0.1.9 (Record GIF on Ctrl+Alt+Print Screen, no
+/// default for Capture All Screens).
+pub const HOTKEYS_VERSION: u32 = 1;
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub hotkeys: Hotkeys,
+    /// Which defaults the shortcuts were last brought up to (see [`Settings::from_json`]).
+    pub hotkeys_version: u32,
     pub after_capture: AfterCapture,
     /// Where captures are saved; `None` is `Pictures/ScreenGrabCraft`.
     pub folder: Option<String>,
@@ -415,8 +625,22 @@ pub struct Settings {
     /// Start the capture service when the owner signs in (and restart it if it stops). `None`
     /// until the first run has decided (it turns it on and says so).
     pub start_at_login: Option<bool>,
-    pub gif_fps: u32,
+    /// Frames a second of a GIF recording. It's `gifFrameRate` in the file: the old `gifFps` was
+    /// written at every save, so it says nothing of what the owner chose, and is left behind.
+    pub gif_frame_rate: u32,
     pub gif_max_secs: u32,
+    /// A quick video (Record Video).
+    pub video: VideoOptions,
+    /// A Video Production recording: what it takes in besides the screen.
+    pub production: VideoOptions,
+    /// A Video Production recording: the Recorder's area, and whether the screen is in it.
+    pub recorder: RecorderOptions,
+    /// Frames a second of a video recording.
+    pub video_frame_rate: u32,
+    /// The longest a video recording runs, in minutes.
+    pub video_max_mins: u32,
+    /// Keep a quick video at the size recorded (else it is made no larger than 1920 × 1080).
+    pub video_full_size: bool,
     pub theme: Theme,
     /// The area of the last region capture, for Repeat Last Capture.
     pub last_region: Option<IRect>,
@@ -424,12 +648,23 @@ pub struct Settings {
     pub welcomed: bool,
     /// Play a short sound when a capture is taken.
     pub sound: bool,
+    /// Take an open editor out of the picture before a capture.
+    pub hide_editor: bool,
+    /// Ask GitHub for a newer release now and then (the only network request ScreenGrabCraft
+    /// makes). A file from before it existed gets the default, on.
+    #[serde(default = "on")]
+    pub check_updates: bool,
+}
+
+fn on() -> bool {
+    true
 }
 
 impl Default for Settings {
     fn default() -> Settings {
         Settings {
             hotkeys: Hotkeys::default(),
+            hotkeys_version: HOTKEYS_VERSION,
             after_capture: AfterCapture::default(),
             folder: None,
             file_name: "Capture {date} {time}".to_string(),
@@ -440,12 +675,20 @@ impl Default for Settings {
             magnifier: true,
             crosshair: true,
             start_at_login: None,
-            gif_fps: 12,
+            gif_frame_rate: 30,
             gif_max_secs: 60,
+            video: VideoOptions::default(),
+            production: VideoOptions::production(),
+            recorder: RecorderOptions::default(),
+            video_frame_rate: 30,
+            video_max_mins: 60,
+            video_full_size: false,
             theme: Theme::System,
             last_region: None,
             welcomed: false,
             sound: false,
+            hide_editor: true,
+            check_updates: true,
         }
     }
 }
@@ -453,10 +696,24 @@ impl Default for Settings {
 impl Settings {
     /// Reads settings, replacing what can't be read with defaults (field by field where the
     /// JSON is an object, wholesale where it isn't JSON at all).
+    ///
+    /// Every shortcut is written at every save, so a changed default wouldn't reach anyone who
+    /// has a settings file. A file from before the defaults changed is brought up to them where
+    /// it still has the old ones; a shortcut the owner chose is left as it is.
     pub fn from_json(text: &str) -> Settings {
         let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(text) else {
             return Settings::default();
         };
+        let version = map.get("hotkeysVersion").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let mut s = Settings::from_map(map);
+        if version < 1 {
+            s.hotkeys.bring_up_to_0_1_9();
+        }
+        s.hotkeys_version = HOTKEYS_VERSION;
+        s
+    }
+
+    fn from_map(map: serde_json::Map<String, serde_json::Value>) -> Settings {
         let mut out = serde_json::Map::new();
         let defaults = serde_json::to_value(Settings::default()).unwrap_or_default();
         for (k, v) in map {
@@ -474,8 +731,11 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
         self.delay_secs = self.delay_secs.min(60);
-        self.gif_fps = self.gif_fps.clamp(1, 30);
+        self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
+        self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
+        self.video_max_mins = self.video_max_mins.clamp(1, 240);
+        self.recorder = self.recorder.clamped();
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }
@@ -496,6 +756,52 @@ pub struct EditorSettings {
     pub show_tray: bool,
     /// The format Export proposes.
     pub export_format: ImageFormat,
+    /// The drawing tool last picked, which the editor starts with. One that can't be read is
+    /// let go, not the rest of the settings with it.
+    #[serde(deserialize_with = "or_none")]
+    pub tool: Option<Kind>,
+    /// The stamp last picked.
+    #[serde(deserialize_with = "or_none")]
+    pub stamp: Option<crate::object::StampKind>,
+    /// What the Fill tool fills with.
+    #[serde(deserialize_with = "or_default")]
+    pub fill: FillTool,
+}
+
+/// The Fill tool's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FillTool {
+    /// The colour it fills with; a transparent one clears the area.
+    pub color: crate::color::Color,
+    /// How close (0 to 255 a channel) a colour must be to the one clicked to be filled too.
+    pub tolerance: u8,
+}
+
+impl Default for FillTool {
+    fn default() -> FillTool {
+        FillTool { color: crate::color::Color::RED, tolerance: 32 }
+    }
+}
+
+/// A setting that can't be read is its default.
+fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
+/// A setting that can't be read is none.
+fn or_none<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 impl EditorSettings {
@@ -583,6 +889,50 @@ mod tests {
     }
 
     #[test]
+    fn gif_is_ctrl_alt_print_screen_and_all_screens_leaves_windows_its_key() {
+        let k = Hotkeys::defaults_for(false);
+        assert_eq!(k.gif, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        assert_eq!(k.scrolling, Some(Hotkey::new(false, true, true, false, "PrintScreen")));
+        assert_eq!(k.all_screens, None);
+        assert_eq!(Settings::default().hotkeys_version, HOTKEYS_VERSION);
+    }
+
+    /// A settings file written before 0.1.9, with every shortcut as it was by default then.
+    fn file_before_0_1_9(gif: &str) -> String {
+        format!(
+            r#"{{"hotkeys":{{"region":"PrintScreen","window":"Alt+PrintScreen","screen":"Ctrl+PrintScreen","allScreens":"Ctrl+Shift+PrintScreen","repeat":"Shift+PrintScreen","scrolling":"Ctrl+Alt+PrintScreen","gif":"{gif}"}},"delaySecs":5}}"#
+        )
+    }
+
+    #[test]
+    fn a_file_from_before_gets_the_new_shortcuts_where_they_were_the_old_defaults() {
+        let s = Settings::from_json(&file_before_0_1_9("Alt+Shift+PrintScreen"));
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        assert_eq!(s.hotkeys.gif, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        assert_eq!(s.hotkeys.scrolling, Some(Hotkey::new(false, true, true, false, "PrintScreen")));
+        assert_eq!(s.hotkeys.all_screens, None);
+        assert_eq!(s.delay_secs, 5);
+        assert_eq!(s.hotkeys_version, HOTKEYS_VERSION);
+        assert!(s.hotkeys.clashes().is_empty());
+    }
+
+    #[test]
+    fn a_shortcut_the_owner_chose_is_kept() {
+        // GIF on a key of the owner's own: neither GIF nor Scrolling moves.
+        let s = Settings::from_json(&file_before_0_1_9("Ctrl+Shift+G"));
+        assert_eq!(s.hotkeys.gif, Some(Hotkey::new(true, false, true, false, "G")));
+        assert_eq!(s.hotkeys.scrolling, Some(Hotkey::new(true, true, false, false, "PrintScreen")));
+        // Once brought up to date, the file's shortcuts are the owner's: nothing moves again.
+        let text = serde_json::to_string(&Settings { hotkeys: Hotkeys::defaults_for(false), ..Settings::default() }).unwrap();
+        let mut again = Settings::from_json(&text);
+        again.hotkeys.all_screens = Some(Hotkey::new(true, false, true, false, "PrintScreen"));
+        let text = serde_json::to_string(&again).unwrap();
+        assert_eq!(Settings::from_json(&text).hotkeys.all_screens, Some(Hotkey::new(true, false, true, false, "PrintScreen")));
+    }
+
+    #[test]
     fn default_hotkeys_do_not_clash() {
         for mac in [false, true] {
             assert!(Hotkeys::defaults_for(mac).clashes().is_empty());
@@ -603,6 +953,102 @@ mod tests {
         assert_eq!(s.hotkeys, Hotkeys::default(), "unreadable: the default");
         let round = Settings::from_json(&serde_json::to_string(&s).unwrap());
         assert_eq!(round, s);
+    }
+
+    #[test]
+    fn the_default_copies_and_opens_the_editor_without_stopping() {
+        let s = Settings::default();
+        assert!(s.after_capture.copy && s.after_capture.open_editor);
+        assert!(!s.after_capture.show_bar);
+        assert!(s.hide_editor);
+    }
+
+    #[test]
+    fn a_file_from_before_the_default_ran_at_once_gets_it() {
+        // Every start used to write `preview: true`, the old default, so it says nothing of what
+        // the owner chose.
+        let s = Settings::from_json(r#"{"afterCapture":{"preview":true,"openEditor":true,"copy":false,"save":true}}"#);
+        assert!(!s.after_capture.show_bar);
+        assert!(!s.after_capture.copy, "the rest stays as chosen");
+        let s = Settings::from_json(r#"{"afterCapture":{"showBar":true}}"#);
+        assert!(s.after_capture.show_bar);
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+    }
+
+    #[test]
+    fn a_file_from_before_smooth_recordings_gets_them() {
+        assert_eq!(Settings::default().gif_frame_rate, 30);
+        assert_eq!(Settings::from_json(r#"{"gifFps":12}"#).gif_frame_rate, 30);
+        let s = Settings::from_json(r#"{"gifFrameRate":15}"#);
+        assert_eq!(s.gif_frame_rate, 15, "a rate of its own is kept");
+        assert_eq!(Settings::from_json(&serde_json::to_string(&s).unwrap()), s);
+        assert_eq!(Settings::from_json(r#"{"gifFrameRate":500}"#).gif_frame_rate, 30);
+    }
+
+    #[test]
+    fn update_checks_are_on_unless_turned_off() {
+        assert!(Settings::default().check_updates);
+        // A file from before the setting existed.
+        assert!(Settings::from_json(r#"{"format":"jpeg","welcomed":true}"#).check_updates);
+        assert!(serde_json::from_str::<Settings>(r#"{"welcomed":true}"#).unwrap().check_updates);
+        let off = Settings::from_json(r#"{"checkUpdates":false}"#);
+        assert!(!off.check_updates);
+        assert_eq!(Settings::from_json(&serde_json::to_string(&off).unwrap()), off);
+        assert!(Settings::from_json(r#"{"checkUpdates":"sometimes"}"#).check_updates, "unreadable: the default");
+    }
+
+    #[test]
+    fn the_recorders_choices_are_kept_and_a_file_from_before_gets_the_defaults() {
+        // A file from before the Recorder: the screen, an area dragged out, 1920 × 1080 for a fixed size.
+        let old = Settings::from_json(r#"{"production":{"systemSound":false,"microphone":true,"camera":false}}"#);
+        assert_eq!(old.recorder, RecorderOptions::default());
+        assert!(old.recorder.screen && old.recorder.area == RecordArea::Region);
+        assert!(old.production.microphone && !old.production.system_sound, "the rest is as chosen");
+        let recorder = RecorderOptions {
+            area: RecordArea::Fixed,
+            monitor: Some(MonitorChoice { name: "DELL U2720Q".into(), x: -2560, y: 0 }),
+            width: 1080,
+            height: 1920,
+            screen: false,
+        };
+        let s = Settings { recorder, ..Settings::default() };
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back.recorder, s.recorder);
+        // Sizes are kept in range; an area this version doesn't know leaves the Recorder at its defaults only.
+        let s = Settings::from_json(r#"{"recorder":{"area":"fixed","width":0,"height":99999},"delaySecs":7}"#);
+        assert_eq!((s.recorder.width, s.recorder.height), (FIXED_MIN, FIXED_MAX));
+        let s = Settings::from_json(r#"{"recorder":{"area":"hologram"},"delaySecs":7}"#);
+        assert_eq!((s.recorder.clone(), s.delay_secs), (RecorderOptions::default(), 7));
+        for a in RecordArea::ALL {
+            assert!(!a.label().is_empty());
+            assert_eq!(a.chosen_on_screen(), !matches!(a, RecordArea::Screen | RecordArea::AllScreens));
+        }
+    }
+
+    #[test]
+    fn a_remembered_monitor_is_found_again() {
+        let c = MonitorChoice { name: "DELL".into(), x: 1920, y: 0 };
+        let two_dells = [("DELL", 0, 0), ("DELL", 1920, 0), ("LG", 3840, 0)];
+        assert_eq!(c.pick(&two_dells), Some(1), "the one where it was");
+        assert_eq!(c.pick(&[("LG", 0, 0), ("DELL", -1920, 0)]), Some(1), "moved");
+        assert_eq!(c.pick(&[("LG", 0, 0), ("Generic", 1920, 0)]), Some(1), "renamed");
+        assert_eq!(c.pick(&[("LG", 0, 0)]), None);
+        assert_eq!(c.pick(&[]), None);
+    }
+
+    #[test]
+    fn something_must_be_recorded() {
+        let none = VideoOptions { system_sound: false, microphone: false, microphone_name: None, camera: false, camera_index: None };
+        let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
+        assert!(!off.records_anything(&none, true, true));
+        assert!(RecordArea::ALL.iter().all(|a| RecorderOptions { area: *a, ..RecorderOptions::default() }.records_anything(&none, true, true)));
+        assert!(off.records_anything(&VideoOptions { camera: true, ..none.clone() }, false, true));
+        assert!(off.records_anything(&VideoOptions { microphone: true, ..none.clone() }, false, false));
+        // The computer's sound and the camera count only where they can be recorded.
+        let sound = VideoOptions { system_sound: true, ..none.clone() };
+        assert!(off.records_anything(&sound, true, false));
+        assert!(!off.records_anything(&sound, false, true));
+        assert!(!off.records_anything(&VideoOptions { camera: true, ..none }, true, false));
     }
 
     #[test]
@@ -636,5 +1082,32 @@ mod tests {
         e.remember("f25.png");
         assert_eq!(e.recent.len(), EditorSettings::MAX_RECENT);
         assert_eq!(e.recent.first().map(String::as_str), Some("f25.png"));
+    }
+
+    #[test]
+    fn the_last_tool_is_remembered_and_a_bad_one_spoils_nothing() {
+        assert_eq!(EditorSettings::from_json("{}").tool, None, "a file from before has none");
+        let e =
+            EditorSettings { tool: Some(Kind::Callout), stamp: Some(crate::object::StampKind::Cross), show_tray: true, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
+        let e = EditorSettings::from_json(r#"{"tool":"teapot","stamp":7,"showTray":true}"#);
+        assert_eq!((e.tool, e.stamp), (None, None));
+        assert!(e.show_tray, "the rest is still read");
+    }
+
+    #[test]
+    fn the_fill_tool_keeps_its_colour_and_a_bad_one_spoils_nothing() {
+        assert_eq!(EditorSettings::from_json("{}").fill, FillTool::default(), "a file from before has the default");
+        let e = EditorSettings { fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90 }, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
+        for bad in [
+            r#"{"fill":{"color":"teapot","tolerance":9},"showTray":true}"#,
+            r#"{"fill":{"tolerance":900},"showTray":true}"#,
+            r#"{"fill":3,"showTray":true}"#,
+        ] {
+            let e = EditorSettings::from_json(bad);
+            assert_eq!(e.fill, FillTool::default(), "{bad}");
+            assert!(e.show_tray, "the rest is still read: {bad}");
+        }
     }
 }
