@@ -113,6 +113,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             });
             return;
         }
+        (None, Tool::Fill) => {
+            fill_settings(ed, ui);
+            return;
+        }
         (None, Tool::Select) => {
             ui.heading("Select");
             ui.add_space(6.0);
@@ -276,6 +280,39 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
                 ed.run(&ctx, "edit.delete", serde_json::json!({}));
             }
         });
+    }
+}
+
+/// The Fill tool's panel: what it does, the colour and the tolerance.
+fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Fill");
+    ui.add_space(6.0);
+    ui.label("Click the picture to fill the area round that spot that is all one colour.");
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("Click a box, ellipse, callout or text box to fill it instead.").color(t.muted));
+    ui.add_space(10.0);
+    let mut f = ed.settings.fill;
+    colour_row(ui, "Colour", &mut f.color, true);
+    ui.label(egui::RichText::new("None makes the area see-through.").size(12.0).color(t.muted));
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Tolerance").size(12.0).color(t.muted));
+    let mut pct = (f32::from(f.tolerance) / 2.55).round();
+    if ui
+        .add(egui::Slider::new(&mut pct, 0.0..=100.0).step_by(1.0).suffix("%"))
+        .on_hover_text("How close a colour must be to the one clicked to be filled too")
+        .changed()
+    {
+        f.tolerance = (pct * 2.55).round().clamp(0.0, 255.0) as u8;
+    }
+    if f != ed.settings.fill {
+        ed.settings.fill = f;
+        ed.props_editing = true;
+    }
+    // Saved once a slider is let go.
+    if ed.props_editing && !ui.ctx().input(|i| i.pointer.any_down()) {
+        ed.props_editing = false;
+        ed.services.save_settings(&ed.settings);
     }
 }
 

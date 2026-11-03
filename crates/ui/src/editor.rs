@@ -20,12 +20,14 @@ use crate::theme::Tokens;
 pub enum Tool {
     Select,
     Draw(Kind),
+    /// Fills an area of the picture, or a shape, with a colour.
+    Fill,
     Crop,
 }
 
 impl Tool {
     /// The tool bar, in order: the tool, its icon, its name and its key.
-    pub const BAR: [(Tool, Icon, &'static str, Key); 16] = [
+    pub const BAR: [(Tool, Icon, &'static str, Key); 17] = [
         (Tool::Select, Icon::Select, "Select and move", Key::V),
         (Tool::Draw(Kind::Arrow), Icon::Arrow, "Arrow", Key::A),
         (Tool::Draw(Kind::Line), Icon::Line, "Line", Key::L),
@@ -41,6 +43,7 @@ impl Tool {
         (Tool::Draw(Kind::Spotlight), Icon::Spotlight, "Spotlight", Key::S),
         (Tool::Draw(Kind::Magnify), Icon::Magnify, "Magnify", Key::M),
         (Tool::Draw(Kind::Stamp), Icon::Stamp, "Stamp", Key::G),
+        (Tool::Fill, Icon::Fill, "Fill", Key::F),
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
     ];
 
@@ -782,6 +785,9 @@ impl Editor {
         }
         if tool == Tool::Crop {
             self.crop = Some(self.session.doc.bounds());
+        }
+        // These act on the picture, not on a selection, and the panel shows their own settings.
+        if matches!(tool, Tool::Crop | Tool::Fill) {
             self.session.select(Vec::new());
         }
     }
@@ -926,6 +932,10 @@ impl Editor {
                         self.set_tool(Tool::Crop);
                         ui.close();
                     }
+                    if ui.add(egui::Button::new("Fill").shortcut_text("F")).clicked() {
+                        self.set_tool(Tool::Fill);
+                        ui.close();
+                    }
                     if ui.button("Trim Borders").clicked() {
                         self.run(&ctx, "image.trim", json!({}));
                         self.view.fit_pending = true;
@@ -1037,20 +1047,21 @@ impl Editor {
             .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
             .show(ui, |ui| {
+                let side = bar_side(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    if bar_button(ui, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
+                    if bar_button(ui, side, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
                         && let Err(e) = self.services.new_capture(CaptureMode::Region)
                     {
                         self.error(&ctx, e);
                     }
-                    if bar_button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                    if bar_button(ui, side, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
                         self.services.request_open();
                     }
-                    if bar_button(ui, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
+                    if bar_button(ui, side, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
                         self.save(&ctx);
                     }
-                    if bar_button(ui, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
+                    if bar_button(ui, side, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
                         self.copy(&ctx);
                     }
                     ui.add_space(6.0);
@@ -1058,7 +1069,7 @@ impl Editor {
                     ui.add_space(6.0);
                     for (tool, icon, label, key) in Tool::BAR {
                         let tip = format!("{label} ({})", key.name());
-                        if bar_button(ui, icon, &tip, self.tool == tool, true).clicked() {
+                        if bar_button(ui, side, icon, &tip, self.tool == tool, true).clicked() {
                             self.set_tool(tool);
                         }
                     }
@@ -1066,33 +1077,29 @@ impl Editor {
                     ui.separator();
                     ui.add_space(6.0);
                     let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                    if bar_button(ui, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
+                    if bar_button(ui, side, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
                         self.run(&ctx, "edit.undo", json!({}));
                     }
                     let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                    if bar_button(ui, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
+                    if bar_button(ui, side, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
                         self.run(&ctx, "edit.redo", json!({}));
                     }
                     let any = !self.session.selected().is_empty();
-                    if bar_button(ui, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
+                    if bar_button(ui, side, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
                         self.run(&ctx, "edit.delete", json!({}));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if bar_button(ui, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
+                        if bar_button(ui, side, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
                             self.view.fit_pending = true;
                         }
-                        if bar_button(ui, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
+                        if bar_button(ui, side, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
                             self.view.zoom_by(1.25, None);
                         }
                         let pct = format!("{:.0}%", self.view.zoom * 100.0);
-                        if ui
-                            .add(egui::Button::new(pct).frame(false).min_size(vec2(52.0, BAR_BUTTON)))
-                            .on_hover_text("Actual size (Ctrl+1)")
-                            .clicked()
-                        {
+                        if ui.add(egui::Button::new(pct).frame(false).min_size(vec2(52.0, side))).on_hover_text("Actual size (Ctrl+1)").clicked() {
                             self.view.set_zoom(1.0, None);
                         }
-                        if bar_button(ui, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
+                        if bar_button(ui, side, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
                             self.view.zoom_by(0.8, None);
                         }
                     });
@@ -1226,10 +1233,24 @@ impl Editor {
 
 /// How big the tool bar's buttons are, in points.
 pub const BAR_BUTTON: f32 = 40.0;
+/// The smallest they get in a narrow window.
+pub const BAR_BUTTON_MIN: f32 = 28.0;
 
-/// A button on the tool bar, named by its tooltip.
-fn bar_button(ui: &mut Ui, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
-    let resp = icons::button_sized(ui, icon, tip, on, enabled, BAR_BUTTON);
+/// How big the tool bar's buttons are on a bar `width` points wide: full size when they all fit,
+/// smaller (down to [`BAR_BUTTON_MIN`]) when they don't, so the last of them doesn't run into the
+/// zoom at the right.
+pub fn bar_side(width: f32) -> f32 {
+    // What isn't a square button: the zoom's percentage, the separators and the space round
+    // them, the gaps between the buttons and a little to spare.
+    const OTHER: f32 = 200.0;
+    let buttons = (4 + Tool::BAR.len() + 3 + 3) as f32;
+    let side = (width - OTHER) / buttons;
+    if side.is_finite() { side.clamp(BAR_BUTTON_MIN, BAR_BUTTON) } else { BAR_BUTTON }
+}
+
+/// A button on the tool bar, `side` points square, named by its tooltip.
+fn bar_button(ui: &mut Ui, side: f32, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
+    let resp = icons::button_sized(ui, icon, tip, on, enabled, side);
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     resp
 }

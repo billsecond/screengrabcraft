@@ -19,8 +19,9 @@ pub struct View {
     pub fit_pending: bool,
     pub canvas: egui::Rect,
     pub ppp: f32,
-    /// The picture as last shown. Another one (cropped, rotated, resized, undone…) is fitted
-    /// and centred again, as it is when the window changes size.
+    /// The picture as last shown. Another one of another size (cropped, rotated, resized,
+    /// undone…) is fitted and centred again, as it is when the window changes size; new pixels
+    /// in the same size (a fill, an effect) leave the view where it is.
     shown: Option<screengrabcraft_model::Raster>,
 }
 
@@ -81,7 +82,8 @@ impl View {
     pub fn follow(&mut self, canvas: egui::Rect, picture: &screengrabcraft_model::Raster) {
         let resized = (canvas.size() - self.canvas.size()).length() > 0.5;
         let replaced = self.shown.as_ref().is_none_or(|s| !s.same_pixels(picture));
-        if resized || replaced {
+        let reshaped = self.shown.as_ref().is_none_or(|s| (s.width(), s.height()) != (picture.width(), picture.height()));
+        if resized || reshaped {
             self.fit_pending = true;
         }
         if replaced {
@@ -229,6 +231,19 @@ impl Editor {
             return None;
         }
         self.session.doc.object_at(p, NEAR / self.view.scale())
+    }
+
+    /// The topmost shape with an inside under an image point, which the Fill tool fills (inside
+    /// it as well as on its border, whether it has a fill yet or not).
+    pub(crate) fn fillable_under(&self, p: Pt) -> Option<ObjectId> {
+        if !self.session.doc.bounds().contains(p) {
+            return None;
+        }
+        let tol = NEAR / self.view.scale();
+        let solid = |o: &&screengrabcraft_model::Object| {
+            o.shape.hit(&screengrabcraft_model::Style { fill: screengrabcraft_model::Color::WHITE, ..o.style }, p, tol)
+        };
+        self.session.doc.objects.iter().rev().filter(|o| has_inside(o.shape.kind())).find(solid).map(|o| o.id)
     }
 
     /// The handle of a selected annotation under a screen point.
@@ -433,6 +448,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 None if ed.crop.is_some_and(|c| c != ed.session.doc.bounds() && c.contains(to_img(h, &ed.view))) => CursorIcon::Move,
                 None => CursorIcon::Crosshair,
             },
+            Tool::Fill if on_picture => CursorIcon::Crosshair,
+            Tool::Fill => CursorIcon::Default,
             // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
             Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
             Tool::Draw(k) if !matches!(k, Kind::Pen | Kind::Highlight) && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
@@ -455,6 +472,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 
     // ---- double click: type into text ----
     if resp.double_clicked()
+        && ed.tool != Tool::Fill
         && let Some(p) = hover
         && let Some(id) = ed.object_under(to_img(p, &ed.view))
         && ed.session.doc.get(id).is_some_and(|o| o.shape.text().is_some())
@@ -508,6 +526,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     ed.drag = Some(Drag::CropNew { start });
                 }
             }
+            // A fill happens where the button went down; moving on before letting go is no drag.
+            Tool::Fill => fill_at(ed, &ctx, start),
             Tool::Draw(kind) => {
                 // Starting on a handle of the selected annotation reshapes it instead.
                 if let Some((id, handle)) = ed.handle_at(start_s) {
@@ -673,6 +693,23 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     }
 }
 
+/// Whether a kind is a shape with an inside to fill.
+fn has_inside(kind: Kind) -> bool {
+    matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
+}
+
+/// The Fill tool at an image point: a shape with an inside there takes the colour as its fill;
+/// anywhere else, the area of the picture round the pixel does.
+fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
+    let fill = ed.settings.fill;
+    let colour = fill.color.to_hex();
+    if let Some(id) = ed.fillable_under(p) {
+        ed.run(ctx, "object.update", serde_json::json!({"id": id.0, "style": {"fill": colour}}));
+    } else if ed.session.doc.bounds().contains(p) {
+        ed.run(ctx, "image.fill", serde_json::json!({"x": p.x.floor(), "y": p.y.floor(), "color": colour, "tolerance": fill.tolerance}));
+    }
+}
+
 /// A click (no drag) on the canvas.
 fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     let Some(s) = at else { return };
@@ -698,6 +735,11 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                 }
                 Some(id) => ed.session.select(vec![id]),
                 None => ed.session.select(Vec::new()),
+            }
+        }
+        Tool::Fill => {
+            if !editing_before {
+                fill_at(ed, ctx, p);
             }
         }
         Tool::Draw(kind) => {

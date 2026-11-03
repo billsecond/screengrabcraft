@@ -20,6 +20,7 @@ pub enum Icon {
     Spotlight,
     Magnify,
     Stamp,
+    Fill,
     Crop,
     Undo,
     Redo,
@@ -146,6 +147,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 pts.push(at(10.0 + a.cos() * r, 10.5 + a.sin() * r));
             }
             poly(pts, true);
+        }
+        Icon::Fill => {
+            // A pail tipped to the right, half full, with a drop running off its lip.
+            let pail = [at(2.5, 9.0), at(8.5, 3.0), at(15.0, 9.5), at(9.0, 15.5)];
+            fill_poly(vec![pail[0], pail[2], pail[3]], color.gamma_multiply(0.55));
+            poly(pail.to_vec(), true);
+            line(at(8.5, 3.0), at(6.0, 0.8));
+            fill_poly(vec![at(16.5, 10.5), at(18.3, 14.5), at(14.7, 14.5)], color);
+            p.circle_filled(at(16.5, 15.0), 1.8 * u, color);
         }
         Icon::Crop => {
             poly(vec![at(6.0, 2.0), at(6.0, 14.0), at(18.0, 14.0)], false);

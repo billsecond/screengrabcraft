@@ -1610,3 +1610,110 @@ fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_ano
     drag(&mut h, q, egui::pos2(q.x + 6.0, q.y + 4.0));
     assert_eq!(h.state().session.doc.objects.len(), 1);
 }
+
+/// The editor on a white picture with a blue square in the middle.
+fn square_picture() -> Editor {
+    let mut r = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..200 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 200, 255]);
+        }
+    }
+    let mut ed = editor();
+    ed.session.replace(Document::new(r));
+    ed
+}
+
+#[test]
+fn the_fill_tool_is_on_the_bar_and_on_its_key() {
+    let mut h = harness(square_picture());
+    h.run_steps(4);
+    h.get_by_label("Fill (F)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill);
+    h.get_by_label("Tolerance");
+    h.state_mut().set_tool(Tool::Select);
+    h.run_steps(1);
+    h.key_press(egui::Key::F);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Fill, "F picks it");
+}
+
+#[test]
+fn the_fill_tool_fills_the_area_clicked_and_leaves_the_view_where_it_is() {
+    let mut h = ready(square_picture(), Tool::Fill);
+    h.state_mut().view.set_zoom(1.5, None);
+    h.run_steps(2);
+    let (zoom, center) = (h.state().view.zoom, h.state().view.center);
+    let p = at(&h, 200.0, 150.0);
+    click_at(&mut h, p);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.base.pixel(200, 150), Some(ed.settings.fill.color), "the square is filled");
+    assert_eq!(ed.session.doc.base.pixel(160, 110), Some(ed.settings.fill.color), "all of it");
+    assert_eq!(ed.session.doc.base.pixel(20, 20), Some(Color::WHITE), "the white round it isn't");
+    assert_eq!(ed.session.undo_label(), Some("Fill"));
+    assert_eq!((ed.view.zoom, ed.view.center), (zoom, center), "no jump: the view stays as it was");
+    assert!(ed.session.doc.objects.is_empty(), "no annotation, the picture itself");
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.base.pixel(200, 150), Some(Color::rgb(30, 90, 200)));
+    // A press that wobbles a little is still a fill, and only one.
+    let q = at(&h, 20.0, 20.0);
+    drag(&mut h, q, pos2(q.x + 6.0, q.y + 4.0));
+    assert_eq!(h.state().session.doc.base.pixel(20, 20), Some(h.state().settings.fill.color));
+    assert!(h.state_mut().session.undo());
+    assert!(!h.state().session.can_undo(), "one step for the wobbly press");
+    if let Ok(dir) = std::env::var("SGC_SHOTS") {
+        let p = at(&h, 200.0, 150.0);
+        click_at(&mut h, p);
+        if let Ok(img) = h.render() {
+            let _ = img.save(format!("{dir}/fill-tool.png"));
+        }
+    }
+}
+
+#[test]
+fn the_fill_tool_fills_a_shape_clicked_inside() {
+    let mut ed = square_picture();
+    let empty = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 100.0, 60.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    let mut h = ready(ed, Tool::Fill);
+    let base = h.state().session.doc.base.clone();
+    let p = at(&h, 70.0, 50.0);
+    click_at(&mut h, p);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.get(empty).map(|o| o.style.fill), Some(ed.settings.fill.color), "the box without a fill has one now");
+    assert!(ed.session.doc.base.same_pixels(&base), "the picture under it isn't touched");
+    assert!(ed.session.selected().is_empty(), "nothing is selected: the tool stays the Fill tool");
+    assert_eq!(ed.tool, Tool::Fill);
+    // None, for the next click, takes the fill away again.
+    h.state_mut().settings.fill.color = Color::TRANSPARENT;
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.get(empty).map(|o| o.style.fill), Some(Color::TRANSPARENT));
+}
+
+#[test]
+fn the_tool_bar_buttons_get_smaller_rather_than_run_into_the_zoom() {
+    for width in [1000.0, 1100.0, 1200.0, 1280.0, 1400.0] {
+        let mut h = Harness::builder().with_size(egui::vec2(width, 800.0)).build_ui_state(
+            |ui, ed: &mut Editor| {
+                let ctx = ui.ctx().clone();
+                ed.logic(&ctx);
+                ed.ui(ui);
+            },
+            editor(),
+        );
+        h.run_steps(4);
+        let last = h.get_by_label("Delete the selection (Del)").rect();
+        let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
+        assert!(last.max.x + 4.0 <= zoom_out.min.x, "at {width}: {last:?} runs into {zoom_out:?}");
+        let fill = h.get_by_label("Fill (F)").rect();
+        assert!(fill.width() >= crate::editor::BAR_BUTTON_MIN - 0.5, "at {width}: {fill:?}");
+        if width >= 1400.0 {
+            assert!((fill.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "full size when there's room: {fill:?}");
+        }
+    }
+}

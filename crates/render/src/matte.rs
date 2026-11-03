@@ -429,7 +429,7 @@ pub fn apply_clean(r: &Raster, m: &Matte) -> Result<Raster, RasterError> {
 
 /// Fills `gone` with the pixels that `near` takes in and that are joined (side by side, not
 /// corner to corner) to one of the seeds, a row of pixels at a time so the work list stays short.
-fn flood(w: usize, h: usize, seeds: &[(usize, usize)], near: &dyn Fn(usize) -> bool, gone: &mut [u8]) {
+pub(crate) fn flood(w: usize, h: usize, seeds: &[(usize, usize)], near: &dyn Fn(usize) -> bool, gone: &mut [u8]) {
     let open = |gone: &[u8], i: usize| gone.get(i).is_some_and(|g| *g == 0) && near(i);
     let mut stack: Vec<(usize, usize)> = Vec::new();
     for &seed in seeds {

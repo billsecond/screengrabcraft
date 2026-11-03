@@ -147,6 +147,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
     cmd!(
+        "image.fill",
+        "Fill",
+        "Image",
+        None,
+        r##"{"x": px, "y": px, "color": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 32} → {"filled": pixels} — the area round the pixel at x, y that is within tolerance (0 to 255 a channel) of its colour becomes the colour (a transparent one clears it)"##,
+        always,
+        fill_area
+    ),
+    cmd!(
         "image.removeBackground",
         "Remove Background",
         "Image",
@@ -523,6 +532,20 @@ fn trim(s: &mut Session, p: &Value) -> Result<Value> {
     let tol = int(p, "tolerance", 8, 0, 255)? as u8;
     let area = effects::trim_bounds(&s.doc.base, tol);
     crop(s, &json!({ "x": area.x, "y": area.y, "w": area.w, "h": area.h }))
+}
+
+fn fill_area(s: &mut Session, p: &Value) -> Result<Value> {
+    let (x, y) = pixel_param(s, p)?.ok_or_else(|| EngineError::Params("give the `x` and `y` of a pixel to fill from".to_string()))?;
+    if p.get("color").is_none_or(Value::is_null) {
+        return Err(EngineError::Params("`color` is the colour to fill with, like #RRGGBB".to_string()));
+    }
+    let colour = color(p, "color", Color::TRANSPARENT)?;
+    let tolerance = int(p, "tolerance", 32, 0, 255)? as u8;
+    let (picture, filled) = effects::fill(&s.doc.base, x, y, colour, tolerance)?;
+    if filled > 0 {
+        s.doc.base = picture;
+    }
+    Ok(json!({ "filled": filled }))
 }
 
 // ---- the background ----

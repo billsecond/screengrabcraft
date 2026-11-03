@@ -763,6 +763,35 @@ pub struct EditorSettings {
     /// The stamp last picked.
     #[serde(deserialize_with = "or_none")]
     pub stamp: Option<crate::object::StampKind>,
+    /// What the Fill tool fills with.
+    #[serde(deserialize_with = "or_default")]
+    pub fill: FillTool,
+}
+
+/// The Fill tool's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FillTool {
+    /// The colour it fills with; a transparent one clears the area.
+    pub color: crate::color::Color,
+    /// How close (0 to 255 a channel) a colour must be to the one clicked to be filled too.
+    pub tolerance: u8,
+}
+
+impl Default for FillTool {
+    fn default() -> FillTool {
+        FillTool { color: crate::color::Color::RED, tolerance: 32 }
+    }
+}
+
+/// A setting that can't be read is its default.
+fn or_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 /// A setting that can't be read is none.
@@ -1064,5 +1093,21 @@ mod tests {
         let e = EditorSettings::from_json(r#"{"tool":"teapot","stamp":7,"showTray":true}"#);
         assert_eq!((e.tool, e.stamp), (None, None));
         assert!(e.show_tray, "the rest is still read");
+    }
+
+    #[test]
+    fn the_fill_tool_keeps_its_colour_and_a_bad_one_spoils_nothing() {
+        assert_eq!(EditorSettings::from_json("{}").fill, FillTool::default(), "a file from before has the default");
+        let e = EditorSettings { fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90 }, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
+        for bad in [
+            r#"{"fill":{"color":"teapot","tolerance":9},"showTray":true}"#,
+            r#"{"fill":{"tolerance":900},"showTray":true}"#,
+            r#"{"fill":3,"showTray":true}"#,
+        ] {
+            let e = EditorSettings::from_json(bad);
+            assert_eq!(e.fill, FillTool::default(), "{bad}");
+            assert!(e.show_tray, "the rest is still read: {bad}");
+        }
     }
 }

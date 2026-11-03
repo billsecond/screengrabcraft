@@ -307,6 +307,39 @@ fn a_colour_goes_everywhere_or_from_a_pixel() {
     }
 }
 
+#[test]
+fn a_fill_colours_one_area_in_one_undo_step() {
+    let mut s = square_on_blue();
+    let out = s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFD600"})).unwrap();
+    assert_eq!(out["filled"], 20 * 20, "the red square");
+    assert_eq!(s.doc.base.pixel(30, 20), Some(Color::rgb(0xFF, 0xD6, 0x00)));
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)), "the blue round it stays");
+    assert_eq!(s.undo_label(), Some("Fill"));
+    // Filling it with the colour it already is changes nothing, and adds no undo step.
+    let out = s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFD600"})).unwrap();
+    assert_eq!(out["filled"], 0);
+    s.undo();
+    assert_eq!(s.doc.base.pixel(30, 20), Some(Color::rgb(229, 57, 53)));
+    assert!(!s.can_undo(), "one fill, one step");
+    // The tolerance reaches the blue too.
+    s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#00000000", "tolerance": 255})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
+    for bad in [
+        json!({}),
+        json!({"x": 5, "y": 5}),
+        json!({"x": 500, "y": 5, "color": "#FFFFFF"}),
+        json!({"x": -1, "y": 5, "color": "#FFFFFF"}),
+        json!({"x": "left", "y": 0, "color": "#FFFFFF"}),
+        json!({"x": 1, "y": 1, "color": 12}),
+        json!({"x": 1, "y": 1, "color": "yellow"}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "tolerance": "lots"}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("image.fill", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
 /// A model that calls the left half of any picture background.
 struct LeftIsBackground;
 

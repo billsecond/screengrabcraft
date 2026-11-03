@@ -101,12 +101,14 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
 - Colours (a palette that reads well for people who see red and green alike, and any colour),
   thickness, opacity, shadows, dashes.
+- **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
+  close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
 - **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
   contrast.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
-- Whatever tool is chosen, a click on an annotation selects it and a drag moves it (the pen and
-  highlighter draw over things); its handles take hold even when the press is a little off.
+- Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
+  pen and highlighter draw over things); its handles take hold even when the press is a little off.
 - Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
