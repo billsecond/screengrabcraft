@@ -51,6 +51,7 @@ pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<
     let capture = |m: CaptureMode| Entry::Item(label(m.label(), shortcut(m)), Item::Capture(m));
     let mut e: Vec<Entry> = [
         CaptureMode::Region,
+        CaptureMode::Adjust,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
