@@ -849,6 +849,10 @@ impl Service {
             if let Some(r) = &mut self.recording {
                 r.stop();
             }
+            // An editor kept ready ends with the service (an editor the owner has open stays).
+            if self.ready_wanted {
+                launch::tell_editor(launch::EDITOR_UNREADY);
+            }
             self.guard.close();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

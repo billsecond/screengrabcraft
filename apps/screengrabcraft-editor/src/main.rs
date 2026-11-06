@@ -29,8 +29,10 @@ const APP_ID: &str = "io.github.billsecond.screengrabcraft.editor";
 const WINDOW_FILE: &str = "editor-window.ron";
 static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.editor.png");
 
-/// How often a hidden window looks for the service that hid it.
-const WATCH: Duration = Duration::from_secs(1);
+/// How often a thread looks for the capture service, to wake a window out of sight (hidden for a
+/// capture, or kept ready) once the service has gone. The window itself asks for no frames while
+/// out of sight: eframe draws a hidden window ten times a second for as long as one is asked for.
+const WATCH: Duration = Duration::from_secs(3);
 
 /// What to do with the window.
 #[derive(Debug, PartialEq)]
@@ -151,10 +153,16 @@ impl eframe::App for App {
             if ctx.input(|i| i.viewport().close_requested()) {
                 return;
             }
-            // Ready for as long as the service runs; once it has gone (quit, or updating), so does this.
-            if instance::running("service") {
-                ctx.request_repaint_after(WATCH);
-            } else {
+            // eframe shows its window once the first frame is drawn, even one made hidden, and it
+            // runs this frame's commands just after: so it's hidden on that frame (out of sight
+            // nothing is drawn, and it would be a black window). Only then: a command asks for
+            // another frame, and a hidden window's frames come ten a second while they're asked for.
+            if !self.warm {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            }
+            // Ready for as long as the service runs; once it has gone (quit, or updating), so does
+            // this (the watch thread wakes it then).
+            if !instance::running("service") {
                 log::info!("the capture service has gone; the editor kept ready ends too");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
@@ -163,12 +171,9 @@ impl eframe::App for App {
                 return;
             }
         }
-        if self.aside.hidden {
-            if instance::running("service") {
-                ctx.request_repaint_after(WATCH);
-            } else {
-                self.aside.back().apply(ctx);
-            }
+        // Hidden for a capture by a service that has gone since (the watch thread wakes it then).
+        if self.aside.hidden && !instance::running("service") {
+            self.aside.back().apply(ctx);
         }
         self.editor.logic(ctx);
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -282,6 +287,7 @@ fn main() -> std::process::ExitCode {
             let mut editor = Editor::new(Box::new(services::DesktopServices::new(ctx.clone())), settings);
             let wake = ctx.clone();
             guard.set_waker(Box::new(move || wake.request_repaint()));
+            watch_the_service(ctx.clone());
             for f in &files {
                 editor.open_path(&ctx, f);
             }
@@ -298,6 +304,29 @@ fn main() -> std::process::ExitCode {
             log::error!("the editor window could not start: {e}");
             std::process::ExitCode::FAILURE
         }
+    }
+}
+
+/// Wakes the window when the capture service goes (quits, crashes, is updated), so a window out
+/// of sight comes back or, kept ready, ends. A thread that sleeps costs nothing; a hidden window
+/// asking for frames would be drawn ten times a second.
+fn watch_the_service(ctx: egui::Context) {
+    if paths::no_prefs() {
+        return;
+    }
+    let spawned = std::thread::Builder::new().name("service-watch".into()).spawn(move || {
+        let mut was = instance::running("service");
+        loop {
+            std::thread::sleep(WATCH);
+            let now = instance::running("service");
+            if was && !now {
+                ctx.request_repaint();
+            }
+            was = now;
+        }
+    });
+    if let Err(e) = spawned {
+        log::warn!("no watch for the capture service: {e}");
     }
 }
 
