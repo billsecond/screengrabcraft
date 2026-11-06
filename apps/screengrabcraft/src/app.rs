@@ -25,6 +25,10 @@ pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 /// How long the editor's window takes to leave the screen (Windows fades it out).
 const EDITOR_ASIDE: Duration = Duration::from_millis(200);
+/// How long after the service starts the editor is readied (see `keep_editor_ready`).
+const READY_FIRST: Duration = Duration::from_secs(10);
+/// How often the service looks for the editor kept ready afterwards.
+const READY_AGAIN: Duration = Duration::from_secs(300);
 pub static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.png");
 
 /// Things that happen elsewhere and are handled on the window's thread.
@@ -97,6 +101,16 @@ pub struct Service {
     pub freezing: Option<CaptureMode>,
     /// A worker is on a picture: repeating the last area, or keeping a capture.
     keeping: bool,
+    /// A picture chosen in the overlay, kept on the next frame, once the overlay (the frozen
+    /// screen) has gone: copying it to the clipboard takes a moment, and the screen shouldn't
+    /// stay frozen meanwhile.
+    chosen: Option<(Raster, String, Action)>,
+    /// When the capture now under way was asked for, for the log's timings.
+    asked: Option<Instant>,
+    /// Whether an editor is to be kept ready out of sight (the setting, on Windows), as last seen.
+    ready_wanted: bool,
+    /// When to see that one is (soon after the service starts, then now and then).
+    ready_at: Option<Instant>,
     /// The editor has been asked out of the picture, and not yet back.
     editor_aside: bool,
     pub notice: Option<Notice>,
@@ -162,6 +176,10 @@ impl Service {
             after_countdown: None,
             freezing: None,
             keeping: false,
+            chosen: None,
+            asked: None,
+            ready_wanted: false,
+            ready_at: None,
             editor_aside: false,
             notice: None,
             recording: None,
@@ -181,6 +199,7 @@ impl Service {
             || self.production_at.is_some()
             || self.recording.is_some()
             || self.keeping
+            || self.chosen.is_some()
     }
 
     /// Saves the settings and puts them to work (shortcuts, the tray menu's labels).
@@ -397,7 +416,7 @@ impl Service {
 
     /// Starts a capture of `mode`, after `delay` seconds.
     pub fn start(&mut self, mode: CaptureMode, delay: u32) {
-        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() {
+        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.chosen.is_some() {
             return;
         }
         if self.recording.is_some() {
@@ -455,10 +474,14 @@ impl Service {
 
     fn freeze(&mut self, mode: CaptureMode) {
         self.freezing = Some(mode);
+        let asked = Instant::now();
+        self.asked = Some(asked);
         let hide = self.editor_goes_aside();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let spawned = std::thread::Builder::new().name("freeze".into()).spawn(move || {
-            step_aside(hide);
+            if step_aside(hide) {
+                log::info!("capture: the editor stepped aside in {} ms", asked.elapsed().as_millis());
+            }
             let r = screengrabcraft_capture::freeze().map_err(|e| e.to_string());
             let _ = tx.send(Msg::Frozen(mode, r));
             ctx.request_repaint();
@@ -542,6 +565,13 @@ impl Service {
                 let mut overlay = Overlay::new(om, ow, purpose);
                 let after = &self.settings.after_capture;
                 overlay.preview = after.show_bar;
+                if mode == CaptureMode::Adjust {
+                    // The area stays to be adjusted, starting from the last one.
+                    overlay.preview = true;
+                    if let Some(last) = self.settings.last_region {
+                        overlay.preselect_desktop(last);
+                    }
+                }
                 overlay.enter = enter_button(after);
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
@@ -600,7 +630,9 @@ impl Service {
                 let pic = self.with_pointer(&pic, &m, (mon.picture.width(), mon.picture.height()), origin, run.pointer);
                 self.settings.last_region = Some(desktop);
                 store::save_settings(&self.settings);
-                self.finish(pic, title.as_deref().unwrap_or("Region"), action);
+                // Kept on the next frame, when the frozen screen has gone.
+                self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action));
+                self.ctx.request_repaint();
             }
         }
     }
@@ -735,6 +767,12 @@ impl Service {
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
+        // The overlay went at the end of the last frame: the picture chosen in it is kept now.
+        if self.overlay.is_none()
+            && let Some((pic, source, action)) = self.chosen.take()
+        {
+            self.finish(pic, &source, action);
+        }
         if let Some(c) = &self.countdown
             && Instant::now() >= c.until
         {
@@ -762,6 +800,7 @@ impl Service {
         if self.editor_aside
             && self.freezing.is_none()
             && self.overlay.is_none()
+            && self.chosen.is_none()
             && self.recording.is_none()
             && self.production_at.is_none()
             && !self.keeping
@@ -772,6 +811,7 @@ impl Service {
         if self.notice.as_ref().is_some_and(|n| Instant::now() >= n.until) {
             self.notice = None;
         }
+        self.keep_editor_ready(ctx);
         crate::update::tick(self, ctx);
         if self.overlay.is_some() && self.screens.is_empty() {
             self.screens = winit_screens(frame);
@@ -809,8 +849,39 @@ impl Service {
             if let Some(r) = &mut self.recording {
                 r.stop();
             }
+            // An editor kept ready ends with the service (an editor the owner has open stays).
+            if self.ready_wanted {
+                launch::tell_editor(launch::EDITOR_UNREADY);
+            }
             self.guard.close();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// Keeps an editor ready out of sight, as the settings say: started a little after the service
+    /// (not to slow down signing in), and looked for now and then (it may have been ended); ended
+    /// when the owner turns it off.
+    fn keep_editor_ready(&mut self, ctx: &egui::Context) {
+        let wanted = cfg!(target_os = "windows") && self.settings.keep_editor_ready && !paths::no_prefs();
+        let now = Instant::now();
+        if wanted != self.ready_wanted {
+            self.ready_wanted = wanted;
+            if wanted {
+                self.ready_at = Some(now + READY_FIRST);
+            } else {
+                self.ready_at = None;
+                let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_UNREADY));
+            }
+        }
+        let Some(at) = self.ready_at else { return };
+        if now >= at && !self.capturing() {
+            self.ready_at = Some(now + READY_AGAIN);
+            if let Err(e) = launch::ready_editor() {
+                log::warn!("keeping the editor ready: {e}");
+            }
+        }
+        if let Some(at) = self.ready_at {
+            ctx.request_repaint_after(at.saturating_duration_since(now));
         }
     }
 
@@ -823,6 +894,11 @@ impl Service {
                 ctx.show_viewport_immediate(ViewportId::from_hash_of(("overlay", i)), builder, |ui, _| run.overlay.show_monitor(ui, i));
             }
             run.frames = run.frames.saturating_add(1);
+            if run.frames == 1
+                && let Some(t) = self.asked
+            {
+                log::info!("capture: the overlay was drawn {} ms after the capture began", t.elapsed().as_millis());
+            }
             if run.frames >= 3 {
                 // Drawn, and drawn again after being raised.
                 run.opening.opened();
@@ -914,11 +990,14 @@ fn place(tmp: &Path, dir: &Path, name: &str, ext: &str) -> Result<PathBuf, Strin
     Ok(dest)
 }
 
-/// Takes the editor out of the picture, if it's there (on a capture's worker thread).
-fn step_aside(hide: bool) {
-    if hide && launch::tell_editor(launch::EDITOR_HIDE) {
+/// Takes the editor out of the picture, if it's there (on a capture's worker thread). True when
+/// an editor was asked.
+fn step_aside(hide: bool) -> bool {
+    let told = hide && launch::tell_editor(launch::EDITOR_HIDE);
+    if told {
         std::thread::sleep(EDITOR_ASIDE);
     }
+    told
 }
 
 /// Puts the editor back if it's aside (from a thread of its own: it may not answer at once).
@@ -959,10 +1038,18 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
         std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         // The editor opens pictures, not PDFs.
         let fmt = if edit && format == ImageFormat::Pdf { ImageFormat::Png } else { format };
+        let t = Instant::now();
         let bytes = screengrabcraft_render::encode(pic, fmt, s.jpeg_quality).map_err(|e| e.to_string())?;
+        let encoded = t.elapsed().as_millis();
         let path = free_path(&dir, &name, fmt.extension());
         store::write_atomic(&path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-        log::info!("capture {}x{} kept as {}", pic.width(), pic.height(), path.display());
+        log::info!(
+            "capture {}x{} kept as {} (made in {encoded} ms, written in {} ms)",
+            pic.width(),
+            pic.height(),
+            path.display(),
+            t.elapsed().as_millis().saturating_sub(encoded)
+        );
         if save {
             saved = Some(path.clone());
         }
@@ -970,8 +1057,12 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
     }
     let mut edited = false;
     if edit && let Some(p) = &path_for_editor {
+        let t = Instant::now();
         match launch::open_editor(&[p.to_string_lossy().to_string()]) {
-            Ok(()) => edited = true,
+            Ok(()) => {
+                edited = true;
+                log::info!("capture: handed to the editor in {} ms", t.elapsed().as_millis());
+            }
             Err(e) => log::warn!("opening the editor: {e}"),
         }
     }

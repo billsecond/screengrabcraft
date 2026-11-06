@@ -15,7 +15,8 @@ screengrabcraft-render = { workspace = true }
 screengrabcraft-media = { workspace = true }
 screengrabcraft-ui = { workspace = true }
 screengrabcraft-desktop = { workspace = true }
-eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
+# `persistence`: the window opens where, as big and as maximized as it was left (only that is kept).
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "persistence"] }
 egui = { workspace = true }
 log = { workspace = true }
 rfd = { workspace = true }

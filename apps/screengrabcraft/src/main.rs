@@ -102,8 +102,9 @@ fn main() -> ExitCode {
     if args.first().map(String::as_str) == Some("service") {
         return service_command(args.get(1).map(String::as_str));
     }
-    logging::init("service");
+    logging::init();
     if args.iter().any(|a| a == "--background") {
+        logging::to_file("supervisor");
         let Ok(exe) = std::env::current_exe() else { return ExitCode::FAILURE };
         log::info!("{}: supervising the capture service", version::line("ScreenGrabCraft"));
         let code = service::supervise(&exe, &[]);
@@ -124,6 +125,8 @@ fn main() -> ExitCode {
         // Nothing was running to quit.
         return ExitCode::SUCCESS;
     }
+    // The copy that stays: its log is the one kept.
+    logging::to_file("service");
     log::info!("{} starting ({})", version::line("ScreenGrabCraft"), screengrabcraft_capture::backend_name());
 
     let mut settings = store::load_settings();
