@@ -4849,6 +4849,7 @@ dependencies = [
  "screengrabcraft-render",
  "screengrabcraft-ui",
  "trash",
+ "winit",
  "winresource",
 ]
 
