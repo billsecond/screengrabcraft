@@ -51,6 +51,7 @@ Snagit may be **observed** black-box: run it, use it, note how it behaves. Never
 ## The capture service
 - One process: `apps/screengrabcraft`. eframe's root window is a 1×1 see-through anchor shown only while something is on screen (eframe opens windows only from a shown window, and paints a hidden one at 10 fps); the overlay, settings, countdown, notices and recording controls are immediate viewports.
 - `--background` is the supervisor (restarts a crash with back-off; exit code 0 means stop); `--tray` runs the service itself; a second start hands its arguments to the first (`crates/desktop/src/instance.rs`).
+- On Windows the service keeps the editor ready out of sight (`screengrabcraft-editor --standby`, the `keep_editor_ready` setting): Windows can take seconds over a program's first start (it checks it, more so after an update), so the editor is started while nobody waits, a closed editor window only hides, and a capture is handed to the running editor straight over the instance port. The hidden editor ends with the service.
 - Sign-in registration is `crates/desktop/src/service.rs`; a build in `target/` never registers itself.
 - Updates: `crates/desktop/src/update.rs` (check, download, checksum, install) and `apps/screengrabcraft/src/update.rs` (when, and what the owner sees). The installer closes the service, so on Windows Update now hands `msiexec /passive` to a detached `cmd.exe` that waits for it and then starts `screengrabcraft.exe --background` again. Only a copy the MSI installed updates itself; never run the installer from a test. `cargo run -p screengrabcraft-desktop --example update_check -- --as 0.1.6` asks GitHub live.
 
@@ -60,6 +61,6 @@ Before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, l
 ## Running and looking at the app
 - `cargo run --release -p screengrabcraft` (the service; add `-- --capture region` to capture at once), `cargo run --release -p screengrabcraft-editor -- picture.png`.
 - `SCREENGRABCRAFT_NO_PREFS=1` runs without settings, instance lock or sign-in registration (tests, CI).
-- Logs: `<settings>/logs/service.log` and `editor.log` (`%APPDATA%\ScreenGrabCraft`, `~/Library/Application Support/ScreenGrabCraft`, `~/.config/screengrabcraft`).
+- Logs: `<settings>/logs/service.log`, `supervisor.log` and `editor.log`, times to the millisecond (each step of a capture and of the editor starting is timed) (`%APPDATA%\ScreenGrabCraft`, `~/Library/Application Support/ScreenGrabCraft`, `~/.config/screengrabcraft`).
 - For UI work, look at the result: `cargo run -p screengrabcraft-render --example sample -- out.png` draws every annotation; the editor's behaviour is tested headless with egui_kittest (`crates/ui/src/tests.rs`).
 - Parallel agents: separate `CARGO_TARGET_DIR` per agent; edit only the crates (or files) you own; format only your own files.

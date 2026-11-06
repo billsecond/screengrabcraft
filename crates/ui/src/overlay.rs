@@ -270,6 +270,19 @@ impl Overlay {
         }
     }
 
+    /// Starts with an area of the desktop already chosen, on the monitor its middle is on, ready
+    /// to adjust (Capture Region, Adjust First starts from the last area). An area on no monitor
+    /// now is left out.
+    pub fn preselect_desktop(&mut self, area: IRect) {
+        let (cx, cy) = (i64::from(area.x) + i64::from(area.w / 2), i64::from(area.y) + i64::from(area.h / 2));
+        let Some(mi) = self.monitors.iter().position(|m| m.rect.contains(cx, cy)) else { return };
+        let Some(r) = self.monitors.get(mi).and_then(|m| desk_to_px(m, area)) else { return };
+        if r.w >= 1.0 && r.h >= 1.0 {
+            self.sel = Some((mi, r));
+            self.phase = Phase::Adjusting;
+        }
+    }
+
     fn choose(&mut self, action: Action) {
         let Some((mi, r)) = self.sel else { return };
         let Some(m) = self.monitors.get(mi) else { return };
@@ -773,6 +786,22 @@ mod tests {
         let m = OverlayMonitor { rect: IRect::new(-100, 0, 100, 50), picture: Raster::filled(200, 100, Color::WHITE).unwrap(), name: "left".into() };
         let w = OverlayWindow { rect: IRect::new(-90, 10, 40, 20), title: "Notes".into() };
         Overlay::new(vec![m], vec![w], Purpose::Picture)
+    }
+
+    #[test]
+    fn the_last_area_is_ready_to_adjust_on_its_monitor_and_one_off_every_monitor_is_left_out() {
+        let mut o = overlay();
+        o.preselect_desktop(IRect::new(-90, 10, 40, 20));
+        // In the monitor's picture's pixels (twice the desktop's here).
+        assert_eq!(o.sel, Some((0, Rect::new(20.0, 20.0, 80.0, 40.0))));
+        assert_eq!(o.phase, Phase::Adjusting);
+        // Enter keeps it as it is.
+        o.choose(Action::Default);
+        let Outcome::Chosen { desktop, .. } = o.outcome() else { panic!("not chosen") };
+        assert_eq!(*desktop, IRect::new(-90, 10, 40, 20));
+        let mut o = overlay();
+        o.preselect_desktop(IRect::new(500, 500, 10, 10));
+        assert_eq!((o.sel, o.phase), (None, Phase::Choosing));
     }
 
     #[test]

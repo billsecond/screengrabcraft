@@ -8,6 +8,11 @@
 //! The capture service also hides the window before a capture ([`Aside`]). A hidden window has no
 //! taskbar button to be found by, so it never outlasts the service that hid it, and a program
 //! asking for the editor (the Start menu, the tray) brings it back too.
+//!
+//! On Windows the service keeps an editor ready out of sight (`--standby`, see
+//! [`launch::ready_editor`]): started hidden soon after the service, and hidden again rather than
+//! closed when its window is closed, so a capture never waits for the editor to start. It ends
+//! with the service, or when the owner turns that off.
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -16,10 +21,12 @@ mod video;
 
 use std::time::Duration;
 
-use screengrabcraft_desktop::{instance, launch, logging, store, version};
+use screengrabcraft_desktop::{instance, launch, logging, paths, store, version};
 use screengrabcraft_ui::Editor;
 
 const APP_ID: &str = "io.github.billsecond.screengrabcraft.editor";
+/// The window's place, size and state, in the settings folder (written by eframe).
+const WINDOW_FILE: &str = "editor-window.ron";
 static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.editor.png");
 
 /// How often a hidden window looks for the service that hid it.
@@ -82,6 +89,30 @@ struct App {
     editor: Editor,
     guard: instance::Guard,
     aside: Aside,
+    /// Out of sight, kept ready for the next capture (`--standby`, or its window closed).
+    standby: bool,
+    /// A frame has been drawn: the fonts and the drawing are ready.
+    warm: bool,
+    /// When the program started, until its first frame is drawn (for the log).
+    started: Option<std::time::Instant>,
+}
+
+impl App {
+    /// Whether a closed window goes out of sight instead of ending the program: while the
+    /// capture service runs and the owner hasn't turned it off.
+    fn keep_ready(&self) -> bool {
+        cfg!(target_os = "windows") && instance::running("service") && store::load_settings().keep_editor_ready
+    }
+
+    /// The window was closed (and nothing is left unsaved): out of sight, with an empty picture.
+    fn go_out_of_sight(&mut self, ctx: &egui::Context) {
+        store::save_editor_settings(&self.editor.settings);
+        self.editor.start_over();
+        self.aside = Aside::default();
+        self.standby = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        log::info!("the window was closed; the editor stays ready out of sight");
+    }
 }
 
 impl eframe::App for App {
@@ -90,17 +121,47 @@ impl eframe::App for App {
             if let [word] = args.as_slice()
                 && word.starts_with("--")
             {
+                // An editor kept ready is out of the picture already, and stays out of sight, or
+                // ends when the owner no longer wants one.
+                if self.standby {
+                    if word == launch::EDITOR_UNREADY {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    continue;
+                }
                 let (minimized, focused) = ctx.input(|i| (i.viewport().minimized.unwrap_or(false), i.viewport().focused.unwrap_or(false)));
                 self.aside.hear(word, minimized, focused).apply(ctx);
                 continue;
             }
+            self.standby = false;
             self.aside = Aside::default();
+            let t = std::time::Instant::now();
             for a in args.iter().filter(|a| !a.starts_with("--")) {
                 self.editor.open_path(ctx, a);
+            }
+            if args.iter().any(|a| !a.starts_with("--")) {
+                log::info!("opened what was handed over in {} ms", t.elapsed().as_millis());
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.standby {
+            // Asked to close (an installer, signing out): there is nothing to keep, so it does.
+            if ctx.input(|i| i.viewport().close_requested()) {
+                return;
+            }
+            // Ready for as long as the service runs; once it has gone (quit, or updating), so does this.
+            if instance::running("service") {
+                ctx.request_repaint_after(WATCH);
+            } else {
+                log::info!("the capture service has gone; the editor kept ready ends too");
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            // Nothing to do out of sight once the first frame has readied the fonts and the drawing.
+            if self.warm {
+                return;
+            }
         }
         if self.aside.hidden {
             if instance::running("service") {
@@ -110,24 +171,52 @@ impl eframe::App for App {
             }
         }
         self.editor.logic(ctx);
-        if ctx.input(|i| i.viewport().close_requested()) && !self.editor.close_requested() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if !self.editor.close_requested() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            } else if !self.standby && self.keep_ready() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.go_out_of_sight(ctx);
+            }
         }
         if self.editor.quit_requested {
             self.editor.quit_requested = false;
             if self.editor.close_requested() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                if self.keep_ready() {
+                    self.go_out_of_sight(ctx);
+                } else {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
         }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.standby && self.warm {
+            return;
+        }
         self.editor.ui(ui);
+        self.warm = true;
+        if let Some(s) = self.started.take() {
+            log::info!("start: first frame after {} ms", s.elapsed().as_millis());
+        }
+    }
+
+    /// The window's place is written now and then, not only when the program ends (a program
+    /// kept ready may end with Windows).
+    fn auto_save_interval(&self) -> Duration {
+        Duration::from_secs(10)
     }
 
     fn on_exit(&mut self) {
         store::save_editor_settings(&self.editor.settings);
         self.guard.close();
+    }
+
+    /// Only the window's place and size are kept, not egui's state (which holds, among other
+    /// things, the undo history of text being typed).
+    fn persist_egui_memory(&self) -> bool {
+        false
     }
 }
 
@@ -141,8 +230,13 @@ fn main() -> std::process::ExitCode {
         println!("usage: screengrabcraft-editor [--version] [pictures or .sgcraft projects...]");
         return std::process::ExitCode::SUCCESS;
     }
-    logging::init("editor");
-    log::info!("{}", version::line("ScreenGrabCraft Editor"));
+    let started = std::time::Instant::now();
+    logging::init();
+    let standby = args.iter().any(|a| a == launch::EDITOR_STANDBY);
+    // Kept ready by the service: one running already is enough (and isn't to be shown).
+    if standby && instance::running("editor") {
+        return std::process::ExitCode::SUCCESS;
+    }
     // Paths as the file manager gave them, made whole before they are handed to another copy.
     let files: Vec<String> =
         args.iter().filter(|a| !a.starts_with("--")).map(|a| std::fs::canonicalize(a).map(|p| simplify(&p)).unwrap_or_else(|_| a.clone())).collect();
@@ -154,21 +248,34 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::FAILURE;
         }
     };
+    // The copy that stays: its log is the one kept.
+    logging::to_file("editor");
+    log::info!("{}", version::line("ScreenGrabCraft Editor"));
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(screengrabcraft_model::EDITOR_NAME)
         .with_app_id(APP_ID)
         .with_inner_size([1320.0, 860.0])
         .with_min_inner_size([760.0, 480.0])
-        .with_drag_and_drop(true);
+        .with_drag_and_drop(true)
+        .with_visible(!standby);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON) {
         viewport = viewport.with_icon(icon);
     }
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // The window opens where it was left: the same place (and so the same monitor), the same
+    // size, maximized or not. eframe keeps that (and nothing else, see `persist_egui_memory`) in
+    // the settings folder, and brings a window whose monitor is gone back onto one that's there.
+    match paths::ensure_settings_dir().filter(|_| !paths::no_prefs()) {
+        Some(dir) => options.persistence_path = Some(dir.join(WINDOW_FILE)),
+        None => options.persist_window = false,
+    }
     screengrabcraft_desktop::graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
+    log::info!("start: graphics chosen after {} ms", started.elapsed().as_millis());
     let result = eframe::run_native(
         screengrabcraft_model::EDITOR_NAME,
         options,
         Box::new(move |cc| {
+            log::info!("start: window and graphics ready after {} ms", started.elapsed().as_millis());
             screengrabcraft_desktop::graphics::log_errors(cc);
             let ctx = cc.egui_ctx.clone();
             let settings = store::load_editor_settings();
@@ -178,7 +285,11 @@ fn main() -> std::process::ExitCode {
             for f in &files {
                 editor.open_path(&ctx, f);
             }
-            Ok(Box::new(App { editor, guard, aside: Aside::default() }))
+            log::info!("start: editor ready after {} ms", started.elapsed().as_millis());
+            if standby {
+                log::info!("kept ready out of sight for the next capture");
+            }
+            Ok(Box::new(App { editor, guard, aside: Aside::default(), standby, warm: false, started: Some(started) }))
         }),
     );
     match result {

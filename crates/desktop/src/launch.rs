@@ -16,6 +16,10 @@ pub const SERVICE_BUNDLE_ID: &str = "io.github.billsecond.screengrabcraft";
 pub const EDITOR_HIDE: &str = "--hide-for-capture";
 /// What it tells the editor once a capture is over, if no picture came of it for the editor.
 pub const EDITOR_SHOW: &str = "--show-after-capture";
+/// What it starts the editor with to keep it ready out of sight ([`ready_editor`]).
+pub const EDITOR_STANDBY: &str = "--standby";
+/// What it tells an editor kept ready when the owner no longer wants one: it ends.
+pub const EDITOR_UNREADY: &str = "--end-standby";
 
 fn exe_name(bin: &str) -> String {
     if cfg!(target_os = "windows") { format!("{bin}.exe") } else { bin.to_string() }
@@ -45,7 +49,13 @@ fn spawn(program: &Path, args: &[String]) -> Result<(), String> {
 }
 
 /// Opens the editor with `args` (files to open); a running editor takes them over.
+///
+/// A running editor is handed them straight away, in a few milliseconds; only when none runs is
+/// one started (a start would otherwise load a whole second editor just to hand them over).
 pub fn open_editor(args: &[String]) -> Result<(), String> {
+    if crate::instance::tell("editor", args) {
+        return Ok(());
+    }
     if let Some(p) = sibling(EDITOR_BIN) {
         return spawn(&p, args);
     }
@@ -61,6 +71,17 @@ pub fn open_editor(args: &[String]) -> Result<(), String> {
         return c.spawn().map(|_| ()).map_err(|e| format!("open: {e}"));
     }
     spawn(Path::new(EDITOR_BIN), args)
+}
+
+/// Starts the editor out of sight, ready for the next capture, unless one is running already.
+/// The first start of a program can take seconds (Windows checks it before it runs, and more so
+/// after an update); done here, while nobody waits, a capture opens in the editor at once.
+pub fn ready_editor() -> Result<(), String> {
+    if crate::instance::running("editor") {
+        return Ok(());
+    }
+    let p = sibling(EDITOR_BIN).ok_or("the editor isn't installed next to the capture service")?;
+    spawn(&p, &[EDITOR_STANDBY.to_string()])
 }
 
 /// Tells the editor something if one is running, without starting one; `true` if one took it.
