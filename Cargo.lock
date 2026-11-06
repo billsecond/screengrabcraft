@@ -24,6 +24,8 @@ version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3b7f7f85a7e5f68090000ed7622545829afd484d210358702ae4cb97dd0c320"
 dependencies = [
+ "enumn",
+ "serde",
  "uuid",
 ]
 
@@ -146,6 +148,7 @@ dependencies = [
  "cfg-if 1.0.5",
  "getrandom 0.3.4",
  "once_cell",
+ "serde",
  "version_check",
  "zerocopy",
 ]
@@ -1434,6 +1437,7 @@ checksum = "0656a7530b9e2841ee7a5f983965bdd9840c32f4012f759cfd44b912cced6b34"
 dependencies = [
  "bytemuck",
  "emath",
+ "serde",
 ]
 
 [[package]]
@@ -1462,6 +1466,8 @@ dependencies = [
  "pollster 1.0.1",
  "profiling",
  "raw-window-handle",
+ "ron",
+ "serde",
  "static_assertions",
  "wasm-bindgen",
  "web-sys",
@@ -1486,6 +1492,8 @@ dependencies = [
  "log",
  "nohash-hasher",
  "profiling",
+ "ron",
+ "serde",
  "smallvec",
  "unicode-segmentation",
  "web-sys",
@@ -1527,6 +1535,7 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "profiling",
  "raw-window-handle",
+ "serde",
  "smithay-clipboard",
  "web-time",
  "winit",
@@ -1577,6 +1586,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52c8d4141cf0f60fb2f7aefaf352d3ffa5171ef0ab09731c64391801e95e48f1"
 dependencies = [
  "bytemuck",
+ "serde",
 ]
 
 [[package]]
@@ -1607,6 +1617,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "enumn"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2f9ed6b3789237c8a0c1c505af1c7eb2c560df6186f01b098c3a1064ea532f38"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "epaint"
 version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,6 +1645,7 @@ dependencies = [
  "parking_lot",
  "profiling",
  "self_cell",
+ "serde",
  "skrifa",
  "smallvec",
  "unicode-general-category",
@@ -1816,6 +1838,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
 dependencies = [
  "bytemuck",
+ "serde",
 ]
 
 [[package]]
@@ -4580,6 +4603,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ron"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97b3fe97c18ff24299ea56f802c5693eb34266fb0bc8317f4e101debc8a3ceaf"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4722,7 +4758,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screengrabcraft"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "eframe",
  "egui",
@@ -4743,7 +4779,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-capture"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "async-io",
  "cpal",
@@ -4764,7 +4800,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-cli"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "screengrabcraft-capture",
  "screengrabcraft-desktop",
@@ -4777,7 +4813,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-desktop"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "arboard",
  "dirs",
@@ -4799,7 +4835,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-editor"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "cpal",
  "eframe",
@@ -4813,12 +4849,13 @@ dependencies = [
  "screengrabcraft-render",
  "screengrabcraft-ui",
  "trash",
+ "winit",
  "winresource",
 ]
 
 [[package]]
 name = "screengrabcraft-engine"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "log",
  "proptest",
@@ -4832,7 +4869,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-matte"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "log",
  "prost",
@@ -4845,7 +4882,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-media"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "crc32fast",
  "image",
@@ -4863,7 +4900,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-model"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "proptest",
  "serde",
@@ -4873,7 +4910,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-render"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -4891,7 +4928,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-ui"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -4906,7 +4943,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-web"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "eframe",
  "egui",
@@ -5085,6 +5122,9 @@ name = "smallvec"
 version = "1.16.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b3dc8af474f516a851ff4bd12db780f948b9250ad37211e4eec0bccea54e01b"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "smithay-client-toolkit"
@@ -6835,7 +6875,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.14"
+version = "0.1.17"
 dependencies = [
  "image",
  "serde_json",
