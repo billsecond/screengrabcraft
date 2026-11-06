@@ -153,6 +153,9 @@ impl<'de> Deserialize<'de> for Hotkey {
 pub enum CaptureMode {
     /// Drag out an area (or click a window).
     Region,
+    /// Drag out an area (or click a window), then adjust it before it's kept, starting from the
+    /// last area: its handles, a drag inside it, the arrow keys; Enter or a button keeps it.
+    Adjust,
     /// Click a window.
     Window,
     /// The monitor under the pointer.
@@ -173,8 +176,9 @@ pub enum CaptureMode {
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 9] = [
+    pub const ALL: [CaptureMode; 10] = [
         CaptureMode::Region,
+        CaptureMode::Adjust,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
@@ -188,6 +192,7 @@ impl CaptureMode {
     pub fn label(self) -> &'static str {
         match self {
             CaptureMode::Region => "Capture Region",
+            CaptureMode::Adjust => "Capture Region, Adjust First",
             CaptureMode::Window => "Capture Window",
             CaptureMode::Screen => "Capture Full Screen",
             CaptureMode::AllScreens => "Capture All Screens",
@@ -203,6 +208,7 @@ impl CaptureMode {
     pub fn arg(self) -> &'static str {
         match self {
             CaptureMode::Region => "region",
+            CaptureMode::Adjust => "adjust",
             CaptureMode::Window => "window",
             CaptureMode::Screen => "screen",
             CaptureMode::AllScreens => "all",
@@ -224,6 +230,8 @@ impl CaptureMode {
 #[serde(default, rename_all = "camelCase")]
 pub struct Hotkeys {
     pub region: Option<Hotkey>,
+    /// None by default: Print Screen and its variants are taken.
+    pub adjust: Option<Hotkey>,
     pub window: Option<Hotkey>,
     pub screen: Option<Hotkey>,
     pub all_screens: Option<Hotkey>,
@@ -244,6 +252,7 @@ impl Hotkeys {
             let k = |key: &str| Some(Hotkey::new(true, false, true, false, key));
             Hotkeys {
                 region: k("C"),
+                adjust: None,
                 window: k("W"),
                 screen: k("F"),
                 all_screens: None,
@@ -257,6 +266,7 @@ impl Hotkeys {
         } else {
             Hotkeys {
                 region: Some(Hotkey::new(false, false, false, false, "PrintScreen")),
+                adjust: None,
                 window: Some(Hotkey::new(false, true, false, false, "PrintScreen")),
                 screen: Some(Hotkey::new(true, false, false, false, "PrintScreen")),
                 // Ctrl+Shift+Print Screen is Windows' own; every other Print Screen key is taken.
@@ -274,6 +284,7 @@ impl Hotkeys {
     pub fn get(&self, mode: CaptureMode) -> Option<&Hotkey> {
         match mode {
             CaptureMode::Region => self.region.as_ref(),
+            CaptureMode::Adjust => self.adjust.as_ref(),
             CaptureMode::Window => self.window.as_ref(),
             CaptureMode::Screen => self.screen.as_ref(),
             CaptureMode::AllScreens => self.all_screens.as_ref(),
@@ -303,6 +314,7 @@ impl Hotkeys {
     pub fn set(&mut self, mode: CaptureMode, key: Option<Hotkey>) {
         let slot = match mode {
             CaptureMode::Region => &mut self.region,
+            CaptureMode::Adjust => &mut self.adjust,
             CaptureMode::Window => &mut self.window,
             CaptureMode::Screen => &mut self.screen,
             CaptureMode::AllScreens => &mut self.all_screens,
@@ -654,6 +666,11 @@ pub struct Settings {
     /// makes). A file from before it existed gets the default, on.
     #[serde(default = "on")]
     pub check_updates: bool,
+    /// Keep the editor running out of sight while the service runs (started soon after it, and
+    /// hidden rather than closed), so a capture opens in it at once instead of waiting for it to
+    /// start. A file from before it existed gets the default, on.
+    #[serde(default = "on")]
+    pub keep_editor_ready: bool,
 }
 
 fn on() -> bool {
@@ -689,6 +706,7 @@ impl Default for Settings {
             sound: false,
             hide_editor: true,
             check_updates: true,
+            keep_editor_ready: true,
         }
     }
 }
@@ -961,6 +979,22 @@ mod tests {
         assert!(s.after_capture.copy && s.after_capture.open_editor);
         assert!(!s.after_capture.show_bar);
         assert!(s.hide_editor);
+    }
+
+    #[test]
+    fn the_editor_is_kept_ready_unless_the_owner_says_not_and_adjusting_has_no_shortcut() {
+        assert!(Settings::default().keep_editor_ready);
+        assert!(Settings::from_json(r#"{"hideEditor":true}"#).keep_editor_ready, "a file from before it existed");
+        assert!(!Settings::from_json(r#"{"keepEditorReady":false}"#).keep_editor_ready);
+        for mac in [false, true] {
+            let keys = Hotkeys::defaults_for(mac);
+            assert_eq!(keys.get(CaptureMode::Adjust), None);
+        }
+        assert_eq!(CaptureMode::from_arg("adjust"), Some(CaptureMode::Adjust));
+        let mut keys = Hotkeys::default();
+        let k = Hotkey::new(true, true, false, false, "A");
+        keys.set(CaptureMode::Adjust, Some(k.clone()));
+        assert_eq!(keys.get(CaptureMode::Adjust), Some(&k));
     }
 
     #[test]

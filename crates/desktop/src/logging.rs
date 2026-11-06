@@ -1,11 +1,13 @@
 //! The log: `log::` records to standard error and to `<settings>/logs/<program>.log`.
 //!
 //! A program started from the tray or at sign-in has no terminal, so the file is what a bug
-//! report can attach. Each start moves the previous log to `<program>.1.log` (and that one to
-//! `.2`), so the log of a run that crashed survives the next start. The file stops growing at
-//! 16 MB. `RUST_LOG` sets the level (`debug`, `warn`, …); by default ScreenGrabCraft's own
-//! crates log at info and everything else at warn. Runs without settings log to standard error
-//! only.
+//! report can attach. [`init`] logs to standard error; [`to_file`] adds the file once the program
+//! knows it is the copy that stays (a copy that only hands its arguments to a running one and
+//! exits writes no file, so it doesn't push the running copy's log aside). That moves the
+//! previous log to `<program>.1.log` (and that one to `.2`), so the log of a run that crashed
+//! survives the next start. The file stops growing at 16 MB. `RUST_LOG` sets the level (`debug`,
+//! `warn`, …); by default ScreenGrabCraft's own crates log at info and everything else at warn.
+//! Runs without settings log to standard error only.
 
 use std::fs::File;
 use std::io::Write;
@@ -65,30 +67,35 @@ fn level(text: &str) -> Option<LevelFilter> {
 
 static LOGGER: OnceLock<Logger> = OnceLock::new();
 
-/// Starts logging for the program `name` (the log file's name).
-pub fn init(name: &str) {
+/// Starts logging, to standard error.
+pub fn init() {
     let env = std::env::var("RUST_LOG").ok().and_then(|v| level(&v));
     let (ours, others) = match env {
         Some(l) => (l, l),
         None => (LevelFilter::Info, LevelFilter::Warn),
     };
-    let file = if crate::paths::no_prefs() {
-        None
-    } else {
-        crate::paths::log_dir().and_then(|dir| {
-            std::fs::create_dir_all(&dir).ok()?;
-            let current = dir.join(format!("{name}.log"));
-            let older = |n: u32| dir.join(format!("{name}.{n}.log"));
-            let _ = std::fs::rename(older(1), older(2));
-            let _ = std::fs::rename(&current, older(1));
-            File::create(&current).ok().map(|f| (f, 0u64))
-        })
-    };
-    let logger = LOGGER.get_or_init(|| Logger { file: Mutex::new(file), ours, others });
+    let logger = LOGGER.get_or_init(|| Logger { file: Mutex::new(None), ours, others });
     if log::set_logger(logger).is_ok() {
         log::set_max_level(ours.max(others));
     }
     install_panic_hook();
+}
+
+/// Logs to the file of the program `name` too, from now on (once; after [`init`]).
+pub fn to_file(name: &str) {
+    let Some(logger) = LOGGER.get() else { return };
+    let mut guard = logger.file.lock().unwrap_or_else(PoisonError::into_inner);
+    if guard.is_some() || crate::paths::no_prefs() {
+        return;
+    }
+    *guard = crate::paths::log_dir().and_then(|dir| {
+        std::fs::create_dir_all(&dir).ok()?;
+        let current = dir.join(format!("{name}.log"));
+        let older = |n: u32| dir.join(format!("{name}.{n}.log"));
+        let _ = std::fs::rename(older(1), older(2));
+        let _ = std::fs::rename(&current, older(1));
+        File::create(&current).ok().map(|f| (f, 0u64))
+    });
 }
 
 /// Reports every panic through the log (a panic in a worker thread would otherwise vanish).
