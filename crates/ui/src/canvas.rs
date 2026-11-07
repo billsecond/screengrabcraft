@@ -128,6 +128,8 @@ const HANDLE: f32 = 10.0;
 const GRAB: f32 = 13.0;
 /// How near a line or a border a press takes hold of its annotation, in screen points.
 const NEAR: f32 = 6.0;
+/// How big a tool drawn as the pointer is (the eyedropper, the Fill tool's pail), in screen points.
+const POINTER: f32 = 30.0;
 
 fn snap_angle(from: Pt, to: Pt) -> Pt {
     let d = to.sub(from);
@@ -345,6 +347,26 @@ impl Editor {
         }
         self.tiles = tiles;
         self.texture_key = key;
+        // Kept for the eyedropper: the picture exactly as it is shown.
+        self.shown = Some((w, h, pix.take()));
+    }
+
+    /// The colour shown at a picture point (annotations included), for the eyedropper.
+    pub(crate) fn colour_at(&self, p: Pt) -> Option<screengrabcraft_model::Color> {
+        let (w, h, data) = self.shown.as_ref()?;
+        if !(p.x.is_finite() && p.y.is_finite()) || p.x < 0.0 || p.y < 0.0 {
+            return None;
+        }
+        let (x, y) = (p.x.floor() as u64, p.y.floor() as u64);
+        if x >= u64::from(*w) || y >= u64::from(*h) {
+            return None;
+        }
+        let i = usize::try_from(y.checked_mul(u64::from(*w))?.checked_add(x)?.checked_mul(4)?).ok()?;
+        let px = data.get(i..i.checked_add(4)?)?;
+        let (r, g, b, a) = (px.first()?, px.get(1)?, px.get(2)?, px.get(3)?);
+        // Stored with the colour multiplied by its alpha.
+        let un = |v: u8| if *a == 0 { 0 } else { ((u16::from(v) * 255 + u16::from(*a) / 2) / u16::from(*a)).min(255) as u8 };
+        Some(screengrabcraft_model::Color { r: un(*r), g: un(*g), b: un(*b), a: *a })
     }
 
     fn checker(&mut self, ctx: &egui::Context) -> egui::TextureId {
@@ -436,6 +458,37 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         ctx.set_cursor_icon(CursorIcon::Grab);
     }
 
+    // ---- the eyedropper: while it's out, a click on the picture takes the colour there and
+    // nothing else happens; Esc or the right button puts it away ----
+    if crate::eyedropper::active(&ctx) {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) || resp.secondary_clicked() {
+            crate::eyedropper::cancel(&ctx);
+            return;
+        }
+        if let Some(h) = hover
+            && resp.hovered()
+        {
+            let colour = ed.colour_at(ed.view.to_image(h));
+            match colour {
+                Some(c) => {
+                    ctx.set_cursor_icon(CursorIcon::None);
+                    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tool-pointer")));
+                    // The colour under the tip, beside the eyedropper.
+                    let swatch = egui::Rect::from_min_size(h + vec2(14.0, 6.0), vec2(22.0, 22.0));
+                    p.rect_filled(swatch, 4.0, crate::to_color32(c));
+                    p.rect_stroke(swatch, 4.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Outside);
+                    p.rect_stroke(swatch.expand(1.5), 5.0, Stroke::new(1.0, Color32::from_black_alpha(200)), StrokeKind::Outside);
+                    crate::icons::paint_pointer(&p, h, crate::icons::Icon::Eyedropper, POINTER);
+                    if resp.clicked_by(egui::PointerButton::Primary) || resp.drag_stopped_by(egui::PointerButton::Primary) {
+                        crate::eyedropper::picked(&ctx, c);
+                    }
+                }
+                None => ctx.set_cursor_icon(CursorIcon::NotAllowed),
+            }
+        }
+        return;
+    }
+
     let to_img = |p: Pos2, v: &View| v.to_image(p);
     let image_size = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
 
@@ -460,7 +513,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 None if ed.crop.is_some_and(|c| c != ed.session.doc.bounds() && c.contains(to_img(h, &ed.view))) => CursorIcon::Move,
                 None => CursorIcon::Crosshair,
             },
-            Tool::Fill if on_picture => CursorIcon::Crosshair,
+            // The pail is drawn as the pointer, its drop on the spot that's filled.
+            Tool::Fill if on_picture => {
+                if resp.hovered() {
+                    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tool-pointer")));
+                    crate::icons::paint_pointer(&p, h, crate::icons::Icon::Fill, POINTER);
+                }
+                CursorIcon::None
+            }
             Tool::Fill => CursorIcon::Default,
             // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
             Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),

@@ -29,6 +29,16 @@ had before 0.1.19, and what is still missing.
 | Stamps | seven stamps drawn in code | (a larger library and your own pictures as stamps: still missing) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |
 
+## What 0.1.21 changes
+
+- **An eyedropper in every colour menu** (fill, border, text, text outline, line, ring, and the
+  Fill tool's colour): "Pick from the picture", then a click on the picture takes the colour
+  shown there, annotations included, for that colour. A swatch beside the pointer shows the
+  colour under it; Esc or the right button puts the eyedropper away.
+- **The pointer shows the tool**: over the picture the eyedropper and the Fill tool's pail are
+  the pointer, their tip on the spot that's picked or filled, white with a dark edge so they show
+  on any colour. Windows has no such pointers, so the editor draws them and hides its own.
+
 ## What 0.1.20 changes
 
 - **Every tool is on the tool bar**, at full size: no More menu. A window too narrow for one row

@@ -52,6 +52,30 @@ pub enum Icon {
     Move,
     More,
     Effects,
+    Eyedropper,
+}
+
+/// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
+/// the eyedropper, the drop falling from the Fill tool's pail.
+pub fn hot_spot(icon: Icon) -> (f32, f32) {
+    match icon {
+        Icon::Eyedropper => (2.6, 17.4),
+        Icon::Fill => (16.5, 16.8),
+        _ => (10.0, 10.0),
+    }
+}
+
+/// Draws `icon` as the pointer, `size` points square, its tip ([`hot_spot`]) on `at`: white with
+/// a dark edge, so it shows over any colour.
+pub fn paint_pointer(p: &Painter, at: Pos2, icon: Icon, size: f32) {
+    let (hx, hy) = hot_spot(icon);
+    let u = size / 20.0;
+    let rect = Rect::from_min_size(pos2(at.x - hx * u, at.y - hy * u), vec2(size, size));
+    let edge = Color32::from_black_alpha(200);
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)] {
+        paint(p, rect.translate(vec2(dx, dy)), icon, edge);
+    }
+    paint(p, rect, icon, Color32::WHITE);
 }
 
 /// Draws `icon` in `rect` (square-ish) in `color`.
@@ -193,6 +217,15 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 line(at(x - r, y), at(x + r, y));
                 line(at(x, y - r), at(x, y + r));
             }
+        }
+        Icon::Eyedropper => {
+            // A dropper held slanting: its squeeze bulb at the top right, a band, and the glass
+            // tube down to its tip at the bottom left.
+            p.line_segment([at(2.8, 17.2), at(10.6, 9.4)], Stroke::new(w * 1.5, color));
+            line(at(8.4, 7.4), at(12.6, 11.6));
+            line(at(11.0, 9.0), at(12.6, 7.4));
+            p.circle_filled(at(14.4, 5.6), 3.4 * u, color);
+            p.circle_filled(at(2.6, 17.4), 1.1 * u, color);
         }
         Icon::Fill => {
             // A pail tipped to the right, half full, with a drop running off its lip.

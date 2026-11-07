@@ -1758,3 +1758,117 @@ fn a_callout_left_without_text_stays_a_text_box_left_empty_goes() {
     assert!(!h.state().session.doc.objects.iter().any(|o| o.shape.kind() == Kind::Text), "the empty text box went");
     assert!(the_callout(&h).is_some(), "the callout stays");
 }
+
+// ---- the eyedropper, and tools drawn as the pointer ----
+
+#[test]
+fn the_eyedropper_takes_a_colour_from_the_picture_for_the_selection() {
+    let mut ed = editor();
+    let green = Color::rgba(0x2E, 0x9E, 0x44, 255);
+    let rect = ed
+        .session
+        .doc
+        .add(
+            Shape::Rect { rect: screengrabcraft_model::Rect::new(250.0, 150.0, 120.0, 100.0), radius: 0.0 },
+            screengrabcraft_model::Style { fill: green, stroke: green, ..Kind::Rect.default_style() },
+        )
+        .unwrap();
+    let callout = ed
+        .session
+        .doc
+        .add(
+            Shape::Callout {
+                rect: screengrabcraft_model::Rect::new(30.0, 30.0, 150.0, 60.0),
+                tail: screengrabcraft_model::Pt::new(40.0, 130.0),
+                text: "Hi".into(),
+                form: screengrabcraft_model::CalloutForm::Rounded,
+            },
+            Kind::Callout.default_style(),
+        )
+        .unwrap();
+    ed.session.select(vec![callout]);
+    let mut h = ready(ed, Tool::Select);
+    let before = h.state().session.doc.objects.len();
+    h.get_by_label("Fill colour").click();
+    h.run_steps(3);
+    h.get_by_label("Eyedropper: pick a colour from the picture").click();
+    h.run_steps(3);
+    assert!(crate::eyedropper::active(&h.ctx), "the eyedropper is out");
+    // Over the picture the eyedropper is the pointer.
+    let p = at(&h, 310.0, 200.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "drawn by the editor");
+    crate::quick_tests::shot(&mut h, "eyedropper");
+    click_at(&mut h, p);
+    h.run_steps(2);
+    let ed = h.state();
+    assert!(!crate::eyedropper::active(&h.ctx), "put away once a colour is taken");
+    assert_eq!(ed.session.doc.get(callout).map(|o| o.style.fill), Some(green), "the callout's fill is the colour clicked");
+    assert_eq!(ed.session.doc.objects.len(), before, "nothing drawn");
+    assert_eq!(ed.session.selected(), vec![callout], "the selection stays");
+    assert!(ed.session.doc.get(rect).is_some());
+    // One undo step puts the fill back.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    assert_ne!(h.state().session.doc.get(callout).map(|o| o.style.fill), Some(green));
+}
+
+#[test]
+fn esc_puts_the_eyedropper_away_and_the_tool_works_again() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Rect));
+    crate::eyedropper::start(&h.ctx, "Outline colour");
+    let p = at(&h, 100.0, 100.0);
+    click_at(&mut h, p);
+    assert!(h.state().session.doc.objects.is_empty(), "a click with the eyedropper draws nothing");
+    // That click took a colour; out again, then Esc.
+    crate::eyedropper::start(&h.ctx, "Outline colour");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!crate::eyedropper::active(&h.ctx));
+    let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 160.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "the tool draws again");
+}
+
+#[test]
+fn the_fill_tool_is_a_pail_over_the_picture() {
+    let mut h = ready(editor(), Tool::Fill);
+    let p = at(&h, 200.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "the pail is drawn as the pointer");
+    crate::quick_tests::shot(&mut h, "fill-pointer");
+    let p = at(&h, -30.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default, "off the picture, the usual pointer");
+}
+
+#[test]
+fn the_eyedropper_reads_the_colour_as_shown() {
+    let mut ed = editor();
+    ed.session
+        .doc
+        .add(
+            Shape::Rect { rect: screengrabcraft_model::Rect::new(0.0, 0.0, 50.0, 50.0), radius: 0.0 },
+            screengrabcraft_model::Style { fill: Color::rgba(10, 20, 30, 255), stroke: Color::rgba(10, 20, 30, 255), ..Kind::Rect.default_style() },
+        )
+        .unwrap();
+    let mut h = ready(ed, Tool::Select);
+    h.run_steps(2);
+    let ed = h.state();
+    assert_eq!(ed.colour_at(screengrabcraft_model::Pt::new(25.0, 25.0)), Some(Color::rgba(10, 20, 30, 255)));
+    assert_eq!(ed.colour_at(screengrabcraft_model::Pt::new(300.0, 200.0)), Some(Color::WHITE));
+    for junk in [
+        screengrabcraft_model::Pt::new(-1.0, 5.0),
+        screengrabcraft_model::Pt::new(400.0, 5.0),
+        screengrabcraft_model::Pt::new(5.0, 300.0),
+        screengrabcraft_model::Pt::new(f32::NAN, 1.0),
+        screengrabcraft_model::Pt::new(f32::INFINITY, 1.0),
+    ] {
+        assert_eq!(ed.colour_at(junk), None, "{junk:?}");
+    }
+}

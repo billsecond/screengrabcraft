@@ -134,6 +134,9 @@ pub struct Editor {
     pub view: View,
     pub(crate) renderer: Renderer,
     pub(crate) tiles: Vec<crate::canvas::Tile>,
+    /// The picture as last drawn on the canvas (width, height, its pixels with the colour
+    /// multiplied by alpha), for the eyedropper.
+    pub(crate) shown: Option<(u32, u32, Vec<u8>)>,
     pub(crate) texture_key: (u64, Option<ObjectId>),
     pub(crate) checker: Option<egui::TextureHandle>,
     pub(crate) drag: Option<Drag>,
@@ -197,6 +200,7 @@ impl Editor {
             view: View::default(),
             renderer: Renderer::new(),
             tiles: Vec::new(),
+            shown: None,
             texture_key: (0, None),
             checker: None,
             drag: None,
@@ -795,7 +799,10 @@ impl Editor {
             self.run(ctx, "edit.delete", json!({}));
         }
         if plain(Key::Escape) {
-            if self.crop.is_some() {
+            if crate::eyedropper::active(ctx) {
+                // Only the eyedropper goes: the selection it was taking a colour for stays.
+                crate::eyedropper::cancel(ctx);
+            } else if self.crop.is_some() {
                 self.crop = None;
             } else if self.drag.is_some() {
                 self.session.cancel();

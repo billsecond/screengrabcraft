@@ -60,10 +60,22 @@ fn paint_colour(p: &egui::Painter, r: egui::Rect, c: Color) {
     }
 }
 
-/// The colours a colour button offers: the palette, none when allowed, and any other colour in
-/// the picker. `keep_alpha` keeps a see-through colour see-through (the highlighter's).
-fn colour_choices(ui: &mut Ui, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
+/// The colours a colour button (called `name`) offers: the palette, none when allowed, the
+/// eyedropper, and any other colour in the picker. `keep_alpha` keeps a see-through colour
+/// see-through (the highlighter's).
+fn colour_choices(ui: &mut Ui, name: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
     let mut changed = false;
+    ui.horizontal(|ui| {
+        let tip = "Eyedropper: pick a colour from the picture";
+        let resp = crate::icons::button_sized(ui, Icon::Eyedropper, tip, false, true, 26.0);
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+        if resp.clicked() {
+            crate::eyedropper::start(ui.ctx(), name);
+            ui.close();
+        }
+        ui.label(egui::RichText::new("Pick from the picture").size(12.0));
+    });
+    ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(5.0, 5.0);
         if allow_none && swatch(ui, Color::TRANSPARENT, c.a == 0, 24.0).on_hover_text("None").clicked() {
@@ -115,17 +127,28 @@ fn prop_button(ui: &mut Ui, name: &str, caption: &str, face: &dyn Fn(&egui::Pain
 
 /// A colour button and its menu.
 fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
+    let mut changed = false;
+    // A colour taken from the picture with this button's eyedropper.
+    if let Some(p) = crate::eyedropper::take(ui.ctx(), name) {
+        *c = if keep_alpha { p.with_alpha(c.a.max(60)) } else { p };
+        changed = true;
+    }
     let shown = *c;
+    let picking = crate::eyedropper::for_button(ui.ctx()).is_some_and(|b| b == name);
     let resp = prop_button(ui, name, caption, &|p, r| {
         paint_colour(p, r, shown);
         p.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_black_alpha(50)), StrokeKind::Inside);
     });
-    let mut changed = false;
+    if picking {
+        // The eyedropper is out for this one: it says so.
+        let t = Tokens::get(ui.ctx());
+        ui.painter().rect_stroke(resp.rect.shrink2(vec2(0.0, 8.0)).translate(vec2(0.0, -8.0)), 5.0, Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_width(204.0);
         ui.label(egui::RichText::new(name).strong());
         ui.add_space(4.0);
-        changed = colour_choices(ui, c, allow_none, keep_alpha);
+        changed |= colour_choices(ui, name, c, allow_none, keep_alpha);
     });
     changed
 }

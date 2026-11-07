@@ -107,6 +107,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
   tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+- **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
+  eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
   or an ellipse), **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow

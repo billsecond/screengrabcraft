@@ -10,6 +10,7 @@ pub mod background;
 pub mod canvas;
 pub mod dialogs;
 pub mod editor;
+pub mod eyedropper;
 pub mod icons;
 pub mod overlay;
 pub mod playback;
