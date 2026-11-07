@@ -79,6 +79,13 @@
     <util:CloseApplication Id="CloseScreenGrabCraft" Target="screengrabcraft.exe"
         CloseMessage="yes" TerminateProcess="0" RebootPrompt="no"
         Condition="Installed OR WIX_UPGRADE_DETECTED" />
+    <!-- The service keeps an editor ready out of its sight (a hidden window) and that one ends
+         with the service anyway; asked to close, it does at once. An editor the owner has open
+         closes too once its work is saved (it saves as it goes). It is asked, never terminated,
+         so nothing unsaved is lost. -->
+    <util:CloseApplication Id="CloseEditor" Target="screengrabcraft-editor.exe"
+        CloseMessage="yes" RebootPrompt="no"
+        Condition="Installed OR WIX_UPGRADE_DETECTED" />
     <InstallExecuteSequence>
       <Custom Action="override Wix4CloseApplications_$(sys.BUILDARCHSHORT)" After="InstallInitialize"
           Condition="VersionNT &gt; 400" />
