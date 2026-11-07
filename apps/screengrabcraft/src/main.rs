@@ -175,6 +175,13 @@ fn main() -> ExitCode {
         options,
         Box::new(move |cc| {
             graphics::log_errors(cc);
+            // eframe shows the anchor window after its first frame, made hidden or not, and Windows
+            // keeps it on a monitor (at the top left), where it can't be see-through everywhere:
+            // cloaked, it is never seen. Nor animated.
+            screengrabcraft_desktop::cloak::calm_windows();
+            if cfg!(target_os = "windows") && !screengrabcraft_desktop::cloak::cloak(cc, true) {
+                log::warn!("the anchor window couldn't be cloaked; it may be seen at the top left of a monitor");
+            }
             screengrabcraft_ui::setup(&cc.egui_ctx, theme);
             let mut svc = app::Service::new(cc.egui_ctx.clone(), guard, settings);
             let tray_missing = svc.tray.as_ref().is_none_or(|t| !t.available());

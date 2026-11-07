@@ -5,9 +5,10 @@
 //! One editor window at a time: started again (a capture handed over by the capture service, a
 //! file opened from the file manager), it hands the files to the window already open and exits.
 //!
-//! The capture service also hides the window before a capture ([`Aside`]). A hidden window has no
-//! taskbar button to be found by, so it never outlasts the service that hid it, and a program
-//! asking for the editor (the Start menu, the tray) brings it back too.
+//! The capture service also has the window step aside before a capture ([`Aside`]): on Windows
+//! it is cloaked, there but not seen, at once and without Windows' animations; elsewhere hidden.
+//! It never outlasts the service that sent it aside, and a program asking for the editor (the
+//! Start menu, the tray) brings it back too.
 //!
 //! On Windows the service keeps an editor ready out of sight (`--standby`, see
 //! [`launch::ready_editor`]): started hidden soon after the service, and hidden again rather than
@@ -21,7 +22,7 @@ mod video;
 
 use std::time::Duration;
 
-use screengrabcraft_desktop::{instance, launch, logging, paths, store, version};
+use screengrabcraft_desktop::{cloak, instance, launch, logging, paths, store, version};
 use screengrabcraft_ui::Editor;
 
 const APP_ID: &str = "io.github.billsecond.screengrabcraft.editor";
@@ -46,14 +47,9 @@ enum Move {
     Stay,
 }
 
-/// Where a window steps aside to, in points: off every monitor. Hiding a window plays Windows'
-/// animation, and showing it again another; moving it is instant.
-const PARK: f32 = -16000.0;
-
 /// The window out of the picture for a capture, and whether the owner was working in it. A
 /// window the owner minimized isn't in the picture, and stays minimized; one kept ready out of
-/// sight steps aside too, shown off the screens, so that it appears at once if the capture
-/// comes to it.
+/// sight steps aside too, shown but cloaked, so that it appears at once if the capture comes to it.
 #[derive(Default)]
 struct Aside {
     parked: bool,
@@ -98,8 +94,12 @@ struct App {
     editor: Editor,
     guard: instance::Guard,
     aside: Aside,
-    /// Where the window was before it stepped aside, in physical pixels.
-    place: Option<egui::Pos2>,
+    /// The window is cloaked, having stepped aside.
+    cloaked: bool,
+    /// The window is to be uncloaked on the next frame, once a capture for it is drawn.
+    reveal: bool,
+    /// The window's taskbar button was taken away while it was kept ready.
+    off_taskbar: bool,
     /// Out of sight, kept ready for the next capture (`--standby`, or its window closed).
     standby: bool,
     /// A frame has been drawn: the fonts and the drawing are ready.
@@ -115,47 +115,40 @@ impl App {
         cfg!(target_os = "windows") && instance::running("service") && store::load_settings().keep_editor_ready
     }
 
-    /// The window's physical pixels per egui point now (they change between monitors).
-    fn scale(ctx: &egui::Context) -> f32 {
-        ctx.input(|i| i.viewport().native_pixels_per_point.unwrap_or(1.0)) * ctx.zoom_factor()
-    }
-
-    /// Out of the picture for a capture, at once: moved off every monitor and off the taskbar
-    /// (not hidden, which Windows animates). Kept ready out of sight, it is shown there too, so
-    /// that coming back is a move as well. A window whose place isn't known is hidden instead.
+    /// Out of the picture for a capture, at once: cloaked, so that Windows shows nothing of it
+    /// although it stays where it is, maximized or not, and is drawn (moving it would un-maximize
+    /// it, and hiding it is a taskbar button gone). Kept ready out of sight, it is shown cloaked,
+    /// off the taskbar, so that it appears at once if the capture comes to it. Where cloaking isn't
+    /// to be had it is hidden (without Windows' animation, see `cloak::calm_windows`).
     fn park(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
-        let Some(outer) = ctx.input(|i| i.viewport().outer_rect) else {
+        cloak::calm_windows();
+        self.cloaked = cloak::cloak(frame, true);
+        if !self.cloaked {
             if !self.standby {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             }
             return;
-        };
-        let s = Self::scale(ctx);
-        self.place = Some(egui::pos2(outer.min.x * s, outer.min.y * s));
-        taskbar_button(frame, false);
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(PARK, PARK)));
+        }
         if self.standby {
+            taskbar_button(frame, false);
+            self.off_taskbar = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
     }
 
-    /// Back where it was before the capture. Kept ready, it goes out of sight again first (off
-    /// the screens, so its going isn't seen either).
+    /// Back as it was before the capture. Kept ready, it is hidden again first, at once (a command
+    /// would hide it only after this frame), so that uncloaking it shows nothing.
     fn unpark(&mut self, ctx: &egui::Context, frame: &eframe::Frame, focus: bool) {
-        let place = self.place.take();
-        if self.standby {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-        }
-        match place {
-            Some(p) => {
-                let s = Self::scale(ctx);
-                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(p.x / s, p.y / s)));
+        if std::mem::take(&mut self.cloaked) {
+            if self.standby
+                && let Some(w) = frame.winit_window()
+            {
+                w.set_visible(false);
             }
-            // Hidden the usual way, for want of a place.
-            None if !self.standby => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true)),
-            None => {}
+            cloak::cloak(frame, false);
+        } else if !self.standby {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
         }
-        taskbar_button(frame, true);
         if focus && !self.standby {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
@@ -174,6 +167,11 @@ impl App {
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // A capture for the editor was drawn on the last frame, cloaked: now it's seen.
+        if std::mem::take(&mut self.reveal) {
+            cloak::cloak(frame, false);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
         for args in self.guard.handed() {
             if let [word] = args.as_slice()
                 && word.starts_with("--")
@@ -191,12 +189,15 @@ impl eframe::App for App {
                 }
                 continue;
             }
-            // A capture for the editor: back from aside (kept ready, it's already shown off the
-            // screens, so it appears at once), then shown with the keyboard.
-            if self.aside.parked {
-                self.aside = Aside::default();
-                self.standby = false;
-                self.unpark(ctx, frame, false);
+            // A capture for the editor: drawn this frame while still cloaked (kept ready, it's
+            // already shown, cloaked), and uncloaked on the next, so that it appears at once and
+            // with the capture; then it has the keyboard. Hidden instead, it's shown.
+            if self.aside.parked && std::mem::take(&mut self.cloaked) {
+                self.reveal = true;
+                ctx.request_repaint();
+            }
+            if std::mem::take(&mut self.off_taskbar) {
+                taskbar_button(frame, true);
             }
             self.standby = false;
             self.aside = Aside::default();
@@ -273,9 +274,9 @@ impl eframe::App for App {
     }
 
     /// The window's place is written now and then, not only when the program ends (a program
-    /// kept ready may end with Windows); never while it has stepped aside, off the screens.
+    /// kept ready may end with Windows). Stepping aside doesn't move it.
     fn auto_save_interval(&self) -> Duration {
-        if self.place.is_some() { Duration::from_secs(24 * 3600) } else { Duration::from_secs(10) }
+        Duration::from_secs(10)
     }
 
     fn on_exit(&mut self) {
@@ -347,6 +348,9 @@ fn main() -> std::process::ExitCode {
         Box::new(move |cc| {
             log::info!("start: window and graphics ready after {} ms", started.elapsed().as_millis());
             screengrabcraft_desktop::graphics::log_errors(cc);
+            // The window is made, not shown yet (eframe shows it after the first frame): Windows
+            // won't animate it opening, closing or stepping aside.
+            cloak::calm_windows();
             let ctx = cc.egui_ctx.clone();
             let settings = store::load_editor_settings();
             let mut editor = Editor::new(Box::new(services::DesktopServices::new(ctx.clone())), settings);
@@ -360,7 +364,17 @@ fn main() -> std::process::ExitCode {
             if standby {
                 log::info!("kept ready out of sight for the next capture");
             }
-            Ok(Box::new(App { editor, guard, aside: Aside::default(), place: None, standby, warm: false, started: Some(started) }))
+            Ok(Box::new(App {
+                editor,
+                guard,
+                aside: Aside::default(),
+                cloaked: false,
+                reveal: false,
+                off_taskbar: false,
+                standby,
+                warm: false,
+                started: Some(started),
+            }))
         }),
     );
     match result {

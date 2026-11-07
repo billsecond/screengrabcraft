@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
-use screengrabcraft_desktop::{clipboard, graphics, instance, launch, paths, store};
+use screengrabcraft_desktop::{clipboard, cloak, graphics, instance, launch, paths, store};
 use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, RecordArea, RecorderOptions, Settings};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
@@ -23,8 +23,8 @@ use crate::tray::{Item, Tray};
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
 /// Whether the anchor window stays shown once shown (see `logic`).
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
-/// How long the editor is given to step aside before the screen is frozen: a frame to move off the
-/// screens (it moves rather than hides, which Windows would animate), and one for the screen to show it.
+/// How long the editor is given to step aside before the screen is frozen: a frame to be cloaked
+/// (at once, without Windows' animations), and one for the screen to show it gone.
 const EDITOR_ASIDE: Duration = Duration::from_millis(100);
 /// How long after the service starts the editor is readied (see `keep_editor_ready`).
 const READY_FIRST: Duration = Duration::from_secs(10);
@@ -59,6 +59,8 @@ pub struct OverlayRun {
     pub pointer: Option<(i32, i32)>,
     /// The frames the overlay's windows have been drawn in (see [`overlay_builder`]).
     pub frames: u32,
+    /// The windows are shown (on Windows, from the second frame).
+    pub seen: bool,
     /// Kept until the windows have been drawn, so a crash in opening them switches to OpenGL.
     pub opening: graphics::Opening,
 }
@@ -577,7 +579,7 @@ impl Service {
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
                 let opening = graphics::Opening::start();
-                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, opening });
+                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening });
             }
         }
     }
@@ -823,10 +825,17 @@ impl Service {
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
+            if need {
+                // Cloaked from the start (see `main`); again, in case Windows let go of it.
+                cloak::cloak(frame, true);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(need));
             self.root_shown = need;
             ctx.request_repaint();
         }
+        // No window of the service's opens or closes with Windows' animation (the popups' are
+        // turned off once they're made: they may still be seen opening).
+        cloak::calm_windows();
         // Timers: countdown seconds, notices and recordings tick without input.
         if self.countdown.is_some()
             || self.recording.is_some()
@@ -885,20 +894,28 @@ impl Service {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if let Some(run) = self.overlay.as_mut() {
+            // On Windows the windows are made hidden, Windows' animations are turned off for them,
+            // and they're shown on the next frame: so they neither fade in nor fade out.
+            let shown = run.frames > 0 || !cfg!(target_os = "windows");
             for i in 0..run.monitors.len() {
                 let Some(m) = run.monitors.get(i) else { continue };
-                let builder = overlay_builder(m, &self.screens, run.frames > 0);
+                let builder = overlay_builder(m, &self.screens, run.frames > 0).with_visible(shown);
                 ctx.show_viewport_immediate(ViewportId::from_hash_of(("overlay", i)), builder, |ui, _| run.overlay.show_monitor(ui, i));
             }
+            cloak::calm_windows();
             run.frames = run.frames.saturating_add(1);
-            if run.frames == 1
+            if shown
+                && !run.seen
                 && let Some(t) = self.asked
             {
-                log::info!("capture: the overlay was drawn {} ms after the capture began", t.elapsed().as_millis());
+                log::info!("capture: the overlay was shown {} ms after the capture began", t.elapsed().as_millis());
             }
+            run.seen = shown;
             if run.frames >= 3 {
                 // Drawn, and drawn again after being raised.
                 run.opening.opened();
+            } else {
+                ctx.request_repaint();
             }
         }
         crate::popups::countdown(self, &ctx);
