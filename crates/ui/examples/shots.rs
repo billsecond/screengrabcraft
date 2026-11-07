@@ -60,7 +60,12 @@ fn main() -> Result<(), String> {
     add(&mut doc, Shape::Blur { rect: Rect::new(340.0, 280.0, 200.0, 60.0) });
     let callout = add(
         &mut doc,
-        Shape::Callout { rect: Rect::new(560.0, 360.0, 260.0, 90.0), tail: Pt::new(480.0, 300.0), text: "Recent captures live here".into() },
+        Shape::Callout {
+            rect: Rect::new(560.0, 360.0, 260.0, 90.0),
+            tail: Pt::new(480.0, 300.0),
+            text: "Recent captures live here".into(),
+            form: screengrabcraft_model::CalloutForm::Rounded,
+        },
     );
     ed.session.replace(doc);
     if let Some(id) = callout {
@@ -135,6 +140,8 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         camera_supported: true,
         system_sound: true,
         system_sound_platform: true,
+        speakers: vec!["Speakers".to_string()],
+        default_speaker: Some("Speakers".to_string()),
     };
     let mut fixed = Settings::default();
     fixed.recorder.area = RecordArea::Fixed;
@@ -158,7 +165,7 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         let mut h = Harness::builder().with_size(recorder::SIZE).build_ui_state(
             move |ui, (s, v, m): &mut (Settings, RecorderView, MicLevel)| {
                 screengrabcraft_ui::theme::apply(ui.ctx(), theme);
-                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m);
+                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m, &recorder::MicLevel::Off);
             },
             state,
         );

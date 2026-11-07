@@ -31,8 +31,9 @@ const GAP: u64 = RATE as u64 / 20;
 pub enum AudioSource {
     /// A microphone by name, or the system's default one.
     Microphone(Option<String>),
-    /// What the computer plays.
-    SystemSound,
+    /// What the computer plays, through a speaker (an output device) by name or the system's
+    /// default one.
+    SystemSound(Option<String>),
 }
 
 /// Some sound: samples from `first` (per channel, at 48 kHz from the start), interleaved.
@@ -70,6 +71,25 @@ pub fn microphones() -> Vec<String> {
             Vec::new()
         }
     }
+}
+
+/// The speakers (sound outputs) by name: what the computer plays through each can be recorded
+/// on Windows.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub fn speakers() -> Vec<String> {
+    match cpal::default_host().output_devices() {
+        Ok(ds) => ds.map(|d| device_name(&d)).collect(),
+        Err(e) => {
+            log::warn!("listing speakers: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// The system's default speaker, by name.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub fn default_speaker() -> Option<String> {
+    cpal::default_host().default_output_device().map(|d| device_name(&d))
 }
 
 /// Whether what the computer plays can be recorded here.
@@ -224,7 +244,10 @@ fn run(
 ) {
     let host = cpal::default_host();
     let device = match &source {
-        AudioSource::SystemSound => host.default_output_device(),
+        AudioSource::SystemSound(Some(name)) => {
+            host.output_devices().ok().and_then(|mut ds| ds.find(|d| device_name(d) == *name)).or_else(|| host.default_output_device())
+        }
+        AudioSource::SystemSound(None) => host.default_output_device(),
         AudioSource::Microphone(Some(name)) => {
             host.input_devices().ok().and_then(|mut ds| ds.find(|d| device_name(d) == *name)).or_else(|| host.default_input_device())
         }
@@ -232,14 +255,14 @@ fn run(
     };
     let Some(device) = device else {
         let _ = ready.send(Err(match source {
-            AudioSource::SystemSound => "there is no sound output to record".to_string(),
+            AudioSource::SystemSound(_) => "there is no sound output to record".to_string(),
             AudioSource::Microphone(_) => "there is no microphone".to_string(),
         }));
         return;
     };
     let name = device_name(&device);
     let config = match source {
-        AudioSource::SystemSound => device.default_output_config(),
+        AudioSource::SystemSound(_) => device.default_output_config(),
         AudioSource::Microphone(_) => device.default_input_config(),
     };
     let config = match config {
@@ -347,6 +370,16 @@ pub fn microphones() -> Vec<String> {
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn system_sound_supported() -> bool {
     false
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn speakers() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn default_speaker() -> Option<String> {
+    None
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]

@@ -23,47 +23,59 @@ pub struct Recorder {
     view: RecorderView,
     devices: RecorderDevices,
     meter: Option<Meter>,
+    /// The computer's sound heard for its meter.
+    sound_meter: Option<Meter>,
 }
 
 impl Recorder {
     pub fn open() -> Recorder {
-        Recorder { focus: true, view: RecorderView::default(), devices: find_devices(), meter: None }
+        Recorder { focus: true, view: RecorderView::default(), devices: find_devices(), meter: None, sound_meter: None }
     }
 
-    /// The meter's reading. The microphone is opened when it's wanted (on another thread: it
-    /// takes a moment) and let go as soon as it isn't.
+    /// The microphone meter's reading.
     fn level(&mut self, want: bool, name: &Option<String>, wake: &egui::Context) -> MicLevel {
-        if !want {
-            self.meter = None;
-            return MicLevel::Off;
-        }
-        if self.meter.as_ref().is_none_or(|m| m.name != *name) {
-            self.meter = Some(Meter::open(name.clone(), wake.clone()));
-        }
-        let Some(m) = self.meter.as_mut() else { return MicLevel::Off };
-        if let MeterState::Opening(rx) = &m.state {
-            match rx.try_recv() {
-                Ok(Ok(cap)) => m.state = MeterState::Open(cap),
-                Ok(Err(e)) => m.state = MeterState::Failed(e),
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => m.state = MeterState::Failed("the microphone didn't start".to_string()),
-            }
-        }
-        match &m.state {
-            MeterState::Opening(_) => MicLevel::Starting,
-            MeterState::Open(cap) => {
-                // Only how loud it is matters: what it heard is let go.
-                drop(cap.take());
-                MicLevel::Level(cap.level())
-            }
-            MeterState::Failed(e) => MicLevel::Failed(e.clone()),
-        }
+        read(&mut self.meter, want, AudioSource::Microphone(name.clone()), wake)
+    }
+
+    /// The computer's sound meter's reading.
+    fn sound_level(&mut self, want: bool, name: &Option<String>, wake: &egui::Context) -> MicLevel {
+        read(&mut self.sound_meter, want, AudioSource::SystemSound(name.clone()), wake)
     }
 }
 
-/// The microphone heard for the meter.
+/// A meter's reading. The device is opened when it's wanted (on another thread: it takes a
+/// moment) and let go as soon as it isn't.
+fn read(meter: &mut Option<Meter>, want: bool, source: AudioSource, wake: &egui::Context) -> MicLevel {
+    if !want {
+        *meter = None;
+        return MicLevel::Off;
+    }
+    if meter.as_ref().is_none_or(|m| m.source != source) {
+        *meter = Some(Meter::open(source, wake.clone()));
+    }
+    let Some(m) = meter.as_mut() else { return MicLevel::Off };
+    if let MeterState::Opening(rx) = &m.state {
+        match rx.try_recv() {
+            Ok(Ok(cap)) => m.state = MeterState::Open(cap),
+            Ok(Err(e)) => m.state = MeterState::Failed(e),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => m.state = MeterState::Failed("the sound device didn't start".to_string()),
+        }
+    }
+    match &m.state {
+        MeterState::Opening(_) => MicLevel::Starting,
+        MeterState::Open(cap) => {
+            // Only how loud it is matters: what it heard is let go.
+            drop(cap.take());
+            MicLevel::Level(cap.level())
+        }
+        MeterState::Failed(e) => MicLevel::Failed(e.clone()),
+    }
+}
+
+/// A sound device heard for a meter.
 struct Meter {
-    name: Option<String>,
+    source: AudioSource,
     state: MeterState,
 }
 
@@ -74,19 +86,19 @@ enum MeterState {
 }
 
 impl Meter {
-    fn open(name: Option<String>, wake: egui::Context) -> Meter {
+    fn open(source: AudioSource, wake: egui::Context) -> Meter {
         let (tx, rx) = channel();
-        let source = AudioSource::Microphone(name.clone());
-        let spawned = std::thread::Builder::new().name("mic-meter".into()).spawn(move || {
+        let opened = source.clone();
+        let spawned = std::thread::Builder::new().name("sound-meter".into()).spawn(move || {
             // Let go at once if the window has gone meanwhile (the send fails, the capture is dropped).
-            let _ = tx.send(AudioCapture::start(source, Instant::now()).map_err(|e| e.to_string()));
+            let _ = tx.send(AudioCapture::start(opened, Instant::now()).map_err(|e| e.to_string()));
             wake.request_repaint();
         });
         let state = match spawned {
             Ok(_) => MeterState::Opening(rx),
             Err(e) => MeterState::Failed(e.to_string()),
         };
-        Meter { name, state }
+        Meter { source, state }
     }
 }
 
@@ -114,6 +126,8 @@ fn find_devices() -> RecorderDevices {
         camera_supported: cfg!(any(target_os = "windows", target_os = "macos")),
         system_sound: audio::system_sound_supported(),
         system_sound_platform: cfg!(target_os = "windows"),
+        speakers: audio::speakers(),
+        default_speaker: audio::default_speaker(),
     }
 }
 
@@ -124,6 +138,7 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     }
     let p = &svc.settings.production;
     let level = r.level(p.microphone && r.view.listen, &p.microphone_name, ctx);
+    let sound = r.sound_level(p.system_sound && r.devices.system_sound && r.view.listen, &p.system_sound_name, ctx);
     let mut builder = ViewportBuilder::default()
         .with_title("ScreenGrabCraft Recorder")
         .with_app_id(APP_ID)
@@ -144,7 +159,7 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
         }
         let mut rec = svc.settings.recorder.clone();
         let mut sources = svc.settings.production.clone();
-        if let Some(c) = recorder::recorder_ui(ui, &mut r.view, &mut rec, &mut sources, &r.devices, &level) {
+        if let Some(c) = recorder::recorder_ui(ui, &mut r.view, &mut rec, &mut sources, &r.devices, &level, &sound) {
             choice = Some(c);
         }
         if rec != svc.settings.recorder || sources != svc.settings.production {
