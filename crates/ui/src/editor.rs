@@ -53,9 +53,10 @@ impl Tool {
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
     ];
 
-    /// The tool bar's own tools, after Favorites and before More. The Shape button stands for
-    /// the rectangle and the ellipse.
-    pub const MAIN: [Tool; 7] = [
+    /// Every tool on the tool bar after Favorites, each with its own button, at full size: first
+    /// Arrow, Text, Callout, Shape, Stamp, Fill and Move, then the rest. The Shape button stands
+    /// for the rectangle and the ellipse.
+    pub const BAR: [Tool; 16] = [
         Tool::Draw(Kind::Arrow),
         Tool::Draw(Kind::Text),
         Tool::Draw(Kind::Callout),
@@ -63,10 +64,6 @@ impl Tool {
         Tool::Draw(Kind::Stamp),
         Tool::Fill,
         Tool::Select,
-    ];
-
-    /// The tools under More, in order.
-    pub const MORE: [Tool; 9] = [
         Tool::Draw(Kind::Line),
         Tool::Draw(Kind::Pen),
         Tool::Draw(Kind::Highlight),
@@ -98,11 +95,6 @@ impl Tool {
     /// Whether it is the Shape button's (a rectangle or an ellipse).
     pub fn is_shape(self) -> bool {
         matches!(self, Tool::Draw(Kind::Rect | Kind::Ellipse))
-    }
-
-    /// Whether it is under More.
-    pub fn is_more(self) -> bool {
-        Tool::MORE.contains(&self)
     }
 }
 
@@ -153,6 +145,9 @@ pub struct Editor {
     pub(crate) video_epoch: u64,
     /// The text annotation being typed into, and its text as typed.
     pub(crate) editing: Option<ObjectId>,
+    /// The annotation whose box is being reshaped while it was typed into: typing goes on once
+    /// the handle is let go.
+    pub(crate) resume_editing: Option<ObjectId>,
     pub(crate) edit_buffer: String,
     last_dark: Option<bool>,
     pub(crate) crop: Option<Rect>,
@@ -209,6 +204,7 @@ impl Editor {
             video: None,
             video_epoch: 0,
             editing: None,
+            resume_editing: None,
             edit_buffer: String::new(),
             last_dark: None,
             crop: None,
@@ -1110,7 +1106,7 @@ impl Editor {
             .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
             .show(ui, |ui| {
-                let side = bar_side(ui.available_width());
+                let side = BAR_BUTTON;
                 let bar = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), side));
                 let row = |layout: egui::Layout| egui::UiBuilder::new().max_rect(bar).layout(layout);
                 // At the left: the files and undo.
@@ -1172,16 +1168,26 @@ impl Editor {
                     })
                     .response
                     .rect;
-                // In the middle (as near the middle as the two sides leave room for): the tools.
+                // The tools: in the middle (as near it as the two sides leave room for) when they
+                // fit there, else on a row of their own below, never smaller.
                 let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP;
-                let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
-                let middle = egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side));
-                ui.scope_builder(egui::UiBuilder::new().max_rect(middle).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-                    ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
+                let middle = if left.right() + BAR_SPACE + width + BAR_SPACE <= right.left() {
+                    let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
+                    egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side))
+                } else {
+                    // Too narrow even for a row of its own, the row goes on to another.
+                    let w = width.min(bar.width());
+                    let x = (bar.center().x - w / 2.0).max(bar.left());
+                    let rows = (width / bar.width().max(side)).ceil().clamp(1.0, 4.0);
+                    egui::Rect::from_min_size(egui::pos2(x, bar.bottom() + 2.0 * BAR_GAP), vec2(w, rows * side + (rows - 1.0) * BAR_GAP))
+                };
+                let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
+                ui.scope_builder(egui::UiBuilder::new().max_rect(middle).layout(layout), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(BAR_GAP, BAR_GAP);
                     if bar_button(ui, side, Icon::Favorites, "Favorites", self.tool == Tool::Favorites, true).clicked() {
                         self.set_tool(Tool::Favorites);
                     }
-                    for tool in Tool::MAIN {
+                    for tool in Tool::BAR {
                         let Some((icon, label, key)) = tool.info() else { continue };
                         let (icon, tip, on) = if tool.is_shape() {
                             // The Shape button draws whichever of the two was picked last.
@@ -1193,7 +1199,6 @@ impl Editor {
                             self.set_tool(if tool.is_shape() { self.shape_tool() } else { tool });
                         }
                     }
-                    self.more_button(ui, side);
                 });
             });
     }
@@ -1205,44 +1210,6 @@ impl Editor {
         }
         let round = self.settings.options.get(&Kind::Rect).and_then(|o| o.round) == Some(true);
         Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect })
-    }
-
-    /// More: the other tools, in a menu. While one of them is the tool, the button shows it.
-    fn more_button(&mut self, ui: &mut Ui, side: f32) {
-        let picked = if self.tool.is_more() { self.tool.info() } else { None };
-        let (icon, tip) = match picked {
-            Some((icon, label, key)) => (icon, format!("More tools: {label} ({})", key.name())),
-            None => (Icon::More, "More tools".to_string()),
-        };
-        let resp = bar_button(ui, side, icon, &tip, picked.is_some(), true);
-        // A small arrow at the lower right says it opens a menu.
-        let t = Tokens::get(ui.ctx());
-        let r = resp.rect;
-        let (tip_x, tip_y, k) = (r.right() - 5.0, r.bottom() - 5.0, 3.0);
-        ui.painter().add(egui::Shape::convex_polygon(
-            vec![egui::pos2(tip_x - 2.0 * k, tip_y - k), egui::pos2(tip_x, tip_y - k), egui::pos2(tip_x - k, tip_y)],
-            t.muted,
-            egui::Stroke::NONE,
-        ));
-        egui::Popup::menu(&resp).show(|ui| {
-            ui.set_min_width(200.0);
-            for tool in Tool::MORE {
-                let Some((icon, label, key)) = tool.info() else { continue };
-                let on = self.tool == tool;
-                let item = ui.horizontal(|ui| {
-                    let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
-                    icons::paint(ui.painter(), r, icon, if on { t.accent } else { t.text });
-                    let resp = ui.add(egui::Button::selectable(on, label).shortcut_text(key.name()));
-                    // Named by the tool alone (the key is shown beside it).
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label));
-                    resp
-                });
-                if item.inner.clicked() {
-                    self.set_tool(tool);
-                    ui.close();
-                }
-            }
-        });
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
@@ -1390,29 +1357,15 @@ impl Editor {
     }
 }
 
-/// How big the tool bar's buttons are, in points.
+/// How big the tool bar's buttons are, in points (always: a narrow window puts the tools on a
+/// row of their own rather than make them smaller).
 pub const BAR_BUTTON: f32 = 40.0;
-/// The smallest they get in a narrow window.
-pub const BAR_BUTTON_MIN: f32 = 28.0;
 /// The room between the tool bar's buttons.
 const BAR_GAP: f32 = 2.0;
 /// The least room between the tools in the middle and the buttons at either side.
 const BAR_SPACE: f32 = 16.0;
-/// The buttons in the middle of the tool bar: Favorites, the main tools and More.
-const TOOLS_ON_BAR: usize = 1 + Tool::MAIN.len() + 1;
-
-/// How big the tool bar's buttons are on a bar `width` points wide: full size when they all fit,
-/// smaller (down to [`BAR_BUTTON_MIN`]) when they don't, so the tools in the middle don't run
-/// into the buttons at either side.
-pub fn bar_side(width: f32) -> f32 {
-    // What isn't a square button: the zoom's percentage, the separators and the space round
-    // them, the gaps between the buttons, the room either side of the tools and a little to spare.
-    const OTHER: f32 = 220.0;
-    // Capture, Open, Save, Undo, Redo, Delete; the tools; Copy, Zoom out, Zoom in, Fit.
-    let buttons = (6 + TOOLS_ON_BAR + 4) as f32;
-    let side = (width - OTHER) / buttons;
-    if side.is_finite() { side.clamp(BAR_BUTTON_MIN, BAR_BUTTON) } else { BAR_BUTTON }
-}
+/// The tools on the tool bar: Favorites and every other tool.
+const TOOLS_ON_BAR: usize = 1 + Tool::BAR.len();
 
 /// A button on the tool bar, `side` points square, named by its tooltip.
 fn bar_button(ui: &mut Ui, side: f32, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {

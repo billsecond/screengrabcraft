@@ -1695,25 +1695,66 @@ fn the_fill_tool_fills_a_shape_clicked_inside() {
     assert_eq!(h.state().session.doc.get(empty).map(|o| o.style.fill), Some(Color::TRANSPARENT));
 }
 
+/// The callout as it is now, and whether its text is being typed.
+fn the_callout(h: &Harness<'_, Editor>) -> Option<(screengrabcraft_model::ObjectId, screengrabcraft_model::Rect, bool)> {
+    let ed = h.state();
+    ed.session.doc.objects.iter().find_map(|o| match &o.shape {
+        Shape::Callout { rect, .. } => Some((o.id, *rect, ed.editing == Some(o.id))),
+        _ => None,
+    })
+}
+
 #[test]
-fn the_tool_bar_buttons_get_smaller_rather_than_run_into_the_zoom() {
-    for width in [1000.0, 1100.0, 1200.0, 1280.0, 1400.0] {
-        let mut h = Harness::builder().with_size(egui::vec2(width, 800.0)).build_ui_state(
-            |ui, ed: &mut Editor| {
-                let ctx = ui.ctx().clone();
-                ed.logic(&ctx);
-                ed.ui(ui);
-            },
-            editor(),
-        );
-        h.run_steps(4);
-        let last = h.get_by_label("Delete the selection (Del)").rect();
-        let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
-        assert!(last.max.x + 4.0 <= zoom_out.min.x, "at {width}: {last:?} runs into {zoom_out:?}");
-        let fill = h.get_by_label("Fill (F)").rect();
-        assert!(fill.width() >= crate::editor::BAR_BUTTON_MIN - 0.5, "at {width}: {fill:?}");
-        if width >= 1400.0 {
-            assert!((fill.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "full size when there's room: {fill:?}");
+fn a_callout_just_drawn_can_be_made_bigger_and_typing_goes_on() {
+    // The owner drew a callout and pulled its corner: it vanished (an empty text was removed).
+    for tool in [Tool::Draw(Kind::Callout), Tool::Select] {
+        let mut h = ready(editor(), Tool::Draw(Kind::Callout));
+        let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 140.0));
+        drag(&mut h, a, b);
+        let (id, before, typing) = the_callout(&h).expect("a callout drawn");
+        assert!(typing, "typing into it at once");
+        crate::quick_tests::shot(&mut h, "callout-drawn");
+        if tool == Tool::Select {
+            // Picked the Move tool meanwhile: the callout is still being typed into.
+            h.state_mut().tool = Tool::Select;
         }
+        let corner = at(&h, before.right(), before.bottom());
+        let further = at(&h, before.right() + 80.0, before.bottom() + 40.0);
+        drag(&mut h, corner, further);
+        let (still, after, typing) = the_callout(&h).expect("the callout is still there");
+        assert_eq!(still, id);
+        assert!(after.w > before.w + 60.0 && after.h > before.h + 20.0, "{tool:?}: bigger: {before:?} -> {after:?}");
+        assert!(typing, "{tool:?}: typing goes on once the corner is let go");
+        crate::quick_tests::shot(&mut h, "callout-resized");
+        // Typed into, then left: it keeps the text.
+        h.event(egui::Event::Text("Look here".to_string()));
+        h.run_steps(3);
+        crate::quick_tests::shot(&mut h, "callout-typed");
+        let away = at(&h, 380.0, 280.0);
+        h.state_mut().set_tool(Tool::Select);
+        click_at(&mut h, away);
+        let ed = h.state();
+        assert_eq!(ed.session.doc.get(id).and_then(|o| o.shape.text()).map(str::to_string), Some("Look here".to_string()));
     }
+}
+
+#[test]
+fn a_callout_left_without_text_stays_a_text_box_left_empty_goes() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Callout));
+    let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 140.0));
+    drag(&mut h, a, b);
+    let away = at(&h, 380.0, 280.0);
+    h.state_mut().set_tool(Tool::Select);
+    click_at(&mut h, away);
+    assert!(the_callout(&h).is_some_and(|(_, _, typing)| !typing), "the empty callout is still there");
+    // An empty text box has nothing to show, and goes.
+    h.state_mut().set_tool(Tool::Draw(Kind::Text));
+    h.run_steps(1);
+    let (a, b) = (at(&h, 220.0, 160.0), at(&h, 360.0, 220.0));
+    drag(&mut h, a, b);
+    assert!(h.state().session.doc.objects.iter().any(|o| o.shape.kind() == Kind::Text), "a text box drawn");
+    h.state_mut().set_tool(Tool::Select);
+    click_at(&mut h, away);
+    assert!(!h.state().session.doc.objects.iter().any(|o| o.shape.kind() == Kind::Text), "the empty text box went");
+    assert!(the_callout(&h).is_some(), "the callout stays");
 }

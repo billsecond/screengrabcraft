@@ -9,7 +9,7 @@ use crate::editor::{Editor, Tool};
 use crate::tests::{at, drag, editor, harness, ready};
 
 /// Saves what the window looks like, when asked (`SGC_SHOTS=folder`).
-fn shot(h: &mut Harness<'_, Editor>, name: &str) {
+pub(crate) fn shot(h: &mut Harness<'_, Editor>, name: &str) {
     if let Ok(dir) = std::env::var("SGC_SHOTS")
         && let Ok(img) = h.render()
     {
@@ -28,51 +28,95 @@ fn callout(ed: &mut Editor) -> screengrabcraft_model::ObjectId {
     ed.session.doc.add(shape, Kind::Callout.default_style()).unwrap()
 }
 
-#[test]
-fn the_tool_bar_has_the_main_tools_in_the_middle_and_the_rest_under_more() {
-    let mut h = harness(editor());
+/// Every tool's button on the tool bar, in order.
+const BAR: [&str; 17] = [
+    "Favorites",
+    "Arrow (A)",
+    "Text (T)",
+    "Callout (C)",
+    "Shape (R, O)",
+    "Stamp (G)",
+    "Fill (F)",
+    "Move (V)",
+    "Line (L)",
+    "Pen (P)",
+    "Highlighter (H)",
+    "Step number (N)",
+    "Blur (B)",
+    "Pixelate (X)",
+    "Spotlight (S)",
+    "Magnify (M)",
+    "Crop (K)",
+];
+
+fn sized(width: f32) -> Harness<'static, Editor> {
+    let mut h = Harness::builder().with_size(egui::vec2(width, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        editor(),
+    );
     h.run_steps(4);
-    let labels = ["Favorites", "Arrow (A)", "Text (T)", "Callout (C)", "Shape (R, O)", "Stamp (G)", "Fill (F)", "Move (V)", "More tools"];
-    let rects: Vec<egui::Rect> = labels.iter().map(|l| h.get_by_label(l).rect()).collect();
-    for (pair, names) in rects.windows(2).zip(labels.windows(2)) {
+    h
+}
+
+#[test]
+fn every_tool_is_on_the_tool_bar_at_full_size_in_the_middle() {
+    let mut h = sized(1600.0);
+    let rects: Vec<egui::Rect> = BAR.iter().map(|l| h.get_by_label(l).rect()).collect();
+    for (pair, names) in rects.windows(2).zip(BAR.windows(2)) {
         if let [a, b] = pair {
             assert!(a.max.x <= b.min.x && (a.center().y - b.center().y).abs() < 0.5, "{names:?} in order on one row");
         }
     }
-    // In the middle of the bar (the window is 1200 wide, less the panel… the bar is the whole width).
+    for (r, name) in rects.iter().zip(BAR) {
+        assert!((r.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "{name} full size: {r:?}");
+    }
     let (first, last) = (rects.first().unwrap(), rects.last().unwrap());
     let middle = (first.min.x + last.max.x) / 2.0;
-    assert!((middle - 600.0).abs() < 40.0, "centred: {middle}");
-    // The others are not on the bar.
-    for gone in ["Line (L)", "Pen (P)", "Blur (B)", "Crop (K)", "Rectangle (R)", "Ellipse (O)"] {
-        assert!(h.query_by_label(gone).is_none(), "{gone} is under More");
-    }
+    assert!((middle - 800.0).abs() < 60.0, "centred: {middle}");
     // The files at the left, copying and the zoom at the right, none of them over the tools.
-    let save = h.get_by_label("Save (Ctrl+S)").rect();
+    let save = h.get_by_label("Delete the selection (Del)").rect();
     let copy = h.get_by_label("Copy the picture (Ctrl+C)").rect();
     assert!(save.max.x < first.min.x && last.max.x < copy.min.x, "{save:?} {first:?} {last:?} {copy:?}");
+    assert!(h.query_by_label("More tools").is_none(), "nothing is tucked away");
     shot(&mut h, "tool-bar");
 }
 
 #[test]
-fn more_holds_the_other_tools_and_shows_the_one_picked() {
-    let mut h = harness(editor());
-    h.run_steps(4);
-    click(&mut h, "More tools");
-    for name in ["Line", "Pen", "Highlighter", "Step number", "Blur", "Pixelate", "Spotlight", "Magnify", "Crop"] {
-        h.get_by_label(name);
+fn a_narrow_window_puts_the_tools_on_a_row_of_their_own_not_smaller() {
+    for width in [800.0, 1000.0, 1200.0, 1400.0] {
+        let h = sized(width);
+        let delete = h.get_by_label("Delete the selection (Del)").rect();
+        let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
+        let canvas_top = h.state().view.to_screen(screengrabcraft_model::Pt::new(0.0, 0.0)).y;
+        for name in BAR {
+            let r = h.get_by_label(name).rect();
+            assert!((r.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "at {width}: {name} full size: {r:?}");
+            assert!(!r.intersects(delete) && !r.intersects(zoom_out), "at {width}: {name} {r:?} over {delete:?} or {zoom_out:?}");
+            assert!(r.max.x <= width && r.min.x >= 0.0, "at {width}: {name} in the window: {r:?}");
+            assert!(r.max.y <= canvas_top, "at {width}: {name} above the picture: {r:?} (picture at {canvas_top})");
+        }
     }
-    shot(&mut h, "more-menu");
-    click(&mut h, "Pen");
-    assert_eq!(h.state().tool, Tool::Draw(Kind::Pen));
-    assert!(h.query_by_label("Highlighter").is_none(), "the menu closed");
-    h.get_by_label("More tools: Pen (P)");
-    // Its key still picks it, and a main tool puts More back as it was.
-    h.key_press(egui::Key::B);
+}
+
+#[test]
+fn every_tool_button_picks_its_tool_and_shows_it_picked() {
+    let mut h = sized(1600.0);
+    for (name, tool) in [
+        ("Pen (P)", Tool::Draw(Kind::Pen)),
+        ("Blur (B)", Tool::Draw(Kind::Blur)),
+        ("Crop (K)", Tool::Crop),
+        ("Callout (C)", Tool::Draw(Kind::Callout)),
+    ] {
+        click(&mut h, name);
+        assert_eq!(h.state().tool, tool, "{name}");
+    }
+    h.key_press(egui::Key::H);
     h.run_steps(2);
-    h.get_by_label("More tools: Blur (B)");
-    click(&mut h, "Arrow (A)");
-    h.get_by_label("More tools");
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Highlight));
 }
 
 #[test]

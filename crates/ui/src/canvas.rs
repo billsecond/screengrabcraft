@@ -276,16 +276,25 @@ impl Editor {
         self.session.begin("Type Text");
     }
 
-    /// Stops typing: empty text removes the annotation.
+    /// Stops typing. A text box left empty goes (there is nothing of it to see); a callout stays,
+    /// with or without text, as a shape.
     pub(crate) fn stop_editing(&mut self) {
         let Some(id) = self.editing.take() else { return };
-        let empty = self.session.doc.get(id).and_then(|o| o.shape.text()).is_none_or(|t| t.trim().is_empty());
+        let empty = self.session.doc.get(id).is_none_or(|o| matches!(&o.shape, Shape::Text { text, .. } if text.trim().is_empty()));
         if empty {
             self.session.doc.remove(&[id]);
             self.session.selection.retain(|s| *s != id);
             self.session.touch();
         }
         self.session.commit();
+    }
+
+    /// Stops typing for a while, keeping the annotation however empty: its box is being
+    /// reshaped, and typing goes on after (see `resume_editing`).
+    fn pause_editing(&mut self) {
+        if self.editing.take().is_some() {
+            self.session.commit();
+        }
     }
 
     fn upload(&mut self, ctx: &egui::Context) {
@@ -487,7 +496,16 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 
     // ---- a press and drag ----
     if resp.drag_started_by(egui::PointerButton::Primary) {
-        ed.stop_editing();
+        // Pulling a handle of the box being typed into reshapes it, and the typing goes on after
+        // (a callout or a text box just drawn has no text yet); any other drag ends the typing.
+        let typed = ed.editing.filter(|e| press.and_then(|p| ed.handle_at(p)).is_some_and(|(id, _)| id == *e));
+        match typed {
+            Some(id) => {
+                ed.pause_editing();
+                ed.resume_editing = Some(id);
+            }
+            None => ed.stop_editing(),
+        }
         let Some(start_s) = press else { return };
         let start = to_img(start_s, &ed.view);
         // Nothing starts outside the picture, though a handle on its edge is still a handle.
@@ -655,7 +673,12 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     }
 
     if resp.drag_stopped() {
+        let resume = ed.resume_editing.take();
         match ed.drag.take() {
+            Some(Drag::Handle { id, .. }) if resume == Some(id) => {
+                ed.session.commit();
+                ed.start_editing(id);
+            }
             Some(Drag::Create { id, kind, .. }) => {
                 let keep = ed.session.doc.get(id).is_some_and(|o| big_enough(&o.shape));
                 if keep {

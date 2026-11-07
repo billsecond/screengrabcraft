@@ -8,7 +8,7 @@ had before 0.1.19, and what is still missing.
 
 | Area | What's there |
 |---|---|
-| Tool bar, top centre | Favorites, Arrow, Text, Callout, Shape, Stamp, Fill, Move, then a More menu with the other tools |
+| Tool bar, top centre | Favorites, Arrow, Text, Callout, Shape, Stamp, Fill, Move, then every other tool, each with its own button (ScreenGrabCraft shows them all rather than tuck some under More) |
 | Quick Styles, right | a theme menu, then a grid of ready-made looks for the current tool (for callouts: four colours, tails to the lower left or right, arrow-shaped callouts); a look can be starred as a favourite |
 | Tool properties, under it | fill colour, outline colour, a shape picker, a "more" grid, and two sliders with number boxes (thickness, opacity) |
 | Under the panel | an Effects button and a Properties button |
@@ -28,6 +28,14 @@ had before 0.1.19, and what is still missing.
 | Text | our own fonts, colours, a box behind the text | no outline round the letters, no ready-made overlays (titles, captions on a see-through box) |
 | Stamps | seven stamps drawn in code | (a larger library and your own pictures as stamps: still missing) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |
+
+## What 0.1.20 changes
+
+- **Every tool is on the tool bar**, at full size: no More menu. A window too narrow for one row
+  puts the tools on a row of their own under the file buttons and the zoom, never smaller.
+- **A callout keeps its box while it's resized**: one just drawn (still empty) no longer vanishes
+  when a handle is pulled, and typing goes on once the handle is let go. A callout left without
+  text stays, as a shape; only an empty text box goes.
 
 ## What 0.1.19 changes
 

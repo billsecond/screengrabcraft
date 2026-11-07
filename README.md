@@ -101,7 +101,8 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 Annotations stay editable (move them, resize them, restyle them) until you flatten or export:
 
 - The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
-  **Fill** and **Move** in the middle, and the other tools under **More**. Every tool keeps its key.
+  **Fill** and **Move** in the middle, then every other tool, each with its own full-size button
+  (a narrow window gives the tools a row of their own). Every tool keeps its key.
 - **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
