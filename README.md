@@ -111,6 +111,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
   with the text in it) with a tail set to point down left, down right, left, right, up or down,
   and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
+  Text overlays: an outline round the letters, a shadow, a filled or see-through box behind
+  them, and big titles, each a quick style of the Text tool.
 - **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
   information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).

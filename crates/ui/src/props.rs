@@ -20,7 +20,23 @@ fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
     macro_rules! field {
         ($($f:ident),*) => { $( if old.$f != new.$f { target.$f = new.$f; } )* };
     }
-    field!(stroke, fill, width, opacity, shadow, dashed, font_size, bold, italic, mono, text_color, align, strength);
+    field!(
+        stroke,
+        fill,
+        width,
+        opacity,
+        shadow,
+        dashed,
+        font_size,
+        bold,
+        italic,
+        mono,
+        text_color,
+        align,
+        strength,
+        text_outline,
+        text_outline_width
+    );
 }
 
 fn swatch(ui: &mut Ui, c: Color, selected: bool, size: f32) -> egui::Response {
@@ -83,20 +99,18 @@ fn colour_choices(ui: &mut Ui, c: &mut Color, allow_none: bool, keep_alpha: bool
 /// a short caption under it. `name` is what it is called (its tooltip).
 fn prop_button(ui: &mut Ui, name: &str, caption: &str, face: &dyn Fn(&egui::Painter, egui::Rect)) -> egui::Response {
     let t = Tokens::get(ui.ctx());
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        let (rect, resp) = ui.allocate_exact_size(vec2(44.0, 34.0), Sense::click());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-        let p = ui.painter();
-        p.rect_filled(rect, 5.0, if resp.hovered() { t.hover } else { t.control });
-        p.rect_stroke(rect, 5.0, Stroke::new(1.0, t.control_border), StrokeKind::Inside);
-        face(p, egui::Rect::from_min_max(rect.min + vec2(6.0, 6.0), rect.max - vec2(15.0, 6.0)));
-        let (x, y) = (rect.right() - 9.0, rect.center().y);
-        p.add(egui::Shape::convex_polygon(vec![pos2(x - 3.0, y - 2.0), pos2(x + 3.0, y - 2.0), pos2(x, y + 2.0)], t.muted, Stroke::NONE));
-        ui.label(egui::RichText::new(caption).size(11.0).color(t.muted));
-        resp.on_hover_text(name)
-    })
-    .inner
+    // One block, the caption under the button, so a row of them wraps like any other widgets.
+    let (block, resp) = ui.allocate_exact_size(vec2(44.0, 34.0 + 16.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+    let rect = egui::Rect::from_min_size(block.min, vec2(44.0, 34.0));
+    let p = ui.painter();
+    p.rect_filled(rect, 5.0, if resp.hovered() { t.hover } else { t.control });
+    p.rect_stroke(rect, 5.0, Stroke::new(1.0, t.control_border), StrokeKind::Inside);
+    face(p, egui::Rect::from_min_max(rect.min + vec2(6.0, 6.0), rect.max - vec2(15.0, 6.0)));
+    let (x, y) = (rect.right() - 9.0, rect.center().y);
+    p.add(egui::Shape::convex_polygon(vec![pos2(x - 3.0, y - 2.0), pos2(x + 3.0, y - 2.0), pos2(x, y + 2.0)], t.muted, Stroke::NONE));
+    p.text(pos2(rect.left(), rect.bottom() + 2.0), egui::Align2::LEFT_TOP, caption, egui::FontId::proportional(11.0), t.muted);
+    resp.on_hover_text(name)
 }
 
 /// A colour button and its menu.
@@ -318,8 +332,10 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     let picker = matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Stamp | Kind::Spotlight);
     let shadow = !matches!(kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Highlight);
     let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Pen | Kind::Callout);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing = vec2(5.0, 0.0);
+    // Text and callouts can have an outline round their letters too.
+    let letters = matches!(kind, Kind::Text | Kind::Callout);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
         if fill {
             let (name, caption) = if kind == Kind::Text { ("Background colour", "Fill") } else { ("Fill colour", "Fill") };
             colour_button(ui, name, caption, &mut s.fill, true, false);
@@ -331,6 +347,9 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         }
         if kind.has_text() {
             colour_button(ui, "Text colour", "Text", &mut s.text_color, false, false);
+        }
+        if letters {
+            colour_button(ui, "Text outline colour", "Outline", &mut s.text_outline, true, false);
         }
         if picker {
             shape_button(ed, ui, kind, first.map(|o| &o.shape));
@@ -372,6 +391,9 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
                     }
                 }
             });
+        }
+        if letters && s.text_outline.a > 0 {
+            slider(ui, "Text outline", &mut s.text_outline_width, 0.0..=16.0, 0.5, " px");
         }
         ui.add_space(4.0);
     }

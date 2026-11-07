@@ -36,12 +36,12 @@ pub(crate) fn tool_look(ed: &Editor, kind: Kind) -> QuickStyle {
     if kind.family() == Kind::Rect {
         options.round = Some(kind == Kind::Ellipse);
     }
-    QuickStyle { kind: kind.family(), style: ed.tool_style(kind), options }
+    QuickStyle::new(kind.family(), ed.tool_style(kind), options)
 }
 
 /// An annotation's look.
 pub(crate) fn object_look(o: &Object) -> QuickStyle {
-    QuickStyle { kind: o.shape.kind().family(), style: o.style, options: ShapeOptions::of(&o.shape) }
+    QuickStyle::new(o.shape.kind().family(), o.style, ShapeOptions::of(&o.shape))
 }
 
 /// The first selected annotation of `kind`'s tool, if one is selected.
@@ -107,7 +107,10 @@ fn paint_page(base: &mut Raster) {
 /// A look drawn on a small made-up picture: what its tool would draw with it.
 pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> Option<Raster> {
     let (w, h) = PREVIEW;
-    let mut base = Raster::filled(w, h, PAPER).ok()?;
+    // A light outline round letters only shows on something darker than paper.
+    let light_outline = look.style.has_text_outline() && look.style.text_outline.luminance() > 0.5;
+    let paper = if light_outline { Color::rgb(0x8C, 0x91, 0x9A) } else { PAPER };
+    let mut base = Raster::filled(w, h, paper).ok()?;
     if matches!(look.kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Magnify | Kind::Highlight) {
         paint_page(&mut base);
     }
@@ -131,9 +134,12 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
             if o.round.unwrap_or(shape == Kind::Ellipse) { Shape::Ellipse { rect } } else { Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) } }
         }
         Kind::Text => {
-            style.font_size = 34.0;
+            // A title is drawn bigger than the rest, its outline in step.
+            let size = if look.sized { 46.0 } else { 34.0 };
+            style.text_outline_width *= size / style.font_size.max(1.0);
+            style.font_size = size;
             style.align = TextAlign::Center;
-            Shape::Text { rect: Rect::new(12.0, 12.0, 84.0, 56.0), text: "Aa".into() }
+            Shape::Text { rect: Rect::new(6.0, 6.0, 96.0, 68.0), text: "Aa".into() }
         }
         Kind::Callout => {
             style.font_size = 20.0;
@@ -422,7 +428,7 @@ pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
     // The tool keeps the look; its text size stays what it was.
     let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse] } else { std::slice::from_ref(&family) };
     for k in kinds {
-        let size = ed.tool_style(*k).font_size;
+        let size = if look.sized { look.style.font_size } else { ed.tool_style(*k).font_size };
         ed.settings.styles.insert(*k, Style { font_size: size, ..look.style }.clamped());
     }
     ed.set_tool_options(family, look.options);
@@ -430,7 +436,7 @@ pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
         ed.session.selected().into_iter().filter(|id| ed.session.doc.get(*id).is_some_and(|o| o.shape.kind().family() == family)).collect();
     if !ids.is_empty() {
         let style = serde_json::to_value(look.style).unwrap_or(serde_json::Value::Null);
-        ed.run(ctx, "object.look", json!({ "ids": ids, "style": style, "options": look.options }));
+        ed.run(ctx, "object.look", json!({ "ids": ids, "style": style, "options": look.options, "keepTextSize": !look.sized }));
     }
     if ed.tool == Tool::Favorites || (ed.tool.is_shape() && ed.tool != Tool::Draw(draw)) {
         let keep = ed.session.selected();

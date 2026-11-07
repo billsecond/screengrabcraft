@@ -462,6 +462,20 @@ fn apply_look(s: &mut Session, p: &Value) -> Result<Value> {
         if let Shape::Callout { tail, .. } = &mut shape {
             *tail = picture.nearest(*tail);
         }
+        // Bigger text (a title) gets the room it needs below; a box is never made smaller.
+        if style.font_size > o.style.font_size {
+            match &mut shape {
+                Shape::Text { rect, text } => {
+                    rect.h = rect.h.max(screengrabcraft_render::text::fit_box(text, &style, rect.min(), Some(rect.w)).h);
+                }
+                Shape::Callout { rect, text, form, .. } => {
+                    let pad = screengrabcraft_render::text::padding(&style);
+                    let lay = screengrabcraft_render::text::layout(text, &style, Some(form.text_area(*rect).w - 2.0 * pad));
+                    rect.h = rect.h.max(form.box_height(lay.height + 2.0 * pad));
+                }
+                _ => {}
+            }
+        }
         changes.push((id, picture.encloses(o.shape.bounds(&o.style)), shape, style));
     }
     for (id, was_inside, shape, style) in changes {

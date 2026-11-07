@@ -465,3 +465,17 @@ fn a_quick_style_changes_the_selection_in_one_undo_step() {
         assert_eq!(s.doc, before);
     }
 }
+
+#[test]
+fn a_title_look_makes_its_text_bigger_and_its_box_taller() {
+    let mut s = session();
+    let t = add(&mut s, json!({"type": "text", "rect": {"x": 10, "y": 10, "w": 180, "h": 30}, "text": "Title", "style": {"fontSize": 20}}));
+    s.select(vec![t]);
+    let before = s.doc.get(t).unwrap().shape.rect().unwrap();
+    s.execute("object.look", &json!({"style": {"fontSize": 56, "textOutline": "#FFFFFF", "textOutlineWidth": 4}, "keepTextSize": false})).unwrap();
+    let o = s.doc.get(t).unwrap();
+    assert_eq!((o.style.font_size, o.style.text_outline, o.style.text_outline_width), (56.0, Color::WHITE, 4.0));
+    let after = o.shape.rect().unwrap();
+    assert!(after.h > before.h && after.w == before.w, "{before:?} → {after:?}");
+    assert!(s.doc.bounds().encloses(o.shape.bounds(&o.style)), "still on the picture");
+}

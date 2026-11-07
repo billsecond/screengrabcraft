@@ -15,23 +15,32 @@ pub struct QuickStyle {
     pub style: Style,
     #[serde(default)]
     pub options: ShapeOptions,
+    /// Whether the look sets the text size too (a title); otherwise the text keeps its size.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sized: bool,
 }
 
 impl QuickStyle {
+    /// A look that leaves the text size alone.
+    pub fn new(kind: Kind, style: Style, options: ShapeOptions) -> QuickStyle {
+        QuickStyle { kind, style, options, sized: false }
+    }
+
     /// Every number in its range, and the kind as the tool it belongs to.
     pub fn clamped(self) -> QuickStyle {
-        QuickStyle { kind: self.kind.family(), style: self.style.clamped(), options: self.options.clamped() }
+        QuickStyle { kind: self.kind.family(), style: self.style.clamped(), options: self.options.clamped(), sized: self.sized }
     }
 
     /// Whether this look describes `current` (a tool's look, or an annotation's): the same tool,
-    /// the same style (the text size aside, which a quick style leaves alone), and every option
-    /// it sets the same (a tail's spot only where `current` knows it).
+    /// the same style (the text size aside, unless the look sets it), and every option it sets
+    /// the same (a tail's spot only where `current` knows it).
     pub fn matches(&self, current: &QuickStyle) -> bool {
         let o = &self.options;
         let c = &current.options;
         let same = |a: Option<bool>, b: Option<bool>| a.is_none() || a == b;
+        let size = if self.sized { self.style.font_size } else { current.style.font_size };
         self.kind.family() == current.kind.family()
-            && Style { font_size: current.style.font_size, ..self.style } == current.style
+            && Style { font_size: size, ..self.style } == current.style
             && (o.heads.is_none() || o.heads == c.heads)
             && (o.radius.is_none() || o.radius == c.radius)
             && (o.form.is_none() || o.form == c.form)
@@ -43,6 +52,9 @@ impl QuickStyle {
 
 /// The most favourites kept.
 pub const MAX_FAVORITES: usize = 48;
+
+/// The text size of a title quick style.
+pub const TITLE_SIZE: f32 = 56.0;
 
 /// A colour of a theme, its name, and the colour of text on it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -139,7 +151,7 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
     let mut row = |variant: &str, make: &dyn Fn(&Swatch) -> (Style, ShapeOptions)| {
         for s in &theme.swatches {
             let (style, options) = make(s);
-            out.push(Preset { name: format!("{}, {variant}", s.name), look: QuickStyle { kind, style: style.clamped(), options } });
+            out.push(Preset { name: format!("{}, {variant}", s.name), look: QuickStyle::new(kind, style.clamped(), options) });
         }
     };
     let heads = |h: ArrowHeads| ShapeOptions { heads: Some(h), ..none };
@@ -170,9 +182,20 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
         }
         Kind::Text => {
             let plain = Style { stroke: Color::TRANSPARENT, fill: Color::TRANSPARENT, width: 0.0, bold: true, shadow: false, ..base };
+            let outlined = |s: &Swatch| Style { text_color: s.color, text_outline: s.ink, text_outline_width: 3.0, ..plain };
             row("text", &|s| (Style { text_color: s.color, ..plain }, none));
+            row("outlined text", &|s| (outlined(s), none));
+            row("shadowed text", &|s| (Style { text_color: s.color, shadow: true, ..plain }, none));
             row("label", &|s| (Style { fill: s.color, text_color: s.ink, ..plain }, none));
+            // Text on a see-through box of the colour: a caption that lets the picture show.
+            row("see-through label", &|s| (Style { fill: s.color.with_alpha(170), text_color: s.ink, ..plain }, none));
             row("boxed text", &|s| (Style { fill: Color::WHITE, stroke: s.color, width: 3.0, text_color: on_white(s), bold: false, ..plain }, none));
+            // Titles: big, outlined and shadowed; these set the text's size too.
+            for s in &theme.swatches {
+                let style = Style { font_size: TITLE_SIZE, text_outline_width: 4.0, shadow: true, ..outlined(s) };
+                let look = QuickStyle { sized: true, ..QuickStyle::new(kind, style.clamped(), none) };
+                out.push(Preset { name: format!("{}, title", s.name), look });
+            }
         }
         Kind::Callout => {
             let filled =
@@ -193,12 +216,12 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
         Kind::Stamp => {
             drop(row);
             for k in StampKind::ALL {
-                let look = QuickStyle { kind, style: Style { fill: k.color(), ..base }, options: ShapeOptions { stamp: Some(k), ..none } };
+                let look = QuickStyle::new(kind, Style { fill: k.color(), ..base }, ShapeOptions { stamp: Some(k), ..none });
                 out.push(Preset { name: k.label().to_string(), look });
             }
             // The stamp in use, in the theme's colours.
             for s in &theme.swatches {
-                out.push(Preset { name: s.name.to_string(), look: QuickStyle { kind, style: Style { fill: s.color, ..base }, options: none } });
+                out.push(Preset { name: s.name.to_string(), look: QuickStyle::new(kind, Style { fill: s.color, ..base }, none) });
             }
         }
         Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Magnify => {
@@ -212,8 +235,7 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
             let rounds: &[(&str, Option<bool>)] = if kind == Kind::Spotlight { &[("", Some(false)), (", round", Some(true))] } else { &[("", None)] };
             for (suffix, round) in rounds {
                 for (name, strength) in strengths {
-                    let look =
-                        QuickStyle { kind, style: Style { strength: *strength, ..base }.clamped(), options: ShapeOptions { round: *round, ..none } };
+                    let look = QuickStyle::new(kind, Style { strength: *strength, ..base }.clamped(), ShapeOptions { round: *round, ..none });
                     out.push(Preset { name: format!("{name}{suffix}"), look });
                 }
             }
@@ -305,5 +327,44 @@ mod tests {
         let q: QuickStyle = serde_json::from_str::<QuickStyle>(json).unwrap().clamped();
         assert_eq!((q.kind, q.options.radius), (Kind::Rect, Some(0.0)));
         assert!(q.style.width <= crate::object::MAX_WIDTH);
+    }
+}
+
+#[cfg(test)]
+mod text_tests {
+    use super::*;
+
+    #[test]
+    fn text_comes_outlined_shadowed_on_boxes_and_as_titles() {
+        let p = presets(Kind::Text, theme("Bold"));
+        assert_eq!(p.len(), 28);
+        let any = |f: &dyn Fn(&QuickStyle) -> bool| p.iter().any(|q| f(&q.look));
+        assert!(any(&|l| l.style.has_text_outline() && l.style.fill.a == 0), "outlined text");
+        assert!(any(&|l| l.style.shadow && l.style.fill.a == 0 && !l.sized), "shadowed text");
+        assert!(any(&|l| l.style.fill.a == 255), "text on a filled box");
+        assert!(any(&|l| l.style.fill.a > 0 && l.style.fill.a < 255), "text on a see-through box");
+        let titles: Vec<&Preset> = p.iter().filter(|q| q.look.sized).collect();
+        assert_eq!(titles.len(), 4);
+        for t in titles {
+            assert_eq!(t.look.style.font_size, TITLE_SIZE, "{}", t.name);
+            assert!(t.look.style.has_text_outline() && t.look.style.shadow, "{}", t.name);
+        }
+    }
+
+    #[test]
+    fn a_title_matches_only_text_of_its_size() {
+        let p = presets(Kind::Text, theme("Bold"));
+        let title = p.iter().find(|q| q.look.sized).map(|q| q.look).unwrap();
+        let mut small = title;
+        small.sized = false;
+        small.style.font_size = 20.0;
+        assert!(!title.matches(&small), "a title is big");
+        small.style.font_size = TITLE_SIZE;
+        assert!(title.matches(&small));
+        // Written only when set, and read back.
+        let plain = p.first().map(|q| q.look).unwrap();
+        assert!(!serde_json::to_string(&plain).unwrap().contains("sized"));
+        let back: QuickStyle = serde_json::from_str(&serde_json::to_string(&title).unwrap()).unwrap();
+        assert_eq!(back, title);
     }
 }

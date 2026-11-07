@@ -1233,8 +1233,7 @@ mod tests {
         // Never more than the most kept.
         let mut e = EditorSettings::default();
         for i in 0..(crate::quick::MAX_FAVORITES + 5) {
-            let look =
-                crate::quick::QuickStyle { kind: Kind::Pen, style: Style { width: i as f32, ..Style::default() }, options: ShapeOptions::default() };
+            let look = crate::quick::QuickStyle::new(Kind::Pen, Style { width: i as f32, ..Style::default() }, ShapeOptions::default());
             e.toggle_favorite(&look);
         }
         assert_eq!(e.favorites.len(), crate::quick::MAX_FAVORITES);

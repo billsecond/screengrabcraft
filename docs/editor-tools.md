@@ -25,7 +25,7 @@ had before 0.1.19, and what is still missing.
 | Callouts | one form: a rounded box with a tail dragged anywhere | no square, oval, cloud or arrow-shaped callouts; no tails set to the lower left or right in one click |
 | Arrows | four head layouts, thickness, dashes, shadow | (curved arrows and other head shapes: still missing) |
 | Shapes | rectangle, rounded rectangle, ellipse | (triangles and free polygons: still missing) |
-| Text | our own fonts, colours, a box behind the text | — |
+| Text | our own fonts, colours, a box behind the text | no outline round the letters, no ready-made overlays (titles, captions on a see-through box) |
 | Stamps | seven stamps drawn in code | (a larger library and your own pictures as stamps: still missing) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |
 
@@ -45,6 +45,10 @@ had before 0.1.19, and what is still missing.
   (callout form, rectangle or ellipse, arrow heads, stamp, round spotlight) and More (shadow,
   dashes, text style), then sliders with number boxes. **Effects** and **Properties** buttons sit at
   the bottom of the panel; Properties folds the tool properties away.
+- **Text overlays**: the Text tool's quick styles are plain text, text with an outline round its
+  letters, text with a shadow, text on a filled box, on a see-through box, in a bordered box, and
+  titles (big, outlined and shadowed; a title sets the text's size, the other looks keep it). The
+  outline has its own colour and width in the tool properties, for text and callouts alike.
 - **Callouts** come in five forms: rounded box, box, oval, cloud (its tail a trail of bubbles) and
   arrow (the box narrows to a point at its tail). Tails can be set to the lower left, lower right,
   left, right, up or down, and still be dragged anywhere.

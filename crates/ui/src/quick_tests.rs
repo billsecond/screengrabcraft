@@ -267,6 +267,12 @@ fn the_tool_properties_change_the_colours_and_the_callout_form() {
     click(&mut h, "#1E88E5");
     h.run_steps(3);
     assert_eq!(h.state().session.doc.get(id).map(|o| o.style.fill), Some(Color::rgb(0x1E, 0x88, 0xE5)));
+    // Shadow, from More.
+    let shadow = h.state().session.doc.get(id).map(|o| o.style.shadow);
+    click(&mut h, "More options");
+    click(&mut h, "Shadow");
+    h.run_steps(3);
+    assert_eq!(h.state().session.doc.get(id).map(|o| !o.style.shadow), shadow);
     // A cloud with its tail to the left, from the shape menu.
     click(&mut h, "Shape options");
     click(&mut h, "Cloud");
@@ -276,12 +282,6 @@ fn the_tool_properties_change_the_colours_and_the_callout_form() {
     let Shape::Callout { form, tail, rect, .. } = o.shape else { panic!("a callout") };
     assert_eq!(form, CalloutForm::Cloud);
     assert!(tail.x < rect.x && (tail.y - rect.center().y).abs() < 1.0, "{tail:?} {rect:?}");
-    // Shadow, from More.
-    let shadow = o.style.shadow;
-    click(&mut h, "More options");
-    click(&mut h, "Shadow");
-    h.run_steps(3);
-    assert_eq!(h.state().session.doc.get(id).map(|o| o.style.shadow), Some(!shadow));
 }
 
 #[test]
@@ -295,4 +295,47 @@ fn the_panel_fits_its_quick_styles_four_to_a_row() {
     let canvas = h.state().view.canvas;
     assert!(a.min.x > canvas.max.x && d.max.x <= 1200.0, "in the panel: {a:?} {d:?}");
     assert!(a.width() >= 40.0, "big enough to see: {a:?}");
+}
+
+#[test]
+fn text_overlays_come_outlined_shadowed_on_boxes_and_as_titles() {
+    let mut ed = editor();
+    let style = Kind::Text.default_style();
+    let id = ed.session.doc.add(Shape::Text { rect: Rect::new(40.0, 40.0, 260.0, 44.0), text: "Hello".into() }, style).unwrap();
+    let mut h = ready(ed, Tool::Draw(Kind::Text));
+    for name in ["Red, outlined text", "Red, shadowed text", "Red, label", "Red, see-through label", "Red, boxed text", "Red, title"] {
+        h.get_by_label(name);
+    }
+    shot(&mut h, "text-quick-styles");
+    // A title on the selected text: big, outlined, shadowed, in a taller box; one undo step.
+    h.state_mut().session.select(vec![id]);
+    h.run_steps(2);
+    click(&mut h, "Blue, title");
+    let o = h.state().session.doc.get(id).cloned().unwrap();
+    assert_eq!(o.style.font_size, screengrabcraft_model::quick::TITLE_SIZE);
+    assert!(o.style.has_text_outline() && o.style.shadow);
+    assert!(o.shape.rect().unwrap().h > 44.0, "the box grew for the title");
+    assert_eq!(h.state().session.undo_label(), Some("Apply Quick Style"));
+    // An outline from the tool properties, with its width.
+    click(&mut h, "Red, text");
+    assert_eq!(h.state().session.doc.get(id).map(|o| o.style.font_size), Some(screengrabcraft_model::quick::TITLE_SIZE), "plain looks keep the size");
+    click(&mut h, "Text outline colour");
+    click(&mut h, "#111111");
+    h.run_steps(3);
+    let o = h.state().session.doc.get(id).cloned().unwrap();
+    assert_eq!(o.style.text_outline, Color::rgb(0x11, 0x11, 0x11));
+    h.get_by_label("Text outline");
+    // Drawing with the title look: the next text box is a title too.
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Green, title");
+    assert_eq!(h.state().tool_style(Kind::Text).font_size, screengrabcraft_model::quick::TITLE_SIZE);
+    let (a, b) = (at(&h, 40.0, 150.0), at(&h, 360.0, 200.0));
+    drag(&mut h, a, b);
+    h.event(egui::Event::Text("Big".into()));
+    h.run_steps(2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let last = h.state().session.doc.objects.last().cloned().unwrap();
+    assert_eq!((last.shape.text(), last.style.font_size), (Some("Big"), screengrabcraft_model::quick::TITLE_SIZE));
 }
