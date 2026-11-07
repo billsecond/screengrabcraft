@@ -14,6 +14,7 @@ pub mod icons;
 pub mod overlay;
 pub mod playback;
 pub mod props;
+pub mod quick;
 pub mod recorder;
 pub mod services;
 pub mod strip;
@@ -60,6 +61,8 @@ pub fn setup(ctx: &egui::Context, theme: screengrabcraft_model::Theme) {
     theme::apply(ctx, theme);
 }
 
+#[cfg(test)]
+mod quick_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

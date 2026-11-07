@@ -227,7 +227,7 @@ fn shortcuts(ui: &mut Ui) {
             ui.label(what);
             ui.end_row();
         };
-        for (_, _, label, key) in crate::editor::Tool::BAR {
+        for (_, _, label, key) in crate::editor::Tool::ALL {
             row(key.name(), label);
         }
         for (k, what) in [

@@ -9,7 +9,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geom::IRect;
-use crate::object::{Kind, Style};
+use crate::object::{Kind, ShapeOptions, Style};
+use crate::quick::QuickStyle;
 
 /// A keyboard shortcut that works anywhere on the desktop: modifiers and a key, written the way
 /// people say it (`Ctrl+Shift+PrintScreen`, `Alt+F9`).
@@ -784,6 +785,18 @@ pub struct EditorSettings {
     /// What the Fill tool fills with.
     #[serde(deserialize_with = "or_default")]
     pub fill: FillTool,
+    /// What each tool sets about the shapes it draws besides their style (arrow heads, corners,
+    /// a callout's form and tail, the stamp, round or square).
+    #[serde(deserialize_with = "or_default")]
+    pub options: std::collections::BTreeMap<Kind, ShapeOptions>,
+    /// The quick styles' theme, by name (the first theme when it isn't one).
+    pub quick_theme: String,
+    /// The looks starred as favourites, in the order they were starred. One that can't be read
+    /// is let go, not the others.
+    #[serde(deserialize_with = "readable")]
+    pub favorites: Vec<QuickStyle>,
+    /// The tool properties folded away under the quick styles (the Properties button).
+    pub hide_properties: bool,
 }
 
 /// The Fill tool's settings.
@@ -812,6 +825,19 @@ where
     Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
+/// A list of which only the entries that can be read are kept.
+fn readable<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(match v {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|i| serde_json::from_value(i).ok()).collect(),
+        _ => Vec::new(),
+    })
+}
+
 /// A setting that can't be read is none.
 fn or_none<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -833,8 +859,61 @@ impl EditorSettings {
         for s in self.styles.values_mut() {
             *s = s.clamped();
         }
+        for o in self.options.values_mut() {
+            *o = o.clamped();
+        }
         self.recent.truncate(EditorSettings::MAX_RECENT);
+        self.favorites = self.favorites.iter().map(|f| f.clamped()).collect();
+        self.favorites.dedup();
+        self.favorites.truncate(crate::quick::MAX_FAVORITES);
+        if self.quick_theme.len() > 64 {
+            self.quick_theme.clear();
+        }
         self
+    }
+
+    /// What a tool sets about the shapes it draws: what it was last given, over its defaults.
+    pub fn options(&self, kind: Kind) -> ShapeOptions {
+        let defaults = match kind {
+            Kind::Arrow => ShapeOptions { heads: Some(crate::object::ArrowHeads::End), ..ShapeOptions::default() },
+            Kind::Rect => ShapeOptions { radius: Some(0.0), ..ShapeOptions::default() },
+            Kind::Callout => ShapeOptions {
+                form: Some(crate::object::CalloutForm::Rounded),
+                tail: Some(crate::object::TailSpot::DownLeft),
+                ..ShapeOptions::default()
+            },
+            Kind::Stamp => ShapeOptions { stamp: Some(self.stamp.unwrap_or_default()), ..ShapeOptions::default() },
+            Kind::Spotlight => ShapeOptions { round: Some(false), ..ShapeOptions::default() },
+            _ => ShapeOptions::default(),
+        };
+        // A rectangle's and an ellipse's are kept as one, the Shape tool's; which of the two it
+        // draws is the tool itself.
+        let mut kept = self.options.get(&kind.family()).copied().unwrap_or_default();
+        if kind.family() == Kind::Rect {
+            kept.round = None;
+        }
+        defaults.merged(kept)
+    }
+
+    /// Whether `look` is starred.
+    pub fn is_favorite(&self, look: &QuickStyle) -> bool {
+        let look = look.clamped();
+        self.favorites.contains(&look)
+    }
+
+    /// Stars `look`, or takes its star away; true when it is starred now.
+    pub fn toggle_favorite(&mut self, look: &QuickStyle) -> bool {
+        let look = look.clamped();
+        if let Some(i) = self.favorites.iter().position(|f| *f == look) {
+            self.favorites.remove(i);
+            false
+        } else {
+            if self.favorites.len() >= crate::quick::MAX_FAVORITES {
+                self.favorites.remove(0);
+            }
+            self.favorites.push(look);
+            true
+        }
     }
 
     /// The style a tool draws with: the last one used, or the kind's default.
@@ -1127,6 +1206,39 @@ mod tests {
         let e = EditorSettings::from_json(r#"{"tool":"teapot","stamp":7,"showTray":true}"#);
         assert_eq!((e.tool, e.stamp), (None, None));
         assert!(e.show_tray, "the rest is still read");
+    }
+
+    #[test]
+    fn favourites_and_tool_options_are_kept_and_a_bad_one_spoils_nothing() {
+        use crate::object::{ArrowHeads, CalloutForm, TailSpot};
+        let fresh = EditorSettings::from_json("{}");
+        assert!(fresh.favorites.is_empty() && !fresh.hide_properties && fresh.quick_theme.is_empty());
+        assert_eq!(fresh.options(Kind::Arrow).heads, Some(ArrowHeads::End));
+        assert_eq!(fresh.options(Kind::Callout).tail, Some(TailSpot::DownLeft));
+        let look = crate::quick::presets(Kind::Callout, crate::quick::theme("Bold")).into_iter().nth(8).map(|p| p.look).unwrap();
+        let mut e = EditorSettings { quick_theme: "Soft".into(), hide_properties: true, ..EditorSettings::default() };
+        assert!(e.toggle_favorite(&look));
+        assert!(e.is_favorite(&look));
+        e.options.insert(Kind::Callout, ShapeOptions { form: Some(CalloutForm::Arrow), ..ShapeOptions::default() });
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back, e);
+        assert_eq!(back.options(Kind::Callout).form, Some(CalloutForm::Arrow));
+        assert_eq!(back.options(Kind::Callout).tail, Some(TailSpot::DownLeft), "the rest from the defaults");
+        assert!(!e.toggle_favorite(&look) && e.favorites.is_empty(), "a second star takes it away");
+        // One favourite that can't be read is let go; the others and the rest stay.
+        let text = r##"{"favorites":[{"kind":"teapot"},{"kind":"arrow","style":{"stroke":"#00FF00"}},7],"showTray":true}"##;
+        let e = EditorSettings::from_json(text);
+        assert_eq!(e.favorites.len(), 1);
+        assert!(e.show_tray);
+        // Never more than the most kept.
+        let mut e = EditorSettings::default();
+        for i in 0..(crate::quick::MAX_FAVORITES + 5) {
+            let look =
+                crate::quick::QuickStyle { kind: Kind::Pen, style: Style { width: i as f32, ..Style::default() }, options: ShapeOptions::default() };
+            e.toggle_favorite(&look);
+        }
+        assert_eq!(e.favorites.len(), crate::quick::MAX_FAVORITES);
+        assert_eq!(e.favorites.last().map(|f| f.style.width), Some((crate::quick::MAX_FAVORITES + 4) as f32), "the newest kept");
     }
 
     #[test]

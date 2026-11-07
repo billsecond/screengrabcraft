@@ -5,7 +5,7 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Object, ObjectId, Order, Pt, Rect, Shape, Style};
+use screengrabcraft_model::{Color, Document, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::effects;
 use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
@@ -112,6 +112,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, …}}"##,
         has_selection,
         restyle
+    ),
+    cmd!(
+        "object.look",
+        "Apply Quick Style",
+        "Annotate",
+        None,
+        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
+        has_selection,
+        apply_look
     ),
     cmd!("object.text", "Change Text", "Annotate", None, r#"{"id": id, "text": "…"}"#, has_objects, set_text),
     cmd!("object.order", "Arrange", "Annotate", None, r#"{"to": "front"|"back"|"forward"|"backward", "ids"?: [id]}"#, has_selection, order),
@@ -415,6 +424,54 @@ fn restyle(s: &mut Session, p: &Value) -> Result<Value> {
     for id in ids {
         if let Some(o) = s.doc.get_mut(id) {
             o.style = merge_style(&o.style, patch)?;
+        }
+    }
+    Ok(Value::Null)
+}
+
+fn apply_look(s: &mut Session, p: &Value) -> Result<Value> {
+    let ids = ids_param(s, p, true)?;
+    let options = match p.get("options") {
+        None | Some(Value::Null) => ShapeOptions::default(),
+        Some(v) => serde_json::from_value::<ShapeOptions>(v.clone()).map_err(|e| EngineError::Params(format!("options: {e}")))?.clamped(),
+    };
+    let style_patch = match p.get("style") {
+        None | Some(Value::Null) => None,
+        Some(v @ Value::Object(_)) => Some(v),
+        Some(_) => return Err(EngineError::Params("`style` must be an object".to_string())),
+    };
+    let keep_size = match p.get("keepTextSize") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(EngineError::Params("`keepTextSize` is true or false".to_string())),
+    };
+    // Everything worked out first, so nonsense changes nothing.
+    let picture = s.doc.bounds();
+    let mut changes = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(o) = s.doc.get(id) else { return Err(EngineError::NoObject(id.0)) };
+        let mut style = match style_patch {
+            Some(patch) => merge_style(&o.style, patch)?,
+            None => o.style,
+        };
+        if keep_size {
+            style.font_size = o.style.font_size;
+        }
+        let mut shape = options.applied(o.shape.clone());
+        // A tail set to a spot stays on the picture.
+        if let Shape::Callout { tail, .. } = &mut shape {
+            *tail = picture.nearest(*tail);
+        }
+        changes.push((id, picture.encloses(o.shape.bounds(&o.style)), shape, style));
+    }
+    for (id, was_inside, shape, style) in changes {
+        if let Some(o) = s.doc.get_mut(id) {
+            o.shape = shape;
+            o.style = style;
+        }
+        // A thicker line or a longer tail doesn't push it over the edge.
+        if was_inside {
+            s.doc.bring_inside(id);
         }
     }
     Ok(Value::Null)

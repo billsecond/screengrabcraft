@@ -100,10 +100,17 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 
 Annotations stay editable (move them, resize them, restyle them) until you flatten or export:
 
-- **Arrow** (one or two heads, any thickness), **line**, **rectangle** (rounded corners),
-  **ellipse**, **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
-- **Text** and **callouts** (speech balloons with a tail you drag), in PatroneOS Sans or
-  PatroneOS Mono, bold, italic, left, centred or right.
+- The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
+  **Fill** and **Move** in the middle, and the other tools under **More**. Every tool keeps its key.
+- **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
+  Mono), drawn as they will look. A click sets the tool's look and changes the selected
+  annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
+  tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+- **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
+  or an ellipse), **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
+- **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
+  with the text in it) with a tail set to point down left, down right, left, right, up or down,
+  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
 - **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
   information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
@@ -112,8 +119,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
-- **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
-  contrast.
+- **Effects** (in the menu, and the Effects button under the panel): border, drop shadow, torn
+  edge, round corners, greyscale, invert, brightness and contrast.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen and highlighter draw over things); its handles take hold even when the press is a little off.

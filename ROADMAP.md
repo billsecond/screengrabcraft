@@ -30,8 +30,9 @@ further on openness, privacy and scripting.
 2. Video recording (MP4) next to GIF; a GIF editor (trim, speed).
 3. Automatic scrolling for scrolling captures (scroll the window under the area for the owner).
 4. Text recognition (copy the text in a capture), without a network service.
-5. Templates and saved styles ("themes") in the editor; a library view of all captures with
-   search and tags.
+5. Templates, and quick-style themes of your own (four built-in themes and favourites came in
+   0.1.19); curved arrows, triangles and polygons, a larger stamp library and your own pictures
+   as stamps; a library view of all captures with search and tags.
 6. Global shortcuts on Wayland through the GlobalShortcuts portal.
 7. Signed builds (Windows Authenticode, Apple Developer ID and notarisation).
 8. A lighter idle service: on Windows it holds about 200 MB (DirectX 12) or 145 MB (OpenGL) of
@@ -66,3 +67,4 @@ further on openness, privacy and scripting.
 | 2026-11-06 | 0.1.16: the editor kept ready out of sight really stays out of sight (in 0.1.15 its window showed, black) and costs next to nothing while it waits |
 | 2026-11-06 | 0.1.17: the editor steps aside for a capture by moving off the screens (no Windows animation), and an editor kept ready is shown off the screens meanwhile, so a capture appears in it at once; every monitor is frozen at the same time (three 4K monitors: 0.15 s instead of 0.23 s); the area being adjusted shows resize arrows over its handles and a hand inside it; the picture goes to the clipboard after the editor has it |
 | 2026-11-07 | 0.1.18: no Windows animations around a capture: the editor steps aside by being cloaked (at once, where it is, maximized or not) and an editor kept ready appears with the capture already drawn; the capture overlay no longer fades in or out; the capture service's hidden anchor window no longer shows as a small black square at the top left of a monitor |
+| 2026-11-07 | 0.1.19: the editor's tools laid out as in Snagit: Favorites, Arrow, Text, Callout, Shape (a rectangle, rounded or not, or an ellipse), Stamp, Fill and Move in the middle of the tool bar and the other tools under More; Quick Styles at the top of the panel (ready-made looks for every tool in four themes, drawn as they will look, a star to keep one under Favorites); tool properties under them (fill, outline, text colour, shape, more, and sliders with number boxes); Effects and Properties buttons under the panel; callouts in five forms (rounded box, box, oval, cloud, arrow) with tails set to any of eight ways. See `docs/editor-tools.md` |

@@ -3,7 +3,7 @@
 //! a blur hides an arrow drawn before it and not one drawn after.
 
 use screengrabcraft_model::object::{arrow_head, step_radius};
-use screengrabcraft_model::{ArrowHeads, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::{ArrowHeads, CalloutForm, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
     Transform,
@@ -253,13 +253,13 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let rect = *rect;
             with_style(canvas, bounds, &style, &|c, t| draw_text_box(c, t, rect, body, &style));
         }
-        Shape::Callout { rect, tail, text: body } => {
-            let (rect, tail) = (*rect, *tail);
+        Shape::Callout { rect, tail, text: body, form } => {
+            let (rect, tail, form) = (*rect, *tail, *form);
             with_style(canvas, bounds, &style, &|c, t| {
-                if let Some(path) = callout_path(rect, tail, (style.font_size * 0.6).clamp(4.0, 24.0)) {
+                for path in callout_paths(rect, tail, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
                     fill_and_stroke(c, &path, &style, t);
                 }
-                draw_text_centered(c, t, rect, body, &style);
+                draw_text_centered(c, t, form.text_area(rect), body, &style);
             });
         }
         Shape::Step { center, number } => {
@@ -417,6 +417,143 @@ fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, number: u32, style: &Styl
     }
 }
 
+/// The outlines of a callout of any form, in drawing order: one for most, the cloud and then
+/// each of the bubbles of its tail for a cloud.
+pub fn callout_paths(rect: Rect, tail: Pt, form: CalloutForm, radius: f32) -> Vec<Path> {
+    match form {
+        CalloutForm::Rounded => callout_path(rect, tail, radius).into_iter().collect(),
+        CalloutForm::Square => callout_path(rect, tail, 0.0).into_iter().collect(),
+        CalloutForm::Oval => oval_callout_path(rect, tail).into_iter().collect(),
+        CalloutForm::Cloud => cloud_paths(rect, tail, form.bulge(rect)),
+        CalloutForm::Arrow => arrow_callout_path(rect, tail).into_iter().collect(),
+    }
+}
+
+/// Which side of `rect` faces `p` (0 top, 1 right, 2 bottom, 3 left): the direction from the
+/// middle compared with the box's diagonals.
+fn facing_side(rect: Rect, p: Pt) -> u8 {
+    let d = p.sub(rect.center());
+    if d.x.abs() * rect.h > d.y.abs() * rect.w {
+        if d.x > 0.0 { 1 } else { 3 }
+    } else if d.y > 0.0 {
+        2
+    } else {
+        0
+    }
+}
+
+/// A box whose side facing `tail` narrows to a point at `tail`: an arrow with room for text.
+pub fn arrow_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
+    if rect.is_empty() || rect.inflate(-1.0).contains(tail) {
+        return rounded_rect(rect, 0.0);
+    }
+    let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
+    let corners = [Pt::new(x0, y0), Pt::new(x1, y0), Pt::new(x1, y1), Pt::new(x0, y1)];
+    // The point goes between the two corners of the side it leaves from.
+    let side = usize::from(facing_side(rect, tail));
+    let mut pb = PathBuilder::new();
+    for (i, p) in corners.iter().enumerate() {
+        if i == 0 {
+            pb.move_to(p.x, p.y);
+        } else {
+            pb.line_to(p.x, p.y);
+        }
+        if i == side {
+            pb.line_to(tail.x, tail.y);
+        }
+    }
+    pb.close();
+    pb.finish()
+}
+
+/// A point on the ellipse in `rect` at angle `a` (measured as on a circle the ellipse is
+/// stretched from).
+fn on_ellipse(c: Pt, rx: f32, ry: f32, a: f32) -> Pt {
+    Pt::new(c.x + rx * a.cos(), c.y + ry * a.sin())
+}
+
+/// How many straight pieces draw an ellipse this big smoothly.
+fn ellipse_steps(rx: f32, ry: f32) -> usize {
+    let around = std::f32::consts::PI * (rx + ry);
+    (around / 4.0).clamp(48.0, 720.0) as usize
+}
+
+/// An oval with a tail from its edge to `tail`, as one outline.
+pub fn oval_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
+    let c = rect.center();
+    let (rx, ry) = (rect.w / 2.0, rect.h / 2.0);
+    let (nx, ny) = if rx >= 1.0 && ry >= 1.0 { ((tail.x - c.x) / rx, (tail.y - c.y) / ry) } else { (0.0, 0.0) };
+    if nx * nx + ny * ny <= 1.0 || !(nx.is_finite() && ny.is_finite()) {
+        return oval(rect);
+    }
+    // Round the ellipse the long way, from one side of the tail's base to the other, then out
+    // to the tail and back.
+    let a = ny.atan2(nx);
+    let half = 0.24;
+    let steps = ellipse_steps(rx, ry);
+    let sweep = std::f32::consts::TAU - 2.0 * half;
+    let mut pb = PathBuilder::new();
+    let first = on_ellipse(c, rx, ry, a + half);
+    pb.move_to(first.x, first.y);
+    for i in 1..=steps {
+        let p = on_ellipse(c, rx, ry, a + half + sweep * i as f32 / steps as f32);
+        pb.line_to(p.x, p.y);
+    }
+    pb.line_to(tail.x, tail.y);
+    pb.close();
+    pb.finish()
+}
+
+/// A cloud: bumps round the ellipse in `rect`, reaching `bulge` out of it; then, when `tail` is
+/// outside it, three bubbles getting smaller on the way to `tail`.
+pub fn cloud_paths(rect: Rect, tail: Pt, bulge: f32) -> Vec<Path> {
+    let c = rect.center();
+    let (rx, ry) = (rect.w / 2.0, rect.h / 2.0);
+    if rx < 2.0 || ry < 2.0 || !(c.x.is_finite() && c.y.is_finite()) {
+        return oval(rect).into_iter().collect();
+    }
+    let bulge = bulge.max(1.0);
+    let around = std::f32::consts::PI * (rx + ry);
+    let n = (around / (bulge * 3.4)).round().clamp(8.0, 40.0) as usize;
+    let mut out = Vec::new();
+    let mut pb = PathBuilder::new();
+    let point = |i: usize| on_ellipse(c, rx, ry, std::f32::consts::TAU * i as f32 / n as f32 - std::f32::consts::FRAC_PI_2);
+    let start = point(0);
+    pb.move_to(start.x, start.y);
+    for i in 0..n {
+        let (a, b) = (point(i), point(i + 1));
+        let mid = a.lerp(b, 0.5);
+        let out_dir = mid.sub(c);
+        let len = out_dir.length().max(0.001);
+        // A quadratic's middle is halfway to its control point: twice the bulge out.
+        let ctrl = mid.add(out_dir.scale(2.0 * bulge / len));
+        pb.quad_to(ctrl.x, ctrl.y, b.x, b.y);
+    }
+    pb.close();
+    out.extend(pb.finish());
+    // The bubbles, from just outside the bumps to the tail.
+    let d = tail.sub(c);
+    let norm = ((d.x / rx).powi(2) + (d.y / ry).powi(2)).sqrt();
+    if norm > 1.0 && norm.is_finite() {
+        let dir = d.scale(1.0 / d.length().max(0.001));
+        let edge = c.add(d.scale(1.0 / norm));
+        let big = (rx.min(ry) * 0.22).clamp(3.0, 22.0);
+        let radii = [big, big * 0.68, big * 0.42];
+        let [.., last] = radii;
+        let from = edge.add(dir.scale(bulge + big * 1.2));
+        let to = tail.sub(dir.scale(last));
+        let room = to.sub(from);
+        // Only where there is room for them, going towards the tail.
+        if room.x * dir.x + room.y * dir.y > 0.0 {
+            for (i, r) in radii.iter().enumerate() {
+                let at = from.lerp(to, i as f32 / 2.0);
+                out.extend(circle(at, *r));
+            }
+        }
+    }
+    out
+}
+
 /// A rounded box with a tail running from the side facing `tail` to `tail`, as one outline.
 pub fn callout_path(rect: Rect, tail: Pt, radius: f32) -> Option<Path> {
     let rad = radius.max(0.0).min(rect.w / 2.0).min(rect.h / 2.0);
@@ -425,16 +562,9 @@ pub fn callout_path(rect: Rect, tail: Pt, radius: f32) -> Option<Path> {
     }
     let c = rect.center();
     let d = tail.sub(c);
-    // Which side the tail leaves from: compare the direction with the box's diagonals.
-    let side = if d.x.abs() * rect.h > d.y.abs() * rect.w {
-        if d.x > 0.0 { 1 } else { 3 }
-    } else if d.y > 0.0 {
-        2
-    } else {
-        0
-    };
+    let side = facing_side(rect, tail);
     // Where on that side the line from the centre to the tail crosses, kept clear of the corners.
-    let base_half = (if side % 2 == 0 { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
+    let base_half = (if side.is_multiple_of(2) { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
     let (lo_x, hi_x) = (rect.x + rad + base_half, rect.right() - rad - base_half);
     let (lo_y, hi_y) = (rect.y + rad + base_half, rect.bottom() - rad - base_half);
     let cross = |along: f32, lo: f32, hi: f32| if lo <= hi { along.clamp(lo, hi) } else { (lo + hi) / 2.0 };
@@ -549,7 +679,12 @@ mod tests {
             Shape::Pen { points: vec![Pt::new(1.0, 1.0)] },
             Shape::Highlight { points: vec![Pt::new(10.0, 60.0), Pt::new(190.0, 60.0)] },
             Shape::Text { rect: r, text: "Hello, world".into() },
-            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into() },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded },
+            Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 45.0), text: "Oval".into(), form: CalloutForm::Oval },
+            Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud },
+            Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow },
+            Shape::Callout { rect: Rect::new(10.0, 10.0, 0.5, 0.5), tail: Pt::new(f32::NAN, 1.0), text: String::new(), form: CalloutForm::Cloud },
             Shape::Step { center: Pt::new(150.0, 30.0), number: 7 },
             Shape::Blur { rect: r },
             Shape::Pixelate { rect: Rect::new(-50.0, -50.0, 500.0, 500.0) },
@@ -639,5 +774,54 @@ mod tests {
         }
         let inside = callout_path(r, Pt::new(150.0, 125.0), 10.0).unwrap();
         assert!((inside.bounds().width() - 100.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn every_callout_form_reaches_its_tail_and_holds_its_box() {
+        let r = Rect::new(100.0, 100.0, 120.0, 60.0);
+        for form in CalloutForm::ALL {
+            for spot in screengrabcraft_model::TailSpot::ALL {
+                let tail = spot.place(form, r);
+                let paths = callout_paths(r, tail, form, 10.0);
+                assert!(!paths.is_empty(), "{form:?} {spot:?}");
+                let b = paths.iter().map(|p| p.bounds()).fold(None, |acc: Option<(f32, f32, f32, f32)>, b| {
+                    Some(match acc {
+                        None => (b.left(), b.top(), b.right(), b.bottom()),
+                        Some((l, t, r, bt)) => (l.min(b.left()), t.min(b.top()), r.max(b.right()), bt.max(b.bottom())),
+                    })
+                });
+                let (left, top, right, bottom) = b.unwrap();
+                let reach = 0.5 + if form == CalloutForm::Cloud { 3.0 } else { 0.0 };
+                assert!(
+                    left <= tail.x + reach && right >= tail.x - reach && top <= tail.y + reach && bottom >= tail.y - reach,
+                    "{form:?} {spot:?}: {tail:?} {b:?}"
+                );
+                assert!(left <= r.x + 0.5 && right >= r.right() - 0.5 && top <= r.y + 0.5 && bottom >= r.bottom() - 0.5);
+            }
+        }
+        // An arrow callout pointing right is a box with a point on its right: five corners.
+        let arrow = arrow_callout_path(r, Pt::new(260.0, 130.0)).unwrap();
+        assert_eq!(arrow.points().len(), 5);
+        assert!((arrow.bounds().right() - 260.0).abs() < 0.01 && (arrow.bounds().left() - 100.0).abs() < 0.01);
+        // A cloud's tail is three bubbles after the cloud; with the tail inside, none.
+        assert_eq!(cloud_paths(r, Pt::new(160.0, 260.0), 6.0).len(), 4);
+        assert_eq!(cloud_paths(r, r.center(), 6.0).len(), 1);
+    }
+
+    #[test]
+    fn a_filled_arrow_callout_is_coloured_at_its_point() {
+        let mut d = doc();
+        let style = Style { fill: Color::rgb(0, 0, 255), stroke: Color::TRANSPARENT, width: 0.0, shadow: false, ..Style::default() };
+        let rect = Rect::new(20.0, 30.0, 100.0, 60.0);
+        d.add(Shape::Callout { rect, tail: Pt::new(170.0, 60.0), text: String::new(), form: CalloutForm::Arrow }, style).unwrap();
+        d.add(
+            Shape::Callout { rect: Rect::new(150.0, 5.0, 40.0, 20.0), tail: Pt::new(170.0, 15.0), text: String::new(), form: CalloutForm::Oval },
+            style,
+        )
+        .unwrap();
+        let out = render(&d).unwrap();
+        assert_eq!(px(&out, 140, 60), Color::rgb(0, 0, 255), "in the point");
+        assert_eq!(px(&out, 140, 35), Color::WHITE, "beside the point");
+        assert_eq!(px(&out, 151, 6), Color::WHITE, "an oval leaves its box's corners alone");
     }
 }

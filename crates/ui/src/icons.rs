@@ -47,6 +47,11 @@ pub enum Icon {
     Timer,
     Play,
     Pause,
+    Favorites,
+    Shape,
+    Move,
+    More,
+    Effects,
 }
 
 /// Draws `icon` in `rect` (square-ish) in `color`.
@@ -140,13 +145,54 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([at(12.3, 12.3), at(17.0, 17.0)], Stroke::new(w * 1.6, color));
         }
         Icon::Stamp => {
+            // A rubber stamp: a round knob, its neck, the wide block and the mark under it.
+            p.circle_stroke(at(10.0, 4.5), 2.6 * u, stroke);
+            poly(vec![at(8.6, 7.0), at(8.0, 10.5), at(12.0, 10.5), at(11.4, 7.0)], false);
+            p.rect_stroke(rect_at(3.5, 10.5, 16.5, 14.5), 1.0 * u, stroke, StrokeKind::Middle);
+            line(at(4.5, 17.3), at(15.5, 17.3));
+        }
+        Icon::Favorites => {
             let mut pts = Vec::new();
             for i in 0..10 {
                 let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-                let r = if i % 2 == 0 { 7.5 } else { 3.2 };
-                pts.push(at(10.0 + a.cos() * r, 10.5 + a.sin() * r));
+                let r = if i % 2 == 0 { 8.0 } else { 3.4 };
+                pts.push(at(10.0 + a.cos() * r, 10.8 + a.sin() * r));
             }
             poly(pts, true);
+        }
+        Icon::Shape => {
+            // A square with a circle over its corner.
+            p.rect_stroke(rect_at(2.5, 2.5, 12.0, 12.0), 0.5 * u, stroke, StrokeKind::Middle);
+            p.circle_filled(at(12.5, 12.5), 5.2 * u, color.gamma_multiply(0.35));
+            p.circle_stroke(at(12.5, 12.5), 5.2 * u, stroke);
+        }
+        Icon::Move => {
+            fill_poly(vec![at(3.0, 2.0), at(11.0, 10.0), at(7.4, 10.4), at(9.8, 14.6), at(8.0, 15.4), at(5.6, 11.2), at(3.0, 13.6)], color);
+            // Four ways at the lower right.
+            let (cx, cy) = (14.5, 14.5);
+            line(at(cx - 4.0, cy), at(cx + 4.0, cy));
+            line(at(cx, cy - 4.0), at(cx, cy + 4.0));
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let tip = at(cx + dx * 5.0, cy + dy * 5.0);
+                let (nx, ny) = (-dy, dx);
+                fill_poly(
+                    vec![tip, at(cx + dx * 3.2 + nx * 1.6, cy + dy * 3.2 + ny * 1.6), at(cx + dx * 3.2 - nx * 1.6, cy + dy * 3.2 - ny * 1.6)],
+                    color,
+                );
+            }
+        }
+        Icon::More => {
+            for x in [4.5, 10.0, 15.5] {
+                p.circle_filled(at(x, 10.0), 1.8 * u, color);
+            }
+        }
+        Icon::Effects => {
+            // A wand with sparks at its tip.
+            p.line_segment([at(3.0, 17.0), at(12.0, 8.0)], Stroke::new(w * 1.4, color));
+            for (x, y, r) in [(15.0, 5.0, 2.6), (8.5, 3.5, 1.5), (16.5, 11.5, 1.5)] {
+                line(at(x - r, y), at(x + r, y));
+                line(at(x, y - r), at(x, y + r));
+            }
         }
         Icon::Fill => {
             // A pail tipped to the right, half full, with a drop running off its lip.

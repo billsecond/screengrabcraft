@@ -96,7 +96,12 @@ fn callout_on_plain_colour() -> Result<Raster, String> {
     e(d.add(Shape::Rect { rect: Rect::new(120.0, 80.0, 420.0, 280.0), radius: 14.0 }, card))?;
     e(d.add(Shape::Text { rect: Rect::new(150.0, 110.0, 360.0, 60.0), text: "Settings saved".into() }, Kind::Text.default_style()))?;
     e(d.add(
-        Shape::Callout { rect: Rect::new(160.0, 200.0, 260.0, 80.0), tail: Pt::new(560.0, 330.0), text: "Click here to keep it".into() },
+        Shape::Callout {
+            rect: Rect::new(160.0, 200.0, 260.0, 80.0),
+            tail: Pt::new(560.0, 330.0),
+            text: "Click here to keep it".into(),
+            form: screengrabcraft_model::CalloutForm::Rounded,
+        },
         Kind::Callout.default_style(),
     ))?;
     e(d.add(Shape::Arrow { from: Pt::new(720.0, 420.0), to: Pt::new(590.0, 330.0), heads: ArrowHeads::End }, Kind::Arrow.default_style()))?;
