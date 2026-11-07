@@ -105,14 +105,39 @@ impl View {
 /// What a drag on the canvas is doing.
 #[derive(Clone, Debug)]
 pub enum Drag {
-    Create { id: ObjectId, kind: Kind, start: Pt },
-    Move { ids: Vec<ObjectId>, last: Pt },
-    Handle { id: ObjectId, handle: Handle },
-    Rubber { start: Pt, now: Pt },
-    Pan { last: Pos2 },
-    CropNew { start: Pt },
-    CropHandle { handle: Handle },
-    CropMove { last: Pt },
+    Create {
+        id: ObjectId,
+        kind: Kind,
+        start: Pt,
+    },
+    Move {
+        ids: Vec<ObjectId>,
+        last: Pt,
+    },
+    Handle {
+        id: ObjectId,
+        handle: Handle,
+    },
+    Rubber {
+        start: Pt,
+        now: Pt,
+    },
+    Pan {
+        last: Pos2,
+    },
+    CropNew {
+        start: Pt,
+    },
+    CropHandle {
+        handle: Handle,
+    },
+    CropMove {
+        last: Pt,
+    },
+    /// An area of the picture being selected with the Selection tool.
+    AreaNew {
+        start: Pt,
+    },
 }
 
 /// The picture's tiles on the GPU (a long scrolling capture is more than one texture).
@@ -252,13 +277,17 @@ impl Editor {
     }
 
     /// The handle of a selected annotation under a screen point.
-    fn handle_at(&self, s: Pos2) -> Option<(ObjectId, Handle)> {
+    pub(crate) fn handle_at(&self, s: Pos2) -> Option<(ObjectId, Handle)> {
         let sel = self.session.selected();
         if sel.len() != 1 {
             return None;
         }
         let id = *sel.first()?;
         let o = self.session.doc.get(id)?;
+        // A pen or highlighter stroke has no box to pull: it's moved, not reshaped.
+        if stroke_points(&o.shape).is_some() {
+            return None;
+        }
         // The nearest one in reach, so two handles close together (a small box) both work.
         nearest(o.shape.handles(&o.style), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
     }
@@ -410,7 +439,12 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
             ed.checker = None;
         }
         ed.upload(&ctx);
+        // The right button puts the eyedropper away rather than open the menu.
+        let picking = crate::eyedropper::active(&ctx);
         input(ed, ui, &resp);
+        if !picking {
+            context_menu(ed, &ctx, &resp);
+        }
         crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
         text_editor(ed, ui);
@@ -499,7 +533,9 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         let on_picture = ed.session.doc.bounds().contains(to_img(h, &ed.view));
         let cursor = match ed.tool {
             Tool::Select | Tool::Favorites => {
-                if let Some((_, handle)) = ed.handle_at(h) {
+                if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) {
+                    CursorIcon::Move
+                } else if let Some((_, handle)) = ed.handle_at(h) {
                     cursor_for(handle)
                 } else if ed.object_under(to_img(h, &ed.view)).is_some() {
                     CursorIcon::Move
@@ -513,6 +549,12 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 None if ed.crop.is_some_and(|c| c != ed.session.doc.bounds() && c.contains(to_img(h, &ed.view))) => CursorIcon::Move,
                 None => CursorIcon::Crosshair,
             },
+            // Inside the selected area (or on the piece taken out of it) a drag moves it.
+            Tool::Area if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) => CursorIcon::Move,
+            Tool::Area if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
+            Tool::Area if ed.object_under(to_img(h, &ed.view)).is_some_and(|id| ed.session.selected().contains(&id)) => CursorIcon::Move,
+            Tool::Area if on_picture => CursorIcon::Crosshair,
+            Tool::Area => CursorIcon::Default,
             // The pail is drawn as the pointer, its drop on the spot that's filled.
             Tool::Fill if on_picture => {
                 if resp.hovered() {
@@ -575,10 +617,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         }
         match ed.tool {
             Tool::Select | Tool::Favorites => {
-                if let Some((id, handle)) = ed.handle_at(start_s) {
+                if lift_area(ed, &ctx, start) {
+                    // Inside an area of the picture selected: that part of it is moved.
+                } else if let Some((id, handle)) = ed.handle_at(start_s) {
+                    ed.area = None;
                     ed.session.begin("Resize");
                     ed.drag = Some(Drag::Handle { id, handle });
                 } else if let Some(id) = ed.object_under(start) {
+                    ed.area = None;
                     let mut sel = ed.session.selected();
                     if !sel.contains(&id) {
                         sel = if shift {
@@ -609,6 +655,22 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             }
             // A fill happens where the button went down; moving on before letting go is no drag.
             Tool::Fill => fill_at(ed, &ctx, start),
+            Tool::Area => {
+                if lift_area(ed, &ctx, start) {
+                    // Inside the selected area: that part of the picture is moved.
+                } else if let Some((id, handle)) = ed.handle_at(start_s) {
+                    // A piece taken out is resized by its handles, and moved again by a drag.
+                    ed.session.begin("Resize");
+                    ed.drag = Some(Drag::Handle { id, handle });
+                } else if let Some(id) = ed.object_under(start).filter(|id| ed.session.selected().contains(id)) {
+                    ed.session.begin("Move");
+                    ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+                } else {
+                    ed.area = None;
+                    ed.session.select(Vec::new());
+                    ed.drag = Some(Drag::AreaNew { start });
+                }
+            }
             Tool::Draw(kind) => {
                 // Starting on a handle of the selected annotation reshapes it instead.
                 if let Some((id, handle)) = ed.handle_at(start_s) {
@@ -713,6 +775,10 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.crop = Rect::from_points(start, end).intersect(bounds);
             }
+            Some(Drag::AreaNew { start }) => {
+                let end = if shift { square_from(start, now) } else { now };
+                ed.area = Rect::from_points(start, end).intersect(bounds);
+            }
             Some(Drag::CropHandle { handle }) => {
                 if let Some(c) = ed.crop {
                     ed.crop = handle.drag_rect(c, now, shift).intersect(bounds);
@@ -754,6 +820,11 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                         ed.start_editing(id);
                     } else {
                         ed.session.commit();
+                        // A pen or highlighter stroke is left as drawn, as on paper: not
+                        // selected, so nothing is drawn over it and the next stroke can follow.
+                        if matches!(kind, Kind::Pen | Kind::Highlight) {
+                            ed.session.select(Vec::new());
+                        }
                     }
                 } else {
                     ed.session.cancel();
@@ -762,9 +833,20 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 }
             }
             Some(Drag::Move { .. }) | Some(Drag::Handle { .. }) => ed.session.commit(),
+            // Too small to be an area: none.
+            Some(Drag::AreaNew { .. }) => {
+                if ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
+                    ed.area = None;
+                }
+            }
             Some(Drag::Rubber { start, now }) => {
                 let area = Rect::from_points(start, now);
                 let mut ids = ed.session.doc.objects_in(area);
+                // Round no annotation, it selects that part of the picture itself, as the
+                // Selection tool does: to move, copy, cut, delete or crop to.
+                if ids.is_empty() && !shift {
+                    ed.area = area.intersect(ed.session.doc.bounds()).filter(|a| a.w >= 2.0 && a.h >= 2.0);
+                }
                 if shift {
                     let mut sel = ed.session.selected();
                     sel.extend(ids);
@@ -797,6 +879,147 @@ fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
 }
 
 /// A click (no drag) on the canvas.
+/// A drag starting inside the area of the picture selected: that part of the picture comes out
+/// as a piece of its own (the command `image.lift`), and the drag moves it. False when the drag
+/// starts elsewhere.
+fn lift_area(ed: &mut Editor, ctx: &egui::Context, start: Pt) -> bool {
+    let Some(params) = ed.area.filter(|a| a.contains(start)).and_then(|_| ed.area_params()) else { return false };
+    ed.area = None;
+    if let Some(id) = ed.run(ctx, "image.lift", params).and_then(|out| out.get("id").and_then(serde_json::Value::as_u64)) {
+        let id = ObjectId(id);
+        ed.session.select(vec![id]);
+        ed.session.begin("Move");
+        ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+    }
+    true
+}
+
+/// The menu a right-click on the picture opens: what can be done with the area of the picture
+/// selected, or with the annotations selected (Flatten among it), and Flatten All.
+fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
+    // A right-click on an annotation picks it first, unless it's inside the area selected.
+    if resp.secondary_clicked()
+        && let Some(p) = resp.interact_pointer_pos()
+    {
+        let at = ed.view.to_image(p);
+        if !ed.area.is_some_and(|a| a.contains(at)) {
+            ed.area = None;
+            ed.stop_editing();
+            match ed.object_under(at) {
+                Some(id) if !ed.session.selected().contains(&id) => ed.session.select(vec![id]),
+                Some(_) => {}
+                None => ed.session.select(Vec::new()),
+            }
+        }
+    }
+    resp.context_menu(|ui| {
+        ui.set_min_width(240.0);
+        let item =
+            |ui: &mut Ui, enabled: bool, label: &str, keys: &str| ui.add_enabled(enabled, egui::Button::new(label).shortcut_text(keys)).clicked();
+        let undo = ed.session.undo_label().map(|l| format!("Undo {l}")).unwrap_or_else(|| "Undo".to_string());
+        if item(ui, ed.session.can_undo(), &undo, "Ctrl+Z") {
+            ed.run(ctx, "edit.undo", serde_json::json!({}));
+            ui.close();
+        }
+        let redo = ed.session.redo_label().map(|l| format!("Redo {l}")).unwrap_or_else(|| "Redo".to_string());
+        if item(ui, ed.session.can_redo(), &redo, "Ctrl+Y") {
+            ed.run(ctx, "edit.redo", serde_json::json!({}));
+            ui.close();
+        }
+        ui.separator();
+        if ed.area.is_some() {
+            if item(ui, true, "Copy Area", "Ctrl+C") {
+                ed.copy(ctx);
+                ui.close();
+            }
+            if item(ui, true, "Cut Area", "Ctrl+X") {
+                ed.cut_area(ctx);
+                ui.close();
+            }
+            if item(ui, true, "Delete Area", "Del") {
+                ed.erase_area(ctx);
+                ui.close();
+            }
+            if item(ui, true, "Crop to Selection", "") {
+                ed.crop_to_area(ctx);
+                ui.close();
+            }
+            ui.separator();
+        }
+        let sel = ed.session.selected();
+        let any = !sel.is_empty();
+        if any {
+            if item(ui, true, "Copy", "Ctrl+C") {
+                ed.copy(ctx);
+                ui.close();
+            }
+            if item(ui, true, "Cut", "Ctrl+X") {
+                ed.cut_selection(ctx);
+                ui.close();
+            }
+            if item(ui, true, "Flatten", "Ctrl+Shift+F") {
+                ed.flatten(ctx, false);
+                ui.close();
+            }
+            // One with text: type into it.
+            let text = match sel.as_slice() {
+                [one] if ed.session.doc.get(*one).is_some_and(|o| o.shape.text().is_some()) => Some(*one),
+                _ => None,
+            };
+            if let Some(id) = text
+                && item(ui, true, "Edit Text", "Double-click")
+            {
+                ed.start_editing(id);
+                ui.close();
+            }
+            if item(ui, true, "Duplicate", "Ctrl+D") {
+                ed.run(ctx, "edit.duplicate", serde_json::json!({}));
+                ui.close();
+            }
+            if item(ui, true, "Delete", "Del") {
+                ed.run(ctx, "edit.delete", serde_json::json!({}));
+                ui.close();
+            }
+            if item(ui, true, "Bring to Front", "") {
+                ed.run(ctx, "object.order", serde_json::json!({"to": "front"}));
+                ui.close();
+            }
+            if item(ui, true, "Send to Back", "") {
+                ed.run(ctx, "object.order", serde_json::json!({"to": "back"}));
+                ui.close();
+            }
+            ui.separator();
+        }
+        if item(ui, true, "Paste", "Ctrl+V") {
+            ed.paste(ctx, false);
+            ui.close();
+        }
+        let plain_copy = ed.area.is_none() && ed.session.selected().is_empty();
+        if item(ui, true, "Copy Picture", if plain_copy { "Ctrl+C" } else { "" }) {
+            ed.copy_whole(ctx);
+            ui.close();
+        }
+        if item(ui, !ed.session.doc.objects.is_empty(), "Flatten All", "") {
+            ed.flatten(ctx, true);
+            ui.close();
+        }
+        ui.separator();
+        if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {
+            ed.set_tool(Tool::Select);
+            ed.run(ctx, "edit.selectAll", serde_json::json!({}));
+            ui.close();
+        }
+        if item(ui, true, "Select an Area of the Picture", "Q") {
+            ed.set_tool(Tool::Area);
+            ui.close();
+        }
+        if item(ui, true, "Zoom to Fit", "Ctrl+0") {
+            ed.view.fit_pending = true;
+            ui.close();
+        }
+    });
+}
+
 fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     let Some(s) = at else { return };
     let p = ed.view.to_image(s);
@@ -809,6 +1032,8 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
             if ed.tool == Tool::Crop {
                 return;
             }
+            // A click lets go of an area of the picture selected.
+            ed.area = None;
             match hit {
                 Some(id) if shift => {
                     let mut sel = ed.session.selected();
@@ -827,6 +1052,11 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
             if !editing_before {
                 fill_at(ed, ctx, p);
             }
+        }
+        // A click lets go of the area; on a piece taken out of the picture it selects that.
+        Tool::Area => {
+            ed.area = None;
+            ed.session.select(hit.into_iter().collect());
         }
         Tool::Draw(kind) => {
             // A click on an annotation selects it (and types into text with the text tools).
@@ -918,14 +1148,26 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         && !ed.session.selected().contains(&id)
         && let Some(o) = ed.session.doc.get(id)
     {
-        let b = ed.view.rect_to_screen(o.shape.bounds(&o.style));
-        painter.rect_stroke(b.expand(2.0), 2.0, Stroke::new(1.0, t.handle.gamma_multiply(0.6)), StrokeKind::Outside);
+        if let Some(points) = stroke_points(&o.shape) {
+            stroke_mark(&painter, ed, points, t.handle.gamma_multiply(0.7), false);
+        } else {
+            let b = ed.view.rect_to_screen(o.shape.bounds(&o.style));
+            painter.rect_stroke(b.expand(2.0), 2.0, Stroke::new(1.0, t.handle.gamma_multiply(0.6)), StrokeKind::Outside);
+        }
     }
 
     // The selection.
     let selected = ed.session.selected();
     for id in &selected {
         let Some(o) = ed.session.doc.get(*id) else { continue };
+        // A pen or highlighter stroke is shown selected along itself, with no box round it, and
+        // not at all while it's being drawn: it looks as it will.
+        if let Some(points) = stroke_points(&o.shape) {
+            if !matches!(&ed.drag, Some(Drag::Create { id: drawing, .. }) if drawing == id) {
+                stroke_mark(&painter, ed, points, t.handle, true);
+            }
+            continue;
+        }
         let line_like = matches!(o.shape, Shape::Arrow { .. } | Shape::Line { .. });
         if !line_like {
             let b = ed.view.rect_to_screen(o.shape.rect().unwrap_or_else(|| o.shape.bounds(&o.style)));
@@ -955,6 +1197,21 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let r = egui::Rect::from_two_pos(ed.view.to_screen(*start), ed.view.to_screen(*now));
         painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.12));
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, t.handle), StrokeKind::Middle);
+    }
+
+    // The area selected with the Selection tool: a frame of dashes in black and white (it shows
+    // on any picture), and its size.
+    if let Some(a) = ed.area {
+        let r = ed.view.rect_to_screen(a);
+        painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.08));
+        painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Middle);
+        dashed_rect(&painter, r, Color32::WHITE);
+        let label = format!("{:.0} × {:.0}", a.w, a.h);
+        let at = pos2(r.center().x, (r.max.y + 14.0).min(clip.max.y - 12.0));
+        let galley = painter.layout_no_wrap(label, egui::FontId::proportional(12.0), Color32::WHITE);
+        let bg = egui::Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
+        painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
+        painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
     }
 
     // The crop: the rest darkened, the frame with its handles and size.
@@ -991,6 +1248,47 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let bg = egui::Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
         painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
         painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    }
+}
+
+/// The points of a pen or highlighter stroke (shown selected along itself, not by a box).
+fn stroke_points(shape: &Shape) -> Option<&[Pt]> {
+    match shape {
+        Shape::Pen { points } | Shape::Highlight { points } => Some(points),
+        _ => None,
+    }
+}
+
+/// A pen or highlighter stroke marked as hovered or selected along its own middle: a thin line
+/// (dashes, white under the colour, when selected) and a dot at each end. Nothing covers the
+/// stroke, so it keeps its colour, and a thin line can't fold over itself where the stroke turns.
+fn stroke_mark(p: &egui::Painter, ed: &Editor, points: &[Pt], color: Color32, selected: bool) {
+    // Every few points on the screen, not every point the pointer gave: no jitter.
+    let mut pts: Vec<Pos2> = Vec::new();
+    for q in points {
+        let s = ed.view.to_screen(*q);
+        if pts.last().is_none_or(|l| l.distance(s) >= 3.0) {
+            pts.push(s);
+        }
+    }
+    if let (Some(last), Some(end)) = (pts.last().copied(), points.last().map(|q| ed.view.to_screen(*q)))
+        && last != end
+    {
+        pts.push(end);
+    }
+    if pts.len() >= 2 {
+        if selected {
+            p.add(egui::Shape::line(pts.clone(), Stroke::new(3.0, Color32::from_white_alpha(220))));
+            p.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.5, color), 6.0, 4.0));
+        } else {
+            p.add(egui::Shape::line(pts.clone(), Stroke::new(1.5, color)));
+        }
+    }
+    if selected {
+        for end in [pts.first(), pts.last()].into_iter().flatten() {
+            p.circle_filled(*end, HANDLE * 0.45, Color32::WHITE);
+            p.circle_stroke(*end, HANDLE * 0.45, Stroke::new(1.5, color));
+        }
     }
 }
 

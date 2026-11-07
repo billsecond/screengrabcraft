@@ -865,3 +865,67 @@ mod tests {
         assert_eq!(px(&out, 151, 6), Color::WHITE, "an oval leaves its box's corners alone");
     }
 }
+
+#[cfg(test)]
+mod stroke_tests {
+    use super::*;
+    use screengrabcraft_model::Kind;
+
+    fn dist_to_polyline(p: (f32, f32), pts: &[Pt]) -> f32 {
+        let mut best = f32::INFINITY;
+        for w in pts.windows(2) {
+            if let [a, b] = w {
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let len2 = dx * dx + dy * dy;
+                let t = if len2 > 0.0 { (((p.0 - a.x) * dx + (p.1 - a.y) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+                let (cx, cy) = (a.x + t * dx, a.y + t * dy);
+                best = best.min(((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt());
+            }
+        }
+        best
+    }
+
+    /// The owner's scribble with a wide highlighter left a wedge (a "crease") where it turned
+    /// sharply: nothing of a stroke is drawn far from where it went.
+    #[test]
+    fn a_sharply_turning_stroke_has_no_crease() {
+        let scribbles: Vec<Vec<Pt>> = vec![
+            vec![Pt::new(30.0, 40.0), Pt::new(160.0, 44.0), Pt::new(164.0, 48.0), Pt::new(32.0, 54.0), Pt::new(30.0, 58.0), Pt::new(160.0, 66.0)],
+            vec![Pt::new(40.0, 100.0), Pt::new(100.0, 20.0), Pt::new(102.0, 22.0), Pt::new(104.0, 100.0), Pt::new(106.0, 98.0), Pt::new(170.0, 20.0)],
+            vec![Pt::new(50.0, 60.0), Pt::new(150.0, 60.0), Pt::new(150.5, 60.5), Pt::new(50.0, 61.0)],
+            // A tight curl drawn fast: short steps round a small circle, then away.
+            (0..40)
+                .map(|i| {
+                    let a = i as f32 * 0.35;
+                    Pt::new(100.0 + 8.0 * a.cos(), 60.0 + 8.0 * a.sin())
+                })
+                .chain([Pt::new(180.0, 100.0)])
+                .collect(),
+            vec![Pt::new(20.0, 100.0), Pt::new(90.0, 30.0), Pt::new(93.0, 29.0), Pt::new(95.0, 31.0), Pt::new(96.0, 36.0), Pt::new(97.0, 100.0)],
+        ];
+        for (kind, width) in [(Kind::Highlight, 30.0), (Kind::Highlight, 60.0), (Kind::Pen, 24.0), (Kind::Pen, 50.0)] {
+            for points in &scribbles {
+                let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
+                let shape = if kind == Kind::Highlight { Shape::Highlight { points: points.clone() } } else { Shape::Pen { points: points.clone() } };
+                let style = Style { width, shadow: false, ..kind.default_style() };
+                d.add(shape, style).unwrap();
+                let out = render(&d).unwrap();
+                let (first, last) = (points.first().copied().unwrap(), points.last().copied().unwrap());
+                let mut stray = Vec::new();
+                for y in 0..120u32 {
+                    for x in 0..200u32 {
+                        let p = (x as f32 + 0.5, y as f32 + 0.5);
+                        let near_end = [first, last].iter().any(|e| ((p.0 - e.x).powi(2) + (p.1 - e.y).powi(2)).sqrt() < width);
+                        if near_end || dist_to_polyline(p, points) <= width / 2.0 + 6.0 {
+                            continue;
+                        }
+                        if out.pixel(x, y) != Some(Color::WHITE) {
+                            stray.push((x, y));
+                        }
+                    }
+                }
+                assert!(stray.is_empty(), "{kind:?} {points:?}: {} pixels drawn away from the stroke, e.g. {:?}", stray.len(), stray.first());
+            }
+        }
+    }
+}

@@ -932,7 +932,12 @@ impl Services for Disk {
         s.files
             .keys()
             .filter(|p| !p.ends_with(".sgcraft"))
-            .map(|p| RecentItem { path: p.clone(), name: crate::editor::file_name(p), modified: s.stamps.get(p).copied().unwrap_or_default() })
+            .map(|p| RecentItem {
+                path: p.clone(),
+                name: crate::editor::file_name(p),
+                modified: s.stamps.get(p).copied().unwrap_or_default(),
+                ..RecentItem::default()
+            })
             .collect()
     }
 
@@ -1871,4 +1876,363 @@ fn the_eyedropper_reads_the_colour_as_shown() {
     ] {
         assert_eq!(ed.colour_at(junk), None, "{junk:?}");
     }
+}
+
+// ---- the strip of recent captures: the mouse wheel, every capture, All captures ----
+
+fn many_captures(n: usize) -> Disk {
+    let files: Vec<(String, Vec<u8>)> = (0..n).map(|i| (format!("captures/Capture {i:03}.png"), png(8, 6, Color::WHITE))).collect();
+    let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+    Disk::with(&refs)
+}
+
+#[test]
+fn the_strip_holds_every_capture_and_makes_thumbnails_only_for_those_in_view() {
+    let disk = many_captures(150);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    // The oldest of 150 is in the strip (it showed 40 before).
+    h.get_by_label("Capture 149.png");
+    let asked = disk.0.borrow().thumbs_asked.len();
+    assert!(asked > 0 && asked < 30, "thumbnails asked for: {asked}");
+}
+
+#[test]
+fn the_mouse_wheel_over_the_strip_goes_back_through_older_captures() {
+    let disk = many_captures(60);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let first = h.get_by_label("Capture 000.png").rect();
+    h.hover_at(first.center());
+    h.run_steps(1);
+    for _ in 0..4 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(20);
+    let after = h.get_by_label("Capture 000.png").rect();
+    assert!(after.min.x < first.min.x - 100.0, "the strip moved along: {first:?} -> {after:?}");
+    // The picture's view didn't zoom or move meanwhile.
+    let zoom = h.state().view.zoom;
+    assert!((zoom - h.state().view.zoom).abs() < f32::EPSILON);
+}
+
+#[test]
+fn all_captures_lists_every_capture_and_opens_the_one_picked() {
+    let disk = many_captures(120);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    h.get_by_label("All captures (120)").click();
+    h.run_steps(3);
+    assert_eq!(h.get_all_by_label("Capture 000.png").count(), 2, "in the strip and in the menu");
+    // A search narrows it down; the oldest is there too.
+    crate::quick_tests::shot(&mut h, "all-captures-grid");
+    h.state_mut().capture_search = "117".into();
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "all-captures");
+    let item = h.get_all_by_label("Capture 117.png").last().map(|n| n.rect()).expect("in the menu");
+    click_at(&mut h, item.center());
+    h.run_steps(4);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 117.png"));
+}
+
+// ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----
+
+/// A host whose clipboard keeps the last picture copied.
+#[derive(Clone, Default)]
+struct Clipboard(Rc<RefCell<Option<Raster>>>);
+
+impl Services for Clipboard {
+    fn copy_image(&self, picture: &Raster) -> Result<(), String> {
+        *self.0.borrow_mut() = Some(picture.clone());
+        Ok(())
+    }
+}
+
+fn area_editor(clip: &Clipboard) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    ready(ed, Tool::Area)
+}
+
+const BLUE: Color = Color { r: 30, g: 90, b: 200, a: 255 };
+
+#[test]
+fn the_selection_tool_moves_part_of_the_picture() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    // The blue square (100 × 100 at 150, 100) selected.
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 250.0, 200.0));
+    drag(&mut h, a, b);
+    let area = h.state().area.expect("an area selected");
+    assert!((area.x - 150.0).abs() < 2.0 && (area.w - 100.0).abs() < 3.0, "{area:?}");
+    crate::quick_tests::shot(&mut h, "area-selected");
+    // Dragged from inside, it moves 100 to the right.
+    let (from, to) = (at(&h, 200.0, 150.0), at(&h, 300.0, 150.0));
+    drag(&mut h, from, to);
+    crate::quick_tests::shot(&mut h, "area-moved");
+    let ed = h.state();
+    assert!(ed.area.is_none());
+    assert_eq!(ed.session.doc.objects.len(), 1, "the part is a piece of its own");
+    let o = ed.session.doc.objects.first().unwrap();
+    assert!(o.shape.rect().is_some_and(|r| (r.x - 250.0).abs() < 4.0), "moved: {:?}", o.shape.rect());
+    assert_eq!(ed.session.doc.base.pixel(200, 150).map(|c| c.a), Some(0), "where it was is see-through");
+    let shown = screengrabcraft_render::render(&ed.session.doc).unwrap();
+    assert_eq!(shown.pixel(300, 150), Some(BLUE), "shown where it went");
+    // Flatten draws it into the picture.
+    h.get_by_label("Flatten").click();
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.session.doc.base.pixel(300, 150), Some(BLUE));
+    // Undo, undo, undo: as it was.
+    for _ in 0..3 {
+        let ctx = h.ctx.clone();
+        h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    }
+    assert_eq!(h.state().session.doc.base.pixel(200, 150), Some(BLUE));
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn the_selection_tool_copies_cuts_deletes_and_crops_an_area() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    let (a, b) = (at(&h, 140.0, 90.0), at(&h, 200.0, 150.0));
+    drag(&mut h, a, b);
+    let (x, y, w, hh) = h.state().area.and_then(|r| r.pixel_bounds(400, 300)).expect("an area");
+    // Copy: just the area, as shown.
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    let copied = clip.0.borrow().clone().expect("copied");
+    assert_eq!((copied.width(), copied.height()), (w, hh));
+    assert_eq!(copied.pixel(w - 1, hh - 1), Some(BLUE));
+    // Cut: copied, and see-through in the picture.
+    *clip.0.borrow_mut() = None;
+    h.get_by_label("Cut").click();
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_some(), "cut copies");
+    assert_eq!(h.state().session.doc.base.pixel(x + w - 1, y + hh - 1).map(|c| c.a), Some(0));
+    // Delete, on another area: see-through.
+    let (a, b) = (at(&h, 230.0, 180.0), at(&h, 260.0, 210.0));
+    drag(&mut h, a, b);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().session.doc.base.pixel(240, 190).map(|c| c.a), Some(0));
+    // Esc lets go of the area.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+    // Crop to Selection keeps only the area.
+    let (a, b) = (at(&h, 10.0, 10.0), at(&h, 110.0, 60.0));
+    drag(&mut h, a, b);
+    let want = h.state().area.and_then(|r| r.pixel_bounds(400, 300)).expect("an area");
+    h.get_by_label("Crop to Selection").click();
+    h.run_steps(2);
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (want.2, want.3));
+}
+
+#[test]
+fn ctrl_a_with_the_selection_tool_selects_the_whole_picture() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert_eq!(h.state().area, Some(h.state().session.doc.bounds()));
+    assert_eq!(h.state().tool, Tool::Area);
+}
+
+#[test]
+fn flatten_selected_keeps_the_others_and_ctrl_shift_f_flattens() {
+    let mut ed = editor();
+    let a = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(10.0, 10.0, 50.0, 50.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    let b = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(200.0, 10.0, 50.0, 50.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    ed.session.select(vec![a]);
+    let mut h = ready(ed, Tool::Select);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::F);
+    h.run_steps(2);
+    let ed = h.state();
+    assert!(ed.session.doc.get(a).is_none() && ed.session.doc.get(b).is_some(), "only the selected one");
+    assert_eq!(ed.tool, Tool::Select, "the key didn't pick the Fill tool");
+}
+
+// ---- the tool bar's groups, the right-click menu, the Move tool's area, strokes selected ----
+
+#[test]
+fn the_tool_bar_is_its_groups_in_order() {
+    let flat: Vec<Tool> = Tool::BAR_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
+    assert_eq!(flat, Tool::BAR.to_vec());
+    for (tool, ..) in Tool::ALL {
+        let on_bar = Tool::BAR.contains(&tool) || tool == Tool::Draw(Kind::Ellipse);
+        assert!(on_bar, "{tool:?} has a button (the ellipse is the Shape button's)");
+    }
+}
+
+fn right_click(h: &mut Harness<'_, Editor>, p: Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+#[test]
+fn a_right_click_on_an_annotation_flattens_it() {
+    let mut ed = editor();
+    let style =
+        screengrabcraft_model::Style { fill: Color::rgb(255, 0, 0), stroke: Color::rgb(255, 0, 0), shadow: false, ..Kind::Rect.default_style() };
+    let a = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(40.0, 40.0, 80.0, 60.0), radius: 0.0 }, style).unwrap();
+    let b = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(250.0, 40.0, 80.0, 60.0), radius: 0.0 }, style).unwrap();
+    let mut h = ready(ed, Tool::Draw(Kind::Arrow));
+    let p = at(&h, 80.0, 70.0);
+    right_click(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![a], "the right-click picked it");
+    crate::quick_tests::shot(&mut h, "right-click-menu");
+    // The menu's Flatten (the panel has one too).
+    h.get_by_label_contains("Ctrl+Shift+F").click();
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.session.doc.get(a).is_none() && ed.session.doc.get(b).is_some());
+    assert_eq!(ed.session.doc.base.pixel(80, 70), Some(Color::rgb(255, 0, 0)), "drawn into the picture");
+    // Flatten All, from the menu on the picture.
+    let p = at(&h, 200.0, 250.0);
+    right_click(&mut h, p);
+    h.get_by_label_contains("Flatten All").click();
+    h.run_steps(3);
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn a_right_click_on_an_area_cuts_it() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 200.0, 150.0));
+    drag(&mut h, a, b);
+    let inside = at(&h, 175.0, 125.0);
+    right_click(&mut h, inside);
+    assert!(h.state().area.is_some(), "a right-click inside keeps the area");
+    h.get_by_label_contains("Cut Area").click();
+    h.run_steps(3);
+    assert!(clip.0.borrow().is_some());
+    assert_eq!(h.state().session.doc.base.pixel(175, 125).map(|c| c.a), Some(0));
+}
+
+#[test]
+fn the_move_tool_selects_part_of_the_picture_where_there_are_no_annotations() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    h.state_mut().set_tool(Tool::Select);
+    h.run_steps(1);
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 250.0, 200.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area.is_some(), "an area of the picture");
+    assert_eq!(h.state().tool, Tool::Select);
+    h.get_by_label("Crop to Selection");
+    let (from, to) = (at(&h, 200.0, 150.0), at(&h, 120.0, 150.0));
+    drag(&mut h, from, to);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.objects.len(), 1, "that part moved");
+    assert_eq!(ed.session.doc.base.pixel(240, 150).map(|c| c.a), Some(0));
+    // A click lets go.
+    let away = at(&h, 380.0, 280.0);
+    click_at(&mut h, away);
+    assert!(h.state().area.is_none());
+}
+
+#[test]
+fn a_highlight_is_shown_selected_along_itself_with_no_box_to_pull() {
+    let mut ed = editor();
+    let id = ed
+        .session
+        .doc
+        .add(
+            Shape::Highlight { points: vec![screengrabcraft_model::Pt::new(60.0, 100.0), screengrabcraft_model::Pt::new(300.0, 120.0)] },
+            Kind::Highlight.default_style(),
+        )
+        .unwrap();
+    let mut h = ready(ed, Tool::Select);
+    let p = at(&h, 180.0, 110.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![id], "clicking the highlight selects it");
+    crate::quick_tests::shot(&mut h, "highlight-selected");
+    // Where a box's corner would be, nothing takes hold.
+    let corner = h.state().view.to_screen(screengrabcraft_model::Pt::new(60.0, 100.0));
+    assert!(h.state().handle_at(corner).is_none());
+    // It still moves.
+    let (from, to) = (at(&h, 180.0, 110.0), at(&h, 180.0, 160.0));
+    drag(&mut h, from, to);
+    let moved = h.state().session.doc.get(id).and_then(|o| match &o.shape {
+        Shape::Highlight { points } => points.first().copied(),
+        _ => None,
+    });
+    assert!(moved.is_some_and(|p| (p.y - 150.0).abs() < 4.0), "{moved:?}");
+}
+
+#[test]
+fn copy_with_an_annotation_selected_copies_only_it_and_cut_takes_it_away() {
+    let clip = Clipboard::default();
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    let style =
+        screengrabcraft_model::Style { fill: Color::rgb(255, 0, 0), stroke: Color::rgb(255, 0, 0), shadow: false, ..Kind::Rect.default_style() };
+    let id = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 60.0, 40.0), radius: 0.0 }, style).unwrap();
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    let copied = clip.0.borrow().clone().expect("copied");
+    // The rectangle and its border, not the 400 × 300 picture.
+    assert!(
+        copied.width() >= 60 && copied.width() <= 70 && copied.height() >= 40 && copied.height() <= 50,
+        "{} × {}",
+        copied.width(),
+        copied.height()
+    );
+    assert_eq!(copied.pixel(copied.width() / 2, copied.height() / 2), Some(Color::rgb(255, 0, 0)));
+    assert!(h.state().session.doc.get(id).is_some(), "copy keeps it");
+    // Copy Picture, from the menu, is the whole picture still.
+    let p = at(&h, 300.0, 250.0);
+    right_click(&mut h, p);
+    h.get_by_label_contains("Copy Picture").click();
+    h.run_steps(2);
+    assert_eq!(clip.0.borrow().as_ref().map(|r| (r.width(), r.height())), Some((400, 300)));
+    // Cut: copied, and gone.
+    h.state_mut().session.select(vec![id]);
+    *clip.0.borrow_mut() = None;
+    h.event(egui::Event::Cut);
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_some(), "cut copies");
+    assert!(h.state().session.doc.get(id).is_none(), "cut takes it away");
+}
+
+#[test]
+fn copy_while_typing_leaves_the_clipboard_to_the_text() {
+    let clip = Clipboard::default();
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    let mut h = ready(ed, Tool::Draw(Kind::Text));
+    let p = at(&h, 100.0, 100.0);
+    click_at(&mut h, p);
+    assert!(h.state().editing.is_some(), "typing");
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_none(), "no picture copied over the text");
 }

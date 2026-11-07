@@ -28,13 +28,18 @@ pub enum DialogResult {
 }
 
 /// A capture in the recent strip.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RecentItem {
     pub path: String,
     pub name: String,
     /// When it was last written, in milliseconds since the epoch (a picture written again has
     /// a new thumbnail).
     pub modified: u64,
+    /// That day, locally, as `2026-11-07` (empty when the host can't tell): All captures groups
+    /// by it.
+    pub day: String,
+    /// That time of day, locally, as `14:05` (or empty).
+    pub time: String,
 }
 
 /// File types offered in a save dialog: a name and its extensions.
@@ -137,6 +142,11 @@ pub trait Services {
     /// The recent captures, newest first.
     fn recent(&self) -> Vec<RecentItem> {
         Vec::new()
+    }
+
+    /// Today, locally, as `2026-11-07` (empty when the host can't tell).
+    fn today(&self) -> String {
+        String::new()
     }
 
     /// A small picture of a recent capture as it was at `modified` (none until it has been

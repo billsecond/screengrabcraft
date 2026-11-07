@@ -53,6 +53,8 @@ pub enum Icon {
     More,
     Effects,
     Eyedropper,
+    /// The Selection tool: a box of dashes round part of the picture.
+    Marquee,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -217,6 +219,18 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 line(at(x - r, y), at(x + r, y));
                 line(at(x, y - r), at(x, y + r));
             }
+        }
+        Icon::Marquee => {
+            // A box of dashes, as an area selected looks, with a hand's pointer at a corner.
+            let (x0, y0, x1, y1) = (2.5, 3.5, 15.5, 13.5);
+            let dash = |a: Pos2, b: Pos2| {
+                p.extend(Shape::dashed_line(&[a, b], stroke, 2.4 * u, 1.6 * u));
+            };
+            dash(at(x0, y0), at(x1, y0));
+            dash(at(x1, y0), at(x1, y1));
+            dash(at(x1, y1), at(x0, y1));
+            dash(at(x0, y1), at(x0, y0));
+            fill_poly(vec![at(12.0, 10.5), at(19.0, 15.5), at(15.6, 16.0), at(17.4, 19.2), at(16.0, 19.8), at(14.3, 16.6), at(12.0, 18.6)], color);
         }
         Icon::Eyedropper => {
             // A dropper held slanting: its squeeze bulb at the top right, a band, and the glass

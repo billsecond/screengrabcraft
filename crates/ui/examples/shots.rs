@@ -140,6 +140,8 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         camera_supported: true,
         system_sound: true,
         system_sound_platform: true,
+        speakers: vec!["Speakers".to_string()],
+        default_speaker: Some("Speakers".to_string()),
     };
     let mut fixed = Settings::default();
     fixed.recorder.area = RecordArea::Fixed;
@@ -163,7 +165,7 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         let mut h = Harness::builder().with_size(recorder::SIZE).build_ui_state(
             move |ui, (s, v, m): &mut (Settings, RecorderView, MicLevel)| {
                 screengrabcraft_ui::theme::apply(ui.ctx(), theme);
-                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m);
+                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m, &recorder::MicLevel::Off);
             },
             state,
         );

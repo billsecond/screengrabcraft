@@ -109,6 +109,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
+- **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
+  **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
+  these and the rest. Copy with annotations selected copies just them.
 - **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
   or an ellipse), **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow

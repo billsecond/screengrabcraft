@@ -29,6 +29,30 @@ had before 0.1.19, and what is still missing.
 | Stamps | seven stamps drawn in code | (a larger library and your own pictures as stamps: still missing) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |
 
+## What 0.1.26 changes
+
+- **Selection tool** (Q, a box of dashes on the tool bar): drag on the picture to select an area
+  of the picture itself. Drag inside it to move that part (it comes out as a piece of its own,
+  leaving the place it was see-through); Ctrl+C copies it, Ctrl+X cuts it, Delete makes it
+  see-through, Crop to Selection keeps only it, Esc lets go, Ctrl+A selects all of the picture.
+  The Move tool does the same when its rubber band catches no annotation.
+- **Flatten**: Flatten Selected (Ctrl+Shift+F, or all when nothing is selected) and Flatten All,
+  in the Edit menu, the panel and the right-click menu.
+- **Right-click menu** on the picture: Undo and Redo; for an area, Copy, Cut, Delete, Crop to
+  Selection; for annotations, Copy, Cut, Flatten, Edit Text, Duplicate, Delete, Bring to Front,
+  Send to Back; then Paste, Copy Picture, Flatten All, Select All Annotations, Select an Area of
+  the Picture, Zoom to Fit. A right-click picks the annotation under it first.
+- **Copy and cut** with annotations selected take only those (on see-through, cut to what they
+  cover; blur, pixelate, spotlight and magnify with the picture under them).
+- **The tool bar in groups** with a faint line between them: Move, Selection, Crop; Arrow, Line,
+  Text, Callout, Shape, Stamp, Step; Pen, Highlighter, Fill; Blur, Pixelate, Spotlight, Magnify.
+- **Pen and highlighter strokes** are shown selected along themselves (a thin dashed line, a dot
+  at each end) rather than by a box, keep their colour, and aren't selected once drawn.
+- **Recent captures**: the mouse wheel goes back through every capture (thumbnails are made for
+  those in view only); **All captures** shows every one bigger, newest first, under Today,
+  Yesterday or its date, with its time and a search. Videos have a play mark.
+- **Videos**: a play button and the time under the picture.
+
 ## What 0.1.21 changes
 
 - **An eyedropper in every colour menu** (fill, border, text, text outline, line, ring, and the

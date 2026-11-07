@@ -255,6 +255,14 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             });
             return;
         }
+        (None, Tool::Area) => {
+            area_panel(ed, ui);
+            return;
+        }
+        (None, _) if ed.area.is_some() => {
+            area_panel(ed, ui);
+            return;
+        }
         (None, Tool::Fill) => {
             ui.heading("Fill");
             ui.add_space(6.0);
@@ -325,8 +333,48 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             if ui.button("Delete").clicked() {
                 ed.run(&ctx, "edit.delete", serde_json::json!({}));
             }
+            if ui.button("Flatten").on_hover_text("Draw the selected annotations into the picture for good (Ctrl+Shift+F)").clicked() {
+                ed.flatten(&ctx, false);
+            }
         });
     }
+}
+
+/// The panel while an area of the picture is selected (or the Selection tool is picked): what
+/// can be done with that part of the picture.
+fn area_panel(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Selection");
+    ui.add_space(6.0);
+    ui.label("Drag on the picture to select an area of it. Drag inside the area to move that part of the picture.");
+    ui.add_space(8.0);
+    let ctx = ui.ctx().clone();
+    let any = ed.area.is_some();
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
+        if ui.add_enabled(any, egui::Button::new("Copy")).on_hover_text("Copy the area (Ctrl+C)").clicked() {
+            ed.copy(&ctx);
+        }
+        if ui.add_enabled(any, egui::Button::new("Cut")).on_hover_text("Copy the area, and leave it see-through (Ctrl+X)").clicked() {
+            ed.cut_area(&ctx);
+        }
+        if ui.add_enabled(any, egui::Button::new("Delete")).on_hover_text("Leave the area see-through (Delete)").clicked() {
+            ed.erase_area(&ctx);
+        }
+        if ui.add_enabled(any, egui::Button::new("Crop to Selection")).on_hover_text("Keep only the area").clicked() {
+            ed.crop_to_area(&ctx);
+        }
+        if ui.button("Select All").on_hover_text("The whole picture (Ctrl+A)").clicked() {
+            ed.select_whole_area();
+        }
+    });
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new(
+            "Shift keeps it square; Esc lets go of it; right-click for more. A part moved is a piece of its own: Flatten draws it into the picture.",
+        )
+        .color(t.muted),
+    );
 }
 
 /// A slider with its name above it (the slider has its number box).

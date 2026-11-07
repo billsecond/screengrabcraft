@@ -479,3 +479,64 @@ fn a_title_look_makes_its_text_bigger_and_its_box_taller() {
     assert!(after.h > before.h && after.w == before.w, "{before:?} → {after:?}");
     assert!(s.doc.bounds().encloses(o.shape.bounds(&o.style)), "still on the picture");
 }
+
+#[test]
+fn an_area_lifted_out_moves_as_a_picture_and_leaves_a_see_through_hole() {
+    let mut s = square_on_blue();
+    // The red square (20 × 20 at 20, 10) with a little blue round it.
+    let out = s.execute("image.lift", &json!({"x": 15, "y": 5, "w": 30, "h": 30})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.selected(), vec![id], "the piece is selected, to be moved");
+    assert_eq!(s.doc.base.pixel(30, 20).map(|c| c.a), Some(0), "the hole is see-through");
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)), "the rest stays");
+    let o = s.doc.get(id).unwrap();
+    assert_eq!(o.shape.rect(), Some(Rect::new(15.0, 5.0, 30.0, 30.0)), "where it was");
+    assert!(!o.style.shadow, "looking as it did");
+    // Drawn where it was, the picture looks the same.
+    let shown = screengrabcraft_render::render(&s.doc).unwrap();
+    assert_eq!(shown.pixel(30, 20), Some(Color::rgb(229, 57, 53)));
+    assert_eq!(s.undo_label(), Some("Move Area"));
+    s.undo();
+    assert_eq!(s.doc.base.pixel(30, 20), Some(Color::rgb(229, 57, 53)), "one undo puts it back");
+    assert!(s.doc.objects.is_empty() && s.doc.images.is_empty());
+    for bad in
+        [json!({}), json!({"x": 500, "y": 5, "w": 10, "h": 10}), json!({"x": 1, "y": 1, "w": 0, "h": 10}), json!({"x": "a", "y": 1, "w": 5, "h": 5})]
+    {
+        let before = s.doc.clone();
+        assert!(s.execute("image.lift", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+#[test]
+fn an_area_erased_is_see_through_and_only_that_area() {
+    let mut s = square_on_blue();
+    s.execute("image.erase", &json!({"x": 20, "y": 10, "w": 10, "h": 10})).unwrap();
+    assert_eq!(s.doc.base.pixel(25, 15).map(|c| c.a), Some(0));
+    assert_eq!(s.doc.base.pixel(35, 25), Some(Color::rgb(229, 57, 53)), "the square's other part stays");
+    // An area reaching past the edge is cut to the picture.
+    s.execute("image.erase", &json!({"x": -50, "y": -50, "w": 60, "h": 60})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
+    assert!(s.execute("image.erase", &json!({"x": 900, "y": 900, "w": 5, "h": 5})).is_err());
+}
+
+#[test]
+fn flatten_draws_only_the_annotations_given_or_all() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 40}}));
+    let b = add(&mut s, json!({"type": "rect", "rect": {"x": 100, "y": 10, "w": 40, "h": 40}}));
+    for (id, c) in [(a, Color::rgb(255, 0, 0)), (b, Color::rgb(0, 0, 255))] {
+        let o = s.doc.get_mut(id).unwrap();
+        o.style.fill = c;
+        o.style.stroke = c;
+        o.style.shadow = false;
+    }
+    s.execute("object.flatten", &json!({"ids": [a.0]})).unwrap();
+    assert!(s.doc.get(a).is_none() && s.doc.get(b).is_some(), "only the one given goes into the picture");
+    assert_eq!(s.doc.base.pixel(30, 30), Some(Color::rgb(255, 0, 0)), "drawn into the picture");
+    assert_eq!(s.doc.base.pixel(120, 30), Some(Color::WHITE), "the other is still an annotation");
+    s.execute("object.flatten", &json!({})).unwrap();
+    assert!(s.doc.objects.is_empty());
+    assert_eq!(s.doc.base.pixel(120, 30), Some(Color::rgb(0, 0, 255)));
+    assert!(s.execute("object.flatten", &json!({"ids": [999]})).is_err(), "no such annotation");
+}

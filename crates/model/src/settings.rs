@@ -450,6 +450,8 @@ pub enum Theme {
 pub struct VideoOptions {
     /// What the computer plays (Windows only).
     pub system_sound: bool,
+    /// The speaker whose sound is recorded, by name; `None` is the system's default one.
+    pub system_sound_name: Option<String>,
     pub microphone: bool,
     /// The microphone by name; `None` is the system's default one.
     pub microphone_name: Option<String>,
@@ -461,14 +463,14 @@ pub struct VideoOptions {
 impl Default for VideoOptions {
     /// A quick video: the screen and what the computer plays.
     fn default() -> VideoOptions {
-        VideoOptions { system_sound: true, microphone: false, microphone_name: None, camera: false, camera_index: None }
+        VideoOptions { system_sound: true, system_sound_name: None, microphone: false, microphone_name: None, camera: false, camera_index: None }
     }
 }
 
 impl VideoOptions {
     /// Video Production: everything, each on its own track.
     pub fn production() -> VideoOptions {
-        VideoOptions { system_sound: true, microphone: true, microphone_name: None, camera: true, camera_index: None }
+        VideoOptions { system_sound: true, system_sound_name: None, microphone: true, microphone_name: None, camera: true, camera_index: None }
     }
 }
 
@@ -1151,7 +1153,14 @@ mod tests {
 
     #[test]
     fn something_must_be_recorded() {
-        let none = VideoOptions { system_sound: false, microphone: false, microphone_name: None, camera: false, camera_index: None };
+        let none = VideoOptions {
+            system_sound: false,
+            system_sound_name: None,
+            microphone: false,
+            microphone_name: None,
+            camera: false,
+            camera_index: None,
+        };
         let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
         assert!(!off.records_anything(&none, true, true));
         assert!(RecordArea::ALL.iter().all(|a| RecorderOptions { area: *a, ..RecorderOptions::default() }.records_anything(&none, true, true)));

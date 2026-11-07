@@ -5,7 +5,7 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
+use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Raster, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::effects;
 use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
@@ -129,9 +129,27 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Flatten",
         "Annotate",
         Some("Ctrl+Shift+F"),
-        "{} — draws every annotation into the picture for good",
+        r#"{"ids"?: [id]} — draws those annotations (default: every one) into the picture for good"#,
         has_objects,
         flatten
+    ),
+    cmd!(
+        "image.lift",
+        "Move Area",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — takes that area out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
+        always,
+        lift
+    ),
+    cmd!(
+        "image.erase",
+        "Delete Area",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — makes that area of the picture see-through"#,
+        always,
+        erase
     ),
     cmd!("image.crop", "Crop", "Image", None, r#"{"x": 0, "y": 0, "w": 100, "h": 100}"#, always, crop),
     cmd!(
@@ -512,12 +530,64 @@ fn order(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-fn flatten(s: &mut Session, _: &Value) -> Result<Value> {
-    let pic = screengrabcraft_render::render(&s.doc).ok_or_else(|| EngineError::Failed("the picture could not be drawn".to_string()))?;
-    s.doc.base = pic;
-    s.doc.objects.clear();
-    s.doc.images.clear();
-    s.selection.clear();
+fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
+    let failed = || EngineError::Failed("the picture could not be drawn".to_string());
+    match p.get("ids") {
+        None | Some(Value::Null) => {
+            s.doc.base = screengrabcraft_render::render(&s.doc).ok_or_else(failed)?;
+            s.doc.objects.clear();
+            s.doc.images.clear();
+            s.selection.clear();
+        }
+        Some(_) => {
+            // Only those: the picture is drawn with them alone on it, and they go.
+            let ids = ids_param(s, p, false)?;
+            let hide: Vec<ObjectId> = s.doc.objects.iter().map(|o| o.id).filter(|id| !ids.contains(id)).collect();
+            let pix = screengrabcraft_render::Renderer::new()
+                .render(&s.doc, &screengrabcraft_render::Options { hide, no_text: None })
+                .ok_or_else(failed)?;
+            s.doc.base = screengrabcraft_render::canvas::from_pixmap(&pix).ok_or_else(failed)?;
+            s.doc.remove(&ids);
+            s.selection.retain(|id| !ids.contains(id));
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// An area of the picture from `x`, `y`, `w`, `h`, in whole pixels inside it.
+fn area_param(s: &Session, p: &Value) -> Result<(u32, u32, u32, u32)> {
+    let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
+    area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))
+}
+
+/// Makes an area of a picture see-through.
+fn clear_area(r: &mut Raster, x: u32, y: u32, w: u32, h: u32) {
+    let width = r.width() as usize;
+    let px = r.pixels_mut();
+    for row in y..y.saturating_add(h) {
+        let Some(start) = (row as usize).checked_mul(width).and_then(|v| v.checked_add(x as usize)).and_then(|v| v.checked_mul(4)) else { return };
+        let Some(end) = (w as usize).checked_mul(4).and_then(|n| start.checked_add(n)) else { return };
+        if let Some(line) = px.get_mut(start..end) {
+            line.fill(0);
+        }
+    }
+}
+
+fn lift(s: &mut Session, p: &Value) -> Result<Value> {
+    let (x, y, w, h) = area_param(s, p)?;
+    let piece = s.doc.base.crop(x, y, w, h).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    let key = s.doc.add_image(piece)?;
+    clear_area(&mut s.doc.base, x, y, w, h);
+    // Where it was, looking as it did (no shadow, no border).
+    let style = Style { shadow: false, ..Kind::Image.default_style() };
+    let id = s.doc.add(Shape::Image { rect: Rect::new(x as f32, y as f32, w as f32, h as f32), image: key }, style)?;
+    s.selection = vec![id];
+    Ok(json!({ "id": id.0 }))
+}
+
+fn erase(s: &mut Session, p: &Value) -> Result<Value> {
+    let (x, y, w, h) = area_param(s, p)?;
+    clear_area(&mut s.doc.base, x, y, w, h);
     Ok(Value::Null)
 }
 

@@ -29,24 +29,25 @@ fn callout(ed: &mut Editor) -> screengrabcraft_model::ObjectId {
 }
 
 /// Every tool's button on the tool bar, in order.
-const BAR: [&str; 17] = [
+const BAR: [&str; 18] = [
     "Favorites",
+    "Move (V)",
+    "Selection (Q)",
+    "Crop (K)",
     "Arrow (A)",
+    "Line (L)",
     "Text (T)",
     "Callout (C)",
     "Shape (R, O)",
     "Stamp (G)",
-    "Fill (F)",
-    "Move (V)",
-    "Line (L)",
+    "Step number (N)",
     "Pen (P)",
     "Highlighter (H)",
-    "Step number (N)",
+    "Fill (F)",
     "Blur (B)",
     "Pixelate (X)",
     "Spotlight (S)",
     "Magnify (M)",
-    "Crop (K)",
 ];
 
 fn sized(width: f32) -> Harness<'static, Editor> {

@@ -69,35 +69,54 @@ pub struct CameraCapture {
     rx: Receiver<CameraFrame>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Why the last picture asked for didn't come, as the system said.
+    trouble: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// What to tell the owner about a camera that sends no pictures, from what the system said: a
+/// camera another program has to itself is said so plainly.
+pub fn trouble_text(said: &str) -> String {
+    let s = said.to_ascii_lowercase();
+    if s.contains("preempted") || s.contains("0xc00d3ea3") || s.contains("0xc00d3704") || s.contains("in use") {
+        "it's in use by another program (a camera app or a video call): close that, then record again".to_string()
+    } else {
+        said.chars().take(200).collect()
+    }
 }
 
 impl CameraCapture {
     /// Starts camera `index`; times count from `started`.
     pub fn start(index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
         let stop = Arc::new(AtomicBool::new(false));
+        let trouble = Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = channel::<CameraFrame>();
         let (ready_tx, ready_rx) = sync_channel::<Result<String, String>>(1);
-        let s = stop.clone();
+        let (s, said) = (stop.clone(), trouble.clone());
         let thread = std::thread::Builder::new()
             .name("camera".into())
             .spawn(move || {
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
-                run(index, started, &tx, &ready_tx, &s);
+                run(index, started, &tx, &ready_tx, &s, &said);
                 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 {
-                    let _ = (index, started, &tx, &s);
+                    let _ = (index, started, &tx, &s, &said);
                     let _ = ready_tx.send(Err("cameras can't be recorded on this system yet".to_string()));
                 }
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
         match ready_rx.recv_timeout(Duration::from_secs(40)) {
-            Ok(Ok(name)) => Ok(CameraCapture { name, rx, stop, thread: Some(thread) }),
+            Ok(Ok(name)) => Ok(CameraCapture { name, rx, stop, thread: Some(thread), trouble }),
             Ok(Err(e)) => Err(CaptureError::Device(e)),
             Err(_) => {
                 stop.store(true, Ordering::SeqCst);
                 Err(CaptureError::Device("the camera didn't start".to_string()))
             }
         }
+    }
+
+    /// Why no picture came, in plain words, if the system said (see [`trouble_text`]).
+    pub fn trouble(&self) -> Option<String> {
+        self.trouble.lock().ok().and_then(|t| t.as_deref().map(trouble_text))
     }
 
     /// The pictures that came in since last time.
@@ -129,6 +148,7 @@ fn run(
     tx: &std::sync::mpsc::Sender<CameraFrame>,
     ready: &std::sync::mpsc::SyncSender<Result<String, String>>,
     stop: &AtomicBool,
+    trouble: &std::sync::Mutex<Option<String>>,
 ) {
     use nokhwa::Camera;
     use nokhwa::pixel_format::RgbFormat;
@@ -178,6 +198,9 @@ fn run(
                 failures += 1;
                 if failures == 1 || failures % 100 == 0 {
                     log::warn!("camera: {e}");
+                    if let Ok(mut t) = trouble.lock() {
+                        *t = Some(e.to_string());
+                    }
                 }
                 if failures > 300 {
                     break;
