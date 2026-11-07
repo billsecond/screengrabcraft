@@ -3,7 +3,9 @@
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Ui, vec2};
 use screengrabcraft_engine::Session;
-use screengrabcraft_model::{CaptureMode, Document, EditorSettings, ImageFormat, Kind, ObjectId, PROJECT_EXT, Raster, Rect, StampKind, Style};
+use screengrabcraft_model::{
+    CaptureMode, Document, EditorSettings, ImageFormat, Kind, ObjectId, PROJECT_EXT, Raster, Rect, ShapeOptions, StampKind, Style,
+};
 use screengrabcraft_render::anim::Player;
 use screengrabcraft_render::{Renderer, project};
 use serde_json::{Value, json};
@@ -18,17 +20,21 @@ use crate::theme::Tokens;
 /// What the pointer does on the canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
+    /// Selects and moves annotations (the Move tool).
     Select,
     Draw(Kind),
     /// Fills an area of the picture, or a shape, with a colour.
     Fill,
     Crop,
+    /// The starred quick styles of every tool in the panel; the canvas selects and moves, as
+    /// the Move tool does, until one is picked.
+    Favorites,
 }
 
 impl Tool {
-    /// The tool bar, in order: the tool, its icon, its name and its key.
-    pub const BAR: [(Tool, Icon, &'static str, Key); 17] = [
-        (Tool::Select, Icon::Select, "Select and move", Key::V),
+    /// Every tool with a key: the tool, its icon, its name and its key.
+    pub const ALL: [(Tool, Icon, &'static str, Key); 17] = [
+        (Tool::Select, Icon::Move, "Move", Key::V),
         (Tool::Draw(Kind::Arrow), Icon::Arrow, "Arrow", Key::A),
         (Tool::Draw(Kind::Line), Icon::Line, "Line", Key::L),
         (Tool::Draw(Kind::Rect), Icon::Rect, "Rectangle", Key::R),
@@ -47,11 +53,56 @@ impl Tool {
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
     ];
 
+    /// The tool bar's own tools, after Favorites and before More. The Shape button stands for
+    /// the rectangle and the ellipse.
+    pub const MAIN: [Tool; 7] = [
+        Tool::Draw(Kind::Arrow),
+        Tool::Draw(Kind::Text),
+        Tool::Draw(Kind::Callout),
+        Tool::Draw(Kind::Rect),
+        Tool::Draw(Kind::Stamp),
+        Tool::Fill,
+        Tool::Select,
+    ];
+
+    /// The tools under More, in order.
+    pub const MORE: [Tool; 9] = [
+        Tool::Draw(Kind::Line),
+        Tool::Draw(Kind::Pen),
+        Tool::Draw(Kind::Highlight),
+        Tool::Draw(Kind::Step),
+        Tool::Draw(Kind::Blur),
+        Tool::Draw(Kind::Pixelate),
+        Tool::Draw(Kind::Spotlight),
+        Tool::Draw(Kind::Magnify),
+        Tool::Crop,
+    ];
+
     pub fn kind(self) -> Option<Kind> {
         match self {
             Tool::Draw(k) => Some(k),
             _ => None,
         }
+    }
+
+    /// The tool's icon, name and key, if it has a key.
+    pub fn info(self) -> Option<(Icon, &'static str, Key)> {
+        Tool::ALL.iter().find(|(t, ..)| *t == self).map(|(_, i, n, k)| (*i, *n, *k))
+    }
+
+    /// Whether the canvas selects and moves with it.
+    pub fn selects(self) -> bool {
+        matches!(self, Tool::Select | Tool::Favorites)
+    }
+
+    /// Whether it is the Shape button's (a rectangle or an ellipse).
+    pub fn is_shape(self) -> bool {
+        matches!(self, Tool::Draw(Kind::Rect | Kind::Ellipse))
+    }
+
+    /// Whether it is under More.
+    pub fn is_more(self) -> bool {
+        Tool::MORE.contains(&self)
     }
 }
 
@@ -82,11 +133,8 @@ pub struct Editor {
     /// The name shown in the title.
     pub name: String,
     pub tool: Tool,
-    pub stamp: StampKind,
-    /// What the shape tools start with, besides their style.
-    pub arrow_heads: screengrabcraft_model::ArrowHeads,
-    pub rect_radius: f32,
-    pub spot_ellipse: bool,
+    /// The quick styles' pictures, drawn once each.
+    pub(crate) previews: std::collections::HashMap<String, egui::TextureHandle>,
     /// A change made in the properties panel is under way (one undo step until let go).
     pub(crate) props_editing: bool,
     /// The last Ctrl+V was handled when it was pressed (its release is not a second paste).
@@ -135,9 +183,8 @@ const TOAST_SECS: f64 = 3.5;
 impl Editor {
     pub fn new(services: Box<dyn Services>, settings: EditorSettings) -> Editor {
         let blank = blank_picture();
-        // The drawing tool and stamp last picked, if they are still on the tool bar.
-        let tool = settings.tool.map(Tool::Draw).filter(|t| Tool::BAR.iter().any(|(b, ..)| b == t)).unwrap_or(Tool::Draw(Kind::Arrow));
-        let stamp = settings.stamp.unwrap_or(StampKind::Check);
+        // The drawing tool last picked, if it is still one of the tools.
+        let tool = settings.tool.map(Tool::Draw).filter(|t| Tool::ALL.iter().any(|(b, ..)| b == t)).unwrap_or(Tool::Draw(Kind::Arrow));
         Editor {
             session: Session::new(Document::new(blank.clone())),
             settings,
@@ -149,10 +196,7 @@ impl Editor {
             save_problem: None,
             name: "Untitled".to_string(),
             tool,
-            stamp,
-            arrow_heads: screengrabcraft_model::ArrowHeads::End,
-            rect_radius: 0.0,
-            spot_ellipse: false,
+            previews: std::collections::HashMap::new(),
             props_editing: false,
             pasted_on_press: false,
             view: View::default(),
@@ -244,6 +288,17 @@ impl Editor {
     pub(crate) fn blank_document(&mut self) {
         let blank = blank_picture();
         self.replace_document(Document::new(blank.clone()), "Untitled".to_string(), None, None, Some(blank));
+    }
+
+    /// As a newly started editor: an empty picture, no dialog, nothing waiting to happen. For a
+    /// window closed (once everything was saved) while the program stays ready out of sight.
+    pub fn start_over(&mut self) {
+        self.blank_document();
+        self.dialog = None;
+        self.pending = None;
+        self.save_problem = None;
+        self.quit_requested = false;
+        self.close_confirmed = false;
     }
 
     /// Opens a picture or project from its bytes, once the document open now is saved.
@@ -764,7 +819,7 @@ impl Editor {
                 self.run(ctx, "edit.nudge", json!({"dx": dx * f, "dy": dy * f}));
             }
         }
-        for (tool, _, _, key) in Tool::BAR {
+        for (tool, _, _, key) in Tool::ALL {
             if plain(key) {
                 self.set_tool(tool);
             }
@@ -776,6 +831,10 @@ impl Editor {
             self.crop = None;
         }
         self.tool = tool;
+        // The Shape button remembers which of its two it draws.
+        if tool.is_shape() {
+            self.settings.options.entry(Kind::Rect).or_default().round = Some(tool == Tool::Draw(Kind::Ellipse));
+        }
         // A drawing tool picked is the one the editor starts with next time.
         if let Tool::Draw(kind) = tool
             && self.settings.tool != Some(kind)
@@ -968,29 +1027,7 @@ impl Editor {
                     ui.separator();
                     crate::background::menu(self, ui);
                 });
-                ui.menu_button("Effects", |ui| {
-                    for (label, d) in [
-                        ("Border…", Dialog::border()),
-                        ("Drop Shadow…", Dialog::shadow()),
-                        ("Torn Edge…", Dialog::torn()),
-                        ("Round Corners…", Dialog::round()),
-                        ("Brightness and Contrast…", Dialog::brightness()),
-                    ] {
-                        if ui.button(label).clicked() {
-                            self.dialog = Some(d);
-                            ui.close();
-                        }
-                    }
-                    ui.separator();
-                    if ui.button("Grayscale").clicked() {
-                        self.run(&ctx, "effect.grayscale", json!({}));
-                        ui.close();
-                    }
-                    if ui.button("Invert Colors").clicked() {
-                        self.run(&ctx, "effect.invert", json!({}));
-                        ui.close();
-                    }
-                });
+                ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {
                     if ui.add(egui::Button::new("Zoom to Fit").shortcut_text("Ctrl+0")).clicked() {
                         self.view.fit_pending = true;
@@ -1040,6 +1077,32 @@ impl Editor {
         });
     }
 
+    /// The Effects menu's items (in the menu bar, and under the Effects button of the panel).
+    pub(crate) fn effects_menu(&mut self, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        for (label, d) in [
+            ("Border…", Dialog::border()),
+            ("Drop Shadow…", Dialog::shadow()),
+            ("Torn Edge…", Dialog::torn()),
+            ("Round Corners…", Dialog::round()),
+            ("Brightness and Contrast…", Dialog::brightness()),
+        ] {
+            if ui.button(label).clicked() {
+                self.dialog = Some(d);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button("Grayscale").clicked() {
+            self.run(&ctx, "effect.grayscale", json!({}));
+            ui.close();
+        }
+        if ui.button("Invert Colors").clicked() {
+            self.run(&ctx, "effect.invert", json!({}));
+            ui.close();
+        }
+    }
+
     fn tool_bar(&mut self, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -1048,47 +1111,45 @@ impl Editor {
             .show_separator_line(true)
             .show(ui, |ui| {
                 let side = bar_side(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    if bar_button(ui, side, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
-                        && let Err(e) = self.services.new_capture(CaptureMode::Region)
-                    {
-                        self.error(&ctx, e);
-                    }
-                    if bar_button(ui, side, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
-                        self.services.request_open();
-                    }
-                    if bar_button(ui, side, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
-                        self.save(&ctx);
-                    }
-                    if bar_button(ui, side, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
-                        self.copy(&ctx);
-                    }
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    for (tool, icon, label, key) in Tool::BAR {
-                        let tip = format!("{label} ({})", key.name());
-                        if bar_button(ui, side, icon, &tip, self.tool == tool, true).clicked() {
-                            self.set_tool(tool);
+                let bar = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), side));
+                let row = |layout: egui::Layout| egui::UiBuilder::new().max_rect(bar).layout(layout);
+                // At the left: the files and undo.
+                let left = ui
+                    .scope_builder(row(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                        ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
+                        if bar_button(ui, side, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
+                            && let Err(e) = self.services.new_capture(CaptureMode::Region)
+                        {
+                            self.error(&ctx, e);
                         }
-                    }
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                    if bar_button(ui, side, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
-                        self.run(&ctx, "edit.undo", json!({}));
-                    }
-                    let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                    if bar_button(ui, side, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
-                        self.run(&ctx, "edit.redo", json!({}));
-                    }
-                    let any = !self.session.selected().is_empty();
-                    if bar_button(ui, side, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
-                        self.run(&ctx, "edit.delete", json!({}));
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if bar_button(ui, side, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                            self.services.request_open();
+                        }
+                        if bar_button(ui, side, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
+                            self.save(&ctx);
+                        }
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
+                        if bar_button(ui, side, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
+                            self.run(&ctx, "edit.undo", json!({}));
+                        }
+                        let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
+                        if bar_button(ui, side, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
+                            self.run(&ctx, "edit.redo", json!({}));
+                        }
+                        let any = !self.session.selected().is_empty();
+                        if bar_button(ui, side, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
+                            self.run(&ctx, "edit.delete", json!({}));
+                        }
+                    })
+                    .response
+                    .rect;
+                // At the right: copying, and the zoom.
+                let right = ui
+                    .scope_builder(row(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+                        ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
                         if bar_button(ui, side, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
                             self.view.fit_pending = true;
                         }
@@ -1102,9 +1163,86 @@ impl Editor {
                         if bar_button(ui, side, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
                             self.view.zoom_by(0.8, None);
                         }
-                    });
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        if bar_button(ui, side, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
+                            self.copy(&ctx);
+                        }
+                    })
+                    .response
+                    .rect;
+                // In the middle (as near the middle as the two sides leave room for): the tools.
+                let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP;
+                let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
+                let middle = egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(middle).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
+                    if bar_button(ui, side, Icon::Favorites, "Favorites", self.tool == Tool::Favorites, true).clicked() {
+                        self.set_tool(Tool::Favorites);
+                    }
+                    for tool in Tool::MAIN {
+                        let Some((icon, label, key)) = tool.info() else { continue };
+                        let (icon, tip, on) = if tool.is_shape() {
+                            // The Shape button draws whichever of the two was picked last.
+                            (Icon::Shape, "Shape (R, O)".to_string(), self.tool.is_shape())
+                        } else {
+                            (icon, format!("{label} ({})", key.name()), self.tool == tool)
+                        };
+                        if bar_button(ui, side, icon, &tip, on, true).clicked() {
+                            self.set_tool(if tool.is_shape() { self.shape_tool() } else { tool });
+                        }
+                    }
+                    self.more_button(ui, side);
                 });
             });
+    }
+
+    /// The tool the Shape button draws with: the rectangle or the ellipse, whichever was used last.
+    pub fn shape_tool(&self) -> Tool {
+        if self.tool.is_shape() {
+            return self.tool;
+        }
+        let round = self.settings.options.get(&Kind::Rect).and_then(|o| o.round) == Some(true);
+        Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect })
+    }
+
+    /// More: the other tools, in a menu. While one of them is the tool, the button shows it.
+    fn more_button(&mut self, ui: &mut Ui, side: f32) {
+        let picked = if self.tool.is_more() { self.tool.info() } else { None };
+        let (icon, tip) = match picked {
+            Some((icon, label, key)) => (icon, format!("More tools: {label} ({})", key.name())),
+            None => (Icon::More, "More tools".to_string()),
+        };
+        let resp = bar_button(ui, side, icon, &tip, picked.is_some(), true);
+        // A small arrow at the lower right says it opens a menu.
+        let t = Tokens::get(ui.ctx());
+        let r = resp.rect;
+        let (tip_x, tip_y, k) = (r.right() - 5.0, r.bottom() - 5.0, 3.0);
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![egui::pos2(tip_x - 2.0 * k, tip_y - k), egui::pos2(tip_x, tip_y - k), egui::pos2(tip_x - k, tip_y)],
+            t.muted,
+            egui::Stroke::NONE,
+        ));
+        egui::Popup::menu(&resp).show(|ui| {
+            ui.set_min_width(200.0);
+            for tool in Tool::MORE {
+                let Some((icon, label, key)) = tool.info() else { continue };
+                let on = self.tool == tool;
+                let item = ui.horizontal(|ui| {
+                    let (r, _) = ui.allocate_exact_size(vec2(20.0, 20.0), egui::Sense::hover());
+                    icons::paint(ui.painter(), r, icon, if on { t.accent } else { t.text });
+                    let resp = ui.add(egui::Button::selectable(on, label).shortcut_text(key.name()));
+                    // Named by the tool alone (the key is shown beside it).
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, label));
+                    resp
+                });
+                if item.inner.clicked() {
+                    self.set_tool(tool);
+                    ui.close();
+                }
+            }
+        });
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
@@ -1225,9 +1363,30 @@ impl Editor {
     pub fn tool_style(&self, kind: Kind) -> Style {
         let mut s = self.settings.style(kind);
         if kind == Kind::Stamp && !self.settings.styles.contains_key(&Kind::Stamp) {
-            s.fill = screengrabcraft_render::stamp::default_fill(self.stamp);
+            s.fill = screengrabcraft_render::stamp::default_fill(self.stamp());
         }
         s
+    }
+
+    /// What the tool for `kind` sets about the shapes it draws besides their style: arrow heads,
+    /// corners, a callout's form and tail, the stamp, a round spotlight.
+    pub fn tool_options(&self, kind: Kind) -> ShapeOptions {
+        self.settings.options(kind)
+    }
+
+    /// The stamp the stamp tool places.
+    pub fn stamp(&self) -> StampKind {
+        self.tool_options(Kind::Stamp).stamp.unwrap_or_default()
+    }
+
+    /// Sets what `o` says of the tool for `kind`'s options (saved with the settings later).
+    pub fn set_tool_options(&mut self, kind: Kind, o: ShapeOptions) {
+        let key = kind.family();
+        let kept = self.settings.options.get(&key).copied().unwrap_or_default().merged(o).clamped();
+        self.settings.options.insert(key, kept);
+        if let Some(s) = o.stamp {
+            self.settings.stamp = Some(s);
+        }
     }
 }
 
@@ -1235,15 +1394,22 @@ impl Editor {
 pub const BAR_BUTTON: f32 = 40.0;
 /// The smallest they get in a narrow window.
 pub const BAR_BUTTON_MIN: f32 = 28.0;
+/// The room between the tool bar's buttons.
+const BAR_GAP: f32 = 2.0;
+/// The least room between the tools in the middle and the buttons at either side.
+const BAR_SPACE: f32 = 16.0;
+/// The buttons in the middle of the tool bar: Favorites, the main tools and More.
+const TOOLS_ON_BAR: usize = 1 + Tool::MAIN.len() + 1;
 
 /// How big the tool bar's buttons are on a bar `width` points wide: full size when they all fit,
-/// smaller (down to [`BAR_BUTTON_MIN`]) when they don't, so the last of them doesn't run into the
-/// zoom at the right.
+/// smaller (down to [`BAR_BUTTON_MIN`]) when they don't, so the tools in the middle don't run
+/// into the buttons at either side.
 pub fn bar_side(width: f32) -> f32 {
     // What isn't a square button: the zoom's percentage, the separators and the space round
-    // them, the gaps between the buttons and a little to spare.
-    const OTHER: f32 = 200.0;
-    let buttons = (4 + Tool::BAR.len() + 3 + 3) as f32;
+    // them, the gaps between the buttons, the room either side of the tools and a little to spare.
+    const OTHER: f32 = 220.0;
+    // Capture, Open, Save, Undo, Redo, Delete; the tools; Copy, Zoom out, Zoom in, Fit.
+    let buttons = (6 + TOOLS_ON_BAR + 4) as f32;
     let side = (width - OTHER) / buttons;
     if side.is_finite() { side.clamp(BAR_BUTTON_MIN, BAR_BUTTON) } else { BAR_BUTTON }
 }

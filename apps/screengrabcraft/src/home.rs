@@ -200,6 +200,7 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     ui.add_space(8.0);
     let modes = [
         (CaptureMode::Region, Icon::Region, "Drag out an area, or click a window"),
+        (CaptureMode::Adjust, Icon::Crop, "Drag out an area, then adjust it before it's taken"),
         (CaptureMode::Window, Icon::Window, "Click a window"),
         (CaptureMode::Screen, Icon::Screen, "The screen under the pointer"),
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
@@ -294,6 +295,17 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     ui.add_space(6.0);
     ui.checkbox(&mut s.hide_editor, "Hide the Editor while capturing");
     ui.label(RichText::new("So it isn't in the picture. It comes back with the new capture.").size(12.0).color(t.muted));
+    if cfg!(target_os = "windows") {
+        ui.add_space(6.0);
+        ui.checkbox(&mut s.keep_editor_ready, "Keep the Editor ready in the background");
+        ui.label(
+            RichText::new(
+                "A capture opens in it at once, instead of waiting seconds for it to start. Closing its window hides it. It uses some memory.",
+            )
+            .size(12.0)
+            .color(t.muted),
+        );
+    }
     ui.add_space(12.0);
     ui.label(RichText::new("Captures folder").strong());
     let dir = paths::captures_dir(&s);

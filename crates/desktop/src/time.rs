@@ -14,10 +14,11 @@ pub fn now() -> Stamp {
     }
 }
 
-/// Now as `2026-10-14T09:30:05` (local time, to the second).
+/// Now as `2026-10-14T09:30:05.123` (local time, to the millisecond, so the log shows how long
+/// each step of a capture takes).
 pub fn rfc3339_now() -> String {
-    let s = now();
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", s.year, s.month, s.day, s.hour, s.minute, s.second)
+    let z = jiff::Zoned::now();
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}", z.year(), z.month(), z.day(), z.hour(), z.minute(), z.second(), z.millisecond())
 }
 
 #[cfg(test)]
@@ -26,6 +27,8 @@ mod tests {
     fn now_is_plausible() {
         let s = super::now();
         assert!(s.year >= 2024 && (1..=12).contains(&s.month) && (1..=31).contains(&s.day) && s.hour < 24);
-        assert_eq!(super::rfc3339_now().len(), 19);
+        let text = super::rfc3339_now();
+        assert_eq!(text.len(), 23, "{text}");
+        assert_eq!(text.as_bytes().get(19), Some(&b'.'));
     }
 }

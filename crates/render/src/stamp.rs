@@ -14,13 +14,7 @@ fn paint(c: Color) -> Paint<'static> {
 
 /// The colour a stamp is filled with when it is first placed.
 pub fn default_fill(kind: StampKind) -> Color {
-    match kind {
-        StampKind::Check => Color::rgb(0x2E, 0x9E, 0x4F),
-        StampKind::Cross | StampKind::Heart => Color::rgb(0xE5, 0x39, 0x35),
-        StampKind::Star => Color::rgb(0xFF, 0xB3, 0x00),
-        StampKind::Question | StampKind::Info => Color::rgb(0x1E, 0x88, 0xE5),
-        StampKind::Warning => Color::rgb(0xFB, 0x8C, 0x00),
-    }
+    kind.color()
 }
 
 /// Draws `kind` filling the square inside `rect`.

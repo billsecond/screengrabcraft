@@ -8,14 +8,14 @@ use screengrabcraft_model::{Color, Document, EditorSettings, ImageFormat, Kind, 
 use crate::editor::{Editor, Tool};
 use crate::services::{NoServices, OpenedFile};
 
-fn editor() -> Editor {
+pub(crate) fn editor() -> Editor {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
     ed.session.replace(Document::new(Raster::filled(400, 300, Color::WHITE).unwrap()));
     ed.view.fit_pending = true;
     ed
 }
 
-fn harness(ed: Editor) -> Harness<'static, Editor> {
+pub(crate) fn harness(ed: Editor) -> Harness<'static, Editor> {
     Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
@@ -27,11 +27,11 @@ fn harness(ed: Editor) -> Harness<'static, Editor> {
 }
 
 /// Where a picture point is on the screen.
-fn at(h: &Harness<'_, Editor>, x: f32, y: f32) -> Pos2 {
+pub(crate) fn at(h: &Harness<'_, Editor>, x: f32, y: f32) -> Pos2 {
     h.state().view.to_screen(screengrabcraft_model::Pt::new(x, y))
 }
 
-fn drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
+pub(crate) fn drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
     h.hover_at(from);
     h.run_steps(2);
     h.drag_at(from);
@@ -64,7 +64,7 @@ fn draws_an_arrow_and_undoes_it() {
 
 #[test]
 fn every_drawing_tool_draws_something() {
-    for (tool, _, _, _) in Tool::BAR {
+    for (tool, _, _, _) in Tool::ALL {
         let Tool::Draw(kind) = tool else { continue };
         let mut h = harness(editor());
         h.run_steps(4);
@@ -417,10 +417,10 @@ fn opening_something_else_leaves_the_gif_behind() {
 
 /// Every drawing tool.
 fn draw_tools() -> Vec<(Tool, Kind)> {
-    Tool::BAR.into_iter().filter_map(|(tool, _, _, _)| if let Tool::Draw(kind) = tool { Some((tool, kind)) } else { None }).collect()
+    Tool::ALL.into_iter().filter_map(|(tool, _, _, _)| if let Tool::Draw(kind) = tool { Some((tool, kind)) } else { None }).collect()
 }
 
-fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
+pub(crate) fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
     let mut h = harness(ed);
     h.run_steps(4);
     h.state_mut().set_tool(tool);
@@ -428,7 +428,7 @@ fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
     h
 }
 
-fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
+pub(crate) fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
     h.hover_at(p);
     h.run_steps(1);
     h.drag_at(p);
@@ -1314,7 +1314,7 @@ fn the_last_drawing_tool_and_stamp_are_there_after_a_restart() {
     let reread = EditorSettings::from_json(&serde_json::to_string(&saved).unwrap());
     let ed = Editor::new(Box::new(NoServices), reread);
     assert_eq!(ed.tool, Tool::Draw(Kind::Stamp));
-    assert_eq!(ed.stamp, screengrabcraft_model::StampKind::Cross);
+    assert_eq!(ed.stamp(), screengrabcraft_model::StampKind::Cross);
 
     // A rectangle picked with its key.
     let mut h = ready(Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default()), Tool::Select);
@@ -1558,12 +1558,12 @@ fn boxes_ellipses_and_callouts_show_their_fill_without_opening_anything() {
         let mut h = harness(editor());
         h.state_mut().set_tool(Tool::Draw(tool));
         h.run_steps(2);
-        assert!(h.query_by_label("Fill").is_some(), "{tool:?}");
+        assert!(h.query_by_label("Fill colour").is_some(), "{tool:?}");
     }
     let mut h = harness(editor());
     h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
     h.run_steps(2);
-    assert!(h.query_by_label("Fill").is_none());
+    assert!(h.query_by_label("Fill colour").is_none());
 }
 
 #[test]

@@ -41,6 +41,7 @@ fn main() -> Result<(), String> {
             rect: Rect::new(90.0, 430.0, 230.0, 90.0),
             tail: Pt::new(150.0, 380.0),
             text: "This panel shows your recent captures".into(),
+            form: screengrabcraft_model::CalloutForm::Rounded,
         },
     ))?;
     for (i, c) in [(1u32, Pt::new(80.0, 90.0)), (2, Pt::new(350.0, 70.0)), (3, Pt::new(640.0, 70.0))] {

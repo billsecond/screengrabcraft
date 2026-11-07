@@ -3,7 +3,7 @@
 
 use egui::{Color32, CursorIcon, Pos2, Sense, Stroke, StrokeKind, TextureOptions, Ui, pos2, vec2};
 use screengrabcraft_model::object::step_radius;
-use screengrabcraft_model::{ArrowHeads, Handle, Kind, ObjectId, Pt, Rect, Shape};
+use screengrabcraft_model::{ArrowHeads, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
 use screengrabcraft_render::{Options, text};
 
 use crate::editor::{Editor, Tool};
@@ -147,8 +147,8 @@ fn square_from(start: Pt, now: Pt) -> Pt {
     Pt::new(start.x + s * dx.signum(), start.y + s * dy.signum())
 }
 
-/// Builds the shape a drag from `start` to `now` makes with a tool.
-fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, stamp: screengrabcraft_model::StampKind, step: u32, image: (f32, f32)) -> Shape {
+/// Builds the shape a drag from `start` to `now` makes with a tool whose options are `opts`.
+fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, step: u32, image: (f32, f32)) -> Shape {
     // A square or a snapped line can reach further than the pointer; it stops at the edge.
     let area = Rect::new(0.0, 0.0, image.0, image.1);
     let boxed = |square: bool| {
@@ -165,16 +165,18 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, stamp: screengrabcraft
         Kind::Highlight => Shape::Highlight { points: vec![start, now] },
         Kind::Text => Shape::Text { rect: boxed(false), text: String::new() },
         Kind::Callout => {
+            // The tail goes where the tool says, as far as the picture goes.
             let rect = boxed(false);
-            let tail = Pt::new(rect.x + rect.w * 0.2, (rect.bottom() + rect.h.max(40.0) * 0.7).min(image.1 - 2.0).max(0.0));
-            Shape::Callout { rect, tail, text: String::new() }
+            let form = opts.form.unwrap_or_default();
+            let tail = area.nearest(opts.tail.unwrap_or_default().place(form, rect));
+            Shape::Callout { rect, tail, text: String::new(), form }
         }
         Kind::Step => Shape::Step { center: now, number: step },
         Kind::Blur => Shape::Blur { rect: boxed(false) },
         Kind::Pixelate => Shape::Pixelate { rect: boxed(false) },
         Kind::Spotlight => Shape::Spotlight { rect: boxed(false), ellipse: false },
         Kind::Magnify => Shape::Magnify { rect: boxed(true) },
-        Kind::Stamp => Shape::Stamp { rect: boxed(true), stamp },
+        Kind::Stamp => Shape::Stamp { rect: boxed(true), stamp: opts.stamp.unwrap_or_default() },
         Kind::Image => Shape::Rect { rect: boxed(false), radius: 0.0 },
     }
 }
@@ -214,15 +216,16 @@ fn crop_handles(r: Rect) -> Vec<(Handle, Pt)> {
 }
 
 impl Editor {
-    /// The shape options the tools keep (arrow heads, corner radius, round spotlight).
-    fn with_defaults(&self, mut shape: Shape) -> Shape {
-        match &mut shape {
-            Shape::Arrow { heads, .. } => *heads = self.arrow_heads,
-            Shape::Rect { radius, .. } => *radius = self.rect_radius,
-            Shape::Spotlight { ellipse, .. } => *ellipse = self.spot_ellipse,
-            _ => {}
-        }
-        shape
+    /// The shape options the tool keeps (arrow heads, corner radius, a callout's form, the stamp,
+    /// a round spotlight). A callout's tail is already where it goes.
+    fn with_defaults(&self, shape: Shape) -> Shape {
+        let kind = shape.kind();
+        let opts = ShapeOptions {
+            tail: None,
+            round: if kind.family() == Kind::Rect { None } else { self.tool_options(kind).round },
+            ..self.tool_options(kind)
+        };
+        opts.applied(shape)
     }
 
     /// The annotation under a picture point. Nothing is picked up outside the picture.
@@ -433,7 +436,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     {
         let on_picture = ed.session.doc.bounds().contains(to_img(h, &ed.view));
         let cursor = match ed.tool {
-            Tool::Select => {
+            Tool::Select | Tool::Favorites => {
                 if let Some((_, handle)) = ed.handle_at(h) {
                     cursor_for(handle)
                 } else if ed.object_under(to_img(h, &ed.view)).is_some() {
@@ -493,7 +496,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             return;
         }
         match ed.tool {
-            Tool::Select => {
+            Tool::Select | Tool::Favorites => {
                 if let Some((id, handle)) = ed.handle_at(start_s) {
                     ed.session.begin("Resize");
                     ed.drag = Some(Drag::Handle { id, handle });
@@ -547,7 +550,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     return;
                 }
                 let step = ed.session.doc.next_step_number();
-                let shape = ed.with_defaults(shape_for(kind, start, start, false, ed.stamp, step, image_size));
+                let shape = ed.with_defaults(shape_for(kind, start, start, false, ed.tool_options(kind), step, image_size));
                 let style = ed.tool_style(kind);
                 ed.session.begin(&format!("Draw {}", kind.label()));
                 match ed.session.doc.add(shape, style) {
@@ -573,11 +576,11 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         let inside = bounds.nearest(now);
         match ed.drag.clone() {
             Some(Drag::Create { id, kind, start }) => {
-                let (stamp, step) = (
-                    ed.stamp,
+                let (opts, step) = (
+                    ed.tool_options(kind),
                     ed.session.doc.get(id).and_then(|o| if let Shape::Step { number, .. } = o.shape { Some(number) } else { None }).unwrap_or(1),
                 );
-                let fresh = ed.with_defaults(shape_for(kind, start, inside, shift, stamp, step, image_size));
+                let fresh = ed.with_defaults(shape_for(kind, start, inside, shift, opts, step, image_size));
                 if let Some(o) = ed.session.doc.get_mut(id) {
                     match (&mut o.shape, kind) {
                         (Shape::Pen { points }, _) | (Shape::Highlight { points }, _) => {
@@ -719,7 +722,7 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     let editing_before = ed.editing.is_some();
     ed.stop_editing();
     match ed.tool {
-        Tool::Select | Tool::Crop => {
+        Tool::Select | Tool::Favorites | Tool::Crop => {
             if ed.tool == Tool::Crop {
                 return;
             }
@@ -763,15 +766,19 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                     Some(Shape::Text { rect: text::fit_box("", &style, p, Some(width)), text: String::new() })
                 }
                 Kind::Callout => {
+                    // The tail at the click, the box placed for the tail to point the tool's way.
+                    let opts = ed.tool_options(Kind::Callout);
+                    let form = opts.form.unwrap_or_default();
                     let (bw, bh) = ((w * 0.25).clamp(160.0, 300.0).min(w), 80.0f32.min(h * 0.4));
-                    let x = (p.x + 30.0).min(w - bw).max(0.0);
-                    let y = (p.y - bh - 60.0).max(0.0);
-                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new() })
+                    let off = opts.tail.unwrap_or_default().offset(form, bw, bh);
+                    let x = (p.x - off.x).min(w - bw).max(0.0);
+                    let y = (p.y - off.y).min(h - bh).max(0.0);
+                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form })
                 }
                 Kind::Step => Some(Shape::Step { center: p, number: ed.session.doc.next_step_number() }),
                 Kind::Stamp => {
                     let size = (w.min(h) * 0.08).clamp(32.0, 128.0).min(w).min(h);
-                    Some(Shape::Stamp { rect: Rect::new(p.x - size / 2.0, p.y - size / 2.0, size, size), stamp: ed.stamp })
+                    Some(Shape::Stamp { rect: Rect::new(p.x - size / 2.0, p.y - size / 2.0, size, size), stamp: ed.stamp() })
                 }
                 Kind::Magnify => {
                     let size = (w.min(h) * 0.25).clamp(80.0, 260.0).min(w).min(h);
@@ -820,7 +827,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     let scale = ed.view.scale();
 
     // Hover outline in the select tool.
-    if ed.tool == Tool::Select
+    if ed.tool.selects()
         && ed.drag.is_none()
         && let Some(h) = ctx.input(|i| i.pointer.hover_pos())
         && clip.contains(h)
@@ -917,6 +924,11 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
         return;
     };
     let Some(rect) = o.shape.rect() else { return };
+    // An oval's or a cloud's text is in its middle.
+    let area = match &o.shape {
+        Shape::Callout { form, .. } => form.text_area(rect),
+        _ => rect,
+    };
     let scale = ed.view.scale();
     let pad = text::padding(&o.style);
     let family = if o.style.mono {
@@ -927,8 +939,8 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
         egui::FontFamily::Name("sans".into())
     };
     let font = egui::FontId::new((o.style.font_size * scale).max(4.0), family);
-    let screen = ed.view.rect_to_screen(rect);
-    let inner_w = ((rect.w - 2.0 * pad) * scale).max(20.0);
+    let screen = ed.view.rect_to_screen(area);
+    let inner_w = ((area.w - 2.0 * pad) * scale).max(20.0);
     let color = crate::to_color32(o.style.text_color);
     let align = match o.style.align {
         screengrabcraft_model::TextAlign::Left => egui::Align::Min,
@@ -937,8 +949,8 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     };
     // Callouts have their text in the middle; text boxes at the top.
     let top = if matches!(o.shape, Shape::Callout { .. }) {
-        let lay = text::layout(&ed.edit_buffer, &o.style, Some(rect.w - 2.0 * pad));
-        screen.min.y + ((rect.h - lay.height) / 2.0).max(pad) * scale
+        let lay = text::layout(&ed.edit_buffer, &o.style, Some(area.w - 2.0 * pad));
+        screen.min.y + ((area.h - lay.height) / 2.0).max(pad) * scale
     } else {
         screen.min.y + pad * scale
     };
@@ -976,9 +988,9 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
                     let need = text::fit_box(body, &style, rect.min(), Some(rect.w));
                     rect.h = need.h.max(rect.h.min(need.h + style.font_size));
                 }
-                Shape::Callout { rect, text: body, .. } => {
-                    let lay = text::layout(body, &style, Some(rect.w - 2.0 * pad));
-                    rect.h = rect.h.max(lay.height + 2.0 * pad);
+                Shape::Callout { rect, text: body, form, .. } => {
+                    let lay = text::layout(body, &style, Some(form.text_area(*rect).w - 2.0 * pad));
+                    rect.h = rect.h.max(form.box_height(lay.height + 2.0 * pad));
                 }
                 _ => {}
             }

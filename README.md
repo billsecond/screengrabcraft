@@ -30,6 +30,7 @@ beside them for scripts and agents.
 | Shortcut (Windows, Linux) | macOS | |
 |---|---|---|
 | Print Screen | Ctrl+Shift+C | **Region**: drag out an area, or click a window; adjust it with its handles; Enter keeps it |
+| — (set one in Settings) | — | **Region, adjust first**: drag out an area, or start from the last one, and adjust it with its handles until Enter (or a button of the bar) takes it |
 | Alt+Print Screen | Ctrl+Shift+W | **Window**: click a window |
 | Ctrl+Print Screen | Ctrl+Shift+F | **Full screen**: the monitor under the pointer |
 | — (set one in Settings; Ctrl+Shift+Print Screen is Windows' own) | — | **All screens** in one picture |
@@ -49,7 +50,14 @@ As soon as you've chosen the area ScreenGrabCraft does its default: copy the cap
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
 or PDF, with a file name pattern of your own). The default is yours to change in the service's
 settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
-or Save. An open editor is hidden while you capture, which you can turn off too.
+or Save, for every capture; or use **Capture Region, Adjust First** (tray menu, or a shortcut of your own)
+for just the captures you want to fine-tune. An open editor is hidden while you capture, which you can turn
+off too.
+
+On Windows the editor is kept ready in the background (Settings, After a capture): it starts a
+little after the capture service, and closing its window hides it, so a capture opens in it at
+once instead of waiting for Windows to start it. The editor opens where you left it: the same
+place and monitor, the same size, maximized or not.
 
 A GIF recording runs at 30 frames a second unless you set it lower, is always saved, and opens in
 the editor like any capture, with a **Play** button under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
@@ -92,10 +100,19 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 
 Annotations stay editable (move them, resize them, restyle them) until you flatten or export:
 
-- **Arrow** (one or two heads, any thickness), **line**, **rectangle** (rounded corners),
-  **ellipse**, **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
-- **Text** and **callouts** (speech balloons with a tail you drag), in PatroneOS Sans or
-  PatroneOS Mono, bold, italic, left, centred or right.
+- The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
+  **Fill** and **Move** in the middle, and the other tools under **More**. Every tool keeps its key.
+- **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
+  Mono), drawn as they will look. A click sets the tool's look and changes the selected
+  annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
+  tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+- **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
+  or an ellipse), **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
+- **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
+  with the text in it) with a tail set to point down left, down right, left, right, up or down,
+  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
+  Text overlays: an outline round the letters, a shadow, a filled or see-through box behind
+  them, and big titles, each a quick style of the Text tool.
 - **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
   information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
@@ -104,8 +121,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
-- **Effects**: border, drop shadow, torn edge, round corners, greyscale, invert, brightness and
-  contrast.
+- **Effects** (in the menu, and the Effects button under the panel): border, drop shadow, torn
+  edge, round corners, greyscale, invert, brightness and contrast.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen and highlighter draw over things); its handles take hold even when the press is a little off.
@@ -131,7 +148,7 @@ screengrabcraft-cli service status
 
 The capture service takes requests too, which is how a capture is bound to a key on a Wayland
 desktop (where programs can't take global shortcuts): `screengrabcraft --capture region`,
-`--capture window|screen|all|repeat|scrolling|gif`, `--delay 5`, `--settings`, `--quit`.
+`--capture adjust|window|screen|all|repeat|scrolling|gif`, `--delay 5`, `--settings`, `--quit`.
 
 ## Platforms
 
