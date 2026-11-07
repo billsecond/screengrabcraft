@@ -417,6 +417,10 @@ pub struct Style {
     /// What the effect kinds do, by kind: blur radius, pixel size, spotlight darkness (0 to 1),
     /// magnification.
     pub strength: f32,
+    /// A line round each letter of the text, so it reads on any picture (transparent for none).
+    pub text_outline: Color,
+    /// How thick that line is, in pixels outside the letter.
+    pub text_outline_width: f32,
 }
 
 impl Default for Style {
@@ -435,9 +439,14 @@ impl Default for Style {
             text_color: Color::RED,
             align: TextAlign::Left,
             strength: 10.0,
+            text_outline: Color::TRANSPARENT,
+            text_outline_width: 3.0,
         }
     }
 }
+
+/// The thickest a text outline is drawn.
+pub const MAX_TEXT_OUTLINE: f32 = 40.0;
 
 /// Bounds on style values, applied to anything read from outside.
 pub const MAX_WIDTH: f32 = 200.0;
@@ -454,16 +463,23 @@ impl Style {
             opacity: fix(self.opacity, 0.0, 1.0, 1.0),
             font_size: fix(self.font_size, MIN_FONT, MAX_FONT, d.font_size),
             strength: fix(self.strength, 0.0, 200.0, d.strength),
+            text_outline_width: fix(self.text_outline_width, 0.0, MAX_TEXT_OUTLINE, d.text_outline_width),
             ..self
         }
     }
 
-    /// Lengths in the style (line width, font size) scaled by `f`, for a picture resized by it.
+    /// Lengths in the style (line width, font size, text outline) scaled by `f`, for a picture
+    /// resized by it.
     pub fn scaled(self, f: f32) -> Style {
         if !f.is_finite() || f <= 0.0 {
             return self;
         }
-        Style { width: self.width * f, font_size: self.font_size * f, ..self }.clamped()
+        Style { width: self.width * f, font_size: self.font_size * f, text_outline_width: self.text_outline_width * f, ..self }.clamped()
+    }
+
+    /// Whether its text has an outline drawn round it.
+    pub fn has_text_outline(&self) -> bool {
+        self.text_outline.a > 0 && self.text_outline_width > 0.0
     }
 }
 

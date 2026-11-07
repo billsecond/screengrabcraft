@@ -1558,12 +1558,12 @@ fn boxes_ellipses_and_callouts_show_their_fill_without_opening_anything() {
         let mut h = harness(editor());
         h.state_mut().set_tool(Tool::Draw(tool));
         h.run_steps(2);
-        assert!(h.query_by_label("Fill").is_some(), "{tool:?}");
+        assert!(h.query_by_label("Fill colour").is_some(), "{tool:?}");
     }
     let mut h = harness(editor());
     h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
     h.run_steps(2);
-    assert!(h.query_by_label("Fill").is_none());
+    assert!(h.query_by_label("Fill colour").is_none());
 }
 
 #[test]

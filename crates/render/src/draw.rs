@@ -380,8 +380,18 @@ fn draw_text_box(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, style: &S
     }
     let lay = text::layout(body, style, Some(rect.w - 2.0 * pad));
     if let Some(path) = text::text_path(&lay, style, Pt::new(rect.x + pad, rect.y + pad), rect.w - 2.0 * pad) {
-        c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
+        fill_text(c, &path, style, t);
     }
+}
+
+/// Text's letters: their outline (when the style has one) round them, then the letters over it.
+fn fill_text(c: &mut Pixmap, path: &Path, style: &Style, t: Transform) {
+    if style.has_text_outline() {
+        // A stroke is centred on the letter's edge: twice as wide, half of it under the letter.
+        let s = Stroke { width: style.text_outline_width * 2.0, line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+        c.stroke_path(path, &paint(style.text_outline), &s, t, None);
+    }
+    c.fill_path(path, &paint(style.text_color), FillRule::Winding, t, None);
 }
 
 fn draw_text_centered(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, style: &Style) {
@@ -389,7 +399,7 @@ fn draw_text_centered(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, styl
     let lay = text::layout(body, style, Some(rect.w - 2.0 * pad));
     let top = rect.y + ((rect.h - lay.height) / 2.0).max(pad);
     if let Some(path) = text::text_path(&lay, style, Pt::new(rect.x + pad, top), rect.w - 2.0 * pad) {
-        c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
+        fill_text(c, &path, style, t);
     }
 }
 
@@ -806,6 +816,36 @@ mod tests {
         // A cloud's tail is three bubbles after the cloud; with the tail inside, none.
         assert_eq!(cloud_paths(r, Pt::new(160.0, 260.0), 6.0).len(), 4);
         assert_eq!(cloud_paths(r, r.center(), 6.0).len(), 1);
+    }
+
+    #[test]
+    fn text_outlines_go_round_the_letters() {
+        let count = |outline: Color| {
+            let mut d = Document::new(Raster::filled(200, 120, Color::BLACK).unwrap());
+            let style = Style {
+                text_color: Color::RED,
+                text_outline: outline,
+                text_outline_width: 4.0,
+                font_size: 60.0,
+                stroke: Color::TRANSPARENT,
+                shadow: false,
+                ..Style::default()
+            };
+            d.add(Shape::Text { rect: Rect::new(10.0, 10.0, 180.0, 100.0), text: "HI".into() }, style).unwrap();
+            let out = render(&d).unwrap();
+            let px = |c: Color| out.pixels().as_chunks::<4>().0.iter().filter(|p| p[..3] == [c.r, c.g, c.b]).count();
+            (px(Color::WHITE), px(Color::RED))
+        };
+        let (white, red) = count(Color::WHITE);
+        assert!(white > 200 && red > 200, "a white outline round red letters: {white} {red}");
+        let (white, red_plain) = count(Color::TRANSPARENT);
+        assert_eq!(white, 0, "no outline without a colour");
+        assert!(red_plain >= red, "the outline is outside the letters, not over them");
+        // Out of range from a file: kept to its bounds.
+        let s = Style { text_outline_width: f32::INFINITY, ..Style::default() }.clamped();
+        assert_eq!(s.text_outline_width, Style::default().text_outline_width);
+        let s = Style { text_outline_width: 900.0, ..Style::default() }.clamped();
+        assert_eq!(s.text_outline_width, screengrabcraft_model::object::MAX_TEXT_OUTLINE);
     }
 
     #[test]
