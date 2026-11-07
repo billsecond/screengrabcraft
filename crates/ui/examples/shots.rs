@@ -60,7 +60,12 @@ fn main() -> Result<(), String> {
     add(&mut doc, Shape::Blur { rect: Rect::new(340.0, 280.0, 200.0, 60.0) });
     let callout = add(
         &mut doc,
-        Shape::Callout { rect: Rect::new(560.0, 360.0, 260.0, 90.0), tail: Pt::new(480.0, 300.0), text: "Recent captures live here".into() },
+        Shape::Callout {
+            rect: Rect::new(560.0, 360.0, 260.0, 90.0),
+            tail: Pt::new(480.0, 300.0),
+            text: "Recent captures live here".into(),
+            form: screengrabcraft_model::CalloutForm::Rounded,
+        },
     );
     ed.session.replace(doc);
     if let Some(id) = callout {

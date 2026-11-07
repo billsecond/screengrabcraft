@@ -43,6 +43,17 @@ impl StampKind {
     pub const ALL: [StampKind; 7] =
         [StampKind::Check, StampKind::Cross, StampKind::Star, StampKind::Question, StampKind::Warning, StampKind::Info, StampKind::Heart];
 
+    /// The colour a stamp is filled with when it is first placed.
+    pub fn color(self) -> Color {
+        match self {
+            StampKind::Check => Color::rgb(0x2E, 0x9E, 0x4F),
+            StampKind::Cross | StampKind::Heart => Color::rgb(0xE5, 0x39, 0x35),
+            StampKind::Star => Color::rgb(0xFF, 0xB3, 0x00),
+            StampKind::Question | StampKind::Info => Color::rgb(0x1E, 0x88, 0xE5),
+            StampKind::Warning => Color::rgb(0xFB, 0x8C, 0x00),
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             StampKind::Check => "Check mark",
@@ -53,6 +64,124 @@ impl StampKind {
             StampKind::Info => "Information",
             StampKind::Heart => "Heart",
         }
+    }
+}
+
+/// A callout's outline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CalloutForm {
+    /// A box with rounded corners.
+    #[default]
+    Rounded,
+    /// A box with square corners.
+    Square,
+    /// An oval.
+    Oval,
+    /// A cloud, its tail a trail of bubbles: a thought.
+    Cloud,
+    /// A box that narrows to a point at its tail: an arrow with the text in it.
+    Arrow,
+}
+
+impl CalloutForm {
+    pub const ALL: [CalloutForm; 5] = [CalloutForm::Rounded, CalloutForm::Square, CalloutForm::Oval, CalloutForm::Cloud, CalloutForm::Arrow];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CalloutForm::Rounded => "Rounded box",
+            CalloutForm::Square => "Box",
+            CalloutForm::Oval => "Oval",
+            CalloutForm::Cloud => "Cloud",
+            CalloutForm::Arrow => "Arrow",
+        }
+    }
+
+    /// How much of the box's width and height the text gets: all of a box, the middle of an
+    /// oval or a cloud (the square that fits in it).
+    fn text_share(self) -> f32 {
+        match self {
+            CalloutForm::Oval => 0.72,
+            CalloutForm::Cloud => 0.66,
+            _ => 1.0,
+        }
+    }
+
+    /// Where the text goes in a callout of this form drawn in `rect`.
+    pub fn text_area(self, rect: Rect) -> Rect {
+        let f = self.text_share();
+        if f >= 1.0 {
+            return rect;
+        }
+        let (w, h) = (rect.w * f, rect.h * f);
+        let c = rect.center();
+        Rect::new(c.x - w / 2.0, c.y - h / 2.0, w, h)
+    }
+
+    /// How tall the box must be for its text area to be `inner` tall.
+    pub fn box_height(self, inner: f32) -> f32 {
+        inner / self.text_share()
+    }
+
+    /// How far a cloud's bumps reach out of its box.
+    pub fn bulge(self, rect: Rect) -> f32 {
+        if self == CalloutForm::Cloud { (rect.w.min(rect.h) * 0.12).clamp(3.0, 24.0) } else { 0.0 }
+    }
+}
+
+/// Where a callout's tail points from its box: what a new callout, or a quick style, starts with.
+/// The tail can still be dragged anywhere afterwards.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TailSpot {
+    #[default]
+    DownLeft,
+    DownRight,
+    UpLeft,
+    UpRight,
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl TailSpot {
+    pub const ALL: [TailSpot; 8] =
+        [TailSpot::DownLeft, TailSpot::DownRight, TailSpot::UpLeft, TailSpot::UpRight, TailSpot::Left, TailSpot::Right, TailSpot::Up, TailSpot::Down];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TailSpot::DownLeft => "Down left",
+            TailSpot::DownRight => "Down right",
+            TailSpot::UpLeft => "Up left",
+            TailSpot::UpRight => "Up right",
+            TailSpot::Left => "Left",
+            TailSpot::Right => "Right",
+            TailSpot::Up => "Up",
+            TailSpot::Down => "Down",
+        }
+    }
+
+    /// The tail's tip for a callout `w` by `h`, from the box's top left corner.
+    pub fn offset(self, form: CalloutForm, w: f32, h: f32) -> Pt {
+        let (w, h) = (w.max(0.0), h.max(0.0));
+        // An arrow's point is short and stout; a speech tail reaches further.
+        let reach = if form == CalloutForm::Arrow { (h * 0.5).max(8.0) } else { (h * 0.7).clamp(24.0, 90.0) };
+        match self {
+            TailSpot::DownLeft => Pt::new(w * 0.06, h + reach),
+            TailSpot::DownRight => Pt::new(w * 0.94, h + reach),
+            TailSpot::UpLeft => Pt::new(w * 0.06, -reach),
+            TailSpot::UpRight => Pt::new(w * 0.94, -reach),
+            TailSpot::Left => Pt::new(-reach, h / 2.0),
+            TailSpot::Right => Pt::new(w + reach, h / 2.0),
+            TailSpot::Up => Pt::new(w / 2.0, -reach),
+            TailSpot::Down => Pt::new(w / 2.0, h + reach),
+        }
+    }
+
+    /// The tail's tip for a callout drawn in `rect`.
+    pub fn place(self, form: CalloutForm, rect: Rect) -> Pt {
+        rect.min().add(self.offset(form, rect.w, rect.h)).finite()
     }
 }
 
@@ -100,11 +229,14 @@ pub enum Shape {
         rect: Rect,
         text: String,
     },
-    /// A speech balloon: a rounded box with a tail pointing at something, and text in it.
+    /// A speech balloon: a box (rounded, square, an oval, a cloud or an arrow) with a tail
+    /// pointing at something, and text in it.
     Callout {
         rect: Rect,
         tail: Pt,
         text: String,
+        #[serde(default)]
+        form: CalloutForm,
     },
     /// A numbered badge, for steps in an explanation.
     Step {
@@ -201,6 +333,15 @@ impl Kind {
         }
     }
 
+    /// The tool a kind is drawn with: rectangles and ellipses are both the Shape tool's, and
+    /// share its looks.
+    pub fn family(self) -> Kind {
+        match self {
+            Kind::Ellipse => Kind::Rect,
+            k => k,
+        }
+    }
+
     /// Whether this kind changes the pixels under it (rather than drawing over them).
     pub fn is_effect(self) -> bool {
         matches!(self, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Magnify)
@@ -276,6 +417,10 @@ pub struct Style {
     /// What the effect kinds do, by kind: blur radius, pixel size, spotlight darkness (0 to 1),
     /// magnification.
     pub strength: f32,
+    /// A line round each letter of the text, so it reads on any picture (transparent for none).
+    pub text_outline: Color,
+    /// How thick that line is, in pixels outside the letter.
+    pub text_outline_width: f32,
 }
 
 impl Default for Style {
@@ -294,9 +439,14 @@ impl Default for Style {
             text_color: Color::RED,
             align: TextAlign::Left,
             strength: 10.0,
+            text_outline: Color::TRANSPARENT,
+            text_outline_width: 3.0,
         }
     }
 }
+
+/// The thickest a text outline is drawn.
+pub const MAX_TEXT_OUTLINE: f32 = 40.0;
 
 /// Bounds on style values, applied to anything read from outside.
 pub const MAX_WIDTH: f32 = 200.0;
@@ -313,16 +463,105 @@ impl Style {
             opacity: fix(self.opacity, 0.0, 1.0, 1.0),
             font_size: fix(self.font_size, MIN_FONT, MAX_FONT, d.font_size),
             strength: fix(self.strength, 0.0, 200.0, d.strength),
+            text_outline_width: fix(self.text_outline_width, 0.0, MAX_TEXT_OUTLINE, d.text_outline_width),
             ..self
         }
     }
 
-    /// Lengths in the style (line width, font size) scaled by `f`, for a picture resized by it.
+    /// Lengths in the style (line width, font size, text outline) scaled by `f`, for a picture
+    /// resized by it.
     pub fn scaled(self, f: f32) -> Style {
         if !f.is_finite() || f <= 0.0 {
             return self;
         }
-        Style { width: self.width * f, font_size: self.font_size * f, ..self }.clamped()
+        Style { width: self.width * f, font_size: self.font_size * f, text_outline_width: self.text_outline_width * f, ..self }.clamped()
+    }
+
+    /// Whether its text has an outline drawn round it.
+    pub fn has_text_outline(&self) -> bool {
+        self.text_outline.a > 0 && self.text_outline_width > 0.0
+    }
+}
+
+/// The largest corner radius a rectangle is given from outside.
+pub const MAX_RADIUS: f32 = 400.0;
+
+/// What a tool, or a quick style, sets about a shape besides its style: an arrow's heads, a
+/// rectangle's corners, a callout's form and tail, the stamp, a round spotlight or an ellipse.
+/// What is none is left as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ShapeOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub heads: Option<ArrowHeads>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub form: Option<CalloutForm>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail: Option<TailSpot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<StampKind>,
+    /// Round rather than square: an ellipse rather than a rectangle (and the other way), a round
+    /// spotlight.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<bool>,
+}
+
+impl ShapeOptions {
+    /// The same options with every number in its range (NaN is dropped).
+    pub fn clamped(self) -> ShapeOptions {
+        ShapeOptions { radius: self.radius.filter(|r| r.is_finite()).map(|r| r.clamp(0.0, MAX_RADIUS)), ..self }
+    }
+
+    /// Whether these options say nothing.
+    pub fn is_empty(&self) -> bool {
+        *self == ShapeOptions::default()
+    }
+
+    /// `shape` with what these options say about its kind set; the rest of it untouched.
+    pub fn applied(&self, shape: Shape) -> Shape {
+        let o = self.clamped();
+        match shape {
+            Shape::Arrow { from, to, heads } => Shape::Arrow { from, to, heads: o.heads.unwrap_or(heads) },
+            Shape::Rect { rect, .. } if o.round == Some(true) => Shape::Ellipse { rect },
+            Shape::Rect { rect, radius } => Shape::Rect { rect, radius: o.radius.unwrap_or(radius) },
+            Shape::Ellipse { rect } if o.round == Some(false) => Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) },
+            Shape::Callout { rect, tail, text, form } => {
+                let form = o.form.unwrap_or(form);
+                let tail = o.tail.map(|s| s.place(form, rect)).unwrap_or(tail);
+                Shape::Callout { rect, tail, text, form }
+            }
+            Shape::Stamp { rect, stamp } => Shape::Stamp { rect, stamp: o.stamp.unwrap_or(stamp) },
+            Shape::Spotlight { rect, ellipse } => Shape::Spotlight { rect, ellipse: o.round.unwrap_or(ellipse) },
+            other => other,
+        }
+    }
+
+    /// What `shape` itself says of these options (the tail's spot isn't kept in a shape).
+    pub fn of(shape: &Shape) -> ShapeOptions {
+        let none = ShapeOptions::default();
+        match shape {
+            Shape::Arrow { heads, .. } => ShapeOptions { heads: Some(*heads), ..none },
+            Shape::Rect { radius, .. } => ShapeOptions { radius: Some(*radius), round: Some(false), ..none },
+            Shape::Ellipse { .. } => ShapeOptions { round: Some(true), ..none },
+            Shape::Callout { form, .. } => ShapeOptions { form: Some(*form), ..none },
+            Shape::Stamp { stamp, .. } => ShapeOptions { stamp: Some(*stamp), ..none },
+            Shape::Spotlight { ellipse, .. } => ShapeOptions { round: Some(*ellipse), ..none },
+            _ => none,
+        }
+    }
+
+    /// These options with `other`'s set over them.
+    pub fn merged(self, other: ShapeOptions) -> ShapeOptions {
+        ShapeOptions {
+            heads: other.heads.or(self.heads),
+            radius: other.radius.or(self.radius),
+            form: other.form.or(self.form),
+            tail: other.tail.or(self.tail),
+            stamp: other.stamp.or(self.stamp),
+            round: other.round.or(self.round),
+        }
     }
 }
 
@@ -497,7 +736,7 @@ impl Shape {
                 let r = step_radius(style.font_size) + half;
                 Rect::new(center.x - r, center.y - r, 2.0 * r, 2.0 * r)
             }
-            Shape::Callout { rect, tail, .. } => rect.union(Rect::new(tail.x, tail.y, 0.0, 0.0)).inflate(half),
+            Shape::Callout { rect, tail, form, .. } => rect.inflate(form.bulge(*rect)).union(Rect::new(tail.x, tail.y, 0.0, 0.0)).inflate(half),
             Shape::Spotlight { rect, .. } | Shape::Blur { rect } | Shape::Pixelate { rect } => *rect,
             _ => self.rect().unwrap_or_default().inflate(half),
         }
@@ -740,6 +979,93 @@ mod tests {
         assert!(t.text().unwrap().len() <= MAX_TEXT);
         let nan = Shape::Line { from: Pt::new(f32::NAN, 1.0), to: Pt::new(f32::INFINITY, 2.0) }.sanitized();
         assert_eq!(nan, Shape::Line { from: Pt::new(0.0, 1.0), to: Pt::new(0.0, 2.0) });
+    }
+
+    #[test]
+    fn callouts_from_before_forms_read_as_rounded_boxes() {
+        let old = r#"{"id":1,"type":"callout","rect":{"x":0,"y":0,"w":100,"h":40},"tail":{"x":10,"y":90},"text":"hi"}"#;
+        let o: Object = serde_json::from_str(old).unwrap();
+        let Shape::Callout { form, .. } = o.shape else { panic!("a callout") };
+        assert_eq!(form, CalloutForm::Rounded);
+        let arrow =
+            Shape::Callout { rect: Rect::new(0.0, 0.0, 100.0, 40.0), tail: Pt::new(150.0, 20.0), text: String::new(), form: CalloutForm::Arrow };
+        let v = serde_json::to_value(&arrow).unwrap();
+        assert_eq!(v["form"], "arrow");
+        assert_eq!(serde_json::from_value::<Shape>(v).unwrap(), arrow);
+    }
+
+    #[test]
+    fn tail_spots_point_where_they_say() {
+        let r = Rect::new(100.0, 100.0, 200.0, 80.0);
+        let c = r.center();
+        for spot in TailSpot::ALL {
+            for form in CalloutForm::ALL {
+                let p = spot.place(form, r);
+                assert!(!r.contains(p), "{spot:?} {form:?}: the tail is outside the box");
+                let (dx, dy) = (p.x - c.x, p.y - c.y);
+                match spot {
+                    TailSpot::DownLeft => assert!(dx < 0.0 && dy > 0.0),
+                    TailSpot::DownRight => assert!(dx > 0.0 && dy > 0.0),
+                    TailSpot::UpLeft => assert!(dx < 0.0 && dy < 0.0),
+                    TailSpot::UpRight => assert!(dx > 0.0 && dy < 0.0),
+                    TailSpot::Left => assert!(dx < 0.0 && dy.abs() < 0.5),
+                    TailSpot::Right => assert!(dx > 0.0 && dy.abs() < 0.5),
+                    TailSpot::Up => assert!(dy < 0.0 && dx.abs() < 0.5),
+                    TailSpot::Down => assert!(dy > 0.0 && dx.abs() < 0.5),
+                }
+            }
+        }
+        // An arrow's point is shorter than a speech tail.
+        let speech = TailSpot::Right.place(CalloutForm::Rounded, r);
+        let arrow = TailSpot::Right.place(CalloutForm::Arrow, r);
+        assert!(arrow.x < speech.x, "{arrow:?} {speech:?}");
+        // Nonsense sizes still give a finite point.
+        let p = TailSpot::Down.place(CalloutForm::Cloud, Rect::new(f32::NAN, 0.0, f32::INFINITY, -4.0));
+        assert!(p.x.is_finite() && p.y.is_finite());
+    }
+
+    #[test]
+    fn ovals_and_clouds_keep_their_text_in_the_middle() {
+        let r = Rect::new(0.0, 0.0, 200.0, 100.0);
+        assert_eq!(CalloutForm::Rounded.text_area(r), r);
+        assert_eq!(CalloutForm::Arrow.text_area(r), r);
+        let oval = CalloutForm::Oval.text_area(r);
+        assert!(r.encloses(oval) && oval.w < r.w && oval.center() == r.center(), "{oval:?}");
+        let h = CalloutForm::Cloud.box_height(50.0);
+        assert!((CalloutForm::Cloud.text_area(Rect::new(0.0, 0.0, 100.0, h)).h - 50.0).abs() < 0.01);
+        // A cloud's bumps are in its bounds.
+        let cloud = Shape::Callout { rect: r, tail: Pt::new(100.0, 50.0), text: String::new(), form: CalloutForm::Cloud };
+        assert!(cloud.bounds(&Style { width: 0.0, ..style() }).w > r.w);
+    }
+
+    #[test]
+    fn shape_options_set_only_what_they_say() {
+        let r = Rect::new(10.0, 10.0, 100.0, 50.0);
+        let callout = Shape::Callout { rect: r, tail: Pt::new(0.0, 0.0), text: "hi".into(), form: CalloutForm::Rounded };
+        let o =
+            ShapeOptions { form: Some(CalloutForm::Arrow), tail: Some(TailSpot::Right), heads: Some(ArrowHeads::Both), ..ShapeOptions::default() };
+        let Shape::Callout { form, tail, text, rect } = o.applied(callout) else { panic!("still a callout") };
+        assert_eq!((form, text.as_str(), rect), (CalloutForm::Arrow, "hi", r));
+        assert_eq!(tail, TailSpot::Right.place(CalloutForm::Arrow, r));
+        // Round turns a rectangle into an ellipse and back, keeping its box.
+        let round = ShapeOptions { round: Some(true), ..ShapeOptions::default() };
+        assert_eq!(round.applied(Shape::Rect { rect: r, radius: 4.0 }), Shape::Ellipse { rect: r });
+        let square = ShapeOptions { round: Some(false), radius: Some(f32::NAN), ..ShapeOptions::default() };
+        assert_eq!(square.applied(Shape::Ellipse { rect: r }), Shape::Rect { rect: r, radius: 0.0 });
+        let huge = ShapeOptions { radius: Some(1e9), ..ShapeOptions::default() };
+        assert_eq!(huge.applied(Shape::Rect { rect: r, radius: 0.0 }), Shape::Rect { rect: r, radius: MAX_RADIUS });
+        // Nothing said, nothing changed; a line has no options.
+        let line = Shape::Line { from: Pt::ZERO, to: Pt::new(5.0, 5.0) };
+        assert_eq!(o.applied(line.clone()), line);
+        assert!(ShapeOptions::default().is_empty() && !o.is_empty());
+        // What a shape says of itself, and options merged.
+        assert_eq!(ShapeOptions::of(&Shape::Ellipse { rect: r }).round, Some(true));
+        let merged = ShapeOptions { heads: Some(ArrowHeads::End), ..ShapeOptions::default() }.merged(o);
+        assert_eq!((merged.heads, merged.form), (Some(ArrowHeads::Both), Some(CalloutForm::Arrow)));
+        // As JSON, only what's set is written.
+        assert_eq!(serde_json::to_string(&round).unwrap(), r#"{"round":true}"#);
+        assert_eq!(Kind::Ellipse.family(), Kind::Rect);
+        assert_eq!(Kind::Callout.family(), Kind::Callout);
     }
 
     #[test]

@@ -72,18 +72,48 @@ pub fn freeze() -> Result<Frozen, CaptureError> {
         return Err(CaptureError::NotPermitted);
     }
     let pointer = pointer();
+    let count = xcap::Monitor::all().map_err(failed)?.len();
+    // Every monitor at once, each on a thread of its own, and the windows on another: the freeze
+    // takes as long as the slowest of them rather than all of them, and the pictures are of the
+    // same moment. (A monitor can't be handed to another thread, so each looks up its own.)
+    let (grabs, windows) = std::thread::scope(|s| {
+        let threads: Vec<_> =
+            (0..count).map(|i| std::thread::Builder::new().name(format!("freeze-{i}")).spawn_scoped(s, move || grab_nth(i))).collect();
+        let listing = std::thread::Builder::new().name("freeze-windows".into()).spawn_scoped(s, windows);
+        let grabs: Vec<_> = threads
+            .into_iter()
+            .enumerate()
+            .map(|(i, t)| match t {
+                Ok(t) => t.join().unwrap_or_else(|_| Err(CaptureError::Failed(format!("capturing monitor {i} failed")))),
+                // No thread to spare: this one does it.
+                Err(_) => grab_nth(i),
+            })
+            .collect();
+        let windows = match listing {
+            Ok(t) => t.join().unwrap_or_else(|_| Ok(Vec::new())),
+            Err(_) => windows(),
+        };
+        (grabs, windows)
+    });
     let mut monitors = Vec::new();
-    for m in xcap::Monitor::all().map_err(failed)? {
-        let info = monitor_of(&m)?;
-        match m.capture_image() {
-            Ok(img) => monitors.push((info, raster_of(img)?)),
-            Err(e) => log::warn!("monitor {} could not be captured: {e}", info.name),
+    for g in grabs {
+        match g {
+            Ok(m) => monitors.push(m),
+            Err(e) => log::warn!("a monitor could not be captured: {e}"),
         }
     }
     if monitors.is_empty() {
         return Err(CaptureError::NoMonitor);
     }
-    Ok(Frozen { monitors, windows: windows().unwrap_or_default(), pointer })
+    Ok(Frozen { monitors, windows: windows.unwrap_or_default(), pointer })
+}
+
+/// The `i`th monitor and a picture of it.
+fn grab_nth(i: usize) -> Result<(Monitor, Raster), CaptureError> {
+    let m = xcap::Monitor::all().map_err(failed)?.into_iter().nth(i).ok_or(CaptureError::NoMonitor)?;
+    let info = monitor_of(&m)?;
+    let img = m.capture_image().map_err(|e| CaptureError::Failed(format!("monitor {}: {e}", info.name)))?;
+    Ok((info, raster_of(img)?))
 }
 
 pub fn grab_monitor(id: u32) -> Result<(Monitor, Raster), CaptureError> {

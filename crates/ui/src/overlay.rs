@@ -237,6 +237,21 @@ fn handles(r: Rect) -> [(f32, f32); 8] {
     [(r.x, r.y), (cx, r.y), (r.right(), r.y), (r.right(), cy), (r.right(), r.bottom()), (cx, r.bottom()), (r.x, r.bottom()), (r.x, cy)]
 }
 
+/// The handle of `r` at `p` (within `tol`), by its place in [`handles`].
+fn handle_under(r: Rect, p: (f32, f32), tol: f32) -> Option<usize> {
+    handles(r).iter().position(|(x, y)| (x - p.0).abs() <= tol && (y - p.1).abs() <= tol)
+}
+
+/// The pointer over a handle: the arrows of the way it pulls.
+fn resize_cursor(handle: usize) -> CursorIcon {
+    match handle {
+        0 | 4 => CursorIcon::ResizeNwSe,
+        2 | 6 => CursorIcon::ResizeNeSw,
+        1 | 5 => CursorIcon::ResizeVertical,
+        _ => CursorIcon::ResizeHorizontal,
+    }
+}
+
 impl Overlay {
     pub fn new(monitors: Vec<OverlayMonitor>, windows: Vec<OverlayWindow>, purpose: Purpose) -> Overlay {
         let n = monitors.len();
@@ -266,6 +281,19 @@ impl Overlay {
     pub fn preselect(&mut self, monitor: usize, area: IRect) {
         if self.monitors.get(monitor).is_some() {
             self.sel = Some((monitor, Rect::new(area.x as f32, area.y as f32, area.w as f32, area.h as f32)));
+            self.phase = Phase::Adjusting;
+        }
+    }
+
+    /// Starts with an area of the desktop already chosen, on the monitor its middle is on, ready
+    /// to adjust (Capture Region, Adjust First starts from the last area). An area on no monitor
+    /// now is left out.
+    pub fn preselect_desktop(&mut self, area: IRect) {
+        let (cx, cy) = (i64::from(area.x) + i64::from(area.w / 2), i64::from(area.y) + i64::from(area.h / 2));
+        let Some(mi) = self.monitors.iter().position(|m| m.rect.contains(cx, cy)) else { return };
+        let Some(r) = self.monitors.get(mi).and_then(|m| desk_to_px(m, area)) else { return };
+        if r.w >= 1.0 && r.h >= 1.0 {
+            self.sel = Some((mi, r));
             self.phase = Phase::Adjusting;
         }
     }
@@ -354,6 +382,11 @@ impl Overlay {
             self.pointer = None;
         }
         self.input(&ctx, &resp, mi, &to_px, (pic_w, pic_h), sx);
+        if let Some(h) = hover
+            && let Some(cursor) = self.adjusting_cursor(mi, to_px(h), HANDLE / sx.max(0.01))
+        {
+            ctx.set_cursor_icon(cursor);
+        }
 
         // ---- what to draw ----
         let dim = Color32::from_black_alpha(110);
@@ -428,6 +461,30 @@ impl Overlay {
         }
         if self.sel.is_none() && self.phase == Phase::Choosing {
             self.hint(&painter, screen);
+        }
+    }
+
+    /// While the area is being adjusted, what the pointer at `p` (this monitor's pixels) shows a
+    /// press would do: arrows over a handle, a hand inside the area (a closed one while it's
+    /// moved), a crosshair outside it, where a drag starts a new area.
+    fn adjusting_cursor(&self, mi: usize, p: (f32, f32), tol: f32) -> Option<CursorIcon> {
+        match self.phase {
+            Phase::Resizing { handle } => Some(resize_cursor(handle)),
+            Phase::Moving { .. } => Some(CursorIcon::Grabbing),
+            Phase::Adjusting => {
+                let (m, r) = self.sel?;
+                if m != mi || self.purpose.clicks_window() {
+                    return Some(CursorIcon::Crosshair);
+                }
+                // A fixed size has no handles: it's moved, not resized.
+                if self.purpose.fixed().is_none()
+                    && let Some(h) = handle_under(r, p, tol)
+                {
+                    return Some(resize_cursor(h));
+                }
+                Some(if r.contains(screengrabcraft_model::Pt::new(p.0, p.1)) { CursorIcon::Grab } else { CursorIcon::Crosshair })
+            }
+            Phase::Choosing | Phase::Dragging { .. } => None,
         }
     }
 
@@ -663,7 +720,7 @@ impl Overlay {
                     Phase::Moving { last: p }
                 }
                 (Some((m, r)), _) if m == mi && self.phase == Phase::Adjusting => {
-                    if let Some(h) = handles(r).iter().position(|(x, y)| (x - p.0).abs() <= tol && (y - p.1).abs() <= tol) {
+                    if let Some(h) = handle_under(r, p, tol) {
                         Phase::Resizing { handle: h }
                     } else if r.contains(screengrabcraft_model::Pt::new(p.0, p.1)) {
                         Phase::Moving { last: p }
@@ -776,6 +833,22 @@ mod tests {
     }
 
     #[test]
+    fn the_last_area_is_ready_to_adjust_on_its_monitor_and_one_off_every_monitor_is_left_out() {
+        let mut o = overlay();
+        o.preselect_desktop(IRect::new(-90, 10, 40, 20));
+        // In the monitor's picture's pixels (twice the desktop's here).
+        assert_eq!(o.sel, Some((0, Rect::new(20.0, 20.0, 80.0, 40.0))));
+        assert_eq!(o.phase, Phase::Adjusting);
+        // Enter keeps it as it is.
+        o.choose(Action::Default);
+        let Outcome::Chosen { desktop, .. } = o.outcome() else { panic!("not chosen") };
+        assert_eq!(*desktop, IRect::new(-90, 10, 40, 20));
+        let mut o = overlay();
+        o.preselect_desktop(IRect::new(500, 500, 10, 10));
+        assert_eq!((o.sel, o.phase), (None, Phase::Choosing));
+    }
+
+    #[test]
     fn coordinates_map_between_desktop_and_picture() {
         let o = overlay();
         let m = &o.monitors[0];
@@ -879,6 +952,34 @@ mod tests {
             Outcome::Chosen { area, .. } => assert_eq!(*area, IRect::new(232, 0, 337, 600)),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn the_pointer_shows_what_a_press_does_while_the_area_is_adjusted() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture);
+        o.preview = true;
+        o.preselect(0, IRect::new(100, 100, 200, 100));
+        let mut h = harness(o);
+        h.run_steps(2);
+        let cursor_at = |h: &mut egui_kittest::Harness<'_, Overlay>, x: f32, y: f32| {
+            h.hover_at(egui::pos2(x, y));
+            h.run_steps(1);
+            h.output().platform_output.cursor_icon
+        };
+        assert_eq!(cursor_at(&mut h, 300.0, 200.0), CursorIcon::ResizeNwSe, "the bottom right corner");
+        assert_eq!(cursor_at(&mut h, 102.0, 199.0), CursorIcon::ResizeNeSw, "the bottom left corner, a little off");
+        assert_eq!(cursor_at(&mut h, 200.0, 100.0), CursorIcon::ResizeVertical, "the top edge");
+        assert_eq!(cursor_at(&mut h, 300.0, 150.0), CursorIcon::ResizeHorizontal, "the right edge");
+        assert_eq!(cursor_at(&mut h, 200.0, 150.0), CursorIcon::Grab, "inside: it moves");
+        assert_eq!(cursor_at(&mut h, 600.0, 400.0), CursorIcon::Crosshair, "outside: a new area");
+        // While it's being pulled, the arrows stay.
+        h.drag_at(egui::pos2(300.0, 200.0));
+        h.run_steps(1);
+        h.hover_at(egui::pos2(340.0, 230.0));
+        h.run_steps(1);
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::ResizeNwSe);
+        h.drop_at(egui::pos2(340.0, 230.0));
+        h.run_steps(2);
     }
 
     #[test]
