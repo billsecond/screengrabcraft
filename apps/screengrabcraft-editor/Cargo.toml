@@ -31,3 +31,8 @@ winresource = "0.1"
 # Playing a video recording's sound while editing it (not on the BSDs yet).
 [target.'cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))'.dependencies]
 cpal = "0.18.2"
+
+# Taking the window off the taskbar while it steps aside for a capture (Windows); the same winit
+# eframe runs on.
+[target.'cfg(target_os = "windows")'.dependencies]
+winit = { version = "0.30", default-features = false }

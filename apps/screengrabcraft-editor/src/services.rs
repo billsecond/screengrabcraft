@@ -286,12 +286,25 @@ impl Services for DesktopServices {
                 let since = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
                 let modified = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
                 let path: PathBuf = e.path();
-                Some(RecentItem { name: e.file_name().to_string_lossy().to_string(), path: path.to_string_lossy().to_string(), modified })
+                Some(RecentItem {
+                    name: e.file_name().to_string_lossy().to_string(),
+                    path: path.to_string_lossy().to_string(),
+                    modified,
+                    ..RecentItem::default()
+                })
             })
             .collect();
         items.sort_by_key(|i| std::cmp::Reverse(i.modified));
-        items.truncate(40);
+        items.truncate(screengrabcraft_ui::strip::MAX_SHOWN);
+        // The local day and time of those kept (All captures groups them by day).
+        for i in &mut items {
+            (i.day, i.time) = screengrabcraft_desktop::time::local_day_time(i.modified);
+        }
         items
+    }
+
+    fn today(&self) -> String {
+        screengrabcraft_desktop::time::today()
     }
 
     fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {

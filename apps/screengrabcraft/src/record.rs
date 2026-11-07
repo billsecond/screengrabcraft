@@ -429,7 +429,10 @@ struct Devices {
 
 fn open_devices(o: &VideoOptions, started: Instant, s: &Shared) -> Devices {
     let system = if o.system_sound && audio::system_sound_supported() {
-        AudioCapture::start(AudioSource::SystemSound, started).map_err(|e| s.note(format!("No computer sound: {e}"))).ok()
+        AudioCapture::start(AudioSource::SystemSound(o.system_sound_name.clone()), started)
+            .inspect(|c| log::info!("recording the computer's sound from {}", c.name))
+            .map_err(|e| s.note(format!("No computer sound: {e}")))
+            .ok()
     } else {
         None
     };
@@ -725,7 +728,10 @@ fn record_screen(
             if camera_pictures == 0 && !camera_told && at >= CAMERA_SILENT {
                 camera_told = true;
                 log::warn!("the camera has sent no pictures");
-                s.note(format!("No camera pictures: {} has sent none (is another program using it?)", c.name));
+                match c.trouble() {
+                    Some(why) => s.note(format!("No camera pictures from {}: {why}", c.name)),
+                    None => s.note(format!("No camera pictures: {} has sent none (is another program using it?)", c.name)),
+                }
             }
         }
         s.wake.request_repaint_after(Duration::from_millis(250));
@@ -933,7 +939,14 @@ mod tests {
 
     #[test]
     fn stopping_stops_the_clock_at_once() {
-        let off = VideoOptions { system_sound: false, microphone: false, microphone_name: None, camera: false, camera_index: None };
+        let off = VideoOptions {
+            system_sound: false,
+            system_sound_name: None,
+            microphone: false,
+            microphone_name: None,
+            camera: false,
+            camera_index: None,
+        };
         let plan = VideoPlan {
             kind: Kind::Production,
             screen: Screen::Off,
@@ -979,7 +992,14 @@ mod tests {
             desktop: area,
             fps: 30,
             max_secs: 60,
-            options: VideoOptions { system_sound: true, microphone: false, microphone_name: None, camera: false, camera_index: None },
+            options: VideoOptions {
+                system_sound: true,
+                system_sound_name: None,
+                microphone: false,
+                microphone_name: None,
+                camera: false,
+                camera_index: None,
+            },
             out: out.clone(),
             max_size: (1920, 1080),
             created: String::new(),

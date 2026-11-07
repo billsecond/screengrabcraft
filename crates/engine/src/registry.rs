@@ -5,7 +5,7 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Object, ObjectId, Order, Pt, Rect, Shape, Style};
+use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Raster, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::effects;
 use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
@@ -113,6 +113,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         has_selection,
         restyle
     ),
+    cmd!(
+        "object.look",
+        "Apply Quick Style",
+        "Annotate",
+        None,
+        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
+        has_selection,
+        apply_look
+    ),
     cmd!("object.text", "Change Text", "Annotate", None, r#"{"id": id, "text": "…"}"#, has_objects, set_text),
     cmd!("object.order", "Arrange", "Annotate", None, r#"{"to": "front"|"back"|"forward"|"backward", "ids"?: [id]}"#, has_selection, order),
     cmd!(
@@ -120,9 +129,27 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Flatten",
         "Annotate",
         Some("Ctrl+Shift+F"),
-        "{} — draws every annotation into the picture for good",
+        r#"{"ids"?: [id]} — draws those annotations (default: every one) into the picture for good"#,
         has_objects,
         flatten
+    ),
+    cmd!(
+        "image.lift",
+        "Move Area",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — takes that area out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
+        always,
+        lift
+    ),
+    cmd!(
+        "image.erase",
+        "Delete Area",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — makes that area of the picture see-through"#,
+        always,
+        erase
     ),
     cmd!("image.crop", "Crop", "Image", None, r#"{"x": 0, "y": 0, "w": 100, "h": 100}"#, always, crop),
     cmd!(
@@ -420,6 +447,68 @@ fn restyle(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+fn apply_look(s: &mut Session, p: &Value) -> Result<Value> {
+    let ids = ids_param(s, p, true)?;
+    let options = match p.get("options") {
+        None | Some(Value::Null) => ShapeOptions::default(),
+        Some(v) => serde_json::from_value::<ShapeOptions>(v.clone()).map_err(|e| EngineError::Params(format!("options: {e}")))?.clamped(),
+    };
+    let style_patch = match p.get("style") {
+        None | Some(Value::Null) => None,
+        Some(v @ Value::Object(_)) => Some(v),
+        Some(_) => return Err(EngineError::Params("`style` must be an object".to_string())),
+    };
+    let keep_size = match p.get("keepTextSize") {
+        None | Some(Value::Null) => true,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(EngineError::Params("`keepTextSize` is true or false".to_string())),
+    };
+    // Everything worked out first, so nonsense changes nothing.
+    let picture = s.doc.bounds();
+    let mut changes = Vec::with_capacity(ids.len());
+    for id in ids {
+        let Some(o) = s.doc.get(id) else { return Err(EngineError::NoObject(id.0)) };
+        let mut style = match style_patch {
+            Some(patch) => merge_style(&o.style, patch)?,
+            None => o.style,
+        };
+        if keep_size {
+            style.font_size = o.style.font_size;
+        }
+        let mut shape = options.applied(o.shape.clone());
+        // A tail set to a spot stays on the picture.
+        if let Shape::Callout { tail, .. } = &mut shape {
+            *tail = picture.nearest(*tail);
+        }
+        // Bigger text (a title) gets the room it needs below; a box is never made smaller.
+        if style.font_size > o.style.font_size {
+            match &mut shape {
+                Shape::Text { rect, text } => {
+                    rect.h = rect.h.max(screengrabcraft_render::text::fit_box(text, &style, rect.min(), Some(rect.w)).h);
+                }
+                Shape::Callout { rect, text, form, .. } => {
+                    let pad = screengrabcraft_render::text::padding(&style);
+                    let lay = screengrabcraft_render::text::layout(text, &style, Some(form.text_area(*rect).w - 2.0 * pad));
+                    rect.h = rect.h.max(form.box_height(lay.height + 2.0 * pad));
+                }
+                _ => {}
+            }
+        }
+        changes.push((id, picture.encloses(o.shape.bounds(&o.style)), shape, style));
+    }
+    for (id, was_inside, shape, style) in changes {
+        if let Some(o) = s.doc.get_mut(id) {
+            o.shape = shape;
+            o.style = style;
+        }
+        // A thicker line or a longer tail doesn't push it over the edge.
+        if was_inside {
+            s.doc.bring_inside(id);
+        }
+    }
+    Ok(Value::Null)
+}
+
 fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     let id = id_param(s, p)?;
     let text = p.get("text").and_then(Value::as_str).ok_or_else(|| EngineError::Params("`text` is required".to_string()))?;
@@ -441,12 +530,64 @@ fn order(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-fn flatten(s: &mut Session, _: &Value) -> Result<Value> {
-    let pic = screengrabcraft_render::render(&s.doc).ok_or_else(|| EngineError::Failed("the picture could not be drawn".to_string()))?;
-    s.doc.base = pic;
-    s.doc.objects.clear();
-    s.doc.images.clear();
-    s.selection.clear();
+fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
+    let failed = || EngineError::Failed("the picture could not be drawn".to_string());
+    match p.get("ids") {
+        None | Some(Value::Null) => {
+            s.doc.base = screengrabcraft_render::render(&s.doc).ok_or_else(failed)?;
+            s.doc.objects.clear();
+            s.doc.images.clear();
+            s.selection.clear();
+        }
+        Some(_) => {
+            // Only those: the picture is drawn with them alone on it, and they go.
+            let ids = ids_param(s, p, false)?;
+            let hide: Vec<ObjectId> = s.doc.objects.iter().map(|o| o.id).filter(|id| !ids.contains(id)).collect();
+            let pix = screengrabcraft_render::Renderer::new()
+                .render(&s.doc, &screengrabcraft_render::Options { hide, no_text: None })
+                .ok_or_else(failed)?;
+            s.doc.base = screengrabcraft_render::canvas::from_pixmap(&pix).ok_or_else(failed)?;
+            s.doc.remove(&ids);
+            s.selection.retain(|id| !ids.contains(id));
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// An area of the picture from `x`, `y`, `w`, `h`, in whole pixels inside it.
+fn area_param(s: &Session, p: &Value) -> Result<(u32, u32, u32, u32)> {
+    let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
+    area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))
+}
+
+/// Makes an area of a picture see-through.
+fn clear_area(r: &mut Raster, x: u32, y: u32, w: u32, h: u32) {
+    let width = r.width() as usize;
+    let px = r.pixels_mut();
+    for row in y..y.saturating_add(h) {
+        let Some(start) = (row as usize).checked_mul(width).and_then(|v| v.checked_add(x as usize)).and_then(|v| v.checked_mul(4)) else { return };
+        let Some(end) = (w as usize).checked_mul(4).and_then(|n| start.checked_add(n)) else { return };
+        if let Some(line) = px.get_mut(start..end) {
+            line.fill(0);
+        }
+    }
+}
+
+fn lift(s: &mut Session, p: &Value) -> Result<Value> {
+    let (x, y, w, h) = area_param(s, p)?;
+    let piece = s.doc.base.crop(x, y, w, h).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    let key = s.doc.add_image(piece)?;
+    clear_area(&mut s.doc.base, x, y, w, h);
+    // Where it was, looking as it did (no shadow, no border).
+    let style = Style { shadow: false, ..Kind::Image.default_style() };
+    let id = s.doc.add(Shape::Image { rect: Rect::new(x as f32, y as f32, w as f32, h as f32), image: key }, style)?;
+    s.selection = vec![id];
+    Ok(json!({ "id": id.0 }))
+}
+
+fn erase(s: &mut Session, p: &Value) -> Result<Value> {
+    let (x, y, w, h) = area_param(s, p)?;
+    clear_area(&mut s.doc.base, x, y, w, h);
     Ok(Value::Null)
 }
 

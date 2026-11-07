@@ -51,6 +51,9 @@ pub struct RecorderDevices {
     pub system_sound: bool,
     /// Whether this kind of system can record the computer's sound at all (Windows).
     pub system_sound_platform: bool,
+    /// The speakers whose sound can be recorded, and which is the system's default.
+    pub speakers: Vec<String>,
+    pub default_speaker: Option<String>,
 }
 
 /// How loud the microphone is, for the meter beside it.
@@ -368,10 +371,15 @@ fn fixed_choice(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions,
 }
 
 /// The microphone's meter, or a Test button that asks for it.
-fn mic_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel) {
+/// A sound level meter (with Test to start listening), named `name`.
+fn level_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel, name: &str, test_tip: &str) {
     let t = Tokens::get(ui.ctx());
     if !view.listen {
-        if ui.add(StandardButton::new("Test")).on_hover_text("Listen to the microphone, to see that it hears you").clicked() {
+        let resp = ui.add(StandardButton::new("Test"));
+        // Named for what it tests: there is one for the microphone and one for the computer's sound.
+        let what = format!("Test the {}", name.trim_end_matches(" level").to_lowercase());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &what));
+        if resp.on_hover_text(test_tip).clicked() {
             view.listen = true;
         }
         return;
@@ -383,7 +391,7 @@ fn mic_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel) {
         MicLevel::Off | MicLevel::Starting | MicLevel::Level(_) => {
             let v = if let MicLevel::Level(l) = level { l.clamp(0.0, 1.0) } else { 0.0 };
             let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 10.0), Sense::hover());
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, "Microphone level"));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, name));
             let p = ui.painter();
             p.rect(rect, 5.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
             // Loudness as it sounds: quiet sounds still move it.
@@ -397,7 +405,15 @@ fn mic_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel) {
     }
 }
 
-fn inputs_section(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions, o: &mut VideoOptions, d: &RecorderDevices, mic: &MicLevel) {
+fn inputs_section(
+    ui: &mut Ui,
+    view: &mut RecorderView,
+    rec: &mut RecorderOptions,
+    o: &mut VideoOptions,
+    d: &RecorderDevices,
+    mic: &MicLevel,
+    sound: &MicLevel,
+) {
     heading(ui, "Inputs");
     egui::Grid::new("recorder-inputs").num_columns(2).spacing([18.0, 8.0]).min_col_width(170.0).min_row_height(widgets::BUTTON_SIZE.y).show(
         ui,
@@ -448,21 +464,44 @@ fn inputs_section(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOption
                     });
                 });
                 if o.microphone {
-                    mic_meter(ui, view, mic);
+                    level_meter(ui, view, mic, "Microphone level", "Listen to the microphone, to see that it hears you");
                 }
             });
             ui.end_row();
 
-            let mut sound = o.system_sound && d.system_sound;
-            if switch(ui, &mut sound, "Computer sound", d.system_sound).changed() {
-                o.system_sound = sound;
+            let mut on = o.system_sound && d.system_sound;
+            let was = on;
+            if switch(ui, &mut on, "Computer sound", d.system_sound).changed() {
+                o.system_sound = on;
+            }
+            // As with the microphone: turning it on here is asking to hear it.
+            if on && !was {
+                view.listen = true;
             }
             if !d.system_sound_platform {
                 note(ui, "Only on Windows: this system has no way to record what it plays.");
             } else if !d.system_sound {
                 note(ui, "No sound output was found.");
             } else {
-                note(ui, "What the computer plays.");
+                // Which speaker's sound: what plays through another one isn't heard.
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(o.system_sound, |ui| {
+                        let default = match &d.default_speaker {
+                            Some(n) => format!("The system's default ({n})"),
+                            None => "The system's default".to_string(),
+                        };
+                        let shown = o.system_sound_name.clone().unwrap_or_else(|| default.clone());
+                        egui::ComboBox::from_id_salt("recorder-speaker").width(260.0).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut o.system_sound_name, None, default);
+                            for s in &d.speakers {
+                                ui.selectable_value(&mut o.system_sound_name, Some(s.clone()), s);
+                            }
+                        });
+                    });
+                    if o.system_sound {
+                        level_meter(ui, view, sound, "Computer sound level", "Listen to what the computer plays, to see it's heard");
+                    }
+                });
             }
             ui.end_row();
         },
@@ -481,6 +520,7 @@ pub fn recorder_ui(
     sources: &mut VideoOptions,
     devices: &RecorderDevices,
     mic: &MicLevel,
+    sound: &MicLevel,
 ) -> Option<RecorderChoice> {
     let t = Tokens::get(ui.ctx());
     // Read before anything is drawn: Esc closing a list isn't for the window, and Enter on a
@@ -524,7 +564,7 @@ pub fn recorder_ui(
     egui::CentralPanel::default().frame(Frame::NONE.fill(t.panel).inner_margin(Margin::symmetric(22, 18))).show(ui, |ui| {
         area_section(ui, view, rec, devices);
         ui.add_space(20.0);
-        inputs_section(ui, view, rec, sources, devices, mic);
+        inputs_section(ui, view, rec, sources, devices, mic, sound);
         ui.add_space(10.0);
         if !rec.records_anything(sources, devices.system_sound, devices.camera_supported) {
             ui.label(RichText::new("Turn on at least one of these to record.").color(t.danger));
@@ -572,6 +612,8 @@ mod tests {
             camera_supported: true,
             system_sound: true,
             system_sound_platform: true,
+            speakers: vec!["Speakers".to_string()],
+            default_speaker: Some("Speakers".to_string()),
         }
     }
 
@@ -579,7 +621,9 @@ mod tests {
         Harness::builder().with_size(SIZE).build_ui_state(
             |ui, st: &mut State| {
                 crate::theme::apply(ui.ctx(), Theme::Light);
-                if let Some(c) = recorder_ui(ui, &mut st.view, &mut st.settings.recorder, &mut st.settings.production, &st.devices, &st.mic) {
+                if let Some(c) =
+                    recorder_ui(ui, &mut st.view, &mut st.settings.recorder, &mut st.settings.production, &st.devices, &st.mic, &MicLevel::Off)
+                {
                     st.pressed = Some(c);
                 }
             },
@@ -790,7 +834,7 @@ mod tests {
         let mut h = harness(Settings::default(), devices());
         h.run_steps(2);
         assert!(h.query_by_label("Microphone level").is_none());
-        press(&mut h, "Test");
+        press(&mut h, "Test the microphone");
         assert!(h.state().view.listen);
         h.state_mut().mic = MicLevel::Failed("no microphone".into());
         h.run_steps(2);
