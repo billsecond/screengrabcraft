@@ -246,6 +246,17 @@ impl Editor {
         self.replace_document(Document::new(blank.clone()), "Untitled".to_string(), None, None, Some(blank));
     }
 
+    /// As a newly started editor: an empty picture, no dialog, nothing waiting to happen. For a
+    /// window closed (once everything was saved) while the program stays ready out of sight.
+    pub fn start_over(&mut self) {
+        self.blank_document();
+        self.dialog = None;
+        self.pending = None;
+        self.save_problem = None;
+        self.quit_requested = false;
+        self.close_confirmed = false;
+    }
+
     /// Opens a picture or project from its bytes, once the document open now is saved.
     pub fn open_file(&mut self, ctx: &egui::Context, file: OpenedFile) {
         if self.ready_to_leave() {

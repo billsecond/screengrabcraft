@@ -31,9 +31,13 @@ pollster = { workspace = true }
 ureq = { workspace = true }
 semver = { workspace = true }
 ring = { workspace = true }
+# Windows shown and hidden without animation (cloak.rs) take the window eframe made.
+raw-window-handle = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # The sign-in entries (Run, StartupApproved) are in the registry.
 winreg = "0.56"
 # The update check goes through the proxy Windows is set to use, if any.
 ureq = { workspace = true, features = ["win-system-proxy"] }
+# Windows' window animations turned off, and windows cloaked (cloak.rs), through a safe binding.
+winsafe = { version = "0.0.29", features = ["dwm"] }

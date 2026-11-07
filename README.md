@@ -30,6 +30,7 @@ beside them for scripts and agents.
 | Shortcut (Windows, Linux) | macOS | |
 |---|---|---|
 | Print Screen | Ctrl+Shift+C | **Region**: drag out an area, or click a window; adjust it with its handles; Enter keeps it |
+| — (set one in Settings) | — | **Region, adjust first**: drag out an area, or start from the last one, and adjust it with its handles until Enter (or a button of the bar) takes it |
 | Alt+Print Screen | Ctrl+Shift+W | **Window**: click a window |
 | Ctrl+Print Screen | Ctrl+Shift+F | **Full screen**: the monitor under the pointer |
 | — (set one in Settings; Ctrl+Shift+Print Screen is Windows' own) | — | **All screens** in one picture |
@@ -49,7 +50,14 @@ As soon as you've chosen the area ScreenGrabCraft does its default: copy the cap
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
 or PDF, with a file name pattern of your own). The default is yours to change in the service's
 settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
-or Save. An open editor is hidden while you capture, which you can turn off too.
+or Save, for every capture; or use **Capture Region, Adjust First** (tray menu, or a shortcut of your own)
+for just the captures you want to fine-tune. An open editor is hidden while you capture, which you can turn
+off too.
+
+On Windows the editor is kept ready in the background (Settings, After a capture): it starts a
+little after the capture service, and closing its window hides it, so a capture opens in it at
+once instead of waiting for Windows to start it. The editor opens where you left it: the same
+place and monitor, the same size, maximized or not.
 
 A GIF recording runs at 30 frames a second unless you set it lower, is always saved, and opens in
 the editor like any capture, with a **Play** button under the picture. Any GIF you open there has one. What you draw goes on a still of the first frame,
@@ -131,7 +139,7 @@ screengrabcraft-cli service status
 
 The capture service takes requests too, which is how a capture is bound to a key on a Wayland
 desktop (where programs can't take global shortcuts): `screengrabcraft --capture region`,
-`--capture window|screen|all|repeat|scrolling|gif`, `--delay 5`, `--settings`, `--quit`.
+`--capture adjust|window|screen|all|repeat|scrolling|gif`, `--delay 5`, `--settings`, `--quit`.
 
 ## Platforms
 
