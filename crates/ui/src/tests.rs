@@ -8,14 +8,14 @@ use screengrabcraft_model::{Color, Document, EditorSettings, ImageFormat, Kind, 
 use crate::editor::{Editor, Tool};
 use crate::services::{NoServices, OpenedFile};
 
-fn editor() -> Editor {
+pub(crate) fn editor() -> Editor {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
     ed.session.replace(Document::new(Raster::filled(400, 300, Color::WHITE).unwrap()));
     ed.view.fit_pending = true;
     ed
 }
 
-fn harness(ed: Editor) -> Harness<'static, Editor> {
+pub(crate) fn harness(ed: Editor) -> Harness<'static, Editor> {
     Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
@@ -27,11 +27,11 @@ fn harness(ed: Editor) -> Harness<'static, Editor> {
 }
 
 /// Where a picture point is on the screen.
-fn at(h: &Harness<'_, Editor>, x: f32, y: f32) -> Pos2 {
+pub(crate) fn at(h: &Harness<'_, Editor>, x: f32, y: f32) -> Pos2 {
     h.state().view.to_screen(screengrabcraft_model::Pt::new(x, y))
 }
 
-fn drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
+pub(crate) fn drag(h: &mut Harness<'_, Editor>, from: Pos2, to: Pos2) {
     h.hover_at(from);
     h.run_steps(2);
     h.drag_at(from);
@@ -64,7 +64,7 @@ fn draws_an_arrow_and_undoes_it() {
 
 #[test]
 fn every_drawing_tool_draws_something() {
-    for (tool, _, _, _) in Tool::BAR {
+    for (tool, _, _, _) in Tool::ALL {
         let Tool::Draw(kind) = tool else { continue };
         let mut h = harness(editor());
         h.run_steps(4);
@@ -417,10 +417,10 @@ fn opening_something_else_leaves_the_gif_behind() {
 
 /// Every drawing tool.
 fn draw_tools() -> Vec<(Tool, Kind)> {
-    Tool::BAR.into_iter().filter_map(|(tool, _, _, _)| if let Tool::Draw(kind) = tool { Some((tool, kind)) } else { None }).collect()
+    Tool::ALL.into_iter().filter_map(|(tool, _, _, _)| if let Tool::Draw(kind) = tool { Some((tool, kind)) } else { None }).collect()
 }
 
-fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
+pub(crate) fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
     let mut h = harness(ed);
     h.run_steps(4);
     h.state_mut().set_tool(tool);
@@ -428,7 +428,7 @@ fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
     h
 }
 
-fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
+pub(crate) fn click_at(h: &mut Harness<'_, Editor>, p: Pos2) {
     h.hover_at(p);
     h.run_steps(1);
     h.drag_at(p);
@@ -932,7 +932,12 @@ impl Services for Disk {
         s.files
             .keys()
             .filter(|p| !p.ends_with(".sgcraft"))
-            .map(|p| RecentItem { path: p.clone(), name: crate::editor::file_name(p), modified: s.stamps.get(p).copied().unwrap_or_default() })
+            .map(|p| RecentItem {
+                path: p.clone(),
+                name: crate::editor::file_name(p),
+                modified: s.stamps.get(p).copied().unwrap_or_default(),
+                ..RecentItem::default()
+            })
             .collect()
     }
 
@@ -1314,7 +1319,7 @@ fn the_last_drawing_tool_and_stamp_are_there_after_a_restart() {
     let reread = EditorSettings::from_json(&serde_json::to_string(&saved).unwrap());
     let ed = Editor::new(Box::new(NoServices), reread);
     assert_eq!(ed.tool, Tool::Draw(Kind::Stamp));
-    assert_eq!(ed.stamp, screengrabcraft_model::StampKind::Cross);
+    assert_eq!(ed.stamp(), screengrabcraft_model::StampKind::Cross);
 
     // A rectangle picked with its key.
     let mut h = ready(Editor::new(Box::new(KeepsSettings(kept.clone())), EditorSettings::default()), Tool::Select);
@@ -1558,12 +1563,12 @@ fn boxes_ellipses_and_callouts_show_their_fill_without_opening_anything() {
         let mut h = harness(editor());
         h.state_mut().set_tool(Tool::Draw(tool));
         h.run_steps(2);
-        assert!(h.query_by_label("Fill").is_some(), "{tool:?}");
+        assert!(h.query_by_label("Fill colour").is_some(), "{tool:?}");
     }
     let mut h = harness(editor());
     h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
     h.run_steps(2);
-    assert!(h.query_by_label("Fill").is_none());
+    assert!(h.query_by_label("Fill colour").is_none());
 }
 
 #[test]
@@ -1695,25 +1700,539 @@ fn the_fill_tool_fills_a_shape_clicked_inside() {
     assert_eq!(h.state().session.doc.get(empty).map(|o| o.style.fill), Some(Color::TRANSPARENT));
 }
 
+/// The callout as it is now, and whether its text is being typed.
+fn the_callout(h: &Harness<'_, Editor>) -> Option<(screengrabcraft_model::ObjectId, screengrabcraft_model::Rect, bool)> {
+    let ed = h.state();
+    ed.session.doc.objects.iter().find_map(|o| match &o.shape {
+        Shape::Callout { rect, .. } => Some((o.id, *rect, ed.editing == Some(o.id))),
+        _ => None,
+    })
+}
+
 #[test]
-fn the_tool_bar_buttons_get_smaller_rather_than_run_into_the_zoom() {
-    for width in [1000.0, 1100.0, 1200.0, 1280.0, 1400.0] {
-        let mut h = Harness::builder().with_size(egui::vec2(width, 800.0)).build_ui_state(
-            |ui, ed: &mut Editor| {
-                let ctx = ui.ctx().clone();
-                ed.logic(&ctx);
-                ed.ui(ui);
-            },
-            editor(),
-        );
-        h.run_steps(4);
-        let last = h.get_by_label("Delete the selection (Del)").rect();
-        let zoom_out = h.get_by_label("Zoom out (Ctrl+-)").rect();
-        assert!(last.max.x + 4.0 <= zoom_out.min.x, "at {width}: {last:?} runs into {zoom_out:?}");
-        let fill = h.get_by_label("Fill (F)").rect();
-        assert!(fill.width() >= crate::editor::BAR_BUTTON_MIN - 0.5, "at {width}: {fill:?}");
-        if width >= 1400.0 {
-            assert!((fill.width() - crate::editor::BAR_BUTTON).abs() < 0.5, "full size when there's room: {fill:?}");
+fn a_callout_just_drawn_can_be_made_bigger_and_typing_goes_on() {
+    // The owner drew a callout and pulled its corner: it vanished (an empty text was removed).
+    for tool in [Tool::Draw(Kind::Callout), Tool::Select] {
+        let mut h = ready(editor(), Tool::Draw(Kind::Callout));
+        let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 140.0));
+        drag(&mut h, a, b);
+        let (id, before, typing) = the_callout(&h).expect("a callout drawn");
+        assert!(typing, "typing into it at once");
+        crate::quick_tests::shot(&mut h, "callout-drawn");
+        if tool == Tool::Select {
+            // Picked the Move tool meanwhile: the callout is still being typed into.
+            h.state_mut().tool = Tool::Select;
         }
+        let corner = at(&h, before.right(), before.bottom());
+        let further = at(&h, before.right() + 80.0, before.bottom() + 40.0);
+        drag(&mut h, corner, further);
+        let (still, after, typing) = the_callout(&h).expect("the callout is still there");
+        assert_eq!(still, id);
+        assert!(after.w > before.w + 60.0 && after.h > before.h + 20.0, "{tool:?}: bigger: {before:?} -> {after:?}");
+        assert!(typing, "{tool:?}: typing goes on once the corner is let go");
+        crate::quick_tests::shot(&mut h, "callout-resized");
+        // Typed into, then left: it keeps the text.
+        h.event(egui::Event::Text("Look here".to_string()));
+        h.run_steps(3);
+        crate::quick_tests::shot(&mut h, "callout-typed");
+        let away = at(&h, 380.0, 280.0);
+        h.state_mut().set_tool(Tool::Select);
+        click_at(&mut h, away);
+        let ed = h.state();
+        assert_eq!(ed.session.doc.get(id).and_then(|o| o.shape.text()).map(str::to_string), Some("Look here".to_string()));
     }
+}
+
+#[test]
+fn a_callout_left_without_text_stays_a_text_box_left_empty_goes() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Callout));
+    let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 140.0));
+    drag(&mut h, a, b);
+    let away = at(&h, 380.0, 280.0);
+    h.state_mut().set_tool(Tool::Select);
+    click_at(&mut h, away);
+    assert!(the_callout(&h).is_some_and(|(_, _, typing)| !typing), "the empty callout is still there");
+    // An empty text box has nothing to show, and goes.
+    h.state_mut().set_tool(Tool::Draw(Kind::Text));
+    h.run_steps(1);
+    let (a, b) = (at(&h, 220.0, 160.0), at(&h, 360.0, 220.0));
+    drag(&mut h, a, b);
+    assert!(h.state().session.doc.objects.iter().any(|o| o.shape.kind() == Kind::Text), "a text box drawn");
+    h.state_mut().set_tool(Tool::Select);
+    click_at(&mut h, away);
+    assert!(!h.state().session.doc.objects.iter().any(|o| o.shape.kind() == Kind::Text), "the empty text box went");
+    assert!(the_callout(&h).is_some(), "the callout stays");
+}
+
+// ---- the eyedropper, and tools drawn as the pointer ----
+
+#[test]
+fn the_eyedropper_takes_a_colour_from_the_picture_for_the_selection() {
+    let mut ed = editor();
+    let green = Color::rgba(0x2E, 0x9E, 0x44, 255);
+    let rect = ed
+        .session
+        .doc
+        .add(
+            Shape::Rect { rect: screengrabcraft_model::Rect::new(250.0, 150.0, 120.0, 100.0), radius: 0.0 },
+            screengrabcraft_model::Style { fill: green, stroke: green, ..Kind::Rect.default_style() },
+        )
+        .unwrap();
+    let callout = ed
+        .session
+        .doc
+        .add(
+            Shape::Callout {
+                rect: screengrabcraft_model::Rect::new(30.0, 30.0, 150.0, 60.0),
+                tail: screengrabcraft_model::Pt::new(40.0, 130.0),
+                text: "Hi".into(),
+                form: screengrabcraft_model::CalloutForm::Rounded,
+            },
+            Kind::Callout.default_style(),
+        )
+        .unwrap();
+    ed.session.select(vec![callout]);
+    let mut h = ready(ed, Tool::Select);
+    let before = h.state().session.doc.objects.len();
+    h.get_by_label("Fill colour").click();
+    h.run_steps(3);
+    h.get_by_label("Eyedropper: pick a colour from the picture").click();
+    h.run_steps(3);
+    assert!(crate::eyedropper::active(&h.ctx), "the eyedropper is out");
+    // Over the picture the eyedropper is the pointer.
+    let p = at(&h, 310.0, 200.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "drawn by the editor");
+    crate::quick_tests::shot(&mut h, "eyedropper");
+    click_at(&mut h, p);
+    h.run_steps(2);
+    let ed = h.state();
+    assert!(!crate::eyedropper::active(&h.ctx), "put away once a colour is taken");
+    assert_eq!(ed.session.doc.get(callout).map(|o| o.style.fill), Some(green), "the callout's fill is the colour clicked");
+    assert_eq!(ed.session.doc.objects.len(), before, "nothing drawn");
+    assert_eq!(ed.session.selected(), vec![callout], "the selection stays");
+    assert!(ed.session.doc.get(rect).is_some());
+    // One undo step puts the fill back.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    assert_ne!(h.state().session.doc.get(callout).map(|o| o.style.fill), Some(green));
+}
+
+#[test]
+fn esc_puts_the_eyedropper_away_and_the_tool_works_again() {
+    let mut h = ready(editor(), Tool::Draw(Kind::Rect));
+    crate::eyedropper::start(&h.ctx, "Outline colour");
+    let p = at(&h, 100.0, 100.0);
+    click_at(&mut h, p);
+    assert!(h.state().session.doc.objects.is_empty(), "a click with the eyedropper draws nothing");
+    // That click took a colour; out again, then Esc.
+    crate::eyedropper::start(&h.ctx, "Outline colour");
+    h.hover_at(p);
+    h.run_steps(1);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(!crate::eyedropper::active(&h.ctx));
+    let (a, b) = (at(&h, 60.0, 60.0), at(&h, 200.0, 160.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 1, "the tool draws again");
+}
+
+#[test]
+fn the_fill_tool_is_a_pail_over_the_picture() {
+    let mut h = ready(editor(), Tool::Fill);
+    let p = at(&h, 200.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::None, "the pail is drawn as the pointer");
+    crate::quick_tests::shot(&mut h, "fill-pointer");
+    let p = at(&h, -30.0, 150.0);
+    h.hover_at(p);
+    h.run_steps(2);
+    assert_eq!(h.output().platform_output.cursor_icon, egui::CursorIcon::Default, "off the picture, the usual pointer");
+}
+
+#[test]
+fn the_eyedropper_reads_the_colour_as_shown() {
+    let mut ed = editor();
+    ed.session
+        .doc
+        .add(
+            Shape::Rect { rect: screengrabcraft_model::Rect::new(0.0, 0.0, 50.0, 50.0), radius: 0.0 },
+            screengrabcraft_model::Style { fill: Color::rgba(10, 20, 30, 255), stroke: Color::rgba(10, 20, 30, 255), ..Kind::Rect.default_style() },
+        )
+        .unwrap();
+    let mut h = ready(ed, Tool::Select);
+    h.run_steps(2);
+    let ed = h.state();
+    assert_eq!(ed.colour_at(screengrabcraft_model::Pt::new(25.0, 25.0)), Some(Color::rgba(10, 20, 30, 255)));
+    assert_eq!(ed.colour_at(screengrabcraft_model::Pt::new(300.0, 200.0)), Some(Color::WHITE));
+    for junk in [
+        screengrabcraft_model::Pt::new(-1.0, 5.0),
+        screengrabcraft_model::Pt::new(400.0, 5.0),
+        screengrabcraft_model::Pt::new(5.0, 300.0),
+        screengrabcraft_model::Pt::new(f32::NAN, 1.0),
+        screengrabcraft_model::Pt::new(f32::INFINITY, 1.0),
+    ] {
+        assert_eq!(ed.colour_at(junk), None, "{junk:?}");
+    }
+}
+
+// ---- the strip of recent captures: the mouse wheel, every capture, All captures ----
+
+fn many_captures(n: usize) -> Disk {
+    let files: Vec<(String, Vec<u8>)> = (0..n).map(|i| (format!("captures/Capture {i:03}.png"), png(8, 6, Color::WHITE))).collect();
+    let refs: Vec<(&str, Vec<u8>)> = files.iter().map(|(p, b)| (p.as_str(), b.clone())).collect();
+    Disk::with(&refs)
+}
+
+#[test]
+fn the_strip_holds_every_capture_and_makes_thumbnails_only_for_those_in_view() {
+    let disk = many_captures(150);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    // The oldest of 150 is in the strip (it showed 40 before).
+    h.get_by_label("Capture 149.png");
+    let asked = disk.0.borrow().thumbs_asked.len();
+    assert!(asked > 0 && asked < 30, "thumbnails asked for: {asked}");
+}
+
+#[test]
+fn the_mouse_wheel_over_the_strip_goes_back_through_older_captures() {
+    let disk = many_captures(60);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let first = h.get_by_label("Capture 000.png").rect();
+    h.hover_at(first.center());
+    h.run_steps(1);
+    for _ in 0..4 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(20);
+    let after = h.get_by_label("Capture 000.png").rect();
+    assert!(after.min.x < first.min.x - 100.0, "the strip moved along: {first:?} -> {after:?}");
+    // The picture's view didn't zoom or move meanwhile.
+    let zoom = h.state().view.zoom;
+    assert!((zoom - h.state().view.zoom).abs() < f32::EPSILON);
+}
+
+#[test]
+fn all_captures_lists_every_capture_and_opens_the_one_picked() {
+    let disk = many_captures(120);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    h.get_by_label("All captures (120)").click();
+    h.run_steps(3);
+    assert_eq!(h.get_all_by_label("Capture 000.png").count(), 2, "in the strip and in the menu");
+    // A search narrows it down; the oldest is there too.
+    crate::quick_tests::shot(&mut h, "all-captures-grid");
+    h.state_mut().capture_search = "117".into();
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "all-captures");
+    let item = h.get_all_by_label("Capture 117.png").last().map(|n| n.rect()).expect("in the menu");
+    click_at(&mut h, item.center());
+    h.run_steps(4);
+    assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 117.png"));
+}
+
+// ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----
+
+/// A host whose clipboard keeps the last picture copied.
+#[derive(Clone, Default)]
+struct Clipboard(Rc<RefCell<Option<Raster>>>);
+
+impl Services for Clipboard {
+    fn copy_image(&self, picture: &Raster) -> Result<(), String> {
+        *self.0.borrow_mut() = Some(picture.clone());
+        Ok(())
+    }
+}
+
+fn area_editor(clip: &Clipboard) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    ready(ed, Tool::Area)
+}
+
+const BLUE: Color = Color { r: 30, g: 90, b: 200, a: 255 };
+
+#[test]
+fn the_selection_tool_moves_part_of_the_picture() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    // The blue square (100 × 100 at 150, 100) selected.
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 250.0, 200.0));
+    drag(&mut h, a, b);
+    let area = h.state().area.expect("an area selected");
+    assert!((area.x - 150.0).abs() < 2.0 && (area.w - 100.0).abs() < 3.0, "{area:?}");
+    crate::quick_tests::shot(&mut h, "area-selected");
+    // Dragged from inside, it moves 100 to the right.
+    let (from, to) = (at(&h, 200.0, 150.0), at(&h, 300.0, 150.0));
+    drag(&mut h, from, to);
+    crate::quick_tests::shot(&mut h, "area-moved");
+    let ed = h.state();
+    assert!(ed.area.is_none());
+    assert_eq!(ed.session.doc.objects.len(), 1, "the part is a piece of its own");
+    let o = ed.session.doc.objects.first().unwrap();
+    assert!(o.shape.rect().is_some_and(|r| (r.x - 250.0).abs() < 4.0), "moved: {:?}", o.shape.rect());
+    assert_eq!(ed.session.doc.base.pixel(200, 150).map(|c| c.a), Some(0), "where it was is see-through");
+    let shown = screengrabcraft_render::render(&ed.session.doc).unwrap();
+    assert_eq!(shown.pixel(300, 150), Some(BLUE), "shown where it went");
+    // Flatten draws it into the picture.
+    h.get_by_label("Flatten").click();
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.session.doc.objects.is_empty());
+    assert_eq!(ed.session.doc.base.pixel(300, 150), Some(BLUE));
+    // Undo, undo, undo: as it was.
+    for _ in 0..3 {
+        let ctx = h.ctx.clone();
+        h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    }
+    assert_eq!(h.state().session.doc.base.pixel(200, 150), Some(BLUE));
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn the_selection_tool_copies_cuts_deletes_and_crops_an_area() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    let (a, b) = (at(&h, 140.0, 90.0), at(&h, 200.0, 150.0));
+    drag(&mut h, a, b);
+    let (x, y, w, hh) = h.state().area.and_then(|r| r.pixel_bounds(400, 300)).expect("an area");
+    // Copy: just the area, as shown.
+    h.get_by_label("Copy").click();
+    h.run_steps(2);
+    let copied = clip.0.borrow().clone().expect("copied");
+    assert_eq!((copied.width(), copied.height()), (w, hh));
+    assert_eq!(copied.pixel(w - 1, hh - 1), Some(BLUE));
+    // Cut: copied, and see-through in the picture.
+    *clip.0.borrow_mut() = None;
+    h.get_by_label("Cut").click();
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_some(), "cut copies");
+    assert_eq!(h.state().session.doc.base.pixel(x + w - 1, y + hh - 1).map(|c| c.a), Some(0));
+    // Delete, on another area: see-through.
+    let (a, b) = (at(&h, 230.0, 180.0), at(&h, 260.0, 210.0));
+    drag(&mut h, a, b);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().session.doc.base.pixel(240, 190).map(|c| c.a), Some(0));
+    // Esc lets go of the area.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+    // Crop to Selection keeps only the area.
+    let (a, b) = (at(&h, 10.0, 10.0), at(&h, 110.0, 60.0));
+    drag(&mut h, a, b);
+    let want = h.state().area.and_then(|r| r.pixel_bounds(400, 300)).expect("an area");
+    h.get_by_label("Crop to Selection").click();
+    h.run_steps(2);
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (want.2, want.3));
+}
+
+#[test]
+fn ctrl_a_with_the_selection_tool_selects_the_whole_picture() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert_eq!(h.state().area, Some(h.state().session.doc.bounds()));
+    assert_eq!(h.state().tool, Tool::Area);
+}
+
+#[test]
+fn flatten_selected_keeps_the_others_and_ctrl_shift_f_flattens() {
+    let mut ed = editor();
+    let a = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(10.0, 10.0, 50.0, 50.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    let b = ed
+        .session
+        .doc
+        .add(Shape::Rect { rect: screengrabcraft_model::Rect::new(200.0, 10.0, 50.0, 50.0), radius: 0.0 }, Kind::Rect.default_style())
+        .unwrap();
+    ed.session.select(vec![a]);
+    let mut h = ready(ed, Tool::Select);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::F);
+    h.run_steps(2);
+    let ed = h.state();
+    assert!(ed.session.doc.get(a).is_none() && ed.session.doc.get(b).is_some(), "only the selected one");
+    assert_eq!(ed.tool, Tool::Select, "the key didn't pick the Fill tool");
+}
+
+// ---- the tool bar's groups, the right-click menu, the Move tool's area, strokes selected ----
+
+#[test]
+fn the_tool_bar_is_its_groups_in_order() {
+    let flat: Vec<Tool> = Tool::BAR_GROUPS.iter().flat_map(|g| g.iter().copied()).collect();
+    assert_eq!(flat, Tool::BAR.to_vec());
+    for (tool, ..) in Tool::ALL {
+        let on_bar = Tool::BAR.contains(&tool) || tool == Tool::Draw(Kind::Ellipse);
+        assert!(on_bar, "{tool:?} has a button (the ellipse is the Shape button's)");
+    }
+}
+
+fn right_click(h: &mut Harness<'_, Editor>, p: Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+#[test]
+fn a_right_click_on_an_annotation_flattens_it() {
+    let mut ed = editor();
+    let style =
+        screengrabcraft_model::Style { fill: Color::rgb(255, 0, 0), stroke: Color::rgb(255, 0, 0), shadow: false, ..Kind::Rect.default_style() };
+    let a = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(40.0, 40.0, 80.0, 60.0), radius: 0.0 }, style).unwrap();
+    let b = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(250.0, 40.0, 80.0, 60.0), radius: 0.0 }, style).unwrap();
+    let mut h = ready(ed, Tool::Draw(Kind::Arrow));
+    let p = at(&h, 80.0, 70.0);
+    right_click(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![a], "the right-click picked it");
+    crate::quick_tests::shot(&mut h, "right-click-menu");
+    // The menu's Flatten (the panel has one too).
+    h.get_by_label_contains("Ctrl+Shift+F").click();
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.session.doc.get(a).is_none() && ed.session.doc.get(b).is_some());
+    assert_eq!(ed.session.doc.base.pixel(80, 70), Some(Color::rgb(255, 0, 0)), "drawn into the picture");
+    // Flatten All, from the menu on the picture.
+    let p = at(&h, 200.0, 250.0);
+    right_click(&mut h, p);
+    h.get_by_label_contains("Flatten All").click();
+    h.run_steps(3);
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+#[test]
+fn a_right_click_on_an_area_cuts_it() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 200.0, 150.0));
+    drag(&mut h, a, b);
+    let inside = at(&h, 175.0, 125.0);
+    right_click(&mut h, inside);
+    assert!(h.state().area.is_some(), "a right-click inside keeps the area");
+    h.get_by_label_contains("Cut Area").click();
+    h.run_steps(3);
+    assert!(clip.0.borrow().is_some());
+    assert_eq!(h.state().session.doc.base.pixel(175, 125).map(|c| c.a), Some(0));
+}
+
+#[test]
+fn the_move_tool_selects_part_of_the_picture_where_there_are_no_annotations() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    h.state_mut().set_tool(Tool::Select);
+    h.run_steps(1);
+    let (a, b) = (at(&h, 150.0, 100.0), at(&h, 250.0, 200.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area.is_some(), "an area of the picture");
+    assert_eq!(h.state().tool, Tool::Select);
+    h.get_by_label("Crop to Selection");
+    let (from, to) = (at(&h, 200.0, 150.0), at(&h, 120.0, 150.0));
+    drag(&mut h, from, to);
+    let ed = h.state();
+    assert_eq!(ed.session.doc.objects.len(), 1, "that part moved");
+    assert_eq!(ed.session.doc.base.pixel(240, 150).map(|c| c.a), Some(0));
+    // A click lets go.
+    let away = at(&h, 380.0, 280.0);
+    click_at(&mut h, away);
+    assert!(h.state().area.is_none());
+}
+
+#[test]
+fn a_highlight_is_shown_selected_along_itself_with_no_box_to_pull() {
+    let mut ed = editor();
+    let id = ed
+        .session
+        .doc
+        .add(
+            Shape::Highlight { points: vec![screengrabcraft_model::Pt::new(60.0, 100.0), screengrabcraft_model::Pt::new(300.0, 120.0)] },
+            Kind::Highlight.default_style(),
+        )
+        .unwrap();
+    let mut h = ready(ed, Tool::Select);
+    let p = at(&h, 180.0, 110.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![id], "clicking the highlight selects it");
+    crate::quick_tests::shot(&mut h, "highlight-selected");
+    // Where a box's corner would be, nothing takes hold.
+    let corner = h.state().view.to_screen(screengrabcraft_model::Pt::new(60.0, 100.0));
+    assert!(h.state().handle_at(corner).is_none());
+    // It still moves.
+    let (from, to) = (at(&h, 180.0, 110.0), at(&h, 180.0, 160.0));
+    drag(&mut h, from, to);
+    let moved = h.state().session.doc.get(id).and_then(|o| match &o.shape {
+        Shape::Highlight { points } => points.first().copied(),
+        _ => None,
+    });
+    assert!(moved.is_some_and(|p| (p.y - 150.0).abs() < 4.0), "{moved:?}");
+}
+
+#[test]
+fn copy_with_an_annotation_selected_copies_only_it_and_cut_takes_it_away() {
+    let clip = Clipboard::default();
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    let style =
+        screengrabcraft_model::Style { fill: Color::rgb(255, 0, 0), stroke: Color::rgb(255, 0, 0), shadow: false, ..Kind::Rect.default_style() };
+    let id = ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 60.0, 40.0), radius: 0.0 }, style).unwrap();
+    ed.session.select(vec![id]);
+    let mut h = ready(ed, Tool::Select);
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    let copied = clip.0.borrow().clone().expect("copied");
+    // The rectangle and its border, not the 400 × 300 picture.
+    assert!(
+        copied.width() >= 60 && copied.width() <= 70 && copied.height() >= 40 && copied.height() <= 50,
+        "{} × {}",
+        copied.width(),
+        copied.height()
+    );
+    assert_eq!(copied.pixel(copied.width() / 2, copied.height() / 2), Some(Color::rgb(255, 0, 0)));
+    assert!(h.state().session.doc.get(id).is_some(), "copy keeps it");
+    // Copy Picture, from the menu, is the whole picture still.
+    let p = at(&h, 300.0, 250.0);
+    right_click(&mut h, p);
+    h.get_by_label_contains("Copy Picture").click();
+    h.run_steps(2);
+    assert_eq!(clip.0.borrow().as_ref().map(|r| (r.width(), r.height())), Some((400, 300)));
+    // Cut: copied, and gone.
+    h.state_mut().session.select(vec![id]);
+    *clip.0.borrow_mut() = None;
+    h.event(egui::Event::Cut);
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_some(), "cut copies");
+    assert!(h.state().session.doc.get(id).is_none(), "cut takes it away");
+}
+
+#[test]
+fn copy_while_typing_leaves_the_clipboard_to_the_text() {
+    let clip = Clipboard::default();
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    let mut h = ready(ed, Tool::Draw(Kind::Text));
+    let p = at(&h, 100.0, 100.0);
+    click_at(&mut h, p);
+    assert!(h.state().editing.is_some(), "typing");
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    assert!(clip.0.borrow().is_none(), "no picture copied over the text");
 }

@@ -418,3 +418,125 @@ fn a_script_places_an_annotation_where_it_says() {
     let a = add(&mut s, json!({"type": "rect", "rect": {"x": 500, "y": 500, "w": 20, "h": 20}}));
     assert_eq!(s.doc.get(a).and_then(|o| o.shape.rect()), Some(Rect::new(500.0, 500.0, 20.0, 20.0)));
 }
+
+#[test]
+fn a_quick_style_changes_the_selection_in_one_undo_step() {
+    let mut s = session();
+    let callout = add(&mut s, json!({"type": "callout", "rect": {"x": 20, "y": 10, "w": 60, "h": 30}, "tail": {"x": 30, "y": 60}, "text": "hi"}));
+    let arrow = add(&mut s, json!({"type": "arrow", "from": {"x": 100, "y": 20}, "to": {"x": 150, "y": 60}}));
+    let size = s.doc.get(callout).unwrap().style.font_size;
+    s.select(vec![callout, arrow]);
+    let params = json!({
+        "style": {"fill": "#1E88E5", "stroke": "#155FA0", "fontSize": 80},
+        "options": {"form": "arrow", "tail": "right", "heads": "both"}
+    });
+    s.execute("object.look", &params).unwrap();
+    let c = s.doc.get(callout).unwrap();
+    let Shape::Callout { form, tail, rect, .. } = c.shape.clone() else { panic!("a callout") };
+    assert_eq!(form, screengrabcraft_model::CalloutForm::Arrow);
+    assert!(tail.x > rect.right() && (tail.y - rect.center().y).abs() < 0.5, "the tail points right: {tail:?} {rect:?}");
+    assert_eq!(c.style.fill, Color::rgb(0x1E, 0x88, 0xE5));
+    assert_eq!(c.style.font_size, size, "the text keeps its size");
+    let a = s.doc.get(arrow).unwrap();
+    assert_eq!(a.shape, Shape::Arrow { from: Pt::new(100.0, 20.0), to: Pt::new(150.0, 60.0), heads: screengrabcraft_model::ArrowHeads::Both });
+    assert_eq!(s.undo_label(), Some("Apply Quick Style"));
+    assert!(s.undo());
+    assert!(matches!(s.doc.get(callout).unwrap().shape, Shape::Callout { form: screengrabcraft_model::CalloutForm::Rounded, .. }));
+    let heads = |s: &Session| match s.doc.get(arrow).map(|o| &o.shape) {
+        Some(Shape::Arrow { heads, .. }) => Some(*heads),
+        _ => None,
+    };
+    assert_eq!(heads(&s), Some(screengrabcraft_model::ArrowHeads::End), "one step for both");
+    // The size too when asked; a rectangle made round is an ellipse; a tail off the picture is
+    // brought back onto it.
+    s.select(vec![callout]);
+    s.execute("object.look", &json!({"style": {"fontSize": 40}, "keepTextSize": false, "options": {"tail": "up"}})).unwrap();
+    let c = s.doc.get(callout).unwrap();
+    assert_eq!(c.style.font_size, 40.0);
+    let Shape::Callout { tail, .. } = c.shape else { panic!("a callout") };
+    assert!(tail.y >= 0.0, "on the picture: {tail:?}");
+    let r = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 50, "w": 40, "h": 30}}));
+    s.execute("object.look", &json!({"ids": [r.0], "options": {"round": true}})).unwrap();
+    assert_eq!(s.doc.get(r).unwrap().shape.kind(), Kind::Ellipse);
+    // Nonsense is an error that changes nothing.
+    let before = s.doc.clone();
+    for bad in [json!({"options": {"form": "teapot"}}), json!({"style": 4}), json!({"keepTextSize": "yes"}), json!({"options": 7})] {
+        assert!(s.execute("object.look", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+#[test]
+fn a_title_look_makes_its_text_bigger_and_its_box_taller() {
+    let mut s = session();
+    let t = add(&mut s, json!({"type": "text", "rect": {"x": 10, "y": 10, "w": 180, "h": 30}, "text": "Title", "style": {"fontSize": 20}}));
+    s.select(vec![t]);
+    let before = s.doc.get(t).unwrap().shape.rect().unwrap();
+    s.execute("object.look", &json!({"style": {"fontSize": 56, "textOutline": "#FFFFFF", "textOutlineWidth": 4}, "keepTextSize": false})).unwrap();
+    let o = s.doc.get(t).unwrap();
+    assert_eq!((o.style.font_size, o.style.text_outline, o.style.text_outline_width), (56.0, Color::WHITE, 4.0));
+    let after = o.shape.rect().unwrap();
+    assert!(after.h > before.h && after.w == before.w, "{before:?} → {after:?}");
+    assert!(s.doc.bounds().encloses(o.shape.bounds(&o.style)), "still on the picture");
+}
+
+#[test]
+fn an_area_lifted_out_moves_as_a_picture_and_leaves_a_see_through_hole() {
+    let mut s = square_on_blue();
+    // The red square (20 × 20 at 20, 10) with a little blue round it.
+    let out = s.execute("image.lift", &json!({"x": 15, "y": 5, "w": 30, "h": 30})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.selected(), vec![id], "the piece is selected, to be moved");
+    assert_eq!(s.doc.base.pixel(30, 20).map(|c| c.a), Some(0), "the hole is see-through");
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)), "the rest stays");
+    let o = s.doc.get(id).unwrap();
+    assert_eq!(o.shape.rect(), Some(Rect::new(15.0, 5.0, 30.0, 30.0)), "where it was");
+    assert!(!o.style.shadow, "looking as it did");
+    // Drawn where it was, the picture looks the same.
+    let shown = screengrabcraft_render::render(&s.doc).unwrap();
+    assert_eq!(shown.pixel(30, 20), Some(Color::rgb(229, 57, 53)));
+    assert_eq!(s.undo_label(), Some("Move Area"));
+    s.undo();
+    assert_eq!(s.doc.base.pixel(30, 20), Some(Color::rgb(229, 57, 53)), "one undo puts it back");
+    assert!(s.doc.objects.is_empty() && s.doc.images.is_empty());
+    for bad in
+        [json!({}), json!({"x": 500, "y": 5, "w": 10, "h": 10}), json!({"x": 1, "y": 1, "w": 0, "h": 10}), json!({"x": "a", "y": 1, "w": 5, "h": 5})]
+    {
+        let before = s.doc.clone();
+        assert!(s.execute("image.lift", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+#[test]
+fn an_area_erased_is_see_through_and_only_that_area() {
+    let mut s = square_on_blue();
+    s.execute("image.erase", &json!({"x": 20, "y": 10, "w": 10, "h": 10})).unwrap();
+    assert_eq!(s.doc.base.pixel(25, 15).map(|c| c.a), Some(0));
+    assert_eq!(s.doc.base.pixel(35, 25), Some(Color::rgb(229, 57, 53)), "the square's other part stays");
+    // An area reaching past the edge is cut to the picture.
+    s.execute("image.erase", &json!({"x": -50, "y": -50, "w": 60, "h": 60})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
+    assert!(s.execute("image.erase", &json!({"x": 900, "y": 900, "w": 5, "h": 5})).is_err());
+}
+
+#[test]
+fn flatten_draws_only_the_annotations_given_or_all() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 40}}));
+    let b = add(&mut s, json!({"type": "rect", "rect": {"x": 100, "y": 10, "w": 40, "h": 40}}));
+    for (id, c) in [(a, Color::rgb(255, 0, 0)), (b, Color::rgb(0, 0, 255))] {
+        let o = s.doc.get_mut(id).unwrap();
+        o.style.fill = c;
+        o.style.stroke = c;
+        o.style.shadow = false;
+    }
+    s.execute("object.flatten", &json!({"ids": [a.0]})).unwrap();
+    assert!(s.doc.get(a).is_none() && s.doc.get(b).is_some(), "only the one given goes into the picture");
+    assert_eq!(s.doc.base.pixel(30, 30), Some(Color::rgb(255, 0, 0)), "drawn into the picture");
+    assert_eq!(s.doc.base.pixel(120, 30), Some(Color::WHITE), "the other is still an annotation");
+    s.execute("object.flatten", &json!({})).unwrap();
+    assert!(s.doc.objects.is_empty());
+    assert_eq!(s.doc.base.pixel(120, 30), Some(Color::rgb(0, 0, 255)));
+    assert!(s.execute("object.flatten", &json!({"ids": [999]})).is_err(), "no such annotation");
+}

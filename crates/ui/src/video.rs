@@ -39,6 +39,9 @@ const EDGE: f32 = 7.0;
 const SAVE_AFTER: f64 = 1.0;
 /// The preview is made no larger than this (the export has its own size).
 const PREVIEW_MAX: (u32, u32) = (1920, 1080);
+/// The play button under the video, and the room kept under the picture for it.
+const PLAY: f32 = 44.0;
+const CONTROLS: f32 = PLAY + 20.0;
 /// Sound waves are kept as peaks per 10 ms.
 const WAVE_STEP: u64 = 480;
 
@@ -656,7 +659,7 @@ impl VideoView {
     }
 
     /// The picture at the playhead, fitted to the space.
-    fn preview(&mut self, ui: &mut Ui) {
+    fn preview(&mut self, ed: &Editor, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let key = (self.playhead, self.session.revision());
         if self.shown != Some(key) {
@@ -669,13 +672,40 @@ impl VideoView {
             self.shown = Some(key);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
-            let area = ui.max_rect().shrink(16.0);
+            // The picture, and under it the play button with the time.
+            let whole = ui.max_rect().shrink(16.0);
+            let area = Rect::from_min_max(whole.min, pos2(whole.max.x, (whole.max.y - CONTROLS).max(whole.min.y)));
+            let mut bottom = area.max.y;
             if let Some(tex) = &self.texture {
                 let size = tex.size_vec2();
                 let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
                 let r = Rect::from_center_size(area.center(), size * f);
                 ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+                bottom = r.max.y;
+            }
+            let now = ui.ctx().input(|i| i.time);
+            let playing = self.playing.is_some();
+            let button = Rect::from_center_size(pos2(area.center().x, bottom + 10.0 + PLAY / 2.0), vec2(PLAY, PLAY));
+            let tip = if playing { "Pause (Space)" } else { "Play (Space)" };
+            let resp = ui.interact(button, ui.id().with("play-under-video"), egui::Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, self.length() > 0, tip));
+            let fill = if resp.hovered() { t.accent.gamma_multiply(1.15) } else { t.accent };
+            ui.painter().circle_filled(button.center(), PLAY / 2.0, fill);
+            icons::paint(ui.painter(), button.shrink(PLAY * 0.27), if playing { Icon::Pause } else { Icon::Play }, Color32::WHITE);
+            ui.painter().text(
+                pos2(button.max.x + 14.0, button.center().y),
+                egui::Align2::LEFT_CENTER,
+                format!("{} / {}", clock(self.playhead), clock(self.length())),
+                egui::FontId::monospace(14.0),
+                t.text,
+            );
+            if resp.on_hover_text(tip).clicked() && self.length() > 0 {
+                if playing {
+                    self.pause();
+                } else {
+                    self.play(ed, now);
+                }
             }
         });
     }
@@ -965,7 +995,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     }
     v.timeline(ed, ui);
     v.camera_panel(ed, ui);
-    v.preview(ui);
+    v.preview(ed, ui);
     // Something else was opened meanwhile (from the strip): this one's edits are written first.
     if ed.video_epoch == epoch && ed.video.is_none() {
         ed.video = Some(v);

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
-use screengrabcraft_desktop::{clipboard, graphics, instance, launch, paths, store};
+use screengrabcraft_desktop::{clipboard, cloak, graphics, instance, launch, paths, store};
 use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, RecordArea, RecorderOptions, Settings};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
@@ -23,8 +23,9 @@ use crate::tray::{Item, Tray};
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
 /// Whether the anchor window stays shown once shown (see `logic`).
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
-/// How long the editor's window takes to leave the screen (Windows fades it out).
-const EDITOR_ASIDE: Duration = Duration::from_millis(200);
+/// How long the editor is given to step aside before the screen is frozen: a frame to be cloaked
+/// (at once, without Windows' animations), and one for the screen to show it gone.
+const EDITOR_ASIDE: Duration = Duration::from_millis(100);
 /// How long after the service starts the editor is readied (see `keep_editor_ready`).
 const READY_FIRST: Duration = Duration::from_secs(10);
 /// How often the service looks for the editor kept ready afterwards.
@@ -58,6 +59,8 @@ pub struct OverlayRun {
     pub pointer: Option<(i32, i32)>,
     /// The frames the overlay's windows have been drawn in (see [`overlay_builder`]).
     pub frames: u32,
+    /// The windows are shown (on Windows, from the second frame).
+    pub seen: bool,
     /// Kept until the windows have been drawn, so a crash in opening them switches to OpenGL.
     pub opening: graphics::Opening,
 }
@@ -576,7 +579,7 @@ impl Service {
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
                 let opening = graphics::Opening::start();
-                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, opening });
+                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening });
             }
         }
     }
@@ -645,17 +648,13 @@ impl Service {
         let settings = self.settings.clone();
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        // The clipboard is served from this thread's handle.
-        let copied = copy
-            && match clipboard::copy_image(&pic) {
-                Ok(()) => true,
-                Err(e) => {
-                    log::warn!("copying the capture: {e}");
-                    false
-                }
-            };
+        // On Windows the picture goes to the clipboard on the worker, once the editor has it (a
+        // big picture takes a moment to copy, and the editor shows it first). Elsewhere it's
+        // copied here, on the window's thread, which some systems want.
+        let copy_later = copy && cfg!(target_os = "windows");
+        let copied = copy && !copy_later && copy_to_clipboard(&pic);
         let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
-            let r = keep(&pic, &source, &settings, save, edit, copied);
+            let r = keep(&pic, &source, &settings, save, edit, copied, copy_later);
             let _ = tx.send(Msg::Saved(r));
             ctx.request_repaint();
         });
@@ -826,10 +825,17 @@ impl Service {
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
+            if need {
+                // Cloaked from the start (see `main`); again, in case Windows let go of it.
+                cloak::cloak(frame, true);
+            }
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(need));
             self.root_shown = need;
             ctx.request_repaint();
         }
+        // No window of the service's opens or closes with Windows' animation (the popups' are
+        // turned off once they're made: they may still be seen opening).
+        cloak::calm_windows();
         // Timers: countdown seconds, notices and recordings tick without input.
         if self.countdown.is_some()
             || self.recording.is_some()
@@ -888,20 +894,28 @@ impl Service {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         if let Some(run) = self.overlay.as_mut() {
+            // On Windows the windows are made hidden, Windows' animations are turned off for them,
+            // and they're shown on the next frame: so they neither fade in nor fade out.
+            let shown = run.frames > 0 || !cfg!(target_os = "windows");
             for i in 0..run.monitors.len() {
                 let Some(m) = run.monitors.get(i) else { continue };
-                let builder = overlay_builder(m, &self.screens, run.frames > 0);
+                let builder = overlay_builder(m, &self.screens, run.frames > 0).with_visible(shown);
                 ctx.show_viewport_immediate(ViewportId::from_hash_of(("overlay", i)), builder, |ui, _| run.overlay.show_monitor(ui, i));
             }
+            cloak::calm_windows();
             run.frames = run.frames.saturating_add(1);
-            if run.frames == 1
+            if shown
+                && !run.seen
                 && let Some(t) = self.asked
             {
-                log::info!("capture: the overlay was drawn {} ms after the capture began", t.elapsed().as_millis());
+                log::info!("capture: the overlay was shown {} ms after the capture began", t.elapsed().as_millis());
             }
+            run.seen = shown;
             if run.frames >= 3 {
                 // Drawn, and drawn again after being raised.
                 run.opening.opened();
+            } else {
+                ctx.request_repaint();
             }
         }
         crate::popups::countdown(self, &ctx);
@@ -1027,8 +1041,45 @@ fn enter_button(a: &AfterCapture) -> Action {
         .unwrap_or(Action::Default)
 }
 
-/// The file work of keeping a capture (on a worker thread).
-fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool) -> Result<Done, String> {
+/// Puts a capture on the clipboard; false (and a line in the log) when it can't.
+fn copy_to_clipboard(pic: &Raster) -> bool {
+    match clipboard::copy_image(pic) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("copying the capture: {e}");
+            false
+        }
+    }
+}
+
+/// The file work of keeping a capture (on a worker thread): written, handed to the editor, then
+/// copied to the clipboard if that's left to do (`copy_later`), whether the file could be
+/// written or not.
+fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool, copy_later: bool) -> Result<Done, String> {
+    let file = write_capture(pic, source, s, save, edit);
+    let mut edited = false;
+    if edit && let Ok((_, Some(p))) = &file {
+        let t = Instant::now();
+        match launch::open_editor(&[p.to_string_lossy().to_string()]) {
+            Ok(()) => {
+                edited = true;
+                log::info!("capture: handed to the editor in {} ms", t.elapsed().as_millis());
+            }
+            Err(e) => log::warn!("opening the editor: {e}"),
+        }
+    }
+    let copied = copied || (copy_later && copy_to_clipboard(pic));
+    let (saved, _) = file?;
+    let thumb = {
+        let f = (96.0 / pic.width() as f32).min(64.0 / pic.height() as f32).min(1.0);
+        screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
+    };
+    Ok(Done { saved, copied, edited, thumb })
+}
+
+/// The capture written: where it was saved (if it was), and the file for the editor (if it goes
+/// there).
+fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
     let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
     let format = if s.format == ImageFormat::Gif || s.format == ImageFormat::Pdf && edit { ImageFormat::Png } else { s.format };
     let mut saved = None;
@@ -1055,22 +1106,7 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
         }
         path_for_editor = Some(path);
     }
-    let mut edited = false;
-    if edit && let Some(p) = &path_for_editor {
-        let t = Instant::now();
-        match launch::open_editor(&[p.to_string_lossy().to_string()]) {
-            Ok(()) => {
-                edited = true;
-                log::info!("capture: handed to the editor in {} ms", t.elapsed().as_millis());
-            }
-            Err(e) => log::warn!("opening the editor: {e}"),
-        }
-    }
-    let thumb = {
-        let f = (96.0 / pic.width() as f32).min(64.0 / pic.height() as f32).min(1.0);
-        screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
-    };
-    Ok(Done { saved, copied, edited, thumb })
+    Ok((saved, path_for_editor))
 }
 
 #[cfg(test)]

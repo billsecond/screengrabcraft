@@ -47,6 +47,37 @@ pub enum Icon {
     Timer,
     Play,
     Pause,
+    Favorites,
+    Shape,
+    Move,
+    More,
+    Effects,
+    Eyedropper,
+    /// The Selection tool: a box of dashes round part of the picture.
+    Marquee,
+}
+
+/// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
+/// the eyedropper, the drop falling from the Fill tool's pail.
+pub fn hot_spot(icon: Icon) -> (f32, f32) {
+    match icon {
+        Icon::Eyedropper => (2.6, 17.4),
+        Icon::Fill => (16.5, 16.8),
+        _ => (10.0, 10.0),
+    }
+}
+
+/// Draws `icon` as the pointer, `size` points square, its tip ([`hot_spot`]) on `at`: white with
+/// a dark edge, so it shows over any colour.
+pub fn paint_pointer(p: &Painter, at: Pos2, icon: Icon, size: f32) {
+    let (hx, hy) = hot_spot(icon);
+    let u = size / 20.0;
+    let rect = Rect::from_min_size(pos2(at.x - hx * u, at.y - hy * u), vec2(size, size));
+    let edge = Color32::from_black_alpha(200);
+    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0), (-1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (1.0, -1.0)] {
+        paint(p, rect.translate(vec2(dx, dy)), icon, edge);
+    }
+    paint(p, rect, icon, Color32::WHITE);
 }
 
 /// Draws `icon` in `rect` (square-ish) in `color`.
@@ -140,13 +171,75 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.line_segment([at(12.3, 12.3), at(17.0, 17.0)], Stroke::new(w * 1.6, color));
         }
         Icon::Stamp => {
+            // A rubber stamp: a round knob, its neck, the wide block and the mark under it.
+            p.circle_stroke(at(10.0, 4.5), 2.6 * u, stroke);
+            poly(vec![at(8.6, 7.0), at(8.0, 10.5), at(12.0, 10.5), at(11.4, 7.0)], false);
+            p.rect_stroke(rect_at(3.5, 10.5, 16.5, 14.5), 1.0 * u, stroke, StrokeKind::Middle);
+            line(at(4.5, 17.3), at(15.5, 17.3));
+        }
+        Icon::Favorites => {
             let mut pts = Vec::new();
             for i in 0..10 {
                 let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
-                let r = if i % 2 == 0 { 7.5 } else { 3.2 };
-                pts.push(at(10.0 + a.cos() * r, 10.5 + a.sin() * r));
+                let r = if i % 2 == 0 { 8.0 } else { 3.4 };
+                pts.push(at(10.0 + a.cos() * r, 10.8 + a.sin() * r));
             }
             poly(pts, true);
+        }
+        Icon::Shape => {
+            // A square with a circle over its corner.
+            p.rect_stroke(rect_at(2.5, 2.5, 12.0, 12.0), 0.5 * u, stroke, StrokeKind::Middle);
+            p.circle_filled(at(12.5, 12.5), 5.2 * u, color.gamma_multiply(0.35));
+            p.circle_stroke(at(12.5, 12.5), 5.2 * u, stroke);
+        }
+        Icon::Move => {
+            fill_poly(vec![at(3.0, 2.0), at(11.0, 10.0), at(7.4, 10.4), at(9.8, 14.6), at(8.0, 15.4), at(5.6, 11.2), at(3.0, 13.6)], color);
+            // Four ways at the lower right.
+            let (cx, cy) = (14.5, 14.5);
+            line(at(cx - 4.0, cy), at(cx + 4.0, cy));
+            line(at(cx, cy - 4.0), at(cx, cy + 4.0));
+            for (dx, dy) in [(1.0f32, 0.0f32), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                let tip = at(cx + dx * 5.0, cy + dy * 5.0);
+                let (nx, ny) = (-dy, dx);
+                fill_poly(
+                    vec![tip, at(cx + dx * 3.2 + nx * 1.6, cy + dy * 3.2 + ny * 1.6), at(cx + dx * 3.2 - nx * 1.6, cy + dy * 3.2 - ny * 1.6)],
+                    color,
+                );
+            }
+        }
+        Icon::More => {
+            for x in [4.5, 10.0, 15.5] {
+                p.circle_filled(at(x, 10.0), 1.8 * u, color);
+            }
+        }
+        Icon::Effects => {
+            // A wand with sparks at its tip.
+            p.line_segment([at(3.0, 17.0), at(12.0, 8.0)], Stroke::new(w * 1.4, color));
+            for (x, y, r) in [(15.0, 5.0, 2.6), (8.5, 3.5, 1.5), (16.5, 11.5, 1.5)] {
+                line(at(x - r, y), at(x + r, y));
+                line(at(x, y - r), at(x, y + r));
+            }
+        }
+        Icon::Marquee => {
+            // A box of dashes, as an area selected looks, with a hand's pointer at a corner.
+            let (x0, y0, x1, y1) = (2.5, 3.5, 15.5, 13.5);
+            let dash = |a: Pos2, b: Pos2| {
+                p.extend(Shape::dashed_line(&[a, b], stroke, 2.4 * u, 1.6 * u));
+            };
+            dash(at(x0, y0), at(x1, y0));
+            dash(at(x1, y0), at(x1, y1));
+            dash(at(x1, y1), at(x0, y1));
+            dash(at(x0, y1), at(x0, y0));
+            fill_poly(vec![at(12.0, 10.5), at(19.0, 15.5), at(15.6, 16.0), at(17.4, 19.2), at(16.0, 19.8), at(14.3, 16.6), at(12.0, 18.6)], color);
+        }
+        Icon::Eyedropper => {
+            // A dropper held slanting: its squeeze bulb at the top right, a band, and the glass
+            // tube down to its tip at the bottom left.
+            p.line_segment([at(2.8, 17.2), at(10.6, 9.4)], Stroke::new(w * 1.5, color));
+            line(at(8.4, 7.4), at(12.6, 11.6));
+            line(at(11.0, 9.0), at(12.6, 7.4));
+            p.circle_filled(at(14.4, 5.6), 3.4 * u, color);
+            p.circle_filled(at(2.6, 17.4), 1.1 * u, color);
         }
         Icon::Fill => {
             // A pail tipped to the right, half full, with a drop running off its lip.
