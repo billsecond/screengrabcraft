@@ -92,6 +92,12 @@ pub fn default_speaker() -> Option<String> {
     cpal::default_host().default_output_device().map(|d| device_name(&d))
 }
 
+/// The system's default microphone, by name.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub fn default_microphone() -> Option<String> {
+    cpal::default_host().default_input_device().map(|d| device_name(&d))
+}
+
 /// Whether what the computer plays can be recorded here.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn system_sound_supported() -> bool {
@@ -256,6 +262,11 @@ fn run(
     let Some(device) = device else {
         let _ = ready.send(Err(match source {
             AudioSource::SystemSound(_) => "there is no sound output to record".to_string(),
+            // Over Remote Desktop the computer's own microphones aren't there: only one the Remote
+            // Desktop app shares.
+            AudioSource::Microphone(_) if cfg!(target_os = "windows") => {
+                "there is no microphone (over Remote Desktop, the Remote Desktop app has to share yours)".to_string()
+            }
             AudioSource::Microphone(_) => "there is no microphone".to_string(),
         }));
         return;
@@ -379,6 +390,11 @@ pub fn speakers() -> Vec<String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn default_speaker() -> Option<String> {
+    None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn default_microphone() -> Option<String> {
     None
 }
 

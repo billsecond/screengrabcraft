@@ -350,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn a_camera_that_starts_late_shows_from_its_first_picture_on() {
+        // The screen from the start, the camera only from 6 s (it was slow to start).
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 100, height: 60, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 32, height: 24, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(100, 60, Color::BLACK).unwrap()).unwrap();
+        let jpeg =
+            screengrabcraft_render::encode(&Raster::filled(32, 24, Color::WHITE).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 90).unwrap();
+        for t in 60..100u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(10_000_000).unwrap())).unwrap());
+        let tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 100, 60);
+        let white = |f: &Raster| f.pixels().as_chunks::<4>().0.iter().filter(|p| p[0] > 200).count();
+        assert_eq!(white(&c.frame(&tl, 3_000_000)), 0, "no camera before its first picture");
+        assert!(white(&c.frame(&tl, 8_000_000)) > 100, "the camera in its corner after");
+        assert!(white(&c.frame(&tl, 9_950_000)) > 100, "to the end");
+    }
+
+    #[test]
     fn the_camera_lands_in_its_corner_and_a_circle_leaves_the_corners_alone() {
         let r = rec();
         let mut tl = Timeline::new(&r);

@@ -218,6 +218,64 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     }
 }
 
+/// How thick the outline round an area being recorded is, in desktop pixels.
+const FRAME: i32 = 3;
+
+/// The area being recorded outlined for as long as it's recorded: four thin strips just outside
+/// it (so in none of the video), on top of everything, that the pointer goes through. A whole
+/// screen isn't outlined, nor anything once the video is being made. The strips are made hidden
+/// and shown on the next frame, without Windows' animation.
+pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
+    let Some(rec) = &svc.recording else {
+        svc.frame_frames = 0;
+        return;
+    };
+    if rec.saving.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        return;
+    }
+    let d = rec.desktop;
+    let monitors: Vec<(IRect, f32)> =
+        screengrabcraft_capture::monitors().map(|ms| ms.into_iter().map(|m| (m.rect, m.scale)).collect()).unwrap_or_default();
+    if monitors.iter().any(|(m, _)| *m == d) || d.w == 0 || d.h == 0 {
+        return;
+    }
+    let (cx, cy) = (d.x.saturating_add((d.w / 2) as i32), d.y.saturating_add((d.h / 2) as i32));
+    let s = monitors.iter().find(|(m, _)| cx >= m.x && cy >= m.y && cx < m.x + m.w as i32 && cy < m.y + m.h as i32).map_or(1.0, |(_, s)| *s);
+    let (w, h) = (d.w as i32, d.h as i32);
+    let strips = [
+        (d.x - FRAME, d.y - FRAME, w + 2 * FRAME, FRAME),
+        (d.x - FRAME, d.y + h, w + 2 * FRAME, FRAME),
+        (d.x - FRAME, d.y, FRAME, h),
+        (d.x + w, d.y, FRAME, h),
+    ];
+    let shown = svc.frame_frames > 0;
+    let red = egui::Color32::from_rgb(0xE5, 0x39, 0x35);
+    for (i, (x, y, sw, sh)) in strips.into_iter().enumerate() {
+        let size = vec2(sw.max(1) as f32 / s.max(0.5), sh.max(1) as f32 / s.max(0.5));
+        let builder = ViewportBuilder::default()
+            .with_title("ScreenGrabCraft recording area")
+            .with_app_id(APP_ID)
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_window_level(egui::WindowLevel::AlwaysOnTop)
+            .with_active(false)
+            .with_mouse_passthrough(true)
+            .with_min_inner_size([1.0, 1.0])
+            .with_position(points(x as f32, y as f32, s))
+            .with_inner_size(size)
+            .with_visible(shown);
+        ctx.show_viewport_immediate(ViewportId::from_hash_of(("recording-frame", i)), builder, |ui, _| {
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(red)).show(ui, |_| {});
+        });
+    }
+    screengrabcraft_desktop::cloak::calm_windows();
+    svc.frame_frames = svc.frame_frames.saturating_add(1);
+    if !shown {
+        ctx.request_repaint();
+    }
+}
+
 /// Where the recording control goes (desktop pixels, and that monitor's scale) so it isn't in
 /// what's recorded: below the area, else above it, on the area's monitor; else at the bottom of
 /// a monitor the area doesn't touch. None when every place is in the recording.

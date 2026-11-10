@@ -2236,3 +2236,19 @@ fn copy_while_typing_leaves_the_clipboard_to_the_text() {
     h.run_steps(2);
     assert!(clip.0.borrow().is_none(), "no picture copied over the text");
 }
+
+#[test]
+fn with_a_video_open_the_picture_before_it_opens_from_the_strip() {
+    // The picture open before a video was still taken for the one open: a click on it did nothing.
+    let disk = many_captures(3);
+    let mut h = on_disk(&disk, Some("captures/Capture 001.png"));
+    h.run_steps(2);
+    h.state_mut().video_path = Some("captures/Recording.sgvideo".to_string());
+    h.run_steps(2);
+    let pic = h.get_by_label("Capture 001.png").rect();
+    click_at(&mut h, pic.center());
+    h.run_steps(3);
+    let ed = h.state();
+    assert_eq!(ed.picture_path.as_deref(), Some("captures/Capture 001.png"));
+    assert!(ed.video_path.is_none(), "the picture is the one open now");
+}

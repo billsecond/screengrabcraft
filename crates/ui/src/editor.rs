@@ -165,6 +165,8 @@ pub struct Editor {
     pub playback: Option<crate::playback::Playback>,
     /// A video recording, when one is open (the window shows the video editor instead).
     pub video: Option<crate::video::VideoView>,
+    /// The file of the video open, if one is (the strip marks it, not the picture open before it).
+    pub(crate) video_path: Option<String>,
     /// Counts what was opened, so the video editor knows when it has been replaced.
     pub(crate) video_epoch: u64,
     /// The text annotation being typed into, and its text as typed.
@@ -231,6 +233,7 @@ impl Editor {
             drag: None,
             playback: None,
             video: None,
+            video_path: None,
             video_epoch: 0,
             editing: None,
             resume_editing: None,
@@ -292,6 +295,7 @@ impl Editor {
 
     fn replace_document(&mut self, doc: Document, name: String, project: Option<String>, picture: Option<String>, original: Option<Raster>) {
         self.video = None;
+        self.video_path = None;
         self.video_epoch += 1;
         self.session.replace(doc);
         self.name = name;
@@ -422,6 +426,7 @@ impl Editor {
                 }
                 let stem = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
                 self.video = Some(crate::video::VideoView::new(rec, path.clone(), stem));
+                self.video_path = path.clone();
                 self.video_epoch += 1;
                 if let Some(p) = &path {
                     self.settings.remember(p);

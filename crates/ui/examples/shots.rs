@@ -136,6 +136,7 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         ],
         all_screens: Some((3840, 1620)),
         microphones: vec!["Headset microphone".into(), "Webcam microphone".into()],
+        default_microphone: Some("Headset microphone".into()),
         cameras: Some(vec![(0, "Integrated Webcam".into())]),
         camera_supported: true,
         system_sound: true,

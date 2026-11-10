@@ -121,6 +121,8 @@ pub struct Service {
     /// The winit monitors, for placing the overlay on each: position, size and name.
     pub screens: Vec<((i32, i32), (u32, u32), String)>,
     root_shown: bool,
+    /// The frames the outline round an area being recorded has been drawn in (see `popups::recording_frame`).
+    pub frame_frames: u32,
     pub quit: bool,
     /// The update check, and an update waiting (`crate::update`).
     pub updates: crate::update::Updates,
@@ -188,6 +190,7 @@ impl Service {
             recording: None,
             screens: Vec::new(),
             root_shown: false,
+            frame_frames: 0,
             quit: false,
             updates: crate::update::Updates::new(),
         }
@@ -720,6 +723,9 @@ impl Service {
     fn poll_recording(&mut self) {
         let Some(rec) = self.recording.as_mut() else { return };
         let Some(result) = rec.take() else { return };
+        // A camera or a microphone asked for and not had is said plainly once the recording is
+        // over (during it, only a mark on its controls says so).
+        let missing = matches!(result, Ok(record::Output::Video(..) | record::Output::Production(_))).then(|| record::missing_after(rec)).flatten();
         self.recording = None;
         if let Some(t) = &mut self.tray {
             t.set_recording(false);
@@ -754,6 +760,9 @@ impl Service {
             }
             Ok(record::Output::Cancelled) => {}
             Err(e) => self.notify("The recording failed", e, None, None, true),
+        }
+        if let Some((text, detail)) = missing {
+            self.notify(text, detail, None, None, true);
         }
     }
 
@@ -920,6 +929,7 @@ impl Service {
         }
         crate::popups::countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
+        crate::popups::recording_frame(self, &ctx);
         crate::popups::notice(self, &ctx);
         crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);

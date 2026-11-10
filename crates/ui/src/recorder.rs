@@ -42,6 +42,8 @@ pub struct RecorderDevices {
     /// The size an all-screens recording is made at.
     pub all_screens: Option<(u32, u32)>,
     pub microphones: Vec<String>,
+    /// The system's default microphone, by name.
+    pub default_microphone: Option<String>,
     /// The cameras by number and name, once looked for (only while the camera is on: on a Mac,
     /// looking asks the owner).
     pub cameras: Option<Vec<(u32, String)>>,
@@ -214,6 +216,20 @@ fn area_tile(ui: &mut Ui, area: RecordArea, selected: bool) -> egui::Response {
 fn heading(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).font(widgets::strong_font(ui.ctx(), 15.0)));
     ui.add_space(6.0);
+}
+
+/// Said under the microphone when it's the camera's own and the camera is on.
+pub const OWN_MICROPHONE_NOTE: &str =
+    "That's the camera's own microphone. Some cameras send no video while it records: if the camera stays off, choose another microphone.";
+
+/// Said under the microphone when there's none.
+pub const NO_MICROPHONE_NOTE: &str = "No microphone was found. Over Remote Desktop, the Remote Desktop app has to share yours.";
+
+/// Whether `microphone` is part of the camera `camera` (Windows names a webcam's microphone
+/// "Microphone (<camera>)").
+fn is_own_microphone(microphone: &str, camera: &str) -> bool {
+    let camera = camera.trim().to_lowercase();
+    !camera.is_empty() && microphone.to_lowercase().contains(&camera)
 }
 
 fn note(ui: &mut Ui, text: impl Into<String>) {
@@ -455,9 +471,15 @@ fn inputs_section(
             }
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(o.microphone, |ui| {
-                    let shown = o.microphone_name.clone().unwrap_or_else(|| "The system's default".to_string());
-                    egui::ComboBox::from_id_salt("recorder-mic").width(260.0).selected_text(shown).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut o.microphone_name, None, "The system's default");
+                    let default = match &d.default_microphone {
+                        Some(n) => format!("The system's default ({n})"),
+                        None => "The system's default".to_string(),
+                    };
+                    let shown = o.microphone_name.clone().unwrap_or_else(|| default.clone());
+                    // A long name is shortened, not let push the meter off the window.
+                    ui.set_max_width(260.0);
+                    egui::ComboBox::from_id_salt("recorder-mic").width(260.0).truncate().selected_text(shown).show_ui(ui, |ui| {
+                        ui.selectable_value(&mut o.microphone_name, None, default);
                         for m in &d.microphones {
                             ui.selectable_value(&mut o.microphone_name, Some(m.clone()), m);
                         }
@@ -468,6 +490,28 @@ fn inputs_section(
                 }
             });
             ui.end_row();
+            // The camera's own microphone, with the camera on: some cameras send no video while
+            // theirs records (the recording then turns it off for the camera).
+            let camera_name = o
+                .camera_index
+                .and_then(|i| d.cameras.as_deref().unwrap_or_default().iter().find(|c| c.0 == i).map(|c| c.1.clone()))
+                .or_else(|| d.cameras.as_deref().and_then(|l| l.first()).map(|c| c.1.clone()));
+            let mic_name = o.microphone_name.clone().or_else(|| d.default_microphone.clone());
+            if o.camera
+                && o.microphone
+                && let (Some(cam), Some(m)) = (camera_name, mic_name)
+                && is_own_microphone(&m, &cam)
+            {
+                ui.label("");
+                note(ui, OWN_MICROPHONE_NOTE);
+                ui.end_row();
+            }
+            // None at all (over Remote Desktop, only one the Remote Desktop app shares is there).
+            if o.microphone && d.microphones.is_empty() {
+                ui.label("");
+                note(ui, NO_MICROPHONE_NOTE);
+                ui.end_row();
+            }
 
             let mut on = o.system_sound && d.system_sound;
             let was = on;
@@ -491,7 +535,8 @@ fn inputs_section(
                             None => "The system's default".to_string(),
                         };
                         let shown = o.system_sound_name.clone().unwrap_or_else(|| default.clone());
-                        egui::ComboBox::from_id_salt("recorder-speaker").width(260.0).selected_text(shown).show_ui(ui, |ui| {
+                        ui.set_max_width(260.0);
+                        egui::ComboBox::from_id_salt("recorder-speaker").width(260.0).truncate().selected_text(shown).show_ui(ui, |ui| {
                             ui.selectable_value(&mut o.system_sound_name, None, default);
                             for s in &d.speakers {
                                 ui.selectable_value(&mut o.system_sound_name, Some(s.clone()), s);
@@ -506,9 +551,6 @@ fn inputs_section(
             ui.end_row();
         },
     );
-    if o.microphone && d.microphones.is_empty() {
-        note(ui, "No microphone was found just now.");
-    }
 }
 
 /// The Recorder's contents: the area, the inputs, and Record and Cancel along the bottom. Changes
@@ -608,6 +650,7 @@ mod tests {
             ],
             all_screens: Some((3840, 1440)),
             microphones: vec!["Headset".into(), "Webcam microphone".into()],
+            default_microphone: Some("Headset".into()),
             cameras: Some(vec![(0, "Webcam".into())]),
             camera_supported: true,
             system_sound: true,
@@ -705,6 +748,40 @@ mod tests {
         assert!(uhd.contains(&(3840, 2160)) && uhd.contains(&(2160, 2160)) && !uhd.contains(&(5120, 2880)));
         assert_eq!(largest(&[monitor(1920, 1080), monitor(1080, 1920)]), (1920, 1920));
         assert_eq!(largest(&[]), (FIXED_MAX, FIXED_MAX));
+    }
+
+    #[test]
+    fn the_cameras_own_microphone_with_the_camera_on_is_pointed_out() {
+        let mut s = Settings::default();
+        s.production.camera = true;
+        s.production.microphone = true;
+        s.production.microphone_name = None;
+        // The system's default microphone is the camera's own.
+        let d = RecorderDevices {
+            microphones: vec!["Headset".into(), "Microphone (Studio Webcam 2)".into()],
+            default_microphone: Some("Microphone (Studio Webcam 2)".into()),
+            cameras: Some(vec![(0, "Studio Webcam 2".into())]),
+            ..devices()
+        };
+        let mut h = harness(s.clone(), d.clone());
+        h.run_steps(2);
+        h.get_by_value("The system's default (Microphone (Studio Webcam 2))");
+        h.get_by_label_contains("That's the camera's own microphone.");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-own-microphone.png"));
+        }
+        // Another microphone, or the camera off: nothing to say.
+        s.production.microphone_name = Some("Headset".into());
+        let mut h = harness(s.clone(), d.clone());
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("That's the camera's own microphone.").is_none());
+        s.production.microphone_name = None;
+        s.production.camera = false;
+        let mut h = harness(s, d);
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("That's the camera's own microphone.").is_none());
     }
 
     #[test]
@@ -813,6 +890,25 @@ mod tests {
         h.get_by_label("Only on Windows: this system has no way to record what it plays.");
         h.get_by_label("Cameras can't be recorded on this system yet.");
         assert!(disabled(&h, "Record"));
+    }
+
+    #[test]
+    fn no_microphone_at_all_is_said_under_it() {
+        let mut s = Settings::default();
+        s.production.microphone = true;
+        let d = RecorderDevices { microphones: Vec::new(), default_microphone: None, ..devices() };
+        let mut h = harness(s.clone(), d);
+        h.run_steps(2);
+        h.get_by_label(NO_MICROPHONE_NOTE);
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-no-microphone.png"));
+        }
+        // With one, nothing is said.
+        let mut h = harness(s, devices());
+        h.run_steps(2);
+        assert!(h.query_by_label(NO_MICROPHONE_NOTE).is_none());
     }
 
     #[test]

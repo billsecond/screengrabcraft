@@ -561,7 +561,7 @@ fn sources(ui: &mut Ui, id: &str, o: &mut VideoOptions, d: &Devices, camera: boo
         });
     });
     if d.microphones.is_empty() && o.microphone {
-        ui.label(RichText::new("No microphone was found just now.").size(12.0).color(t.muted));
+        ui.label(RichText::new("No microphone was found. Over Remote Desktop, the Remote Desktop app has to share yours.").size(12.0).color(t.muted));
     }
     if camera {
         ui.horizontal(|ui| {

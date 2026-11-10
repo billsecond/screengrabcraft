@@ -51,6 +51,12 @@ version = "0.10.11"
 default-features = false
 features = ["input-msmf"]
 
+# The camera thread made ready for Windows' media system (COM) itself: nokhwa does that only on
+# the first thread that asks, which in the capture service is the window's, listing the cameras.
+[target.'cfg(target_os = "windows")'.dependencies.winsafe]
+version = "0.0.29"
+features = ["ole"]
+
 [target.'cfg(target_os = "macos")'.dependencies.nokhwa]
 version = "0.10.11"
 default-features = false

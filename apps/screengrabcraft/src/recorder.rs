@@ -122,6 +122,7 @@ fn find_devices() -> RecorderDevices {
             .collect(),
         all_screens: crate::record::all_screens_size(&rects).map(|(_, size)| size),
         microphones: audio::microphones(),
+        default_microphone: audio::default_microphone(),
         cameras: None,
         camera_supported: cfg!(any(target_os = "windows", target_os = "macos")),
         system_sound: audio::system_sound_supported(),
