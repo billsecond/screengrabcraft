@@ -446,6 +446,9 @@ const CAMERA_SILENT: Duration = Duration::from_secs(5);
 const OWN_MIC_SILENT: Duration = Duration::from_secs(4);
 /// What the note about such a camera says, to know it again.
 const BLOCKED_BY_ITS_MIC: &str = "sends no video while its own microphone records";
+/// What the note about a microphone that heard nothing at all says.
+const MIC_SILENT: &str =
+    "recorded only silence. In Windows Settings, Privacy & security, Microphone, let desktop apps use the microphone, and check it isn't muted";
 
 /// The sound devices and the camera a recording asked for, those that started.
 struct Devices {
@@ -475,6 +478,11 @@ fn missing_from(notes: &[String]) -> Option<(String, String)> {
         ));
     }
     let why = |prefix: &str| notes.iter().find(|n| n.starts_with(prefix)).map(|n| n.split_once(": ").map_or(n.as_str(), |(_, w)| w).to_string());
+    if let Some(m) = notes.iter().find(|n| n.contains(MIC_SILENT))
+        && why("No camera").is_none()
+    {
+        return Some(("The microphone heard nothing".to_string(), m.split_once(": ").map_or(m.as_str(), |(_, w)| w).to_string()));
+    }
     match (why("No camera"), why("No microphone")) {
         (Some(c), Some(m)) => Some(("No camera or microphone was recorded".to_string(), format!("Camera: {c}. Microphone: {m}"))),
         (Some(c), None) => Some(("The camera sent no pictures".to_string(), c)),
@@ -667,14 +675,42 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     made.map(|d| Output::Video(plan.out.clone(), d))
 }
 
-/// Hands sound to the writer; how many samples (all channels) it was.
-fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>) -> usize {
-    let mut n = 0usize;
+/// How much sound came, for the log and to tell a microphone that heard nothing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Heard {
+    /// Samples (all channels).
+    samples: usize,
+    /// The loudest, 0 to 32767.
+    peak: u16,
+}
+
+impl Heard {
+    fn add(&mut self, other: Heard) {
+        self.samples = self.samples.saturating_add(other.samples);
+        self.peak = self.peak.max(other.peak);
+    }
+
+    /// Seconds of it, at `channels`.
+    fn secs(&self, channels: u8) -> f64 {
+        self.samples as f64 / f64::from(channels.max(1)) / f64::from(audio::RATE)
+    }
+
+    /// Only silence: nothing at all, not even the hiss every microphone hears (Windows hands
+    /// silence to programs it doesn't let use the microphone).
+    fn silent(&self) -> bool {
+        self.samples > 0 && self.peak <= 1
+    }
+}
+
+/// Hands sound to the writer; how much it was.
+fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>) -> Heard {
+    let mut h = Heard::default();
     for b in blocks {
-        n = n.saturating_add(b.samples.len());
+        h.samples = h.samples.saturating_add(b.samples.len());
+        h.peak = h.peak.max(b.samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0));
         let _ = tx.send(Item::Sound(id, b));
     }
-    n
+    h
 }
 
 /// The camera's first pictures, waited for up to `wait` (so its size is known before the
@@ -799,8 +835,10 @@ fn record_screen(
     let mut camera_told = false;
     // When the camera's last picture came (it started before the recording did).
     let mut last_picture = Duration::ZERO;
-    // How much sound came, in samples per channel, for the log.
-    let (mut mic_samples, mut system_samples) = (0usize, 0usize);
+    // How much sound came, and how loud, for the log and to tell a microphone that heard nothing.
+    let (mut mic, mut system) = (Heard::default(), Heard::default());
+    let channels = |a: &Option<AudioCapture>| a.as_ref().map_or(1, |a| a.channels);
+    let (mic_ch, system_ch) = (channels(&d.mic), channels(&d.system));
     while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
         let at = started.elapsed();
         if let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab) {
@@ -814,11 +852,11 @@ fn record_screen(
             }
         }
         if let Some(a) = &d.system {
-            system_samples += send_sound(tx, 1, a.take()) / usize::from(a.channels.max(1));
+            system.add(send_sound(tx, 1, a.take()));
             s.levels[0].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(a) = &d.mic {
-            mic_samples += send_sound(tx, 2, a.take()) / usize::from(a.channels.max(1));
+            mic.add(send_sound(tx, 2, a.take()));
             s.levels[1].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(c) = &d.camera {
@@ -856,13 +894,24 @@ fn record_screen(
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
     }
     // What came, so a recording missing its camera or its sound can be told from the log.
-    let secs = |n: usize| n as f64 / f64::from(audio::RATE);
+    let loud = |h: &Heard| f64::from(h.peak) / 32767.0;
     log::info!(
-        "recorded {:.1} s: {frames} screen pictures, {camera_pictures} camera pictures, {:.1} s of microphone, {:.1} s of computer sound",
+        "recorded {:.1} s: {frames} screen pictures, {camera_pictures} camera pictures, {:.1} s of microphone (loudest {:.3}), {:.1} s of computer sound (loudest {:.3})",
         started.elapsed().as_secs_f64(),
-        secs(mic_samples),
-        secs(system_samples)
+        mic.secs(mic_ch),
+        loud(&mic),
+        system.secs(system_ch),
+        loud(&system)
     );
+    // A microphone that heard nothing at all: Windows hands programs silence when it doesn't let
+    // them use the microphone.
+    if let Some(m) = &d.mic
+        && mic.silent()
+        && mic.secs(mic_ch) >= 2.0
+    {
+        log::warn!("the microphone {} recorded only silence", m.name);
+        s.note(format!("No microphone sound: {} {MIC_SILENT}", m.name));
+    }
     if screen.is_some() && frames == 0 {
         return Err("nothing could be recorded".to_string());
     }
@@ -1115,6 +1164,25 @@ mod tests {
         let (title, why) = missing_from(&n(&["Microphone: Mic (Cam)", &blocked])).unwrap();
         assert_eq!(title, "The camera sent no video");
         assert!(why.contains("its own microphone"));
+        let silent = format!("No microphone sound: Headset {MIC_SILENT}");
+        let (title, why) = missing_from(&n(&["Microphone: Headset", "Camera: Cam", &silent])).unwrap();
+        assert_eq!(title, "The microphone heard nothing");
+        assert!(why.contains("Privacy"));
+    }
+
+    #[test]
+    fn a_microphone_that_heard_only_silence_is_known() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let block = |v: i16| SoundBlock { first: 0, samples: vec![v; 4800] };
+        let mut h = Heard::default();
+        h.add(send_sound(&tx, 2, vec![block(0), block(0)]));
+        assert!(h.silent(), "nothing at all");
+        assert!((h.secs(1) - 0.2).abs() < 1e-9);
+        h.add(send_sound(&tx, 2, vec![block(-40)]));
+        assert!(!h.silent(), "a little hiss is a microphone that hears");
+        assert_eq!(h.peak, 40);
+        assert!(!Heard::default().silent(), "no sound at all isn't silence heard");
+        assert_eq!(rx.try_iter().count(), 3);
     }
 
     /// The whole path, end to end, with the real camera and microphone and a small area of the
@@ -1213,6 +1281,21 @@ mod tests {
         let has_mic = notes.iter().any(|n| n.starts_with("Microphone:"));
         if has_mic {
             assert!(mic_us + 1_500_000 >= secs * 1_000_000, "the voice is kept to the end");
+        }
+        // The computer's sound runs the whole recording (silence is played to keep it coming),
+        // and with `SGC_TONE` (something played meanwhile) it has that in it, in the mix the
+        // editor plays and the MP4 has too.
+        if let Some(sys) = file.header.streams.iter().find(|s| s.kind == StreamKind::SystemSound) {
+            let until = file.stream_duration(sys.id);
+            assert!(until + 1_000_000 >= length, "the computer's sound to the end: {until} of {length} us");
+            let n = (screengrabcraft_media::compose::to_samples(length)) as usize;
+            let peak = file.sound(sys.id, 0, n).iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+            let tl = Timeline::new(&file);
+            let mixed = screengrabcraft_media::compose::mix(&file, &tl, 0, n).iter().fold(0f32, |m, s| m.max(s.abs()));
+            println!("computer sound: loudest {peak} of 32767; the editor's mix, loudest {mixed:.3}");
+            if std::env::var("SGC_TONE").is_ok() {
+                assert!(peak > 300 && mixed > 0.01, "what played is in the recording and the mix");
+            }
         }
         if !blocked {
             let (pictures, first, last) = camera.expect("a camera track");
