@@ -17,7 +17,9 @@ use crate::theme::Tokens;
 use crate::widgets::{self, CONTROL_RADIUS, StandardButton};
 
 /// The window's size.
-pub const SIZE: Vec2 = vec2(640.0, 540.0);
+pub const SIZE: Vec2 = vec2(640.0, 640.0);
+/// The camera's picture while it's tested, at most.
+const PREVIEW: Vec2 = vec2(160.0, 120.0);
 /// The size of the Record button: larger than the others, as the window's one big action.
 const RECORD_SIZE: Vec2 = vec2(136.0, 40.0);
 const TILE: Vec2 = vec2(106.0, 76.0);
@@ -67,9 +69,15 @@ pub enum MicLevel {
     Starting,
     /// 0 to 1.
     Level(f32),
+    /// Heard for a while, and nothing at all came: not even the hiss every microphone hears
+    /// (Windows hands programs silence when it doesn't let them use the microphone).
+    Silent,
     /// It couldn't be heard, and why.
     Failed(String),
 }
+
+/// Said of a microphone that hears only silence.
+pub const SILENT_MICROPHONE: &str = "It hears only silence. In Windows Settings, Privacy & security, Microphone, let desktop apps use the microphone; check it isn't muted, and that a headset is switched on.";
 
 /// The window's own state, what isn't a setting.
 #[derive(Clone, Debug, Default)]
@@ -79,6 +87,46 @@ pub struct RecorderView {
     /// The owner has asked to hear the microphone, by turning it on here or with Test: the
     /// service listens to it for the meter while this is on and the microphone is.
     pub listen: bool,
+    /// The owner has asked to see the camera (its Test): the service shows what it sends while
+    /// this is on and the camera is.
+    pub watch: bool,
+}
+
+/// The camera while it's tested, as the service has it.
+#[derive(Clone, Default)]
+pub enum CameraPreview {
+    /// Not tested.
+    #[default]
+    Off,
+    /// Turned on, its first picture not come yet.
+    Starting,
+    /// Its latest picture.
+    Live(egui::TextureHandle),
+    /// No pictures, and why, in plain words.
+    Failed(String),
+}
+
+/// What the camera sends while it's tested: its picture, or why there's none.
+fn camera_preview(ui: &mut Ui, camera: &CameraPreview) {
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal_top(|ui| match camera {
+        CameraPreview::Live(texture) => {
+            let s = texture.size_vec2();
+            let f = (PREVIEW.x / s.x.max(1.0)).min(PREVIEW.y / s.y.max(1.0));
+            let resp = ui.add(egui::Image::new((texture.id(), s * f)).corner_radius(6));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "The camera's picture"));
+            note(ui, "What the camera sends.");
+        }
+        CameraPreview::Off | CameraPreview::Starting => {
+            let (rect, _) = ui.allocate_exact_size(vec2(PREVIEW.x, PREVIEW.x * 0.75), Sense::hover());
+            ui.painter().rect(rect, 6.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            note(ui, "Starting the camera…");
+        }
+        CameraPreview::Failed(why) => {
+            ui.set_max_width(400.0);
+            ui.add(egui::Label::new(RichText::new(why.as_str()).size(12.5).color(t.danger)).wrap());
+        }
+    });
 }
 
 /// What the Recorder's buttons do.
@@ -404,6 +452,9 @@ fn level_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel, name: &st
         MicLevel::Failed(why) => {
             ui.label(RichText::new("Can't hear it").size(12.5).color(t.danger)).on_hover_text(why.as_str());
         }
+        MicLevel::Silent => {
+            ui.label(RichText::new("Hears only silence").size(12.5).color(t.danger)).on_hover_text(SILENT_MICROPHONE);
+        }
         MicLevel::Off | MicLevel::Starting | MicLevel::Level(_) => {
             let v = if let MicLevel::Level(l) = level { l.clamp(0.0, 1.0) } else { 0.0 };
             let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 10.0), Sense::hover());
@@ -429,6 +480,7 @@ fn inputs_section(
     d: &RecorderDevices,
     mic: &MicLevel,
     sound: &MicLevel,
+    camera_view: &CameraPreview,
 ) {
     heading(ui, "Inputs");
     egui::Grid::new("recorder-inputs").num_columns(2).spacing([18.0, 8.0]).min_col_width(170.0).min_row_height(widgets::BUTTON_SIZE.y).show(
@@ -460,9 +512,21 @@ fn inputs_section(
                         }
                     });
                 });
+                // Test: what the camera sends, shown below; Stop lets it go again.
+                if o.camera {
+                    let (label, what, tip) = if view.watch {
+                        ("Stop", "Stop testing the camera", "Stop showing the camera (it's let go)")
+                    } else {
+                        ("Test", "Test the camera", "See what the camera sends")
+                    };
+                    let resp = ui.add(StandardButton::new(label));
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, what));
+                    if resp.on_hover_text(tip).clicked() {
+                        view.watch = !view.watch;
+                    }
+                }
             });
             ui.end_row();
-
             let was = o.microphone;
             switch(ui, &mut o.microphone, "Microphone", true);
             // Turning it on here is asking to hear it; turning it off stops the listening.
@@ -512,6 +576,13 @@ fn inputs_section(
                 note(ui, NO_MICROPHONE_NOTE);
                 ui.end_row();
             }
+            // Tested, and it hears nothing at all: why, and what helps.
+            if o.microphone && view.listen && matches!(mic, MicLevel::Silent) {
+                ui.label("");
+                let t = Tokens::get(ui.ctx());
+                ui.add(egui::Label::new(RichText::new(SILENT_MICROPHONE).size(12.5).color(t.danger)).wrap());
+                ui.end_row();
+            }
 
             let mut on = o.system_sound && d.system_sound;
             let was = on;
@@ -551,6 +622,14 @@ fn inputs_section(
             ui.end_row();
         },
     );
+    // The camera's Test: its picture (or why there's none) under the inputs, lined up with them.
+    if o.camera && d.camera_supported && view.watch {
+        ui.add_space(10.0);
+        ui.horizontal_top(|ui| {
+            ui.add_space(188.0);
+            camera_preview(ui, camera_view);
+        });
+    }
 }
 
 /// The Recorder's contents: the area, the inputs, and Record and Cancel along the bottom. Changes
@@ -563,6 +642,7 @@ pub fn recorder_ui(
     devices: &RecorderDevices,
     mic: &MicLevel,
     sound: &MicLevel,
+    camera: &CameraPreview,
 ) -> Option<RecorderChoice> {
     let t = Tokens::get(ui.ctx());
     // Read before anything is drawn: Esc closing a list isn't for the window, and Enter on a
@@ -606,7 +686,7 @@ pub fn recorder_ui(
     egui::CentralPanel::default().frame(Frame::NONE.fill(t.panel).inner_margin(Margin::symmetric(22, 18))).show(ui, |ui| {
         area_section(ui, view, rec, devices);
         ui.add_space(20.0);
-        inputs_section(ui, view, rec, sources, devices, mic, sound);
+        inputs_section(ui, view, rec, sources, devices, mic, sound, camera);
         ui.add_space(10.0);
         if !rec.records_anything(sources, devices.system_sound, devices.camera_supported) {
             ui.label(RichText::new("Turn on at least one of these to record.").color(t.danger));
@@ -639,6 +719,7 @@ mod tests {
         view: RecorderView,
         devices: RecorderDevices,
         mic: MicLevel,
+        camera: CameraPreview,
         pressed: Option<RecorderChoice>,
     }
 
@@ -664,13 +745,20 @@ mod tests {
         Harness::builder().with_size(SIZE).build_ui_state(
             |ui, st: &mut State| {
                 crate::theme::apply(ui.ctx(), Theme::Light);
-                if let Some(c) =
-                    recorder_ui(ui, &mut st.view, &mut st.settings.recorder, &mut st.settings.production, &st.devices, &st.mic, &MicLevel::Off)
-                {
+                if let Some(c) = recorder_ui(
+                    ui,
+                    &mut st.view,
+                    &mut st.settings.recorder,
+                    &mut st.settings.production,
+                    &st.devices,
+                    &st.mic,
+                    &MicLevel::Off,
+                    &st.camera,
+                ) {
                     st.pressed = Some(c);
                 }
             },
-            State { settings, view: RecorderView::default(), devices, mic: MicLevel::Off, pressed: None },
+            State { settings, view: RecorderView::default(), devices, mic: MicLevel::Off, camera: CameraPreview::Off, pressed: None },
         )
     }
 
@@ -909,6 +997,62 @@ mod tests {
         let mut h = harness(s, devices());
         h.run_steps(2);
         assert!(h.query_by_label(NO_MICROPHONE_NOTE).is_none());
+    }
+
+    #[test]
+    fn the_cameras_test_shows_its_picture_or_why_there_is_none() {
+        let mut s = Settings::default();
+        s.production.camera = true;
+        s.production.microphone = true;
+        let mut h = harness(s, devices());
+        h.run_steps(2);
+        // Test turns the watching on; the service then says how the camera is.
+        h.get_by_label("Test the camera").click();
+        h.run_steps(2);
+        assert!(h.state().view.watch);
+        h.get_by_label_contains("Starting the camera");
+        // Its picture.
+        let grey = egui::ColorImage::new([64, 48], vec![egui::Color32::from_gray(128); 64 * 48]);
+        let texture = h.ctx.load_texture("camera-test", grey, egui::TextureOptions::LINEAR);
+        h.state_mut().camera = CameraPreview::Live(texture);
+        h.run_steps(2);
+        h.get_by_label("The camera's picture");
+        h.get_by_label_contains("What the camera sends");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-camera-test.png"));
+        }
+        // None: why, in plain words.
+        h.state_mut().camera = CameraPreview::Failed("Webcam sends no video while its own microphone is on.".into());
+        h.run_steps(2);
+        h.get_by_label_contains("sends no video while its own microphone is on");
+        // Stop lets it go.
+        h.get_by_label("Stop testing the camera").click();
+        h.run_steps(2);
+        assert!(!h.state().view.watch);
+        assert!(h.query_by_label_contains("sends no video").is_none());
+    }
+
+    #[test]
+    fn a_microphone_that_hears_only_silence_is_said_so() {
+        let mut s = Settings::default();
+        s.production.microphone = true;
+        let mut h = harness(s, devices());
+        h.state_mut().view.listen = true;
+        h.state_mut().mic = MicLevel::Silent;
+        h.run_steps(2);
+        h.get_by_label("Hears only silence");
+        h.get_by_label_contains("let desktop apps use the microphone");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-silent-microphone.png"));
+        }
+        // Heard: no such note.
+        h.state_mut().mic = MicLevel::Level(0.2);
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("let desktop apps use the microphone").is_none());
     }
 
     #[test]

@@ -219,7 +219,11 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
 }
 
 /// How thick the outline round an area being recorded is, in desktop pixels.
-const FRAME: i32 = 3;
+const FRAME: i32 = 4;
+/// Its one colour, a bright red.
+const FRAME_RGB: [u8; 3] = [0xFF, 0x3B, 0x30];
+/// Its windows' title (how they're found to be made plain).
+const FRAME_TITLE: &str = "ScreenGrabCraft recording area";
 
 /// The area being recorded outlined for as long as it's recorded: four thin strips just outside
 /// it (so in none of the video), on top of everything, that the pointer goes through. A whole
@@ -249,11 +253,11 @@ pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
         (d.x + w, d.y, FRAME, h),
     ];
     let shown = svc.frame_frames > 0;
-    let red = egui::Color32::from_rgb(0xE5, 0x39, 0x35);
+    let red = egui::Color32::from_rgb(FRAME_RGB[0], FRAME_RGB[1], FRAME_RGB[2]);
     for (i, (x, y, sw, sh)) in strips.into_iter().enumerate() {
         let size = vec2(sw.max(1) as f32 / s.max(0.5), sh.max(1) as f32 / s.max(0.5));
         let builder = ViewportBuilder::default()
-            .with_title("ScreenGrabCraft recording area")
+            .with_title(FRAME_TITLE)
             .with_app_id(APP_ID)
             .with_decorations(false)
             .with_resizable(false)
@@ -270,6 +274,8 @@ pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
         });
     }
     screengrabcraft_desktop::cloak::calm_windows();
+    // One colour all round: no shadow, border or rounded corners of Windows' own on the strips.
+    screengrabcraft_desktop::cloak::plain_windows(FRAME_TITLE, FRAME_RGB);
     svc.frame_frames = svc.frame_frames.saturating_add(1);
     if !shown {
         ctx.request_repaint();

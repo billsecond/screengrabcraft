@@ -166,7 +166,8 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         let mut h = Harness::builder().with_size(recorder::SIZE).build_ui_state(
             move |ui, (s, v, m): &mut (Settings, RecorderView, MicLevel)| {
                 screengrabcraft_ui::theme::apply(ui.ctx(), theme);
-                let _ = recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m, &recorder::MicLevel::Off);
+                let _ =
+                    recorder::recorder_ui(ui, v, &mut s.recorder, &mut s.production, &d, m, &recorder::MicLevel::Off, &recorder::CameraPreview::Off);
             },
             state,
         );
