@@ -946,6 +946,7 @@ mod tests {
             microphone_name: None,
             camera: false,
             camera_index: None,
+            captions: false,
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -999,6 +1000,7 @@ mod tests {
                 microphone_name: None,
                 camera: false,
                 camera_index: None,
+                captions: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),

@@ -1,5 +1,6 @@
-//! The background model for Remove Background: where its file is, and the model the editor and
-//! the command-line program lend their sessions.
+//! The models installed with ScreenGrabCraft: Remove Background's (where its file is, and the
+//! model the editor and the command-line program lend their sessions) and the speech model
+//! that makes the captions of recordings ([`speech_model`]).
 //!
 //! The file is looked for, in order: the one `SCREENGRABCRAFT_MODEL` names; the `models` folder
 //! in the settings folder (where the owner can put another model of a known family); the one
@@ -82,9 +83,71 @@ pub fn background_model() -> Result<Arc<dyn Matting>, String> {
     }
 }
 
+/// The speech model installed with ScreenGrabCraft: Whisper base, English only, its large
+/// weights in 8 bits (it makes the captions of recordings).
+pub const SPEECH: &str = "whisper-base.en-q8_0.gguf";
+
+/// The first speech model in `dirs`: a `whisper….gguf` (in a folder, the installed one first,
+/// then by name).
+pub fn find_speech(dirs: &[PathBuf]) -> Option<PathBuf> {
+    for d in dirs {
+        let Ok(entries) = std::fs::read_dir(d) else { continue };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("gguf")))
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_ascii_lowercase().starts_with("whisper")))
+            .collect();
+        files.sort();
+        files.sort_by_key(|p| p.file_name() != Some(OsStr::new(SPEECH)));
+        if let Some(f) = files.into_iter().next() {
+            return Some(f);
+        }
+    }
+    None
+}
+
+/// The speech model's file, or why there is none: the one `SCREENGRABCRAFT_SPEECH_MODEL` names,
+/// else the first in [`model_dirs`]. Nothing is ever downloaded.
+pub fn speech_model() -> Result<PathBuf, String> {
+    if let Some(f) = std::env::var_os("SCREENGRABCRAFT_SPEECH_MODEL").filter(|f| !f.is_empty()) {
+        return Ok(PathBuf::from(f));
+    }
+    find_speech(&model_dirs()).ok_or_else(|| format!("The speech model isn't installed with this copy of ScreenGrabCraft ({SPEECH})"))
+}
+
+/// A model file's bytes, no larger than `max`.
+pub fn read_model(path: &Path, max: u64) -> Result<Vec<u8>, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if meta.len() > max {
+        return Err(format!("{}: the model file is too large", path.display()));
+    }
+    std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_installed_speech_model_is_found_first() {
+        let base = std::env::temp_dir().join(format!("sgc-speech-models-{}", std::process::id()));
+        let (a, b) = (base.join("a"), base.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("llama.gguf"), b"").unwrap();
+        std::fs::write(b.join("whisper-tiny.gguf"), b"").unwrap();
+        std::fs::write(b.join(SPEECH), b"").unwrap();
+        let dirs = vec![base.join("missing"), a.clone(), b.clone()];
+        assert_eq!(find_speech(&dirs), Some(b.join(SPEECH)));
+        std::fs::remove_file(b.join(SPEECH)).unwrap();
+        assert_eq!(find_speech(&dirs), Some(b.join("whisper-tiny.gguf")));
+        assert_eq!(find_speech(&[a]), None);
+        assert!(read_model(&b.join("whisper-tiny.gguf"), 0).is_ok());
+        std::fs::write(b.join("big.gguf"), b"12345").unwrap();
+        assert!(read_model(&b.join("big.gguf"), 4).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn the_installed_model_is_found_first_and_strangers_are_not() {

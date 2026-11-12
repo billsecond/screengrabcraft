@@ -124,6 +124,8 @@ pub struct Service {
     pub quit: bool,
     /// The update check, and an update waiting (`crate::update`).
     pub updates: crate::update::Updates,
+    /// Captions of Video Production recordings being made, one at a time, never while recording.
+    pub captions: crate::captions::Captioner,
 }
 
 impl Service {
@@ -190,6 +192,7 @@ impl Service {
             root_shown: false,
             quit: false,
             updates: crate::update::Updates::new(),
+            captions: crate::captions::Captioner::default(),
         }
     }
 
@@ -331,6 +334,13 @@ impl Service {
                 "--quit" => {
                     acted = true;
                     self.quit = true;
+                }
+                launch::ASK_CAPTIONS => {
+                    acted = true;
+                    match it.next().and_then(|p| crate::captions::wanted(p)) {
+                        Some(p) => self.captions.push(p),
+                        None => log::warn!("captions were asked for something that isn't a recording"),
+                    }
                 }
                 "--noop" | "--tray" | "--background" => acted = true,
                 _ => {}
@@ -746,7 +756,13 @@ impl Service {
                 self.notify("Video saved", detail, Some(path), None, false);
             }
             Ok(record::Output::Production(path)) => {
-                if launch::open_editor(&[path.to_string_lossy().to_string()]).is_ok() {
+                // Its captions are made after it (the editor shows them when they come).
+                let mut args = vec![path.to_string_lossy().to_string()];
+                if self.settings.production.captions && (self.settings.production.microphone || self.settings.production.system_sound) {
+                    self.captions.push(path.clone());
+                    args.insert(0, launch::CAPTIONS_COMING.to_string());
+                }
+                if launch::open_editor(&args).is_ok() {
                     self.editor_aside = false;
                 } else {
                     self.notify("Recording saved", file_name(&path), Some(path), None, false);
@@ -795,6 +811,10 @@ impl Service {
             self.overlay_done();
         }
         self.poll_recording();
+        self.captions.tick(self.recording.is_some());
+        if self.captions.busy() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
         // However the capture ended, the editor doesn't stay aside.
         if self.editor_aside
             && self.freezing.is_none()

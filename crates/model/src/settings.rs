@@ -458,19 +458,37 @@ pub struct VideoOptions {
     pub camera: bool,
     /// The camera by number; `None` is the first one.
     pub camera_index: Option<u32>,
+    /// Video Production: captions of what's said, made on this computer after the recording.
+    pub captions: bool,
 }
 
 impl Default for VideoOptions {
     /// A quick video: the screen and what the computer plays.
     fn default() -> VideoOptions {
-        VideoOptions { system_sound: true, system_sound_name: None, microphone: false, microphone_name: None, camera: false, camera_index: None }
+        VideoOptions {
+            system_sound: true,
+            system_sound_name: None,
+            microphone: false,
+            microphone_name: None,
+            camera: false,
+            camera_index: None,
+            captions: true,
+        }
     }
 }
 
 impl VideoOptions {
     /// Video Production: everything, each on its own track.
     pub fn production() -> VideoOptions {
-        VideoOptions { system_sound: true, system_sound_name: None, microphone: true, microphone_name: None, camera: true, camera_index: None }
+        VideoOptions {
+            system_sound: true,
+            system_sound_name: None,
+            microphone: true,
+            microphone_name: None,
+            camera: true,
+            camera_index: None,
+            captions: true,
+        }
     }
 }
 
@@ -1160,6 +1178,7 @@ mod tests {
             microphone_name: None,
             camera: false,
             camera_index: None,
+            captions: false,
         };
         let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
         assert!(!off.records_anything(&none, true, true));

@@ -27,6 +27,12 @@ ScreenGrabCraft takes pictures of your screen, so here is exactly what it does w
   your captures folder and its working file in your temporary folder is deleted; a Video
   Production recording (`.sgvideo`, every track as recorded, with your edits added to its end) is
   kept in your captures folder until you delete it. Nothing of either is sent anywhere.
+- **Captions:** the words of a Video Production recording are written down on your computer, by
+  a speech model installed with ScreenGrabCraft (Whisper, run by ScreenGrabCraft itself; it is
+  never downloaded). Nothing of the recording or its words is sent anywhere. The captions go into
+  the recording and beside it (`.srt`, `.txt`) in your captures folder; the log records only how
+  long it took and how many lines there were, never what was said. Turn them off with Captions in
+  the Recorder.
 - **Permissions:** on macOS ScreenGrabCraft asks for Screen Recording, and the system asks you
   before the microphone or the camera is first used; on Wayland the desktop's screenshot portal
   may ask. ScreenGrabCraft never works around any of these.

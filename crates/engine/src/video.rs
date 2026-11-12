@@ -246,6 +246,24 @@ fn camera(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+fn captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let flag = |key: &str| -> Result<Option<bool>> {
+        match p.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
+        }
+    };
+    let (show, burn) = (flag("show")?, flag("burn")?);
+    let c = &mut s.timeline.captions;
+    if let Some(v) = show {
+        c.show = v;
+    }
+    if let Some(v) = burn {
+        c.burn = v;
+    }
+    Ok(json!({"show": c.show, "burn": c.burn}))
+}
+
 fn revert(s: &mut VideoSession, _: &Value) -> Result<Value> {
     s.timeline = s.original.clone();
     Ok(json!({}))
@@ -265,6 +283,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Camera",
         params: r#"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5}"#,
         run: camera,
+    },
+    VideoCommand {
+        id: "video.captions",
+        label: "Captions",
+        params: r#"{"show"?: bool, "burn"?: bool}: the captions on the picture in the editor, and burned into the video made"#,
+        run: captions,
     },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
 ];
@@ -339,6 +363,21 @@ mod tests {
         assert!(s.timeline.tracks[1].muted);
         s.execute("video.revert", &json!({})).unwrap();
         assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_captions_switches_are_undone_like_any_edit() {
+        let mut s = session();
+        assert!(s.timeline.captions.show && !s.timeline.captions.burn);
+        s.execute("video.captions", &json!({"burn": true})).unwrap();
+        s.execute("video.captions", &json!({"show": false})).unwrap();
+        assert!(!s.timeline.captions.show && s.timeline.captions.burn);
+        assert_eq!(s.undo_label(), Some("Captions"));
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.timeline.captions.show && s.timeline.captions.burn);
+        // Half right is still all wrong: nothing changes.
+        assert!(s.execute("video.captions", &json!({"show": false, "burn": "yes"})).is_err());
+        assert!(s.timeline.captions.show);
     }
 
     #[test]

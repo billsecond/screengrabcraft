@@ -68,6 +68,11 @@ cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/usr/share/icons/"
 # Remove Background's model (IS-Net, Apache-2.0; assets/models/README.md), where the editor and
 # the CLI look for it: ../share/screengrabcraft/models from the programs' bin/.
 install -Dm644 "$ROOT/assets/models/isnet-general-use-int8.onnx" "$STAGE/usr/share/screengrabcraft/models/isnet-general-use-int8.onnx"
+# The speech model that makes the captions of recordings (Whisper base.en, MIT), and its licence,
+# where the capture service looks for it.
+for f in whisper-base.en-q8_0.gguf LICENSE-WHISPER.txt; do
+  install -Dm644 "$ROOT/assets/models/$f" "$STAGE/usr/share/screengrabcraft/models/$f"
+done
 mkdir -p "$STAGE/usr/share/doc/screengrabcraft"
 copy_docs "$STAGE/usr/share/doc/screengrabcraft"
 # The persistent service: the XDG autostart entry (deb/rpm: /etc/xdg/autostart) and the systemd

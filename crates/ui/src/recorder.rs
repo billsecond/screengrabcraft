@@ -17,7 +17,7 @@ use crate::theme::Tokens;
 use crate::widgets::{self, CONTROL_RADIUS, StandardButton};
 
 /// The window's size.
-pub const SIZE: Vec2 = vec2(640.0, 540.0);
+pub const SIZE: Vec2 = vec2(640.0, 584.0);
 /// The size of the Record button: larger than the others, as the window's one big action.
 const RECORD_SIZE: Vec2 = vec2(136.0, 40.0);
 const TILE: Vec2 = vec2(106.0, 76.0);
@@ -504,6 +504,22 @@ fn inputs_section(
                 });
             }
             ui.end_row();
+
+            // Captions need something to hear: the microphone (you) or the computer (the others).
+            let hears = o.microphone || (o.system_sound && d.system_sound);
+            let mut captions = o.captions && hears;
+            if switch(ui, &mut captions, "Captions", hears).changed() {
+                o.captions = captions;
+            }
+            note(
+                ui,
+                if hears {
+                    "What you and the others say, written down on this computer after the recording."
+                } else {
+                    "They need the microphone or the computer's sound."
+                },
+            );
+            ui.end_row();
         },
     );
     if o.microphone && d.microphones.is_empty() {
@@ -643,6 +659,23 @@ mod tests {
     /// Whether a switch shows on.
     fn on(h: &Harness<'_, State>, label: &str) -> bool {
         h.get_by_label(label).accesskit_node().toggled() == Some(egui::accesskit::Toggled::True)
+    }
+
+    #[test]
+    fn captions_are_on_and_need_something_to_hear() {
+        let mut h = harness(Settings::default(), devices());
+        h.run_steps(2);
+        assert!(on(&h, "Captions"));
+        press(&mut h, "Captions");
+        assert!(!h.state().settings.production.captions);
+        press(&mut h, "Captions");
+        assert!(h.state().settings.production.captions);
+        // With neither the microphone nor the computer's sound there's nothing to hear.
+        press(&mut h, "Microphone");
+        press(&mut h, "Computer sound");
+        assert!(disabled(&h, "Captions") && !on(&h, "Captions"));
+        // The choice is kept for when there is again.
+        assert!(h.state().settings.production.captions);
     }
 
     #[test]

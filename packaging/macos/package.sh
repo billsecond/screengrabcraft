@@ -21,6 +21,10 @@ HERE="$ROOT/packaging/macos"
 ICONS="$ROOT/assets/app-icon"
 # Remove Background's model (IS-Net, Apache-2.0; assets/models/README.md).
 MODEL="$ROOT/assets/models/isnet-general-use-int8.onnx"
+# The speech model that makes the captions of recordings (Whisper base.en, MIT), and its licence:
+# the capture service makes them.
+SPEECH_MODEL="$ROOT/assets/models/whisper-base.en-q8_0.gguf"
+SPEECH_LICENCE="$ROOT/assets/models/LICENSE-WHISPER.txt"
 
 ARCH=universal
 SKIP_BUILD=0
@@ -106,19 +110,21 @@ notarize() {
 }
 
 # ---- the two apps ------------------------------------------------------------------------------
-# make_app <bundle> <display name> <binary> <icns> <Info.plist template> [model]
-# The executable and the icon carry the display name (CFBundleExecutable / CFBundleIconFile). A
-# model (Remove Background's) goes in Resources/models, where the program looks for it.
+# make_app <bundle> <display name> <binary> <icns> <Info.plist template> [model files...]
+# The executable and the icon carry the display name (CFBundleExecutable / CFBundleIconFile). Model
+# files (Remove Background's for the editor, the speech model for the service) go in
+# Resources/models, where the program looks for them.
 make_app() {
-  local bundle="$1" name="$2" bin="$3" icns="$4" plist="$5" model="${6:-}"
+  local bundle="$1" name="$2" bin="$3" icns="$4" plist="$5"
+  shift 5
   echo "==> assembling $bundle"
   mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
   cp "$WORK/bin/$bin" "$bundle/Contents/MacOS/$name"
   cp "$icns" "$bundle/Contents/Resources/$name.icns"
-  if [ -n "$model" ]; then
+  for model in "$@"; do
     mkdir -p "$bundle/Contents/Resources/models"
     cp "$model" "$bundle/Contents/Resources/models/"
-  fi
+  done
   sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
     -e "s/@BUILD_SHA@/${SCREENGRABCRAFT_BUILD_SHA:-unknown}/g" \
     "$plist" >"$bundle/Contents/Info.plist"
@@ -130,7 +136,7 @@ make_app() {
   sign --options runtime --entitlements "$HERE/entitlements.plist" "$bundle"
   codesign --verify --strict --deep --verbose=2 "$bundle"
 }
-make_app "$APP" "ScreenGrabCraft" screengrabcraft "$ICONS/screengrabcraft.icns" "$HERE/Info.plist.in"
+make_app "$APP" "ScreenGrabCraft" screengrabcraft "$ICONS/screengrabcraft.icns" "$HERE/Info.plist.in" "$SPEECH_MODEL" "$SPEECH_LICENCE"
 make_app "$EDITOR_APP" "ScreenGrabCraft Editor" screengrabcraft-editor "$ICONS/screengrabcraft-editor.icns" "$HERE/Editor-Info.plist.in" "$MODEL"
 
 if [ "$NOTARIZE" = 1 ]; then

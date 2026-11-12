@@ -18,6 +18,7 @@ use std::thread::JoinHandle;
 
 use crate::MediaError;
 use crate::av1::{Av1Encoder, Av1Settings, Coded};
+use crate::captions::Cue;
 use crate::compose::{self, Composer};
 use crate::mp4::{AudioTrack, Mp4Writer, Sample, VideoTrack};
 use crate::opus::{self, OpusEncoder};
@@ -83,6 +84,7 @@ struct Job {
     end: u64,
     rec: Arc<Recording>,
     timeline: Arc<Timeline>,
+    captions: Option<Arc<Vec<Cue>>>,
 }
 
 type Done = (usize, Result<Vec<Coded>, MediaError>);
@@ -105,6 +107,8 @@ pub struct Exporter {
     written: usize,
     /// The newest recording and edits it was handed (the sound is mixed from them).
     latest: Option<(Arc<Recording>, Arc<Timeline>)>,
+    /// Captions burned into the pictures (timeline time).
+    captions: Option<Arc<Vec<Cue>>>,
     finished: bool,
 }
 
@@ -171,12 +175,19 @@ impl Exporter {
             sent: 0,
             written: 0,
             latest: None,
+            captions: None,
             finished: false,
         })
     }
 
     fn fps(&self) -> u64 {
         u64::from(self.av1.fps)
+    }
+
+    /// Burns these captions (in timeline time) into the pictures of the stretches started from
+    /// now on.
+    pub fn set_captions(&mut self, cues: Option<Arc<Vec<Cue>>>) {
+        self.captions = cues;
     }
 
     /// Pictures in `length` µs.
@@ -195,7 +206,7 @@ impl Exporter {
     }
 
     fn send(&mut self, k: usize, end: u64, rec: &Arc<Recording>, timeline: &Arc<Timeline>) -> Result<(), MediaError> {
-        let job = Job { k, end, rec: rec.clone(), timeline: timeline.clone() };
+        let job = Job { k, end, rec: rec.clone(), timeline: timeline.clone(), captions: self.captions.clone() };
         let sent = self.jobs.as_ref().map(|j| j.send(job).is_ok()).unwrap_or(false);
         if !sent {
             return Err(MediaError::Encode("the encoders stopped".to_string()));
@@ -346,6 +357,7 @@ impl Drop for Exporter {
 fn encode(job: &Job, av1: Av1Settings, fps: u32, cancel: &AtomicBool) -> Result<Vec<Coded>, MediaError> {
     let per = STRETCH_SECS * u64::from(fps);
     let mut composer = Composer::new(job.rec.clone(), &job.timeline, av1.width, av1.height);
+    composer.set_captions(job.captions.clone());
     let mut enc = Av1Encoder::new(av1)?;
     let mut coded = Vec::with_capacity(per as usize);
     for f in (job.k as u64 * per)..job.end {
@@ -371,6 +383,19 @@ pub fn export(
     progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Result<Exported, MediaError> {
+    export_with_captions(rec, timeline, None, out, s, progress, cancel)
+}
+
+/// [`export`], with captions (in timeline time) burned into the pictures.
+pub fn export_with_captions(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    captions: Option<Arc<Vec<Cue>>>,
+    out: &Path,
+    s: ExportSettings,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
     if timeline.length() == 0 {
         return Err(MediaError::Encode("there's nothing left to make a video of".to_string()));
     }
@@ -381,7 +406,8 @@ pub fn export(
     let with_sound = timeline.tracks.iter().any(|t| !t.kind.is_video() && !t.muted && !t.clips.is_empty());
     // The caller's cancel is watched here and passed on to the encoders.
     let stop = Arc::new(AtomicBool::new(false));
-    let exporter = Exporter::new(out, w, h, with_sound, s, stop.clone())?;
+    let mut exporter = Exporter::new(out, w, h, with_sound, s, stop.clone())?;
+    exporter.set_captions(captions);
     std::thread::scope(|scope| {
         let watcher = scope.spawn(|| {
             while !stop.load(Ordering::SeqCst) {

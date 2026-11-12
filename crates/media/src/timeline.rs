@@ -97,12 +97,34 @@ impl Default for CameraLayout {
     }
 }
 
+/// Whether the captions show: on the picture in the editor, and burned into the video made.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionOptions {
+    #[serde(default = "yes")]
+    pub show: bool,
+    #[serde(default)]
+    pub burn: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for CaptionOptions {
+    fn default() -> CaptionOptions {
+        CaptionOptions { show: true, burn: false }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     pub tracks: Vec<Track>,
     #[serde(default)]
     pub camera: CameraLayout,
+    #[serde(default)]
+    pub captions: CaptionOptions,
 }
 
 impl Timeline {
@@ -118,7 +140,7 @@ impl Timeline {
                 Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips }
             })
             .collect();
-        Timeline { tracks, camera: CameraLayout::default() }
+        Timeline { tracks, camera: CameraLayout::default(), captions: CaptionOptions::default() }
     }
 
     /// Edits read from a file, made safe for this recording: tracks it doesn't have go, tracks
@@ -156,7 +178,7 @@ impl Timeline {
             tracks.push(t);
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
-        Timeline { tracks, camera: self.camera }
+        Timeline { tracks, camera: self.camera, captions: self.captions }
     }
 
     /// How long the edited video is: to the end of the last clip.
@@ -313,7 +335,11 @@ mod tests {
 
     fn two_tracks() -> Timeline {
         let full = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }] };
-        Timeline { tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)], camera: CameraLayout::default() }
+        Timeline {
+            tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
+            camera: CameraLayout::default(),
+            captions: CaptionOptions::default(),
+        }
     }
 
     #[test]

@@ -319,6 +319,14 @@
       <Component Id="BackgroundModel" Directory="MODELSFOLDER" Guid="F4C1D861-7EB5-42E6-8C81-3A4587B9C577">
         <File Id="BackgroundModelFile" Source="$(var.BinDir)\models\isnet-general-use-int8.onnx" KeyPath="yes" />
       </Component>
+
+      <!-- The speech model that makes the captions of recordings (Whisper base.en, OpenAI, MIT;
+           see assets/models/README.md) and its licence, in models\ beside the capture service,
+           which makes them. -->
+      <Component Id="SpeechModel" Directory="MODELSFOLDER" Guid="3C39E363-D99C-4E73-BDDA-A74A598C0661">
+        <File Id="SpeechModelFile" Source="$(var.BinDir)\models\whisper-base.en-q8_0.gguf" KeyPath="yes" />
+        <File Id="SpeechModelLicence" Source="$(var.BinDir)\models\LICENSE-WHISPER.txt" />
+      </Component>
     </ComponentGroup>
   </Fragment>
 </Wix>
