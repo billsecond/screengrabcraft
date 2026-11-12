@@ -17,6 +17,7 @@ screengrabcraft-render = { path = "crates/render" }
 screengrabcraft-media = { path = "crates/media" }
 screengrabcraft-capture = { path = "crates/capture" }
 screengrabcraft-matte = { path = "crates/matte" }
+screengrabcraft-speech = { path = "crates/speech" }
 screengrabcraft-engine = { path = "crates/engine" }
 screengrabcraft-ui = { path = "crates/ui" }
 screengrabcraft-desktop = { path = "crates/desktop" }
@@ -47,6 +48,13 @@ lz4_flex = { version = "0.14", default-features = false, features = ["safe-encod
 crc32fast = "1.4"
 rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }
 rusty-opus = "1.0.2"
+
+# Speech to text after a recording (Whisper, on the processor): the tensor library written in
+# Rust, its FFT, and casts for aligned copies. Not in the browser build.
+candle-core = { version = "0.11.1", default-features = false }
+candle-nn = { version = "0.11.1", default-features = false }
+rustfft = "6.4.1"
+bytemuck = "1.25"
 
 # ui
 egui = "0.36"

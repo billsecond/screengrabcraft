@@ -95,6 +95,15 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 - Undo and redo everything. The edits are saved into the recording file a moment after each
   change (the recording itself is never changed), and File › Revert to Recording brings every
   track back whole.
+- **Captions**: after a Video Production recording, what you said (the microphone, "You") and
+  what the others said (the computer's sound, "Others") is written down on this computer, in
+  the background: one thread at the lowest priority, never while recording, about a twelfth of
+  the recording's length (Whisper base, English; nothing is sent anywhere). They appear on their
+  own row under the tracks and follow your edits. **Show** puts them on the picture, **In video**
+  burns them into the MP4, and an `.srt` and a `.txt` are saved beside the recording (and beside
+  each MP4 made, as it was edited). When you use speakers rather than headphones, the others
+  heard again by your microphone aren't written down twice. Turn them off with Captions in the
+  Recorder; File › Make Captions makes them for a recording that has none.
 
 ## Editing
 

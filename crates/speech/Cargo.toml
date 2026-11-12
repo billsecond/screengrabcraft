@@ -1,0 +1,25 @@
+[package]
+name = "screengrabcraft-speech"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Hearing what was said in a recording, on this computer: Whisper run on the processor by candle, each sound track on its own"
+
+[lints]
+workspace = true
+
+[dependencies]
+screengrabcraft-media = { workspace = true }
+# The tensor library written in Rust (no C++, no GPU here): its 8-bit matrix kernels run the
+# decoder, its float ones the encoder.
+candle-core = { workspace = true }
+candle-nn = { workspace = true }
+rustfft = { workspace = true }
+# Aligned copies of the model's weights (candle reads them in place).
+bytemuck = { workspace = true }
+log = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

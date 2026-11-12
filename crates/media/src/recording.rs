@@ -4,7 +4,7 @@
 //!
 //! The file is only ever added to, chunk by chunk, so a recording that stopped halfway (the
 //! program or the computer went down) still opens with everything written up to then. Edits
-//! are added as chunks too; the last one counts.
+//! and captions are added as chunks too; the last of each counts.
 //!
 //! ```text
 //! file  := "SGVIDEO\x01" chunk*
@@ -16,6 +16,7 @@
 //!         kind 2 (JPEG):  the picture as a JPEG (the camera)
 //! AUDI  stream:u8 first:u64 (sample number at 48 kHz) i16 samples, interleaved
 //! EDIT  JSON Timeline
+//! CAPS  JSON Captions: what was said, added once they are made
 //! DONE  JSON Finished
 //! ```
 //!
@@ -29,6 +30,7 @@ use std::sync::Mutex;
 use screengrabcraft_model::Raster;
 use serde::{Deserialize, Serialize};
 
+use crate::captions::Captions;
 use crate::timeline::Timeline;
 
 pub const EXT: &str = "sgvideo";
@@ -271,6 +273,42 @@ pub fn edit_bytes(timeline: &Timeline) -> Result<Vec<u8>, RecordingError> {
     Ok(out)
 }
 
+/// The captions as the chunk to add to the end of a recording file.
+pub fn captions_bytes(captions: &Captions) -> Result<Vec<u8>, RecordingError> {
+    let json = serde_json::to_vec(captions).map_err(|e| RecordingError::Damaged(e.to_string()))?;
+    let mut out = Vec::with_capacity(json.len() + 12);
+    chunk(&mut out, b"CAPS", &json)?;
+    Ok(out)
+}
+
+/// How much of a recording's end is looked through for its captions.
+const CAPTIONS_TAIL: u64 = 32 * 1024 * 1024;
+
+/// The captions last added to a recording, found from its end (they're added after it, and
+/// only edits come after them), so it's quick however long the recording is; none if there are
+/// none there. Kept inside `duration_us`.
+pub fn last_captions(source: &dyn Source, duration_us: u64) -> Option<Captions> {
+    let len = source.len();
+    let from = len.saturating_sub(CAPTIONS_TAIL);
+    let tail = source.read_at(from, usize::try_from(len - from).ok()?).ok()?;
+    let mut found = None;
+    let mut i = 0usize;
+    while let Some(p) = tail.get(i..).and_then(|t| t.windows(4).position(|w| w == b"CAPS")) {
+        let at = i + p;
+        let body = u32_at(&tail, at + 4)
+            .zip(u32_at(&tail, at + 8))
+            .and_then(|(size, crc)| tail.get(at + 12..(at + 12).checked_add(size as usize)?).filter(|b| crc32fast::hash(b) == crc));
+        match body.and_then(|b| serde_json::from_slice::<Captions>(b).ok().map(|c| (c, b.len()))) {
+            Some((c, n)) => {
+                found = Some(c);
+                i = at + 12 + n;
+            }
+            None => i = at + 1,
+        }
+    }
+    found.map(|c| c.checked(duration_us))
+}
+
 /// Whether these bytes start like a recording file.
 pub fn sniff(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
@@ -358,6 +396,8 @@ pub struct Recording {
     audio: BTreeMap<u8, Vec<AudioEntry>>,
     /// The last edits saved, if any.
     pub timeline: Option<Timeline>,
+    /// The captions made of it, if they have been.
+    pub captions: Option<Captions>,
     /// Whether it was finished properly (else it stopped halfway and is what was saved).
     pub finished: bool,
     /// How long it is, in µs.
@@ -388,6 +428,7 @@ impl Recording {
         let mut frames: BTreeMap<u8, Vec<FrameEntry>> = BTreeMap::new();
         let mut audio: BTreeMap<u8, Vec<AudioEntry>> = BTreeMap::new();
         let mut timeline = None;
+        let mut captions = None;
         let mut finished = None;
         while at + 12 <= len {
             let head = source.read_at(at, 12)?;
@@ -437,6 +478,10 @@ impl Recording {
                     Ok(t) => timeline = Some(t),
                     Err(e) => log::warn!("edits in a recording could not be read: {e}"),
                 },
+                b"CAPS" => match serde_json::from_slice::<Captions>(&peek) {
+                    Ok(c) => captions = Some(c),
+                    Err(e) => log::warn!("captions in a recording could not be read: {e}"),
+                },
                 b"DONE" => finished = serde_json::from_slice::<Finished>(&peek).ok(),
                 _ => {}
             }
@@ -455,7 +500,8 @@ impl Recording {
             None => last_frame.max(last_sound),
         }
         .min(MAX_DURATION_US);
-        let mut rec = Recording { source, header, frames, audio, timeline, finished: finished.is_some(), duration_us };
+        let captions = captions.map(|c: Captions| c.checked(duration_us));
+        let mut rec = Recording { source, header, frames, audio, timeline, captions, finished: finished.is_some(), duration_us };
         if let Some(t) = rec.timeline.take() {
             rec.timeline = Some(t.checked(&rec));
         }
@@ -705,6 +751,36 @@ mod tests {
                 let _ = rec.sound(1, 0, 30_000);
             }
         }
+    }
+
+    #[test]
+    fn captions_added_later_are_read_back_and_the_last_counts() {
+        use crate::captions::{Cue, Speaker};
+        let mut bytes = record(10, true);
+        let caps = |text: &str| Captions {
+            cues: vec![Cue { start: 100_000, end: 9_000_000, speaker: Speaker::You, text: text.to_string() }],
+            model: "test".into(),
+        };
+        assert!(Recording::open(Box::new(bytes.clone())).unwrap().captions.is_none());
+        bytes.extend(captions_bytes(&caps("first")).unwrap());
+        bytes.extend(edit_bytes(&Timeline::new(&Recording::open(Box::new(bytes.clone())).unwrap())).unwrap());
+        bytes.extend(captions_bytes(&caps("second")).unwrap());
+        let rec = Recording::open(Box::new(bytes.clone())).unwrap();
+        let got = rec.captions.unwrap();
+        assert_eq!(got.cues[0].text, "second");
+        // Kept inside the recording (one second long).
+        assert_eq!(got.cues[0].end, 1_000_000);
+        assert!(rec.timeline.is_some());
+        // Captions that aren't JSON are let be; the rest of the file still reads.
+        let mut bad = bytes.clone();
+        let mut junk = Vec::new();
+        chunk(&mut junk, b"CAPS", b"{not json").unwrap();
+        bad.extend(junk);
+        assert_eq!(Recording::open(Box::new(bad.clone())).unwrap().captions.unwrap().cues[0].text, "second");
+        // Found from the end just the same, without reading the whole recording.
+        assert_eq!(last_captions(&bad, 1_000_000).unwrap().cues[0].text, "second");
+        assert!(last_captions(&record(3, true), 1_000_000).is_none());
+        assert!(last_captions(&b"CAPS\xff\xff\xff\xff".to_vec(), 1).is_none());
     }
 
     #[test]

@@ -1120,6 +1120,7 @@ mod tests {
             microphone_name: None,
             camera: false,
             camera_index: None,
+            captions: false,
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1230,6 +1231,7 @@ mod tests {
                 microphone_name: std::env::var("SGC_MIC").ok(),
                 camera: true,
                 camera_index: None,
+                captions: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -1361,6 +1363,7 @@ mod tests {
                 microphone_name: None,
                 camera: false,
                 camera_index: None,
+                captions: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),

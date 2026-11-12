@@ -1,6 +1,6 @@
 //! Video: the recording file with a track per source ([`recording`]), the edits to it
-//! ([`timeline`]), and making MP4 files from pictures and sound ([`mp4`], [`av1`], [`opus`],
-//! [`yuv`]).
+//! ([`timeline`]), what was said in it ([`captions`]), and making MP4 files from pictures and
+//! sound ([`mp4`], [`av1`], [`opus`], [`yuv`]).
 //!
 //! Layer L2: Rust only, no I/O beyond what it's handed. The encoders are not in the browser
 //! build.
@@ -8,6 +8,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod av1;
+pub mod captions;
 pub mod compose;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;

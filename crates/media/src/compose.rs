@@ -1,10 +1,12 @@
 //! What the edited video shows and plays at a moment: the screen's picture with the camera's
-//! on top in a corner ([`Composer`]), and the sound tracks mixed ([`mix`]).
+//! on top in a corner and the captions at the bottom ([`Composer`]), and the sound tracks mixed
+//! ([`mix`]).
 
 use std::sync::Arc;
 
 use screengrabcraft_model::Raster;
 
+use crate::captions::{self, Cue, Speaker};
 use crate::recording::{FrameEntry, Recording, ScreenDecoder, StreamKind};
 use crate::timeline::{CameraShape, Corner, Timeline};
 
@@ -33,6 +35,8 @@ pub struct Composer {
     camera: Option<(usize, u8)>,
     /// The last camera picture decoded, and which it was.
     camera_frame: Option<(usize, Raster)>,
+    /// Captions drawn on the picture (in timeline time), if any.
+    captions: Option<Arc<Vec<Cue>>>,
     pub width: u32,
     pub height: u32,
 }
@@ -42,7 +46,7 @@ impl Composer {
     pub fn new(rec: Arc<Recording>, timeline: &Timeline, width: u32, height: u32) -> Composer {
         let screen = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i).map(|t| (i, ScreenDecoder::new(t.stream))));
         let camera = timeline.find(StreamKind::Camera).and_then(|i| timeline.tracks.get(i).map(|t| (i, t.stream)));
-        Composer { rec, screen, camera, camera_frame: None, width: width.max(2), height: height.max(2) }
+        Composer { rec, screen, camera, camera_frame: None, captions: None, width: width.max(2), height: height.max(2) }
     }
 
     /// The picture at timeline time `t` µs. A hidden track (`muted`) isn't in it: without the
@@ -73,7 +77,16 @@ impl Composer {
                 fill_camera(&mut out, &cam);
             }
         }
+        if let Some(cues) = &self.captions {
+            draw_captions(&mut out, &captions::showing(cues, t));
+        }
         out
+    }
+
+    /// Captions to draw on the pictures (in timeline time, see
+    /// [`captions::Captions::on_timeline`]), or none.
+    pub fn set_captions(&mut self, cues: Option<Arc<Vec<Cue>>>) {
+        self.captions = cues;
     }
 
     /// The camera's picture at `src`: the last one up to then, unless the camera had stopped
@@ -156,6 +169,74 @@ fn coverage(shape: CameraShape, x: f32, y: f32, w: f32, h: f32) -> f32 {
             let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
             (0.5 - outside).clamp(0.0, 1.0)
         }
+    }
+}
+
+/// The colour of a speaker's captions on the picture: the others' white, yours yellow.
+pub fn caption_colour(speaker: Speaker) -> screengrabcraft_model::Color {
+    match speaker {
+        Speaker::Others => screengrabcraft_model::Color::WHITE,
+        Speaker::You => screengrabcraft_model::Color::rgb(0xFF, 0xE4, 0x5C),
+    }
+}
+
+/// The most lines of a caption shown on the picture.
+const CAPTION_LINES: usize = 3;
+
+/// Draws caption lines near the bottom of the picture, centred, each on a dark band (the
+/// others' above yours when both speak).
+pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
+    use screengrabcraft_model::{Pt, Rect, Style, TextAlign};
+    use screengrabcraft_render::{draw, text};
+    if lines.is_empty() || out.width() < 16 || out.height() < 16 {
+        return;
+    }
+    let (w, h) = (out.width() as f32, out.height() as f32);
+    let size = (h * 0.045).clamp(10.0, 96.0);
+    let (pad_x, pad_y, gap) = (size * 0.45, size * 0.18, size * 0.3);
+    let mut blocks = Vec::with_capacity(lines.len());
+    for c in lines.iter().take(2) {
+        let style = Style { font_size: size, bold: true, text_color: caption_colour(c.speaker), align: TextAlign::Center, ..Style::default() };
+        let mut lay = text::layout(&c.text, &style, Some(w * 0.86 - 2.0 * pad_x));
+        lay.lines.truncate(CAPTION_LINES);
+        lay.width = lay.lines.iter().map(|l| l.width).fold(0.0, f32::max);
+        lay.height = lay.line_height * lay.lines.len() as f32;
+        if !lay.lines.is_empty() && lay.width > 0.0 {
+            blocks.push((lay, style));
+        }
+    }
+    let total: f32 = blocks.iter().map(|(l, _)| l.height + 2.0 * pad_y).sum::<f32>() + gap * blocks.len().saturating_sub(1) as f32;
+    let bottom = h - (h * 0.06).max(4.0);
+    let top = (bottom - total).max(0.0);
+    // Only the rows the captions cover are drawn on.
+    let (y0, y1) = (top.floor() as u32, (bottom.ceil() as u32).min(out.height()));
+    let row = out.width() as usize * 4;
+    let (from, to) = (y0 as usize * row, y1 as usize * row);
+    let Some(band) = out.pixels().get(from..to).map(<[u8]>::to_vec) else { return };
+    let Some(size_px) = tiny_skia::IntSize::from_wh(out.width(), y1.saturating_sub(y0)) else { return };
+    let Some(mut canvas) = tiny_skia::Pixmap::from_vec(band, size_px) else { return };
+    let shift = tiny_skia::Transform::from_translate(0.0, -(y0 as f32));
+    let mut y = top;
+    for (lay, style) in &blocks {
+        let bw = lay.width + 2.0 * pad_x;
+        let bh = lay.height + 2.0 * pad_y;
+        let x = ((w - bw) / 2.0).max(0.0);
+        if let Some(back) = draw::rounded_rect(Rect::new(x, y, bw, bh), size * 0.22) {
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color(tiny_skia::Color::from_rgba8(0, 0, 0, 165));
+            paint.anti_alias = true;
+            canvas.fill_path(&back, &paint, tiny_skia::FillRule::Winding, shift, None);
+        }
+        if let Some(path) = text::text_path(lay, style, Pt::new(x + pad_x, y + pad_y), lay.width) {
+            let mut paint = tiny_skia::Paint::default();
+            paint.set_color(draw::skia_color(style.text_color, 1.0));
+            paint.anti_alias = true;
+            canvas.fill_path(&path, &paint, tiny_skia::FillRule::Winding, shift, None);
+        }
+        y += bh + gap;
+    }
+    if let Some(dst) = out.pixels_mut().get_mut(from..to) {
+        dst.copy_from_slice(canvas.data());
     }
 }
 
@@ -359,6 +440,48 @@ mod tests {
             let mut out = Raster::filled(ow, oh, Color::BLACK).unwrap();
             fill_camera(&mut out, &Raster::filled(cw, ch, Color::WHITE).unwrap());
             assert!(out.pixels().as_chunks::<4>().0.iter().any(|p| p[0] == 255), "{cw}x{ch} into {ow}x{oh}");
+        }
+    }
+
+    #[test]
+    fn captions_are_drawn_at_the_bottom_in_each_speakers_colour() {
+        let r = rec();
+        let tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 320, 180);
+        let cues = vec![
+            Cue { start: 0, end: 1_000_000, speaker: Speaker::You, text: "Hello there".into() },
+            Cue { start: 500_000, end: 1_500_000, speaker: Speaker::Others, text: "Hi".into() },
+        ];
+        c.set_captions(Some(Arc::new(cues)));
+        let bright = |f: &Raster, rows: std::ops::Range<u32>, yellow: bool| {
+            rows.flat_map(|y| (0..f.width()).map(move |x| (x, y)))
+                .filter_map(|(x, y)| f.pixel(x, y))
+                .any(|p| p.r > 200 && p.g > 200 && if yellow { p.b < 150 } else { p.b > 200 })
+        };
+        // At 0.2 s only your line: yellow, in the bottom third, nothing at the top.
+        let f = c.frame(&tl, 200_000);
+        assert!(bright(&f, 120..180, true));
+        assert!(!bright(&f, 0..100, true) && !bright(&f, 0..180, false));
+        // At 0.7 s both: the others' white one too.
+        let f = c.frame(&tl, 700_000);
+        assert!(bright(&f, 90..180, false) && bright(&f, 90..180, true));
+        // Past both, none.
+        let f = c.frame(&tl, 1_600_000);
+        assert!(!bright(&f, 0..180, true) && !bright(&f, 0..180, false));
+        // At a video's size, for the eye (SGC_SHOTS=<folder>).
+        if let Ok(dir) = std::env::var("SGC_SHOTS") {
+            let mut pic = Raster::filled(1280, 720, Color::rgb(0xE8, 0xEC, 0xF2)).unwrap();
+            let you = Cue { start: 0, end: 1, speaker: Speaker::You, text: "Here's the new login page: the button moved to the top right.".into() };
+            let them = Cue { start: 0, end: 1, speaker: Speaker::Others, text: "It looks good to me.".into() };
+            draw_captions(&mut pic, &[&them, &you]);
+            let png = screengrabcraft_render::encode(&pic, screengrabcraft_model::ImageFormat::Png, 90).unwrap();
+            std::fs::write(format!("{dir}/burned-captions.png"), png).unwrap();
+        }
+        // Any size of picture, any text: never a panic.
+        for (w, h) in [(1, 1), (16, 16), (17, 3000), (3000, 17)] {
+            let mut pic = Raster::filled(w, h, Color::BLACK).unwrap();
+            let long = Cue { start: 0, end: 1, speaker: Speaker::Others, text: "word ".repeat(80) };
+            draw_captions(&mut pic, &[&long, &long, &long]);
         }
     }
 

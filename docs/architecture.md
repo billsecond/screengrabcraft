@@ -1,8 +1,8 @@
 # Architecture
 
-> **Last updated:** 2026-11-02 · **Change:** the `matte` crate and making the background transparent
+> **Last updated:** 2026-11-12 · **Change:** the `speech` crate and the captions of recordings
 
-ScreenGrabCraft is a Cargo workspace of seven library crates in layers and four programs. A crate
+ScreenGrabCraft is a Cargo workspace of nine library crates in layers and four programs. A crate
 may depend only on crates in lower layers (`cargo xtask layers` checks it), and nothing below L6
 knows about a user interface.
 
@@ -13,7 +13,7 @@ L6   desktop ─────────────┤                         
      (settings, log,      │                           │   (editor, overlay)    │                   │
       instance, service)  │                           │                        │                   │
 L4                        │                     engine (Session, undo, command registry)           │
-L3   capture (monitors, windows, pixels: xcap · x11rb · portal)   matte (background model: tract)│
+L3   capture (monitors, windows, pixels: xcap · x11rb · portal)   matte (background: tract)   speech (captions: candle)│
 L2                              render (tiny-skia drawing, text, effects, codecs, PDF, projects, stitching, GIF)
 L1                              model (document, shapes, styles, geometry, settings)
 ```
@@ -25,6 +25,7 @@ L1                              model (document, shapes, styles, geometry, setti
 | `media` | yes (no encoders) | video: the recording file (`recording`: append-only chunks, a track per source), the `Timeline` of edits, the `Composer` (the frame at a moment, the camera in its corner) and `mix` (the sound), the MP4 writer, AV1 (rav1e) and Opus (rusty-opus) encoders and the parallel `export` |
 | `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
 | `matte` | no | Remove Background's model: an ONNX salient-object model (IS-Net, U²-Net, BiRefNet) run by tract, the runtime written in Rust; the picture shrunk to the model's square, its answer stretched back as a soft matte. The host reads the model file; `desktop::models` finds it |
+| `speech` | no | The captions of recordings: Whisper (base.en, 8-bit GGUF) run by candle on the processor, each sound track heard on its own (the microphone "You", the computer's sound "Others"), only where something is said, the speakers' echo left out. The capture service runs it as a program of its own; `desktop::models` finds the model |
 | `engine` | yes | `Session` (document, selection, undo/redo, interactive edits), `COMMANDS` |
 | `ui` | yes | `Editor` (menus, tool bar, canvas, properties, recent strip, dialogs), `Overlay` (the capture overlay), `Services` (what the host provides) |
 | `desktop` | no | paths, settings files, logging, the background model's file, one instance and hand-over, clipboard, the sign-in service and supervisor, launching the other program, the tray icon's pixels, the Windows graphics backend, the update check (the only network code: HTTPS to GitHub's releases, the installer downloaded, checked and run on Windows) |
@@ -114,6 +115,27 @@ video (`media::compose::fill_camera`).
 recording) changed by the engine's `video.*` commands in a `VideoSession` (undo, redo, a drag as
 one step). The editor adds the timeline to the end of the recording file a moment after each
 change; the last one counts. The recording itself never changes.
+
+**Captions** (`speech`, run by the capture service): after a Video Production recording the
+service queues it (`apps/screengrabcraft/src/captions.rs`) and, when nothing is being recorded,
+starts itself again as `screengrabcraft --transcribe <recording>` at the lowest priority, with
+`CANDLE_NUM_THREADS=1` (candle sizes its thread pools from it when it starts, so only a new
+program can be given it; one thread costs the least processor time). A recording starting stops
+it; it's made again after. That program reads the model (`desktop::models::speech_model`, a
+`whisper….gguf` beside the programs) and hears each sound track on its own: the microphone is
+"You", the computer's sound "Others". `speech::audio` finds the stretches with something said
+(20 ms levels, louder than the track's quiet by 12 dB) and puts them end to end with short pauses
+between, so silence costs nothing; the microphone's moments when the computer was clearly louder
+are left out (the speakers, heard again). Whisper base.en runs on candle (`speech::model`: the
+decoder keeps its past keys and values; its matrices in 8 bits, the encoder's widened to floats)
+with OpenAI's greedy decoding and timestamp rules (`speech::decode`). Lines are cut to subtitle
+size, and a line of yours that overlaps one of theirs while the computer was the louder (or with
+their words) is dropped (`speech::echo`). The captions are added to the recording (a `CAPS` chunk)
+and written beside it as `.srt` and `.txt`; the editor, told by the service that they're coming,
+looks for the `.srt` and then reads them from the recording's end (`recording::last_captions`).
+On the timeline they follow the clips of the track they were heard on
+(`Captions::on_timeline`); `video.captions` switches them on the picture (the `Composer` draws
+them) and into the MP4.
 
 **Making the MP4** (`media::export`): the edited video is cut into two-second stretches, each
 starting with a key frame; several are encoded at once, one rav1e encoder each, and written in

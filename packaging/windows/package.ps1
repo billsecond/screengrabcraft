@@ -101,11 +101,14 @@ Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
 $Exes = $Programs | ForEach-Object { Join-Path $Stage $_[0] }
 foreach ($check in $Programs) { Copy-Item (Join-Path $Bin $check[0]) $Stage }
-# Remove Background's model, in models\ beside the programs (where they look for it).
-$Model = Join-Path $Root 'assets\models\isnet-general-use-int8.onnx'
-if (-not (Test-Path $Model)) { throw "the background model is missing: $Model" }
+# Remove Background's model, and the speech model that makes the captions of recordings (with
+# its licence), in models\ beside the programs (where they look for them).
 New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'models') | Out-Null
-Copy-Item $Model (Join-Path $Stage 'models')
+foreach ($m in 'isnet-general-use-int8.onnx', 'whisper-base.en-q8_0.gguf', 'LICENSE-WHISPER.txt') {
+  $Model = Join-Path $Root "assets\models\$m"
+  if (-not (Test-Path $Model)) { throw "a model file is missing: $Model" }
+  Copy-Item $Model (Join-Path $Stage 'models')
+}
 
 & (Join-Path $PSScriptRoot 'sign.ps1') @Exes
 
@@ -125,9 +128,10 @@ function ConvertTo-RtfText([string] $Text) {
 }
 $paragraphs = [System.Collections.Generic.List[string]]::new()
 $paragraphs.Add('\b ScreenGrabCraft\b0')
-$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (PatroneOS Sans and PatroneOS Mono, https://patroneos.com/fonts) are under the SIL Open Font License 1.1, which follows them. The background model Remove Background runs (IS-Net general use, Xuebin Qin et al., https://github.com/xuebinqin/DIS, its weights kept in 8 bits) is under the Apache License, Version 2.0. Every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
+$paragraphs.Add((ConvertTo-RtfText 'ScreenGrabCraft is dual-licensed under the MIT License or the Apache License, Version 2.0, at your option. Both license texts follow. The fonts built into the programs (PatroneOS Sans and PatroneOS Mono, https://patroneos.com/fonts) are under the SIL Open Font License 1.1, which follows them. The background model Remove Background runs (IS-Net general use, Xuebin Qin et al., https://github.com/xuebinqin/DIS, its weights kept in 8 bits) is under the Apache License, Version 2.0. The speech model that makes the captions of recordings (Whisper base.en, OpenAI, https://github.com/openai/whisper, its large weights kept in 8 bits) is under the MIT License; its notice follows the fonts'' licence. Every asset is listed in ATTRIBUTION.md at https://github.com/billsecond/screengrabcraft.'))
 $LicenseFiles = @((Join-Path $Root 'LICENSE-MIT'), (Join-Path $Root 'LICENSE-APACHE')) +
-  @(Get-ChildItem -Path (Join-Path $Root 'assets\fonts\OFL-*.txt') -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName })
+  @(Get-ChildItem -Path (Join-Path $Root 'assets\fonts\OFL-*.txt') -ErrorAction SilentlyContinue | Sort-Object Name | ForEach-Object { $_.FullName }) +
+  @((Join-Path $Root 'assets\models\LICENSE-WHISPER.txt'))
 foreach ($file in $LicenseFiles) {
   $title = $true  # each file opens with its license's name (or the font's copyright): show it bold
   foreach ($para in ((Get-Content -Raw $file) -split '\r?\n\s*\r?\n')) {

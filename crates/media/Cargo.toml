@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 screengrabcraft-model = { workspace = true }
 screengrabcraft-render = { workspace = true }
+tiny-skia = { workspace = true }
 image = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

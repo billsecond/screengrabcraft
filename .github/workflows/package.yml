@@ -154,7 +154,7 @@ jobs:
           $p = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", 'ALLUSERS=2', 'MSIINSTALLPERUSER=1', '/qn', '/norestart', '/l*v', $log) -Wait -PassThru
           if ($p.ExitCode -ne 0) { Get-Content $log -Tail 60; throw "per-user install failed ($($p.ExitCode))" }
           $dir = Join-Path $env:LOCALAPPDATA 'Programs\ScreenGrabCraft'
-          foreach ($f in 'screengrabcraft.exe', 'screengrabcraft-editor.exe', 'screengrabcraft-cli.exe', 'models\isnet-general-use-int8.onnx') {
+          foreach ($f in 'screengrabcraft.exe', 'screengrabcraft-editor.exe', 'screengrabcraft-cli.exe', 'models\isnet-general-use-int8.onnx', 'models\whisper-base.en-q8_0.gguf') {
             if (-not (Test-Path (Join-Path $dir $f))) { throw "$f missing in $dir" }
           }
           if (Test-Path (Join-Path $env:ProgramFiles 'ScreenGrabCraft')) { throw 'the per-user install wrote to Program Files' }

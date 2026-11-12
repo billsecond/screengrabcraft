@@ -21,3 +21,4 @@
 *.onnx binary
 # Model weights: binary, never touched by line-end conversion.
 *.onnx binary
+*.gguf binary

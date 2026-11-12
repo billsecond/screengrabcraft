@@ -2,6 +2,7 @@
 //! recent captures and the capture service. The desktop program and the browser build each
 //! provide their own; anything a host can't do has a default that says so.
 
+use screengrabcraft_media::captions::{Captions, Cue};
 use screengrabcraft_media::recording::{Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
@@ -66,6 +67,10 @@ pub struct VideoJob {
     /// The largest it's made.
     pub max_size: (u32, u32),
     pub fps: u32,
+    /// The captions as they fall on the edited video, if there are some: written beside it
+    /// (`.srt` and `.txt`), and burned into its pictures if `burn`.
+    pub captions: Option<Vec<Cue>>,
+    pub burn: bool,
 }
 
 /// Sound the host is playing; dropping it stops it.
@@ -201,6 +206,18 @@ pub trait Services {
 
     /// Opens a file in the program the system uses for it (a video in its player).
     fn open_with_system(&self, _path: &str) {}
+
+    /// A recording's captions when the file beside it that says they're made (`.srt`) has
+    /// changed since `seen` (a time of the host's, 0 at first): that time, and the recording's
+    /// captions if it has some. Cheap to ask again and again.
+    fn poll_captions(&self, _recording: &str, _seen: u64) -> Option<(u64, Option<Captions>)> {
+        None
+    }
+
+    /// Asks for a recording's captions to be made (by the capture service, in the background).
+    fn make_captions(&self, _recording: &str) -> Result<(), String> {
+        Err("captions are made by the ScreenGrabCraft capture service on the desktop".to_string())
+    }
 
     /// The model Remove Background runs (on a thread of the editor's own; reading its file is
     /// left to the model's first use), or why there is none here.

@@ -8,7 +8,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use screengrabcraft_desktop::{clipboard, launch, paths, store};
-use screengrabcraft_media::recording::{FileSource, Recording, Source};
+use screengrabcraft_media::captions::Captions;
+use screengrabcraft_media::recording::{self, FileSource, Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
@@ -378,6 +379,22 @@ impl Services for DesktopServices {
         if let Err(e) = launch::open_file(Path::new(path)) {
             log::warn!("opening a video: {e}");
         }
+    }
+
+    fn poll_captions(&self, rec: &str, seen: u64) -> Option<(u64, Option<Captions>)> {
+        // The capture service writes the .srt last, once the captions are in the recording.
+        let srt = Path::new(rec).with_extension("srt");
+        let modified = std::fs::metadata(&srt).and_then(|m| m.modified()).ok()?;
+        let ms = modified.duration_since(std::time::UNIX_EPOCH).ok().map_or(1, |d| d.as_millis() as u64).max(1);
+        if ms == seen {
+            return None;
+        }
+        let source = FileSource::open(Path::new(rec)).ok()?;
+        Some((ms, recording::last_captions(&source, u64::MAX)))
+    }
+
+    fn make_captions(&self, rec: &str) -> Result<(), String> {
+        launch::ask_captions(rec)
     }
 
     fn background_model(&self) -> Result<Arc<dyn Matting>, String> {

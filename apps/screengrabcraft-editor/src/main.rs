@@ -205,6 +205,11 @@ impl eframe::App for App {
             for a in args.iter().filter(|a| !a.starts_with("--")) {
                 self.editor.open_path(ctx, a);
             }
+            if args.iter().any(|a| a == launch::CAPTIONS_COMING)
+                && let Some(v) = self.editor.video.as_mut()
+            {
+                v.expect_captions(ctx.input(|i| i.time));
+            }
             if args.iter().any(|a| !a.starts_with("--")) {
                 log::info!("opened what was handed over in {} ms", t.elapsed().as_millis());
             }
@@ -304,6 +309,8 @@ fn main() -> std::process::ExitCode {
     let started = std::time::Instant::now();
     logging::init();
     let standby = args.iter().any(|a| a == launch::EDITOR_STANDBY);
+    // A recording from the capture service whose captions it is making.
+    let coming = args.iter().any(|a| a == launch::CAPTIONS_COMING);
     // Kept ready by the service: one running already is enough (and isn't to be shown).
     if standby && instance::running("editor") {
         return std::process::ExitCode::SUCCESS;
@@ -359,6 +366,9 @@ fn main() -> std::process::ExitCode {
             watch_the_service(ctx.clone());
             for f in &files {
                 editor.open_path(&ctx, f);
+            }
+            if coming && let Some(v) = editor.video.as_mut() {
+                v.expect_captions(0.0);
             }
             log::info!("start: editor ready after {} ms", started.elapsed().as_millis());
             if standby {

@@ -149,6 +149,159 @@ fn a_damaged_recording_is_an_error_not_a_crash() {
     assert!(ed.video.is_none());
 }
 
+/// A host whose capture service makes captions when asked, and says they've come when told.
+#[derive(Clone, Default)]
+struct CaptionHost {
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
+    jobs: std::sync::Arc<std::sync::Mutex<Vec<(Option<usize>, bool)>>>,
+}
+
+impl crate::services::Services for CaptionHost {
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn poll_captions(&self, _recording: &str, seen: u64) -> Option<(u64, Option<screengrabcraft_media::captions::Captions>)> {
+        let ready = self.ready.lock().unwrap().clone();
+        (ready.is_some() && seen != 7).then_some((7, ready))
+    }
+    fn make_captions(&self, recording: &str) -> Result<(), String> {
+        self.asked.lock().unwrap().push(recording.to_string());
+        Ok(())
+    }
+    fn export_video(&self, job: crate::services::VideoJob) -> Result<crate::services::VideoExport, String> {
+        self.jobs.lock().unwrap().push((job.captions.as_ref().map(Vec::len), job.burn));
+        Ok(crate::services::VideoExport::default())
+    }
+}
+
+/// A made-up meeting: 4 s of a screen, the computer's sound and a microphone, each humming.
+fn meeting() -> Vec<u8> {
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 },
+        StreamInfo { id: 1, kind: StreamKind::SystemSound, name: "Speakers".into(), width: 0, height: 0, channels: 2 },
+        StreamInfo { id: 2, kind: StreamKind::Microphone, name: "Desk microphone".into(), width: 0, height: 0, channels: 1 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    for t in 0..40u64 {
+        let shade = 200 - (t * 3) as u8;
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::rgb(shade, shade, 230)).unwrap()).unwrap();
+        let hum: Vec<i16> = (0..4800).map(|i| (((t * 4800 + i) as f32 * 0.06).sin() * 9000.0) as i16).collect();
+        let stereo: Vec<i16> = hum.iter().flat_map(|v| [*v / 2, *v / 2]).collect();
+        w.audio(1, t * 4800, &stereo).unwrap();
+        w.audio(2, t * 4800, &hum).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+fn captions() -> screengrabcraft_media::captions::Captions {
+    use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+    Captions {
+        cues: vec![
+            Cue { start: 200_000, end: 1_800_000, speaker: Speaker::You, text: "Here's the new login page.".into() },
+            Cue { start: 2_000_000, end: 3_600_000, speaker: Speaker::Others, text: "It looks good to me.".into() },
+        ],
+        model: "test".into(),
+    }
+}
+
+fn caption_harness(bytes: Vec<u8>, host: CaptionHost) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(host), EditorSettings::default());
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 860.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h
+}
+
+#[test]
+fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert_eq!(v.cues.len(), 2);
+    }
+    for label in ["Captions", "Show", "In video"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // In video, then export: the job carries the captions and burns them.
+    h.get_by_label("In video").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.captions.burn);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 2_500_000;
+    }
+    h.run_steps(2);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/video-captions.png"));
+    }
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    assert_eq!(host.jobs.lock().unwrap().as_slice(), &[(Some(2), true)]);
+    // Muting the microphone takes your line off the video (and the timeline).
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        v.session.execute("video.mute", &serde_json::json!({"track": mic, "muted": true})).unwrap();
+    }
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().cues.len(), 1);
+    // The captions' Show (the last row's) off: still on the timeline, no longer on the picture.
+    h.query_all_by_label("Show").last().unwrap().click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.captions.show);
+}
+
+#[test]
+fn captions_can_be_asked_for_and_appear_when_theyre_made() {
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    assert!(h.state().video.as_ref().unwrap().captions.is_none());
+    h.get_by_label("Make Captions").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Captures/Production.sgvideo"]);
+    assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
+    assert!(h.query_all_by_label("Make Captions").next().is_none(), "asked once");
+    // The service has made them: they come on the next look.
+    *host.ready.lock().unwrap() = Some(captions());
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.expect_captions(0.0);
+    }
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.captions.as_ref().map(|c| c.cues.len()), Some(2));
+    assert!(v.captions_coming.is_none());
+    assert_eq!(v.cues.len(), 2);
+}
+
+#[test]
+fn a_recording_with_no_words_stops_waiting_for_captions() {
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    h.get_by_label("Make Captions").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
+    // The service heard nothing: empty captions, and the editor stops saying they're coming.
+    *host.ready.lock().unwrap() = Some(screengrabcraft_media::captions::Captions::default());
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.expect_captions(0.0);
+    }
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.captions.is_none() && v.captions_coming.is_none());
+}
+
 #[test]
 fn show_unticked_hides_a_track_and_ticked_shows_it_again() {
     let mut h = harness();

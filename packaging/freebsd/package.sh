@@ -63,6 +63,11 @@ install -m 644 "$LINUX/autostart/$APP_ID.desktop" "$STAGE/share/screengrabcraft/
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/share/icons/"
 # Remove Background's model, where the editor and the CLI look for it (../share/screengrabcraft/models).
 install -m 644 "$ROOT/assets/models/isnet-general-use-int8.onnx" "$STAGE/share/screengrabcraft/models/isnet-general-use-int8.onnx"
+# The speech model that makes the captions of recordings (Whisper base.en, MIT), and its licence,
+# where the capture service looks for it.
+for f in whisper-base.en-q8_0.gguf LICENSE-WHISPER.txt; do
+  install -m 644 "$ROOT/assets/models/$f" "$STAGE/share/screengrabcraft/models/$f"
+done
 copy_docs "$STAGE/share/doc/screengrabcraft"
 
 tar -C "$WORK" -czf "$DIST/$BASENAME.tar.gz" "$BASENAME"

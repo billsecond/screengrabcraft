@@ -11,6 +11,8 @@
 //! screengrabcraft --background         the sign-in entry: run the service and start it again
 //!                                      if it stops unexpectedly
 //! screengrabcraft --tray               run the service itself (what launchd and systemd run)
+//! screengrabcraft --transcribe <file>  make the captions of a Video Production recording (what
+//!                                      the service starts, at low priority, after recording)
 //! screengrabcraft service install|uninstall|status
 //!                                      start at sign-in, or not
 //! screengrabcraft --version
@@ -19,6 +21,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod app;
+mod captions;
 mod home;
 mod hotkeys;
 mod popups;
@@ -34,6 +37,7 @@ use screengrabcraft_desktop::{graphics, instance, logging, paths, service, store
 const USAGE: &str = "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif] [--delay <s>] [--settings] [--quit]
        screengrabcraft --check-updates
        screengrabcraft --background | --tray
+       screengrabcraft --transcribe <recording.sgvideo>
        screengrabcraft service install|uninstall|status
        screengrabcraft --version";
 
@@ -54,6 +58,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
+        self.0.captions.stop();
         self.0.guard.close();
         log::info!("the capture service stopped");
     }
@@ -107,6 +112,15 @@ fn main() -> ExitCode {
         return service_command(args.get(1).map(String::as_str));
     }
     logging::init();
+    if let Some(i) = args.iter().position(|a| a == captions::ARG) {
+        // Its own log: what the service started it for, and how long it took.
+        logging::to_file("captions");
+        let Some(path) = args.get(i + 1) else {
+            eprintln!("usage: screengrabcraft --transcribe <recording.sgvideo>");
+            return ExitCode::FAILURE;
+        };
+        return captions::run(path);
+    }
     if args.iter().any(|a| a == "--background") {
         logging::to_file("supervisor");
         let Ok(exe) = std::env::current_exe() else { return ExitCode::FAILURE };

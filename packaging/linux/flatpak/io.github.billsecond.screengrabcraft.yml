@@ -62,6 +62,10 @@ modules:
       - mkdir -p /app/share/icons && cp -R assets/app-icon/hicolor /app/share/icons/
       # Remove Background's model, where the editor looks for it (../share/screengrabcraft/models).
       - install -Dm644 assets/models/isnet-general-use-int8.onnx /app/share/screengrabcraft/models/isnet-general-use-int8.onnx
+      # The speech model that makes the captions of recordings, and its licence, where the capture
+      # service looks for it.
+      - install -Dm644 assets/models/whisper-base.en-q8_0.gguf /app/share/screengrabcraft/models/whisper-base.en-q8_0.gguf
+      - install -Dm644 assets/models/LICENSE-WHISPER.txt /app/share/screengrabcraft/models/LICENSE-WHISPER.txt
       # The Flatpak is one app (the capture service's id), so only its metainfo goes in.
       - >-
         version=$(awk '/^\[/{p=($0=="[workspace.package]");next} p&&$1=="version"{gsub(/[" ]/,"",$3);print $3;exit}' Cargo.toml);

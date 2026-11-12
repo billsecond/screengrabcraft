@@ -56,6 +56,10 @@ modules:
       - mkdir -p /app/share/icons /app/share/doc && cp -R share/icons/hicolor /app/share/icons/ && cp -R share/doc/screengrabcraft /app/share/doc/
       # Remove Background's model, where the editor looks for it (../share/screengrabcraft/models).
       - install -Dm644 share/screengrabcraft/models/isnet-general-use-int8.onnx /app/share/screengrabcraft/models/isnet-general-use-int8.onnx
+      # The speech model that makes the captions of recordings, and its licence, where the capture
+      # service looks for it.
+      - install -Dm644 share/screengrabcraft/models/whisper-base.en-q8_0.gguf /app/share/screengrabcraft/models/whisper-base.en-q8_0.gguf
+      - install -Dm644 share/screengrabcraft/models/LICENSE-WHISPER.txt /app/share/screengrabcraft/models/LICENSE-WHISPER.txt
     sources:
       - type: dir
         path: stage
