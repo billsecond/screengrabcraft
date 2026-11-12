@@ -92,6 +92,12 @@ pub fn default_speaker() -> Option<String> {
     cpal::default_host().default_output_device().map(|d| device_name(&d))
 }
 
+/// The system's default microphone, by name.
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+pub fn default_microphone() -> Option<String> {
+    cpal::default_host().default_input_device().map(|d| device_name(&d))
+}
+
 /// Whether what the computer plays can be recorded here.
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 pub fn system_sound_supported() -> bool {
@@ -233,6 +239,27 @@ impl Drop for AudioCapture {
     }
 }
 
+/// Silence played on `device` for as long as the stream returned lives (none if it can't be).
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+fn play_silence(device: &cpal::Device, config: &cpal::SupportedStreamConfig) -> Option<cpal::Stream> {
+    // Zero is silence for signed and floating samples; unsigned ones aren't kept quiet this way.
+    if config.sample_format().is_uint() {
+        return None;
+    }
+    let stream = device
+        .build_output_stream_raw(
+            config.config(),
+            config.sample_format(),
+            |data: &mut cpal::Data, _: &cpal::OutputCallbackInfo| data.bytes_mut().fill(0),
+            |e| log::warn!("the silence kept playing for the computer's sound: {e}"),
+            None,
+        )
+        .inspect_err(|e| log::warn!("silence can't be played for the computer's sound: {e}"))
+        .ok()?;
+    stream.play().inspect_err(|e| log::warn!("silence can't be played for the computer's sound: {e}")).ok()?;
+    Some(stream)
+}
+
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn run(
     source: AudioSource,
@@ -256,6 +283,11 @@ fn run(
     let Some(device) = device else {
         let _ = ready.send(Err(match source {
             AudioSource::SystemSound(_) => "there is no sound output to record".to_string(),
+            // Over Remote Desktop the computer's own microphones aren't there: only one the Remote
+            // Desktop app shares.
+            AudioSource::Microphone(_) if cfg!(target_os = "windows") => {
+                "there is no microphone (over Remote Desktop, the Remote Desktop app has to share yours)".to_string()
+            }
             AudioSource::Microphone(_) => "there is no microphone".to_string(),
         }));
         return;
@@ -309,6 +341,13 @@ fn run(
         let _ = ready.send(Err(format!("{name}: {e}")));
         return;
     }
+    // What the computer plays is only handed over while something plays: silence played meanwhile
+    // keeps it coming, so the sound runs the whole recording (quiet where nothing played) and
+    // nothing at its start is lost while Windows wakes the speaker.
+    let _silence = match source {
+        AudioSource::SystemSound(_) => play_silence(&device, &config),
+        AudioSource::Microphone(_) => None,
+    };
     let _ = ready.send(Ok((out_ch as u8, name)));
     while !stop.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(20));
@@ -379,6 +418,11 @@ pub fn speakers() -> Vec<String> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 pub fn default_speaker() -> Option<String> {
+    None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+pub fn default_microphone() -> Option<String> {
     None
 }
 

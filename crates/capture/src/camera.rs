@@ -2,9 +2,12 @@
 //! macOS (Linux and the BSDs: not yet). Pictures are made at most 640 × 480 and kept as JPEGs: the
 //! camera sits in a corner of the video, so more would only make the recording bigger.
 
-use std::sync::Arc;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -27,7 +30,7 @@ pub struct CameraFrame {
 /// The cameras, by number and name.
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn cameras() -> Vec<(u32, String)> {
-    allow();
+    let _ready = allow();
     match nokhwa::query(nokhwa::utils::ApiBackend::Auto) {
         Ok(list) => list
             .iter()
@@ -48,21 +51,36 @@ pub fn cameras() -> Vec<(u32, String)> {
     Vec::new()
 }
 
-/// macOS asks the owner before a program may use the camera; this asks (once) and waits.
+/// macOS asks the owner before a program may use the camera; this asks (once) and waits. Whether
+/// it's allowed.
 #[cfg(target_os = "macos")]
-fn allow() {
+fn allow() -> bool {
     if nokhwa::nokhwa_check() {
-        return;
+        return true;
     }
     nokhwa::nokhwa_initialize(|_| {});
     let until = Instant::now() + Duration::from_secs(30);
     while !nokhwa::nokhwa_check() && Instant::now() < until {
         std::thread::sleep(Duration::from_millis(100));
     }
+    nokhwa::nokhwa_check()
 }
 
+/// Makes this thread ready for Windows' media system (COM, single-threaded as the camera's
+/// reader wants), for as long as the guard lives. nokhwa does it only on the first thread that
+/// asks for any camera: in the capture service that's the window's thread, listing the cameras for
+/// the Recorder, and a camera thread left without it waited for pictures that never came (the
+/// camera's light never went on), holding the camera until the service ended.
 #[cfg(target_os = "windows")]
-fn allow() {}
+fn allow() -> Option<winsafe::guard::CoUninitializeGuard> {
+    match winsafe::CoInitializeEx(winsafe::co::COINIT::APARTMENTTHREADED | winsafe::co::COINIT::DISABLE_OLE1DDE) {
+        Ok(g) => Some(g),
+        Err(e) => {
+            log::warn!("the camera thread couldn't be made ready: {e}");
+            None
+        }
+    }
+}
 
 pub struct CameraCapture {
     pub name: String,
@@ -71,6 +89,31 @@ pub struct CameraCapture {
     thread: Option<JoinHandle<()>>,
     /// Why the last picture asked for didn't come, as the system said.
     trouble: Arc<std::sync::Mutex<Option<String>>>,
+    /// The camera's own program, when it runs in one (see [`use_helper`]), and the way in to it:
+    /// closing that tells it to stop.
+    helper: Option<(Child, Option<ChildStdin>)>,
+}
+
+/// What a program that can run the camera on its own is started with: `<program> --camera-helper
+/// <camera number>`. It calls [`helper_main`] first thing.
+pub const HELPER_ARG: &str = "--camera-helper";
+
+static HELPER: OnceLock<PathBuf> = OnceLock::new();
+
+/// Runs every camera from now on in a program of its own, `program` (this program, which must
+/// call [`helper_main`] first thing), on Windows. Some cameras stop sending pictures while their
+/// own microphone records, and Windows' camera reader then waits for a picture for ever, holding
+/// the camera: in a program of its own the camera is let go of when that program is ended, at
+/// once, instead of when the capture service ends.
+pub fn use_helper(program: PathBuf) {
+    let _ = HELPER.set(program);
+}
+
+/// Whether `microphone` is part of the camera `camera` (Windows names a webcam's microphone
+/// "Microphone (<camera>)").
+pub fn is_own_microphone(microphone: &str, camera: &str) -> bool {
+    let camera = camera.trim().to_lowercase();
+    !camera.is_empty() && microphone.to_lowercase().contains(&camera)
 }
 
 /// What to tell the owner about a camera that sends no pictures, from what the system said: a
@@ -85,8 +128,102 @@ pub fn trouble_text(said: &str) -> String {
 }
 
 impl CameraCapture {
-    /// Starts camera `index`; times count from `started`.
+    /// Starts camera `index`; times count from `started`. In a program of its own when one was
+    /// given (Windows, [`use_helper`]), else on a thread of this program.
     pub fn start(index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
+        match HELPER.get() {
+            Some(program) if cfg!(target_os = "windows") => CameraCapture::start_helper(program, index, started),
+            _ => CameraCapture::start_here(index, started),
+        }
+    }
+
+    /// Starts camera `index` in the program `program` (`<program> --camera-helper <index>`),
+    /// which hands its pictures over through a pipe.
+    fn start_helper(program: &Path, index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
+        let mut command = Command::new(program);
+        command.arg(HELPER_ARG).arg(index.to_string()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW: no console flashes up.
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command.spawn().map_err(|e| CaptureError::Device(format!("the camera's helper didn't start: {e}")))?;
+        let stdin = child.stdin.take();
+        let Some(mut out) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(CaptureError::Device("the camera's helper can't be heard".to_string()));
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        let trouble = Arc::new(std::sync::Mutex::new(None));
+        let (tx, rx) = channel::<CameraFrame>();
+        let (ready_tx, ready_rx) = sync_channel::<Result<String, String>>(1);
+        let said = trouble.clone();
+        let reader = std::thread::Builder::new().name("camera".into()).spawn(move || {
+            let mut ready = Some(ready_tx);
+            loop {
+                match read_record(&mut out) {
+                    Ok((READY, name)) => {
+                        if let Some(r) = ready.take() {
+                            let _ = r.send(Ok(String::from_utf8_lossy(&name).into_owned()));
+                        }
+                    }
+                    Ok((FAILED, why)) => {
+                        if let Some(r) = ready.take() {
+                            let _ = r.send(Err(String::from_utf8_lossy(&why).into_owned()));
+                        }
+                        return;
+                    }
+                    Ok((PICTURE, data)) => {
+                        if let Some(frame) = picture_from(&data, started.elapsed())
+                            && tx.send(frame).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Ok((TROUBLE, why)) => {
+                        let why = String::from_utf8_lossy(&why).into_owned();
+                        log::warn!("camera: {why}");
+                        if let Ok(mut t) = said.lock() {
+                            *t = Some(why);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        if let Some(r) = ready.take() {
+                            let _ = r.send(Err("the camera's helper ended before the camera started".to_string()));
+                        }
+                        return;
+                    }
+                }
+            }
+        });
+        let reader = match reader {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CaptureError::Device(e.to_string()));
+            }
+        };
+        match ready_rx.recv_timeout(Duration::from_secs(40)) {
+            Ok(Ok(name)) => Ok(CameraCapture { name, rx, stop, thread: Some(reader), trouble, helper: Some((child, stdin)) }),
+            Ok(Err(e)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(CaptureError::Device(e))
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(CaptureError::Device("the camera didn't start".to_string()))
+            }
+        }
+    }
+
+    /// Starts camera `index` on a thread of this program.
+    fn start_here(index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
         let stop = Arc::new(AtomicBool::new(false));
         let trouble = Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = channel::<CameraFrame>();
@@ -105,7 +242,7 @@ impl CameraCapture {
             })
             .map_err(|e| CaptureError::Device(e.to_string()))?;
         match ready_rx.recv_timeout(Duration::from_secs(40)) {
-            Ok(Ok(name)) => Ok(CameraCapture { name, rx, stop, thread: Some(thread), trouble }),
+            Ok(Ok(name)) => Ok(CameraCapture { name, rx, stop, thread: Some(thread), trouble, helper: None }),
             Ok(Err(e)) => Err(CaptureError::Device(e)),
             Err(_) => {
                 stop.store(true, Ordering::SeqCst);
@@ -116,7 +253,12 @@ impl CameraCapture {
 
     /// Why no picture came, in plain words, if the system said (see [`trouble_text`]).
     pub fn trouble(&self) -> Option<String> {
-        self.trouble.lock().ok().and_then(|t| t.as_deref().map(trouble_text))
+        self.raw_trouble().as_deref().map(trouble_text)
+    }
+
+    /// Why no picture came, as the system said it.
+    fn raw_trouble(&self) -> Option<String> {
+        self.trouble.lock().ok().and_then(|t| t.clone())
     }
 
     /// The pictures that came in since last time.
@@ -125,9 +267,19 @@ impl CameraCapture {
     }
 
     /// Stops the camera (its light goes off); what came in up to now is returned. A camera stuck
-    /// waiting for a picture isn't waited for longer than a moment.
+    /// waiting for a picture isn't waited for longer than a moment; one in a program of its own
+    /// is then let go of by ending that program.
     pub fn stop(mut self) -> Vec<CameraFrame> {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some((mut child, stdin)) = self.helper.take() {
+            // Its way in closed: it stops the camera and ends.
+            drop(stdin);
+            if !exited_within(&mut child, crate::STOP_WAIT + Duration::from_millis(500)) {
+                log::warn!("the camera's helper didn't end within {} s; it's ended", crate::STOP_WAIT.as_secs());
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
         if let Some(t) = self.thread.take() {
             crate::join_within(t, crate::STOP_WAIT, "the camera");
         }
@@ -135,10 +287,149 @@ impl CameraCapture {
     }
 }
 
+impl CameraCapture {
+    /// Lets a camera that sends nothing go at once, what it held with it: its own program is
+    /// ended without waiting for it (a camera on a thread of this program is told to stop, and
+    /// waited for only a moment).
+    pub fn abandon(mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some((mut child, stdin)) = self.helper.take() {
+            drop(stdin);
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some(t) = self.thread.take() {
+            crate::join_within(t, Duration::from_millis(500), "the camera");
+        }
+    }
+}
+
 impl Drop for CameraCapture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
+        // A capture let go of without being stopped never leaves its program running.
+        if let Some((mut child, stdin)) = self.helper.take() {
+            drop(stdin);
+            if !exited_within(&mut child, Duration::from_millis(200)) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
     }
+}
+
+/// Waits for a program to end, for at most `wait`. True when it did.
+fn exited_within(child: &mut Child, wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
+            _ => return false,
+        }
+    }
+}
+
+// The camera's helper speaks in records: a kind, the length of what follows (4 bytes, little
+// endian), then that.
+const READY: u8 = b'R';
+const FAILED: u8 = b'F';
+const PICTURE: u8 = b'P';
+const TROUBLE: u8 = b'T';
+/// The longest record taken: a picture is a JPEG of at most 640 × 480.
+const MAX_RECORD: usize = 8 << 20;
+
+fn write_record(out: &mut impl Write, kind: u8, data: &[u8]) -> std::io::Result<()> {
+    let len = u32::try_from(data.len()).map_err(|_| std::io::Error::other("too long"))?;
+    out.write_all(&[kind])?;
+    out.write_all(&len.to_le_bytes())?;
+    out.write_all(data)
+}
+
+/// One record, or an error when the pipe ended or what came isn't one.
+fn read_record(input: &mut impl Read) -> std::io::Result<(u8, Vec<u8>)> {
+    let mut head = [0u8; 5];
+    input.read_exact(&mut head)?;
+    let len = u32::from_le_bytes([head[1], head[2], head[3], head[4]]) as usize;
+    if len > MAX_RECORD {
+        return Err(std::io::Error::other("a record too long"));
+    }
+    let mut data = vec![0u8; len];
+    input.read_exact(&mut data)?;
+    Ok((head[0], data))
+}
+
+/// A picture record: its width and height (4 bytes each, little endian), then the JPEG.
+fn picture_record(f: &CameraFrame) -> Vec<u8> {
+    let mut data = Vec::with_capacity(8 + f.jpeg.len());
+    data.extend_from_slice(&f.width.to_le_bytes());
+    data.extend_from_slice(&f.height.to_le_bytes());
+    data.extend_from_slice(&f.jpeg);
+    data
+}
+
+fn picture_from(data: &[u8], at: Duration) -> Option<CameraFrame> {
+    let (size, jpeg) = data.split_at_checked(8)?;
+    let width = u32::from_le_bytes(size.get(..4)?.try_into().ok()?);
+    let height = u32::from_le_bytes(size.get(4..8)?.try_into().ok()?);
+    if width == 0 || height == 0 || width > MAX_W || height > MAX_H || jpeg.is_empty() {
+        return None;
+    }
+    Some(CameraFrame { at, jpeg: jpeg.to_vec(), width, height })
+}
+
+/// The camera's helper: when `args` (the program's, without its name) are `--camera-helper
+/// <camera number>`, runs the camera and hands its pictures to the program that started this one
+/// (on standard output) until that closes standard input; the exit code is returned. None when
+/// these are other arguments.
+pub fn helper_main(args: &[String]) -> Option<u8> {
+    let at = args.iter().position(|a| a == HELPER_ARG)?;
+    let index = args.get(at + 1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    // Standard input closing (the capture service stopped the camera, or ended) ends this.
+    let ended = Arc::new(AtomicBool::new(false));
+    let e = ended.clone();
+    let _ = std::thread::Builder::new().name("camera helper".into()).spawn(move || {
+        let mut buf = [0u8; 64];
+        while matches!(std::io::stdin().read(&mut buf), Ok(n) if n > 0) {}
+        e.store(true, Ordering::SeqCst);
+    });
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    let cap = match CameraCapture::start_here(index, Instant::now()) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = write_record(&mut out, FAILED, e.to_string().as_bytes());
+            let _ = out.flush();
+            return Some(1);
+        }
+    };
+    if write_record(&mut out, READY, cap.name.as_bytes()).and_then(|()| out.flush()).is_err() {
+        drop(cap.stop());
+        return Some(1);
+    }
+    let mut told: Option<String> = None;
+    'run: while !ended.load(Ordering::SeqCst) {
+        for f in cap.take() {
+            if write_record(&mut out, PICTURE, &picture_record(&f)).is_err() {
+                break 'run;
+            }
+        }
+        let now = cap.raw_trouble();
+        if now.is_some() && now != told {
+            if let Some(why) = &now
+                && write_record(&mut out, TROUBLE, why.as_bytes()).is_err()
+            {
+                break;
+            }
+            told = now;
+        }
+        if out.flush().is_err() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    drop(cap.stop());
+    let _ = out.flush();
+    Some(0)
 }
 
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -154,7 +445,7 @@ fn run(
     use nokhwa::pixel_format::RgbFormat;
     use nokhwa::utils::{CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
 
-    allow();
+    let _ready = allow();
     let wanted = CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30);
     let opened = Camera::new(CameraIndex::Index(index), RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(wanted)))
         .or_else(|_| Camera::new(CameraIndex::Index(index), RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)));
@@ -437,6 +728,46 @@ mod tests {
         assert!(to_jpeg(Raw::Nv12, &nv12, w, h).is_some());
         assert!(to_jpeg(Raw::Gray, &vec![9u8; 64 * 48], 64, 48).is_some());
         assert!(to_jpeg(Raw::Bgr, &vec![9u8; 64 * 48 * 3], 64, 48).is_some());
+    }
+
+    #[test]
+    fn the_helpers_records_come_back_as_sent() {
+        let frame = CameraFrame { at: Duration::ZERO, jpeg: vec![0xFF, 0xD8, 1, 2, 3], width: 640, height: 360 };
+        let mut pipe = Vec::new();
+        write_record(&mut pipe, READY, b"Camera 1").unwrap();
+        write_record(&mut pipe, PICTURE, &picture_record(&frame)).unwrap();
+        write_record(&mut pipe, TROUBLE, b"it's in use").unwrap();
+        let mut input = pipe.as_slice();
+        assert_eq!(read_record(&mut input).unwrap(), (READY, b"Camera 1".to_vec()));
+        let (kind, data) = read_record(&mut input).unwrap();
+        assert_eq!(kind, PICTURE);
+        let back = picture_from(&data, Duration::from_millis(40)).unwrap();
+        assert_eq!((back.width, back.height, back.jpeg, back.at), (640, 360, frame.jpeg.clone(), Duration::from_millis(40)));
+        assert_eq!(read_record(&mut input).unwrap(), (TROUBLE, b"it's in use".to_vec()));
+        // The pipe ended: an error, not a hang or a panic.
+        assert!(read_record(&mut input).is_err());
+    }
+
+    #[test]
+    fn junk_from_the_helper_is_refused_not_a_panic() {
+        // Cut short, far too long, and pictures that don't add up.
+        assert!(read_record(&mut [PICTURE, 9, 0].as_slice()).is_err());
+        assert!(read_record(&mut [PICTURE, 10, 0, 0, 0, 1, 2].as_slice()).is_err());
+        assert!(read_record(&mut [PICTURE, 0xFF, 0xFF, 0xFF, 0xFF].as_slice()).is_err());
+        assert!(picture_from(&[], Duration::ZERO).is_none());
+        assert!(picture_from(&[1, 0, 0, 0, 1, 0, 0, 0], Duration::ZERO).is_none());
+        let huge = CameraFrame { at: Duration::ZERO, jpeg: vec![1], width: 100_000, height: 2 };
+        assert!(picture_from(&picture_record(&huge), Duration::ZERO).is_none());
+        // Not its arguments: not the helper.
+        assert_eq!(helper_main(&["--tray".to_string()]), None);
+    }
+
+    #[test]
+    fn a_webcams_own_microphone_is_known_by_its_name() {
+        assert!(is_own_microphone("Microphone (Insta360 Link 2)", "Insta360 Link 2"));
+        assert!(is_own_microphone("Microphone (HD Pro Webcam C920)", "hd pro webcam c920"));
+        assert!(!is_own_microphone("Headset Microphone (Jabra Link 380)", "Insta360 Link 2"));
+        assert!(!is_own_microphone("Microphone", " "));
     }
 
     #[test]

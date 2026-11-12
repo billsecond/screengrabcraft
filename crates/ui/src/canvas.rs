@@ -468,6 +468,10 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     }
     let (shift, space, middle) = ctx.input(|i| (i.modifiers.shift, i.key_down(egui::Key::Space), i.pointer.middle_down()));
     let press = ctx.input(|i| i.pointer.press_origin());
+    // A click on the picture is a choice of its own: what Select All chose is over.
+    if resp.hovered() && ctx.input(|i| i.pointer.primary_pressed()) {
+        ed.everything = None;
+    }
 
     // Panning: the middle button, or Space with the left one.
     if let Some(Drag::Pan { last }) = ed.drag.clone() {
@@ -1005,8 +1009,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
         }
         ui.separator();
         if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {
-            ed.set_tool(Tool::Select);
-            ed.run(ctx, "edit.selectAll", serde_json::json!({}));
+            ed.select_all(ctx);
             ui.close();
         }
         if item(ui, true, "Select an Area of the Picture", "Q") {

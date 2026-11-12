@@ -62,7 +62,7 @@ fn a_recording_opens_in_the_video_editor_with_a_row_for_each_track() {
     let v = h.state().video.as_ref().expect("the video editor is open");
     assert_eq!(v.session.timeline.tracks.len(), 3);
     assert_eq!(length(&h), 4_000_000);
-    for label in ["Export Video", "Split", "Mute", "Top left", "Circle"] {
+    for label in ["Export Video", "Split", "Show", "Top left", "Circle"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     if let Ok(dir) = std::env::var("SGC_SHOTS")
@@ -257,8 +257,8 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
     }
     h.run_steps(2);
     assert_eq!(h.state().video.as_ref().unwrap().cues.len(), 1);
-    // Show off: still on the timeline, no longer on the picture.
-    h.get_by_label("Show").click();
+    // The captions' Show (the last row's) off: still on the timeline, no longer on the picture.
+    h.query_all_by_label("Show").last().unwrap().click();
     h.run_steps(2);
     assert!(!h.state().video.as_ref().unwrap().session.timeline.captions.show);
 }
@@ -300,4 +300,66 @@ fn a_recording_with_no_words_stops_waiting_for_captions() {
     h.run_steps(3);
     let v = h.state().video.as_ref().unwrap();
     assert!(v.captions.is_none() && v.captions_coming.is_none());
+}
+
+#[test]
+fn show_unticked_hides_a_track_and_ticked_shows_it_again() {
+    let mut h = harness();
+    // The tracks: screen, microphone, camera; each row has its Show switch.
+    let shows: Vec<_> = h.query_all_by_label("Show").collect();
+    assert_eq!(shows.len(), 3);
+    let cam = 2;
+    h.query_all_by_label("Show").nth(cam).unwrap().click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[cam].muted, "hidden");
+    h.query_all_by_label("Show").nth(cam).unwrap().click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.tracks[cam].muted, "shown again");
+    // The microphone's: muted.
+    h.query_all_by_label("Show").nth(1).unwrap().click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].muted);
+}
+
+/// A real recording (`SGC_RECORDING`, as `live_camera_and_microphone` keeps it with `SGC_KEEP`)
+/// opened in the editor as the owner opens one: its camera must be in the picture shown at the
+/// start, and gone once its Show is unticked. Only a count of pixels is printed; nothing is
+/// saved. Run by hand only: `cargo test -p screengrabcraft-ui live_recording -- --ignored`.
+#[test]
+#[ignore]
+fn live_recording_shows_its_camera_in_the_editor() {
+    let path = std::env::var("SGC_RECORDING").expect("SGC_RECORDING names a recording");
+    let bytes = std::fs::read(&path).unwrap();
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Live.sgvideo".into(), path: None, bytes });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(4);
+    let v = h.state().video.as_ref().expect("it opens in the video editor");
+    let cam = v.session.timeline.find(StreamKind::Camera).expect("a camera track");
+    let rows = v.session.timeline.tracks.len();
+    let mut differ_at = Vec::new();
+    for at in [100_000u64, 1_000_000] {
+        if let Some(v) = h.state_mut().video.as_mut() {
+            v.playhead = at;
+        }
+        h.run_steps(3);
+        let shown = h.render().unwrap();
+        h.query_all_by_label("Show").nth(cam).unwrap().click();
+        h.run_steps(3);
+        assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[cam].muted, "hidden");
+        let hidden = h.render().unwrap();
+        h.query_all_by_label("Show").nth(cam).unwrap().click();
+        h.run_steps(3);
+        let differ = shown.pixels().zip(hidden.pixels()).filter(|(a, b)| a != b).count();
+        println!("at {:.1} s: {differ} pixels of the editor differ with the camera hidden ({rows} tracks)", at as f64 / 1e6);
+        differ_at.push(differ);
+    }
+    assert!(differ_at.iter().all(|d| *d > 2_000), "the camera is seen in the editor: {differ_at:?}");
 }

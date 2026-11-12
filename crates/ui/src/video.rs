@@ -864,19 +864,22 @@ impl VideoView {
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, kind_colour(track.kind));
         let painter = ui.painter_at(row);
         painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), t.text);
+        // Every track can be shown or hidden: a hidden picture isn't in the video, a hidden
+        // sound isn't heard.
+        let show = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(58.0, 20.0));
+        let mut shown = !track.muted;
+        let tip = if track.kind.is_video() { "Seen in the video (untick to hide it)" } else { "Heard in the video (untick to mute it)" };
+        if ui.put(show, egui::Checkbox::new(&mut shown, "Show")).on_hover_text(tip).changed() {
+            self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": !shown}));
+        }
         if track.kind.is_video() {
             let device = self.rec.stream(track.stream).map(|s| s.name.clone()).unwrap_or_default();
             if !device.is_empty() && device != name {
-                painter.text(row.min + vec2(14.0, 25.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
+                painter.text(row.min + vec2(74.0, 27.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
             }
             return;
         }
-        let mute = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(56.0, 20.0));
-        let mut muted = track.muted;
-        if ui.put(mute, egui::Checkbox::new(&mut muted, "Mute")).changed() {
-            self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": muted}));
-        }
-        let vol = Rect::from_min_size(row.min + vec2(70.0, 24.0), vec2(row.width() - 78.0, 20.0));
+        let vol = Rect::from_min_size(row.min + vec2(72.0, 24.0), vec2(row.width() - 80.0, 20.0));
         let mut v = track.volume * 100.0;
         let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
         if r.drag_started() {

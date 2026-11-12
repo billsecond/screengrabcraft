@@ -284,4 +284,24 @@ mod tests {
         assert_eq!(r.pixel(10, 10).unwrap().r, 0x26);
         assert!(thumbnail(Path::new("C:/nowhere/Missing.sgvideo")).is_none());
     }
+
+    /// The editor's Play, with a real recording (`SGC_RECORDING`) through the real speakers: the
+    /// speakers must take the sound (its place moves on as they play it). Heard, not kept. Run by
+    /// hand only: `cargo test -p screengrabcraft-editor live_playback -- --ignored --nocapture`.
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[ignore]
+    fn live_playback() {
+        let path = std::env::var("SGC_RECORDING").expect("SGC_RECORDING names a recording");
+        let rec = Arc::new(Recording::open(Box::new(FileSource::open(Path::new(&path)).unwrap())).unwrap());
+        let tl = Timeline::new(&rec);
+        let n = compose::to_samples(tl.length()) as usize;
+        let loudest = compose::mix(&rec, &tl, 0, n).iter().fold(0f32, |m, s| m.max(s.abs()));
+        let sound = Sound::start(rec, tl, 0).expect("the speakers start");
+        std::thread::sleep(Duration::from_millis(2500));
+        let at = sound.position_us().unwrap_or(0);
+        println!("played to {:.2} s in 2.5 s; the loudest sound in it {loudest:.3}", at as f64 / 1e6);
+        assert!(at >= 1_500_000, "the speakers play it");
+        assert!(loudest > 0.01, "and it isn't silent");
+    }
 }

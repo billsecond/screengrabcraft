@@ -96,6 +96,10 @@ fn service_command(what: Option<&str>) -> ExitCode {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // A recording's camera, run by the capture service in a program of its own.
+    if let Some(code) = screengrabcraft_capture::camera::helper_main(&args) {
+        return ExitCode::from(code);
+    }
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("{}", version::line("ScreenGrabCraft"));
         return ExitCode::SUCCESS;
@@ -142,6 +146,11 @@ fn main() -> ExitCode {
     // The copy that stays: its log is the one kept.
     logging::to_file("service");
     log::info!("{} starting ({})", version::line("ScreenGrabCraft"), screengrabcraft_capture::backend_name());
+    // A recording's camera runs in a copy of this program (`--camera-helper`): one that locks up
+    // is let go of as soon as the recording ends.
+    if let Ok(exe) = std::env::current_exe() {
+        screengrabcraft_capture::camera::use_helper(exe);
+    }
 
     let mut settings = store::load_settings();
     let first_run = settings.start_at_login.is_none();
