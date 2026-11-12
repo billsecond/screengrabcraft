@@ -2223,6 +2223,51 @@ fn copy_with_an_annotation_selected_copies_only_it_and_cut_takes_it_away() {
 }
 
 #[test]
+fn ctrl_a_then_ctrl_c_copies_the_whole_picture_with_its_annotations() {
+    let clip = Clipboard::default();
+    let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
+    ed.session.replace(square_picture().session.doc.clone());
+    ed.view.fit_pending = true;
+    let style =
+        screengrabcraft_model::Style { fill: Color::rgb(255, 0, 0), stroke: Color::rgb(255, 0, 0), shadow: false, ..Kind::Rect.default_style() };
+    ed.session.doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 60.0, 40.0), radius: 0.0 }, style).unwrap();
+    // A box drawn on the picture earlier, still there.
+    ed.area = Some(screengrabcraft_model::Rect::new(150.0, 100.0, 50.0, 50.0));
+    let mut h = ready(ed, Tool::Select);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert!(h.state().area.is_none(), "Select All lets go of the box");
+    assert_eq!(h.state().session.selected().len(), 1, "and selects every annotation");
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    let copied = clip.0.borrow().clone().expect("copied");
+    assert_eq!((copied.width(), copied.height()), (400, 300), "the whole picture");
+    assert_eq!(copied.pixel(50, 40), Some(Color::rgb(255, 0, 0)), "with the annotation drawn in");
+    assert_eq!(copied.pixel(200, 150), Some(BLUE), "and the picture under it");
+    // A click on that annotation afterwards: Copy is it alone again (though the same one is
+    // selected as Select All selected).
+    let p = at(&h, 50.0, 40.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected().len(), 1);
+    *clip.0.borrow_mut() = None;
+    h.event(egui::Event::Copy);
+    h.run_steps(2);
+    assert!(clip.0.borrow().as_ref().is_some_and(|r| r.width() < 100), "one annotation alone");
+}
+
+#[test]
+fn a_new_picture_forgets_the_last_ones_area() {
+    let clip = Clipboard::default();
+    let mut h = area_editor(&clip);
+    let (a, b) = (at(&h, 140.0, 90.0), at(&h, 200.0, 150.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area.is_some());
+    h.state_mut().blank_document();
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+}
+
+#[test]
 fn copy_while_typing_leaves_the_clipboard_to_the_text() {
     let clip = Clipboard::default();
     let mut ed = Editor::new(Box::new(clip.clone()), EditorSettings::default());
@@ -2235,4 +2280,20 @@ fn copy_while_typing_leaves_the_clipboard_to_the_text() {
     h.event(egui::Event::Copy);
     h.run_steps(2);
     assert!(clip.0.borrow().is_none(), "no picture copied over the text");
+}
+
+#[test]
+fn with_a_video_open_the_picture_before_it_opens_from_the_strip() {
+    // The picture open before a video was still taken for the one open: a click on it did nothing.
+    let disk = many_captures(3);
+    let mut h = on_disk(&disk, Some("captures/Capture 001.png"));
+    h.run_steps(2);
+    h.state_mut().video_path = Some("captures/Recording.sgvideo".to_string());
+    h.run_steps(2);
+    let pic = h.get_by_label("Capture 001.png").rect();
+    click_at(&mut h, pic.center());
+    h.run_steps(3);
+    let ed = h.state();
+    assert_eq!(ed.picture_path.as_deref(), Some("captures/Capture 001.png"));
+    assert!(ed.video_path.is_none(), "the picture is the one open now");
 }

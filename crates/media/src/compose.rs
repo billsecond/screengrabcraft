@@ -11,6 +11,10 @@ use crate::timeline::{CameraShape, Corner, Timeline};
 /// Samples a second.
 pub const RATE: u64 = 48_000;
 
+/// A camera picture older than this (µs) isn't shown: the camera had stopped sending, and a
+/// picture frozen in a corner would be wrong.
+const CAMERA_STALE_US: u64 = 2_000_000;
+
 /// µs to a sample number at 48 kHz.
 pub fn to_samples(us: u64) -> u64 {
     us.saturating_mul(6) / 125
@@ -41,36 +45,45 @@ impl Composer {
         Composer { rec, screen, camera, camera_frame: None, width: width.max(2), height: height.max(2) }
     }
 
-    /// The picture at timeline time `t` µs.
+    /// The picture at timeline time `t` µs. A hidden track (`muted`) isn't in it: without the
+    /// screen the camera is the picture.
     pub fn frame(&mut self, timeline: &Timeline, t: u64) -> Raster {
         let (w, h) = (self.width, self.height);
         let black =
             || Raster::filled(w, h, screengrabcraft_model::Color::BLACK).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::BLACK));
+        let shown = |i: usize| timeline.tracks.get(i).is_some_and(|tr| !tr.muted);
+        let screen_shown = self.screen.as_ref().is_some_and(|(i, _)| shown(*i));
         let mut out = match &mut self.screen {
-            Some((i, dec)) => timeline
+            Some((i, dec)) if screen_shown => timeline
                 .source_time(*i, t)
                 .and_then(|src| dec.frame_at(&self.rec, src))
                 .and_then(|pic| if (pic.width(), pic.height()) == (w, h) { Some(pic) } else { scale(&pic, w, h) })
                 .unwrap_or_else(black),
-            None => black(),
+            _ => black(),
         };
         if let Some((i, stream)) = self.camera
+            && shown(i)
             && let Some(src) = timeline.source_time(i, t)
             && let Some(cam) = self.camera_at(stream, src)
         {
-            if self.screen.is_some() {
+            if screen_shown {
                 overlay_camera(&mut out, &cam, timeline);
             } else {
-                // Recorded without the screen: the camera is the picture.
+                // Recorded (or shown) without the screen: the camera is the picture.
                 fill_camera(&mut out, &cam);
             }
         }
         out
     }
 
+    /// The camera's picture at `src`: the last one up to then, unless the camera had stopped
+    /// sending (none for over two seconds), when there's none.
     fn camera_at(&mut self, stream: u8, src: u64) -> Option<Raster> {
         let frames: &[FrameEntry] = self.rec.frames(stream);
         let i = frames.partition_point(|f| f.pts <= src).checked_sub(1)?;
+        if frames.get(i).is_some_and(|f| src.saturating_sub(f.pts) > CAMERA_STALE_US) {
+            return None;
+        }
         if let Some((at, pic)) = &self.camera_frame
             && *at == i
         {
@@ -347,6 +360,68 @@ mod tests {
             fill_camera(&mut out, &Raster::filled(cw, ch, Color::WHITE).unwrap());
             assert!(out.pixels().as_chunks::<4>().0.iter().any(|p| p[0] == 255), "{cw}x{ch} into {ow}x{oh}");
         }
+    }
+
+    #[test]
+    fn a_camera_that_starts_late_shows_from_its_first_picture_on() {
+        // The screen from the start, the camera only from 6 s (it was slow to start).
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 100, height: 60, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 32, height: 24, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(100, 60, Color::BLACK).unwrap()).unwrap();
+        let jpeg =
+            screengrabcraft_render::encode(&Raster::filled(32, 24, Color::WHITE).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 90).unwrap();
+        for t in 60..100u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(10_000_000).unwrap())).unwrap());
+        let tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 100, 60);
+        let white = |f: &Raster| f.pixels().as_chunks::<4>().0.iter().filter(|p| p[0] > 200).count();
+        assert_eq!(white(&c.frame(&tl, 3_000_000)), 0, "no camera before its first picture");
+        assert!(white(&c.frame(&tl, 8_000_000)) > 100, "the camera in its corner after");
+        assert!(white(&c.frame(&tl, 9_950_000)) > 100, "to the end");
+    }
+
+    #[test]
+    fn hidden_tracks_are_left_out_and_a_camera_that_stopped_isnt_frozen() {
+        // A white screen, and a grey camera that sends pictures for the first second only.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 100, height: 60, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 32, height: 24, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(100, 60, Color::WHITE).unwrap()).unwrap();
+        let grey = Color::rgb(128, 128, 128);
+        let jpeg = screengrabcraft_render::encode(&Raster::filled(32, 24, grey).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 90).unwrap();
+        for t in 0..10u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(10_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        let (screen, camera) = (tl.find(StreamKind::Screen).unwrap(), tl.find(StreamKind::Camera).unwrap());
+        let count = |f: &Raster, pick: &dyn Fn(&[u8; 4]) -> bool| f.pixels().as_chunks::<4>().0.iter().filter(|p| pick(p)).count();
+        let is_grey = |p: &[u8; 4]| (100..160).contains(&p[0]);
+        let is_white = |p: &[u8; 4]| p[0] > 230;
+        let mut c = Composer::new(r.clone(), &tl, 100, 60);
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &is_grey) > 100 && count(&f, &is_white) > 1000, "both shown");
+        // The camera hidden: the screen alone.
+        tl.set_muted(camera, true).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert_eq!(count(&f, &is_grey), 0);
+        // The screen hidden instead: the camera is the picture.
+        tl.set_muted(camera, false).unwrap();
+        tl.set_muted(screen, true).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert_eq!(count(&f, &is_white), 0);
+        assert!(count(&f, &is_grey) > 1000);
+        // Long after the camera's last picture: no frozen camera.
+        tl.set_muted(screen, false).unwrap();
+        let f = c.frame(&tl, 6_000_000);
+        assert_eq!(count(&f, &is_grey), 0);
     }
 
     #[test]

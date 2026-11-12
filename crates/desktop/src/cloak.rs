@@ -26,6 +26,14 @@ pub fn cloak(window: &impl HasWindowHandle, cloaked: bool) -> bool {
     imp::cloak(window, cloaked)
 }
 
+/// Makes the calling thread's windows titled `title` plain, each once: no shadow, square corners,
+/// and Windows' thin border in the window's own colour `rgb`, so that nothing but the window's
+/// colour is seen (the frame around an area being recorded: one colour, no outline). Call it on
+/// the thread that made the windows, once they're made.
+pub fn plain_windows(title: &str, rgb: [u8; 3]) {
+    imp::plain_windows(title, rgb);
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::Mutex;
@@ -35,6 +43,28 @@ mod imp {
 
     /// The windows whose animations are off already, so that each is told once.
     static CALMED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+    /// The windows made plain already.
+    static PLAIN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+    pub fn plain_windows(title: &str, rgb: [u8; 3]) {
+        use winsafe::{COLORREF, co};
+        let mut plain = PLAIN.lock().unwrap_or_else(|e| e.into_inner());
+        let mut there = Vec::new();
+        let _ = EnumThreadWindows(GetCurrentThreadId(), |h: HWND| {
+            let i = id(&h);
+            there.push(i);
+            if !plain.contains(&i) && h.GetWindowText().is_ok_and(|t| t == title) {
+                // No shadow (the window manager draws nothing of its own around it), square
+                // corners, and the border Windows 11 draws in the window's own colour.
+                let _ = h.DwmSetWindowAttribute(DwmAttr::NcRenderingPolicy(co::DWMNCRENDERINGPOLICY::DISABLED));
+                let _ = h.DwmSetWindowAttribute(DwmAttr::WindowCornerPreference(co::DWMWCP::DONOTROUND));
+                let _ = h.DwmSetWindowAttribute(DwmAttr::BorderColor(COLORREF::from_rgb(rgb[0], rgb[1], rgb[2])));
+                plain.push(i);
+            }
+            true
+        });
+        plain.retain(|i| there.contains(i));
+    }
 
     fn id(h: &HWND) -> isize {
         h.ptr() as isize
@@ -83,6 +113,8 @@ mod imp {
     pub fn cloak(_window: &impl HasWindowHandle, _cloaked: bool) -> bool {
         false
     }
+
+    pub fn plain_windows(_title: &str, _rgb: [u8; 3]) {}
 }
 
 #[cfg(test)]
@@ -93,5 +125,6 @@ mod tests {
     fn a_thread_without_windows_is_calmed_without_fuss() {
         calm_windows();
         calm_windows();
+        plain_windows("Nothing of that name", [229, 57, 53]);
     }
 }

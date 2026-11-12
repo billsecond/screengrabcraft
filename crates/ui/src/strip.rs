@@ -34,6 +34,14 @@ pub fn delete_label(name: &str) -> String {
     format!("Move {name} to the {TRASH}")
 }
 
+/// Whether a capture is the one open: the video when one is, else the picture or project.
+fn is_current(ed: &Editor, path: &str) -> bool {
+    match &ed.video_path {
+        Some(v) => v == path,
+        None => ed.picture_path.as_deref() == Some(path) || ed.project_path.as_deref() == Some(path),
+    }
+}
+
 /// Whether a capture is a video (a recording or an MP4).
 pub fn is_video(path: &str) -> bool {
     std::path::Path::new(path)
@@ -179,7 +187,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
                     if !ui.is_rect_visible(rect) {
                         continue;
                     }
-                    let current = ed.picture_path.as_deref() == Some(item.path.as_str()) || ed.project_path.as_deref() == Some(item.path.as_str());
+                    let current = is_current(ed, &item.path);
                     let pointed = ui.rect_contains_pointer(rect);
                     let bg = if pointed { t.hover } else { t.panel };
                     ui.painter().rect_filled(rect, 5.0, bg);
@@ -256,7 +264,7 @@ fn tile(ed: &mut Editor, ui: &mut Ui, item: &RecentItem) -> bool {
     if !ui.is_rect_visible(rect) {
         return false;
     }
-    let current = ed.picture_path.as_deref() == Some(item.path.as_str()) || ed.project_path.as_deref() == Some(item.path.as_str());
+    let current = is_current(ed, &item.path);
     let pic = egui::Rect::from_min_size(rect.min, BIG);
     let bg = if resp.hovered() { t.hover } else { t.panel };
     ui.painter().rect_filled(pic, 5.0, bg);

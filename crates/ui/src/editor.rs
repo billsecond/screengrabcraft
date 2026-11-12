@@ -165,6 +165,8 @@ pub struct Editor {
     pub playback: Option<crate::playback::Playback>,
     /// A video recording, when one is open (the window shows the video editor instead).
     pub video: Option<crate::video::VideoView>,
+    /// The file of the video open, if one is (the strip marks it, not the picture open before it).
+    pub(crate) video_path: Option<String>,
     /// Counts what was opened, so the video editor knows when it has been replaced.
     pub(crate) video_epoch: u64,
     /// The text annotation being typed into, and its text as typed.
@@ -177,6 +179,9 @@ pub struct Editor {
     pub(crate) crop: Option<Rect>,
     /// The area of the picture selected with the Selection tool.
     pub(crate) area: Option<Rect>,
+    /// What Select All selected: while that is still the selection, everything is selected, and
+    /// Copy takes the whole picture as shown.
+    pub(crate) everything: Option<Vec<ObjectId>>,
     pub(crate) dialog: Option<Dialog>,
     pub(crate) pending: Option<Pending>,
     /// What a save dialog that is open will save as.
@@ -231,6 +236,7 @@ impl Editor {
             drag: None,
             playback: None,
             video: None,
+            video_path: None,
             video_epoch: 0,
             editing: None,
             resume_editing: None,
@@ -238,6 +244,7 @@ impl Editor {
             last_dark: None,
             crop: None,
             area: None,
+            everything: None,
             dialog: None,
             pending: None,
             saving: None,
@@ -292,6 +299,7 @@ impl Editor {
 
     fn replace_document(&mut self, doc: Document, name: String, project: Option<String>, picture: Option<String>, original: Option<Raster>) {
         self.video = None;
+        self.video_path = None;
         self.video_epoch += 1;
         self.session.replace(doc);
         self.name = name;
@@ -305,6 +313,9 @@ impl Editor {
         self.editing = None;
         self.props_editing = false;
         self.crop = None;
+        // An area or Select All of the last picture means nothing in this one.
+        self.area = None;
+        self.everything = None;
         self.view.fit_pending = true;
         if self.tool == Tool::Crop {
             self.tool = Tool::Select;
@@ -422,6 +433,7 @@ impl Editor {
                 }
                 let stem = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
                 self.video = Some(crate::video::VideoView::new(rec, path.clone(), stem));
+                self.video_path = path.clone();
                 self.video_epoch += 1;
                 if let Some(p) = &path {
                     self.settings.remember(p);
@@ -551,9 +563,10 @@ impl Editor {
     }
 
     /// Copy: the area selected with the Selection tool, else the annotations selected (alone,
-    /// on see-through, cut to what they cover), else the whole picture as shown.
+    /// on see-through, cut to what they cover), else the whole picture as shown. After Select
+    /// All, everything is selected: the whole picture as shown.
     pub fn copy(&mut self, ctx: &egui::Context) {
-        if self.area.is_none() && !self.session.selected().is_empty() {
+        if self.area.is_none() && !self.session.selected().is_empty() && !self.everything_selected() {
             let n = self.session.selected().len();
             let Some(pic) = self.selection_picture() else { return };
             match self.services.copy_image(&pic) {
@@ -677,6 +690,20 @@ impl Editor {
             self.area = None;
             self.view.fit_pending = true;
         }
+    }
+
+    /// Select All: every annotation, and with them the picture (an area chosen before is let go
+    /// of), so that Copy then takes the whole picture as shown.
+    pub fn select_all(&mut self, ctx: &egui::Context) {
+        self.set_tool(Tool::Select);
+        self.area = None;
+        self.run(ctx, "edit.selectAll", json!({}));
+        self.everything = Some(self.session.selected());
+    }
+
+    /// Whether what Select All selected is still the selection.
+    fn everything_selected(&self) -> bool {
+        self.everything.as_ref().is_some_and(|all| *all == self.session.selected())
     }
 
     /// The whole picture selected with the Selection tool.
@@ -921,8 +948,7 @@ impl Editor {
                 // With the Selection tool, all of the picture.
                 self.select_whole_area();
             } else {
-                self.tool = Tool::Select;
-                self.run(ctx, "edit.selectAll", json!({}));
+                self.select_all(ctx);
             }
         }
         if pressed(cmd(Key::D)) && !self.session.selected().is_empty() {
@@ -1158,8 +1184,7 @@ impl Editor {
                     }
                     ui.separator();
                     if ui.add(egui::Button::new("Select All").shortcut_text("Ctrl+A")).clicked() {
-                        self.tool = Tool::Select;
-                        self.run(&ctx, "edit.selectAll", json!({}));
+                        self.select_all(&ctx);
                         ui.close();
                     }
                     ui.separator();
