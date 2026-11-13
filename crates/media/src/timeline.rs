@@ -136,6 +136,9 @@ pub struct Timeline {
     /// The media bin: files brought in for the layers.
     #[serde(default)]
     pub media: Vec<crate::layers::MediaItem>,
+    /// How the mouse pointer is drawn on the video (if the recording has it).
+    #[serde(default)]
+    pub pointer: crate::pointer::Look,
 }
 
 impl Timeline {
@@ -151,7 +154,14 @@ impl Timeline {
                 Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips }
             })
             .collect();
-        Timeline { tracks, camera: CameraLayout::default(), captions: CaptionOptions::default(), layers: Vec::new(), media: Vec::new() }
+        Timeline {
+            tracks,
+            camera: CameraLayout::default(),
+            captions: CaptionOptions::default(),
+            layers: Vec::new(),
+            media: Vec::new(),
+            pointer: Default::default(),
+        }
     }
 
     /// Edits read from a file, made safe for this recording: tracks it doesn't have go, tracks
@@ -190,7 +200,14 @@ impl Timeline {
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
         self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]);
-        let mut checked = Timeline { tracks, camera: self.camera, captions: self.captions, layers: self.layers, media: self.media };
+        let mut checked = Timeline {
+            tracks,
+            camera: self.camera,
+            captions: self.captions,
+            layers: self.layers,
+            media: self.media,
+            pointer: self.pointer.checked(),
+        };
         checked.check_layers();
         checked
     }
@@ -356,6 +373,7 @@ mod tests {
             captions: CaptionOptions::default(),
             layers: Vec::new(),
             media: Vec::new(),
+            pointer: Default::default(),
         }
     }
 

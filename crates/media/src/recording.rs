@@ -17,6 +17,7 @@
 //! AUDI  stream:u8 first:u64 (sample number at 48 kHz) i16 samples, interleaved
 //! EDIT  JSON Timeline
 //! CAPS  JSON Captions: what was said, added once they are made
+//! PNTR  where the mouse pointer was at a moment; PSHP a pointer's picture (see `pointer`)
 //! DONE  JSON Finished
 //! ```
 //!
@@ -242,6 +243,18 @@ impl<W: Write> RecordingWriter<W> {
         Ok(())
     }
 
+    /// Where the pointer was at a moment (see [`crate::pointer`]).
+    pub fn pointer(&mut self, sample: &crate::pointer::Sample) -> Result<(), RecordingError> {
+        self.written += chunk(&mut self.out, b"PNTR", &crate::pointer::sample_bytes(sample))?;
+        Ok(())
+    }
+
+    /// A pointer's picture, before the first sample that shows it.
+    pub fn pointer_shape(&mut self, shape: &crate::pointer::Shape) -> Result<(), RecordingError> {
+        self.written += chunk(&mut self.out, b"PSHP", &crate::pointer::shape_bytes(shape))?;
+        Ok(())
+    }
+
     /// The edits so far (the last ones written count).
     pub fn edit(&mut self, timeline: &Timeline) -> Result<(), RecordingError> {
         let json = serde_json::to_vec(timeline).map_err(|e| RecordingError::Damaged(e.to_string()))?;
@@ -398,6 +411,8 @@ pub struct Recording {
     pub timeline: Option<Timeline>,
     /// The captions made of it, if they have been.
     pub captions: Option<Captions>,
+    /// Where the mouse pointer was, and its pictures (empty if it wasn't recorded).
+    pub pointer: crate::pointer::Track,
     /// Whether it was finished properly (else it stopped halfway and is what was saved).
     pub finished: bool,
     /// How long it is, in µs.
@@ -430,6 +445,7 @@ impl Recording {
         let mut timeline = None;
         let mut captions = None;
         let mut finished = None;
+        let (mut pointer_samples, mut pointer_shapes) = (Vec::new(), Vec::new());
         while at + 12 <= len {
             let head = source.read_at(at, 12)?;
             let (Some(size), Some(crc)) = (u32_at(&head, 4), u32_at(&head, 8)) else { break };
@@ -483,6 +499,20 @@ impl Recording {
                     Err(e) => log::warn!("captions in a recording could not be read: {e}"),
                 },
                 b"DONE" => finished = serde_json::from_slice::<Finished>(&peek).ok(),
+                b"PNTR" => {
+                    if pointer_samples.len() < crate::pointer::MAX_SAMPLES
+                        && let Some(s) = crate::pointer::sample_from(&peek)
+                    {
+                        pointer_samples.push(s);
+                    }
+                }
+                b"PSHP" => {
+                    if pointer_shapes.len() < crate::pointer::MAX_SHAPES
+                        && let Some(s) = crate::pointer::shape_from(&peek)
+                    {
+                        pointer_shapes.push(s);
+                    }
+                }
                 _ => {}
             }
             at = body_at + u64::from(size);
@@ -501,7 +531,8 @@ impl Recording {
         }
         .min(MAX_DURATION_US);
         let captions = captions.map(|c: Captions| c.checked(duration_us));
-        let mut rec = Recording { source, header, frames, audio, timeline, captions, finished: finished.is_some(), duration_us };
+        let pointer = crate::pointer::Track::new(pointer_samples, pointer_shapes);
+        let mut rec = Recording { source, header, frames, audio, timeline, captions, pointer, finished: finished.is_some(), duration_us };
         if let Some(t) = rec.timeline.take() {
             rec.timeline = Some(t.checked(&rec));
         }
@@ -611,6 +642,11 @@ pub struct ScreenDecoder {
 impl ScreenDecoder {
     pub fn new(stream: u8) -> ScreenDecoder {
         ScreenDecoder { stream, width: 0, height: 0, rgb: Vec::new(), at: None }
+    }
+
+    /// The track it decodes.
+    pub fn stream(&self) -> u8 {
+        self.stream
     }
 
     /// The picture showing at `pts` µs (the last one recorded by then), if there is one.

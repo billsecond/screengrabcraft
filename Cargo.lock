@@ -2696,6 +2696,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ico"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d75e94d66081e4d8dcd098bd8dc5254800fea14a26389b298410158d834de167"
+dependencies = [
+ "byteorder",
+ "png",
+]
+
+[[package]]
 name = "icu_collections"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5312,7 +5322,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screengrabcraft"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "eframe",
  "egui",
@@ -5334,11 +5344,12 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-capture"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "async-io",
  "cpal",
  "futures-lite",
+ "ico",
  "image",
  "log",
  "mouse_position",
@@ -5348,6 +5359,7 @@ dependencies = [
  "thiserror 2.0.21",
  "wayland-client",
  "wayland-protocols",
+ "winreg",
  "winsafe",
  "x11rb",
  "xcap",
@@ -5356,7 +5368,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-cli"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "screengrabcraft-capture",
  "screengrabcraft-desktop",
@@ -5369,7 +5381,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-desktop"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "arboard",
  "dirs",
@@ -5394,7 +5406,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-editor"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "cpal",
  "eframe",
@@ -5414,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-engine"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "log",
  "proptest",
@@ -5428,7 +5440,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-matte"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "log",
  "prost",
@@ -5441,7 +5453,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-media"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "crc32fast",
  "image",
@@ -5462,7 +5474,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-model"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "proptest",
  "serde",
@@ -5472,7 +5484,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-render"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -5490,7 +5502,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-speech"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "bytemuck",
  "candle-core",
@@ -5504,7 +5516,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-ui"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "egui",
  "egui_kittest",
@@ -5519,7 +5531,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-web"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "eframe",
  "egui",
@@ -7708,7 +7720,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "image",
  "serde_json",

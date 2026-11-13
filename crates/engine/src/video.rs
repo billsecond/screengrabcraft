@@ -279,6 +279,28 @@ fn id(p: &Value, key: &str) -> Result<u32> {
     u32::try_from(v).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
 }
 
+/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path, and
+/// whether its clicks are ringed.
+fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("the pointer's look is given as an object".to_string()));
+    }
+    let flag = |key: &str| -> Result<Option<bool>> {
+        match p.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
+        }
+    };
+    let (show, clicks, size, smooth) = (flag("show")?, flag("clicks")?, number(p, "size")?, number(p, "smooth")?);
+    let mut look = s.timeline.pointer;
+    look.show = show.unwrap_or(look.show);
+    look.clicks = clicks.unwrap_or(look.clicks);
+    look.size = size.unwrap_or(look.size);
+    look.smooth = smooth.unwrap_or(look.smooth);
+    s.timeline.pointer = look.checked();
+    Ok(json!({}))
+}
+
 /// A layer: its id, or `"new"` (or nothing) for a new one.
 fn layer_or_new(p: &Value, key: &str) -> Result<Option<u32>> {
     match p.get(key) {
@@ -460,6 +482,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Captions",
         params: r#"{"show"?: bool, "burn"?: bool}: the captions on the picture in the editor, and burned into the video made"#,
         run: captions,
+    },
+    VideoCommand {
+        id: "video.pointer",
+        label: "Pointer",
+        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool}: the mouse pointer on the video"#,
+        run: pointer,
     },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
     VideoCommand {

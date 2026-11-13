@@ -329,6 +329,7 @@ mod tests {
             captions: Default::default(),
             layers: Vec::new(),
             media: Vec::new(),
+            pointer: Default::default(),
         }
     }
 

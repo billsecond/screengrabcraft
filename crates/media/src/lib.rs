@@ -22,6 +22,7 @@ pub mod media_store;
 pub mod mp4;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod opus;
+pub mod pointer;
 pub mod recording;
 pub mod timeline;
 pub mod yuv;

@@ -473,6 +473,7 @@ mod tests {
             captions: CaptionOptions::default(),
             layers: Vec::new(),
             media: Vec::new(),
+            pointer: Default::default(),
         }
     }
 

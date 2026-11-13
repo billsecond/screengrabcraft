@@ -39,6 +39,8 @@ pub struct Composer {
     captions: Option<Arc<Vec<Cue>>>,
     /// The media bin's pictures, for the layers' items.
     media: Arc<dyn crate::layer_draw::MediaStore>,
+    /// The arrow drawn for a pointer the recording has no picture of.
+    arrow: Option<crate::pointer::Shape>,
     texts: crate::layer_draw::TextCache,
     pictures: crate::layer_draw::PictureCache,
     pub width: u32,
@@ -57,6 +59,7 @@ impl Composer {
             camera_frame: None,
             captions: None,
             media: Arc::new(crate::layer_draw::NoMedia),
+            arrow: crate::pointer::arrow(),
             texts: Default::default(),
             pictures: Default::default(),
             width: width.max(2),
@@ -86,6 +89,15 @@ impl Composer {
                 .unwrap_or_else(black),
             _ => black(),
         };
+        // The mouse pointer on the screen, as it was then (larger, smoothed, its clicks ringed).
+        if screen_shown
+            && let Some((i, dec)) = &self.screen
+            && let Some(src) = timeline.source_time(*i, t)
+            && let Some(s) = self.rec.stream(dec.stream())
+        {
+            let f = w as f32 / (s.width as f32).max(1.0);
+            crate::pointer::draw(&mut out, &self.rec.pointer, timeline.pointer, src, f, self.arrow.as_ref());
+        }
         if let Some((i, stream)) = self.camera
             && shown(i)
             && let Some(src) = timeline.source_time(i, t)
@@ -416,6 +428,62 @@ mod tests {
             w.audio(2, t * 4800, &[2000i16, -2000].repeat(4800)).unwrap();
         }
         Arc::new(Recording::open(Box::new(w.finish(2_000_000).unwrap())).unwrap())
+    }
+
+    /// A white screen (320 × 240, 3 s) with the pointer moving right along y = 100, a green
+    /// square for its picture (its hot spot at its corner), a click at 2 s.
+    fn rec_with_pointer() -> Arc<Recording> {
+        use crate::pointer::{LEFT, SHOWING, Sample, Shape};
+        let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 240, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.pointer_shape(&Shape { id: 1, hot: (0, 0), nominal: 16, pic: Raster::filled(16, 16, Color::rgb(0, 200, 0)).unwrap() }).unwrap();
+        for t in 0..30u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(320, 240, Color::WHITE).unwrap()).unwrap();
+            let flags = SHOWING | if t == 20 { LEFT } else { 0 };
+            w.pointer(&Sample { t: t * 100_000, x: 20.0 + t as f32 * 8.0, y: 100.0, flags, shape: 1 }).unwrap();
+        }
+        Arc::new(Recording::open(Box::new(w.finish(3_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn the_recorded_pointer_is_on_the_video_where_it_was_and_follows_the_edits() {
+        let r = rec_with_pointer();
+        assert_eq!((r.pointer.samples().len(), r.pointer.shapes().len(), r.pointer.clicks().len()), (30, 1, 1));
+        let mut tl = Timeline::new(&r);
+        tl.pointer.smooth = 0.0;
+        tl.pointer.clicks = false;
+        let green = |pic: &Raster| -> Vec<(usize, usize)> {
+            let w = pic.width() as usize;
+            pic.pixels().chunks(4).enumerate().filter(|(_, p)| p[1] > 150 && p[0] < 80).map(|(i, _)| (i % w, i / w)).collect()
+        };
+        let mut c = Composer::new(r.clone(), &tl, 320, 240);
+        // At 1 s it was at x = 100: its square from there.
+        let at = green(&c.frame(&tl, 1_000_000));
+        assert_eq!(at.len(), 16 * 16);
+        assert_eq!((at[0], at[at.len() - 1]), ((100, 100), (115, 115)));
+        // Twice as large: four times the pixels, from the same corner (where it points).
+        tl.pointer.size = 2.0;
+        let big = green(&c.frame(&tl, 1_000_000));
+        assert!(big.len() > 900 && big[0].0 <= 101 && big[0].1 <= 101, "{} {:?}", big.len(), big.first());
+        tl.pointer.size = 1.0;
+        // Hidden: not on the video.
+        tl.pointer.show = false;
+        assert!(green(&c.frame(&tl, 1_000_000)).is_empty());
+        tl.pointer.show = true;
+        // The first second cut: at 0.5 s the video shows 1.5 s of the recording, pointer and all.
+        tl.cut(0, 1_000_000).unwrap();
+        let mut c = Composer::new(r.clone(), &tl, 320, 240);
+        assert_eq!(green(&c.frame(&tl, 500_000)).first(), Some(&(140, 100)));
+        // A video made half the size: it's half the size, at half the place.
+        let mut half = Composer::new(r.clone(), &tl, 160, 120);
+        let small = green(&half.frame(&tl, 500_000));
+        assert_eq!(small.first(), Some(&(70, 50)));
+        assert!(small.len() >= 49 && small.len() <= 81, "{}", small.len());
+        // A recording without a pointer is as it was.
+        let plain = rec();
+        let tl = Timeline::new(&plain);
+        assert!(plain.pointer.is_empty());
+        let _ = Composer::new(plain, &tl, 64, 48).frame(&tl, 0);
     }
 
     #[test]

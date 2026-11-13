@@ -1007,3 +1007,60 @@ fn with_the_setting_on_sound_brought_in_is_transcribed_by_itself() {
     assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Music/Song.mp3"], "the song, not the picture");
     assert!(h.state().video.as_ref().unwrap().transcribing().is_some_and(|(t, _)| t == "Transcribing Song.mp3…"));
 }
+
+// ---- the mouse pointer ----
+
+/// A made-up recording of a white screen with the pointer crossing it (a red square for its
+/// picture) and a click half-way.
+fn recording_with_pointer() -> Vec<u8> {
+    use screengrabcraft_media::pointer::{LEFT, SHOWING, Sample, Shape};
+    let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 }];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    w.pointer_shape(&Shape { id: 1, hot: (0, 0), nominal: 12, pic: Raster::filled(12, 12, Color::rgb(0xE0, 0x20, 0x20)).unwrap() }).unwrap();
+    for t in 0..40u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::WHITE).unwrap()).unwrap();
+        let flags = SHOWING | if t == 20 { LEFT } else { 0 };
+        w.pointer(&Sample { t: t * 100_000, x: 20.0 + t as f32 * 6.0, y: 60.0, flags, shape: 1 }).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+#[test]
+fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    for label in ["Pointer", "Show the mouse pointer", "Size", "Smoother movement", "Show clicks"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.run_steps(2);
+    shot(&mut h, "video-pointer");
+    let red = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+    let as_recorded = red(&mut h);
+    assert!(as_recorded >= 100, "the pointer is on the video: {as_recorded}");
+    // Larger (from the engine, as its slider does).
+    h.state_mut().video.as_mut().unwrap().session.execute("video.pointer", &serde_json::json!({"size": 3.0})).unwrap();
+    assert!(red(&mut h) > as_recorded * 6);
+    // Unticked: it isn't on the video; one undo step brings it back.
+    h.get_by_label("Show the mouse pointer").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.pointer.show);
+    assert_eq!(red(&mut h), 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert!(red(&mut h) > 0);
+    // A recording without a pointer has no such panel.
+    let h = harness();
+    assert!(h.query_by_label("Show the mouse pointer").is_none());
+}

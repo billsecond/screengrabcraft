@@ -1098,15 +1098,88 @@ impl VideoView {
 
     /// The camera's place in the picture.
     fn camera_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
-        let Some(track) = self.session.timeline.find(StreamKind::Camera) else { return };
+        let camera = self.session.timeline.find(StreamKind::Camera);
+        let pointer = !self.rec.pointer.is_empty();
+        if camera.is_none() && !pointer {
+            return;
+        }
         let t = Tokens::get(ui.ctx());
-        let ctx = ui.ctx().clone();
-        let cam = self.session.timeline.camera;
         egui::Panel::right("video_camera")
             .exact_size(236.0)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if let Some(track) = camera {
+                        self.camera_section(ed, ui, track);
+                        ui.add_space(18.0);
+                    }
+                    if pointer {
+                        self.pointer_section(ed, ui);
+                    }
+                });
+            });
+    }
+
+    /// The mouse pointer on the video: shown or not, how large, how smooth, its clicks ringed.
+    fn pointer_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let look = self.session.timeline.pointer;
+        ui.label(RichText::new("Pointer").size(16.0).color(t.text));
+        ui.add_space(6.0);
+        let mut show = look.show;
+        if ui.checkbox(&mut show, "Show the mouse pointer").on_hover_text("The pointer as it was while recording").changed() {
+            self.run(ed, &ctx, "video.pointer", json!({"show": show}));
+        }
+        ui.add_enabled_ui(look.show, |ui| {
+            for (label, key, value, range, tip) in [
+                ("Size", "size", look.size * 100.0, 50.0..=400.0, "How large it's drawn: 100% is as it was on the screen"),
+                (
+                    "Smoother movement",
+                    "smooth",
+                    look.smooth * 100.0,
+                    0.0..=100.0,
+                    "Evens out its path. Clicks and drags stay exactly where they were",
+                ),
+            ] {
+                ui.add_space(6.0);
+                ui.label(RichText::new(label).color(t.muted));
+                let mut v = value;
+                let r = ui.add(egui::Slider::new(&mut v, range).suffix("%")).on_hover_text(tip);
+                if r.drag_started() {
+                    self.session.begin("Pointer");
+                }
+                if r.changed() {
+                    let p = json!({ key: v / 100.0 });
+                    if r.dragged() {
+                        let _ = self.session.drag("video.pointer", &p);
+                    } else {
+                        self.run(ed, &ctx, "video.pointer", p)
+                    }
+                }
+                if r.drag_stopped() {
+                    self.session.commit();
+                }
+            }
+            ui.add_space(6.0);
+            let mut clicks = look.clicks;
+            if ui
+                .checkbox(&mut clicks, "Show clicks")
+                .on_hover_text("A ring where a button is pressed: yellow for the left, blue for the right")
+                .changed()
+            {
+                self.run(ed, &ctx, "video.pointer", json!({"clicks": clicks}));
+            }
+        });
+    }
+
+    fn camera_section(&mut self, ed: &mut Editor, ui: &mut Ui, track: usize) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let cam = self.session.timeline.camera;
+        {
+            {
                 ui.label(RichText::new("Camera").size(16.0).color(t.text));
                 ui.add_space(8.0);
                 ui.label(RichText::new("Corner").color(t.muted));
@@ -1160,7 +1233,8 @@ impl VideoView {
                 if hidden {
                     ui.label(RichText::new("The camera's clips were all deleted.").color(t.muted));
                 }
-            });
+            }
+        }
     }
 
     /// The picture at the playhead, fitted to the space.

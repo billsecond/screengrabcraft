@@ -78,6 +78,7 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
         captions: Default::default(),
         layers: Vec::new(),
         media: Vec::new(),
+        pointer: Default::default(),
     };
     // Words drawn larger than on a video, so they can be read on a card.
     let mut item = t.item.clone();
