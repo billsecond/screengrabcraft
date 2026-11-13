@@ -15,7 +15,8 @@
 //!
 //! Every edit is a `video.*` command of the engine's [`VideoSession`]; the edits are added to
 //! the recording file a moment after each change, and Export Video makes the MP4 beside it
-//! (with the captions beside it too, as `.srt` and `.txt`).
+//! (with the captions beside it too, as `.srt` and `.txt`). Export Transcript saves what was
+//! said, as edited, wherever the owner says: a transcript (`.txt`) or subtitles (`.srt`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use std::sync::atomic::Ordering;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_engine::VideoSession;
-use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+use screengrabcraft_media::captions::{self, Captions, Cue, Speaker};
 use screengrabcraft_media::compose::{self, Composer};
 use screengrabcraft_media::recording::{self, Recording, StreamKind};
 use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
@@ -31,7 +32,7 @@ use serde_json::{Value, json};
 
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
-use crate::services::{SoundOut, VideoExport, VideoJob};
+use crate::services::{Filter, SoundOut, VideoExport, VideoJob};
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -55,6 +56,60 @@ const CAPTIONS_POLL: f64 = 2.0;
 const CAPTIONS_GLANCE: f64 = 15.0;
 /// Captions said to be coming that haven't after this long (seconds) can be asked for again.
 const CAPTIONS_WAIT: f64 = 30.0 * 60.0;
+
+/// What Export Transcript saves: the words as a transcript, or as subtitles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptFormat {
+    /// A plain transcript (`.txt`): a paragraph for each turn, with when it started.
+    Text,
+    /// SubRip subtitles (`.srt`), for a video player or a video site.
+    Subtitles,
+}
+
+impl TranscriptFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            TranscriptFormat::Text => "txt",
+            TranscriptFormat::Subtitles => "srt",
+        }
+    }
+
+    /// The one a file's name asks for, by its extension.
+    pub fn of_path(path: &str) -> Option<TranscriptFormat> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+        match ext.as_str() {
+            "txt" => Some(TranscriptFormat::Text),
+            "srt" => Some(TranscriptFormat::Subtitles),
+            _ => None,
+        }
+    }
+
+    /// The lines written out this way.
+    pub fn write(self, cues: &[Cue]) -> String {
+        match self {
+            TranscriptFormat::Text => captions::to_text(cues),
+            TranscriptFormat::Subtitles => captions::to_srt(cues),
+        }
+    }
+
+    /// The name offered in the save dialog for a recording called `name`.
+    fn file_name(self, name: &str) -> String {
+        match self {
+            TranscriptFormat::Text => format!("{name} transcript.txt"),
+            TranscriptFormat::Subtitles => format!("{name} subtitles.srt"),
+        }
+    }
+
+    /// The save dialog's file types, this one first.
+    fn filters(self) -> [Filter; 2] {
+        const TEXT: Filter = ("Transcript", &["txt"]);
+        const SUBTITLES: Filter = ("Subtitles", &["srt"]);
+        match self {
+            TranscriptFormat::Text => [TEXT, SUBTITLES],
+            TranscriptFormat::Subtitles => [SUBTITLES, TEXT],
+        }
+    }
+}
 
 /// What a drag on the timeline is doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -249,6 +304,24 @@ impl VideoView {
         match ed.services.make_captions(&path) {
             Ok(()) => self.expect_captions(ctx.input(|i| i.time)),
             Err(e) => ed.error(ctx, e),
+        }
+    }
+
+    /// Export Transcript: asks where to save what was said in the video as edited (words cut or
+    /// muted are left out), as a transcript or as subtitles; in a browser it's downloaded.
+    pub fn export_transcript(&self, ed: &mut Editor, ctx: &egui::Context, format: TranscriptFormat) {
+        if self.cues.is_empty() {
+            ed.error(ctx, "There are no captions to export: Make Captions writes down what was said");
+            return;
+        }
+        let name = format.file_name(&self.name);
+        if ed.services.has_paths() {
+            ed.saving = None;
+            ed.saving_project = false;
+            ed.saving_transcript = Some(format);
+            ed.services.request_save(&name, &format.filters());
+        } else if let Err(e) = ed.services.download(&name, format.write(&self.cues).as_bytes()) {
+            ed.error(ctx, e);
         }
     }
 
@@ -537,6 +610,16 @@ impl VideoView {
                             ui.close();
                         }
                     }
+                    if !self.cues.is_empty() {
+                        if ui.button("Export Transcript…").on_hover_text("What was said, as a text file (.txt)").clicked() {
+                            self.export_transcript(ed, &ctx, TranscriptFormat::Text);
+                            ui.close();
+                        }
+                        if ui.button("Export Subtitles…").on_hover_text("What was said, as subtitles (.srt) for a video player or site").clicked() {
+                            self.export_transcript(ed, &ctx, TranscriptFormat::Subtitles);
+                            ui.close();
+                        }
+                    }
                     ui.separator();
                     if ui
                         .add_enabled(self.session.edited(), egui::Button::new("Revert to Recording"))
@@ -689,6 +772,20 @@ impl VideoView {
                                 if widgets::primary_button(ui, "Export Video").on_hover_text("Make an MP4 of the video as edited (Ctrl+E)").clicked()
                                 {
                                     self.start_export(ed, &ctx);
+                                }
+                                if self.has_sound {
+                                    let why_not = if self.captions.is_none() {
+                                        "No captions yet: Make Captions (under the tracks) writes down what was said"
+                                    } else {
+                                        "Nothing said is left in the video as edited"
+                                    };
+                                    let r = ui.add_enabled_ui(!self.cues.is_empty(), |ui| widgets::button(ui, "Export Transcript")).inner;
+                                    if r.on_hover_text("Save what was said as a transcript (.txt) or subtitles (.srt)")
+                                        .on_disabled_hover_text(why_not)
+                                        .clicked()
+                                    {
+                                        self.export_transcript(ed, &ctx, TranscriptFormat::Text);
+                                    }
                                 }
                                 if let Some(p) = self.exported.clone() {
                                     if widgets::button(ui, "Show in folder").clicked() {

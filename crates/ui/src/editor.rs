@@ -187,6 +187,8 @@ pub struct Editor {
     /// What a save dialog that is open will save as.
     pub(crate) saving: Option<ImageFormat>,
     pub(crate) saving_project: bool,
+    /// Export Transcript's save dialog is open, for this kind of file.
+    pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
     toast: Option<(String, f64, bool)>,
     /// The strip's thumbnails, with the time of the picture each was made from.
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
@@ -249,6 +251,7 @@ impl Editor {
             pending: None,
             saving: None,
             saving_project: false,
+            saving_transcript: None,
             toast: None,
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
@@ -725,6 +728,7 @@ impl Editor {
     /// Save As…: asks where (in a browser, downloads the project).
     pub fn save_as(&mut self) {
         self.saving = None;
+        self.saving_transcript = None;
         let name = format!("{}.{PROJECT_EXT}", self.name);
         if self.services.has_paths() {
             self.saving_project = true;
@@ -738,6 +742,7 @@ impl Editor {
     pub fn export(&mut self, format: ImageFormat) {
         self.saving = Some(format);
         self.saving_project = false;
+        self.saving_transcript = None;
         let name = format!("{}.{}", self.name, format.extension());
         if self.services.has_paths() {
             let exts: &'static [&'static str] = match format {
@@ -795,6 +800,24 @@ impl Editor {
         }
     }
 
+    /// Export Transcript's file: what was said in the video as edited, as a transcript or as
+    /// subtitles by the name's extension (else as asked; a name with none is given that one's).
+    fn write_transcript(&mut self, ctx: &egui::Context, path: &str, asked: crate::video::TranscriptFormat) {
+        let Some(cues) = self.video.as_ref().map(|v| v.cues.clone()).filter(|c| !c.is_empty()) else {
+            self.error(ctx, "There are no captions to export");
+            return;
+        };
+        let format = crate::video::TranscriptFormat::of_path(path).unwrap_or(asked);
+        let path = match std::path::Path::new(path).extension() {
+            Some(_) => path.to_string(),
+            None => format!("{path}.{}", format.extension()),
+        };
+        match self.services.write_file(&path, format.write(&cues).as_bytes()) {
+            Ok(()) => self.toast(ctx, format!("Exported {}", file_name(&path))),
+            Err(e) => self.error(ctx, format!("{path}: {e}")),
+        }
+    }
+
     fn poll_dialogs(&mut self, ctx: &egui::Context) {
         let Some(answer) = self.services.poll_dialog() else { return };
         match answer {
@@ -804,7 +827,9 @@ impl Editor {
                 }
             }
             DialogResult::SaveTo(path) => {
-                if self.saving_project && !path.to_ascii_lowercase().ends_with(&format!(".{PROJECT_EXT}")) {
+                if let Some(format) = self.saving_transcript.take() {
+                    self.write_transcript(ctx, &path, format);
+                } else if self.saving_project && !path.to_ascii_lowercase().ends_with(&format!(".{PROJECT_EXT}")) {
                     // Saved under a picture's name: that is an export.
                     let f = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).and_then(ImageFormat::from_extension);
                     match f {
@@ -823,6 +848,7 @@ impl Editor {
             DialogResult::Cancelled => {
                 self.saving = None;
                 self.saving_project = false;
+                self.saving_transcript = None;
             }
         }
     }
