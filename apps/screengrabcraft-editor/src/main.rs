@@ -184,7 +184,7 @@ impl App {
 
     /// Being brought to the owner: never as a sliver. Once it's no longer minimized, a window
     /// smaller than the editor is ever shown at gets its usual size back.
-    fn check_size(&mut self, frame: &eframe::Frame) {
+    fn check_size(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
         if self.size_check == 0 {
             return;
         }
@@ -200,10 +200,12 @@ impl App {
         let s = w.inner_size();
         if let Some((x, y)) = rescued_size((s.width, s.height), w.scale_factor()) {
             log::warn!("the window was {} × {} as it was shown; given its usual size", s.width, s.height);
-            let _ = w.request_inner_size(winit::dpi::LogicalSize::new(x, y));
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(x as f32, y as f32)));
+            // Near the top left of its monitor, whole on it.
             if let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) {
-                let p = m.position();
-                w.set_outer_position(winit::dpi::PhysicalPosition::new(p.x + 40, p.y + 40));
+                let (p, scale) = (m.position(), m.scale_factor().max(0.5));
+                let at = egui::pos2((f64::from(p.x) / scale) as f32 + 40.0, (f64::from(p.y) / scale) as f32 + 40.0);
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(at));
             }
         }
     }
@@ -226,7 +228,7 @@ impl eframe::App for App {
             cloak::cloak(frame, false);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        self.check_size(frame);
+        self.check_size(ctx, frame);
         for args in self.guard.handed() {
             if let [word] = args.as_slice()
                 && word.starts_with("--")
