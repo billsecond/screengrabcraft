@@ -92,11 +92,13 @@ pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String>
 const MAX_MEDIA_FILE: u64 = 1024 * 1024 * 1024;
 
 /// Where a video file's pictures are kept while it's in the bin (they go when it does).
+#[cfg(target_os = "windows")]
 fn clips_dir() -> PathBuf {
     std::env::temp_dir().join("ScreenGrabCraft").join("clips")
 }
 
 /// Leftovers of an editor that didn't close (a day old or more) are cleared away.
+#[cfg(target_os = "windows")]
 pub fn clear_old_clips() {
     let Ok(entries) = std::fs::read_dir(clips_dir()) else { return };
     let day = Duration::from_secs(24 * 3600);
