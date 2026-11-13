@@ -34,6 +34,12 @@ pub fn plain_windows(title: &str, rgb: [u8; 3]) {
     imp::plain_windows(title, rgb);
 }
 
+/// Where the mouse pointer is on the desktop, in pixels (Windows; elsewhere none). A window
+/// dragged by its contents follows it, so that dragging never waits on Windows' own move loop.
+pub fn cursor_position() -> Option<(i32, i32)> {
+    imp::cursor_position()
+}
+
 /// Keeps the calling thread's windows titled `title` out of every screen capture and recording,
 /// this program's own included, each once: they're seen on the screen and nowhere else (the
 /// controls of a recording, wherever they're dragged). Windows 10 2004 and later; elsewhere it
@@ -55,6 +61,10 @@ mod imp {
     static PLAIN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
     /// The windows kept out of captures already.
     static UNSEEN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+    pub fn cursor_position() -> Option<(i32, i32)> {
+        winsafe::GetCursorPos().ok().map(|p| (p.x, p.y))
+    }
 
     pub fn keep_out_of_captures(title: &str) {
         use winsafe::co;
@@ -148,6 +158,10 @@ mod imp {
     pub fn plain_windows(_title: &str, _rgb: [u8; 3]) {}
 
     pub fn keep_out_of_captures(_title: &str) {}
+
+    pub fn cursor_position() -> Option<(i32, i32)> {
+        None
+    }
 }
 
 #[cfg(test)]

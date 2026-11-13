@@ -204,11 +204,26 @@ pub fn clock(us: u64) -> String {
     format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
 }
 
-/// Each sound track's peaks per 10 ms (for drawing its wave), the first two hours at most.
-fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
+/// Each sound track's peaks per 10 ms, for drawing its wave.
+pub(crate) type Waves = BTreeMap<u8, Vec<(i16, i16)>>;
+
+/// The samples of a sound track that are looked at for its wave: the first two hours at most.
+fn wave_samples(rec: &Recording, id: u8) -> u64 {
+    compose::to_samples(rec.stream_duration(id)).min(48_000 * 7200)
+}
+
+/// How many samples [`waves`] looks at in all (to say how far it has got).
+pub(crate) fn wave_work(rec: &Recording) -> u64 {
+    rec.header.streams.iter().filter(|s| !s.kind.is_video()).map(|s| wave_samples(rec, s.id)).sum()
+}
+
+/// Each sound track's peaks per 10 ms (for drawing its wave), the first two hours at most;
+/// `done` is told how many samples have been looked at so far.
+pub(crate) fn waves(rec: &Recording, done: &dyn Fn(u64)) -> Waves {
     let mut out = BTreeMap::new();
+    let mut so_far = 0u64;
     for s in rec.header.streams.iter().filter(|s| !s.kind.is_video()) {
-        let total = compose::to_samples(rec.stream_duration(s.id)).min(48_000 * 7200);
+        let total = wave_samples(rec, s.id);
         let ch = usize::from(s.channels.clamp(1, 2));
         let mut peaks = Vec::with_capacity((total / WAVE_STEP) as usize + 1);
         let mut at = 0u64;
@@ -221,6 +236,8 @@ fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
                 peaks.push((lo, hi));
             }
             at += n as u64;
+            so_far += n as u64;
+            done(so_far);
         }
         out.insert(s.id, peaks);
     }
@@ -229,6 +246,12 @@ fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
 
 impl VideoView {
     pub fn new(rec: Recording, path: Option<String>, name: String) -> VideoView {
+        let waves = waves(&rec, &|_| {});
+        VideoView::with_waves(rec, waves, path, name)
+    }
+
+    /// [`VideoView::new`], its sound's waves worked out already (on another thread).
+    pub(crate) fn with_waves(rec: Recording, waves: Waves, path: Option<String>, name: String) -> VideoView {
         let session = VideoSession::new(&rec);
         let (w, h) = rec
             .header
@@ -238,7 +261,6 @@ impl VideoView {
             .or_else(|| rec.header.streams.iter().find(|s| s.kind == StreamKind::Camera))
             .map(|s| compose::fit(s.width, s.height, PREVIEW_MAX.0, PREVIEW_MAX.1))
             .unwrap_or((1280, 720));
-        let waves = waves(&rec);
         let captions = rec.captions.clone().filter(|c| !c.is_empty());
         let has_sound = rec.header.streams.iter().any(|s| Speaker::of(s.kind).is_some());
         let rec = Arc::new(rec);

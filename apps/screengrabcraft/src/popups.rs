@@ -320,22 +320,41 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         }
     };
     let mut choice = None;
-    let mut now_at = None;
+    // Where its window is (points), the points' size in pixels, and whether the button is down.
+    let mut seen: Option<(egui::Pos2, f32, bool)> = None;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup(CONTROL_TITLE, at, size, false), |ui, _| {
         egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(12, 8))).show(ui, |ui| {
             choice = recording_ui(ui, kind, &view);
         });
-        if choice == Some(RecordingChoice::Drag) {
+        let ppp = ui.ctx().pixels_per_point();
+        let (outer, down) = ui.ctx().input(|i| (i.viewport().outer_rect.map(|r| r.min), i.pointer.primary_down()));
+        seen = outer.map(|o| (o, ppp, down));
+        // Elsewhere the system moves it (on Windows its move loop would hold up the service, the
+        // tray and the shortcuts, for as long as it runs: there it follows the pointer, below).
+        if choice == Some(RecordingChoice::Drag) && !cfg!(target_os = "windows") {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
         }
-        now_at = ui.ctx().input(|i| i.viewport().outer_rect).map(|r| r.min);
     });
     // Out of every capture, this one's included (Windows 10 2004 and later; elsewhere it's kept
     // off the area instead).
     screengrabcraft_desktop::cloak::keep_out_of_captures(CONTROL_TITLE);
-    // Once dragged, it stays where it was put.
-    if choice == Some(RecordingChoice::Drag) || svc.controls_at.is_some() {
-        svc.controls_at = now_at.or(svc.controls_at);
+    if let Some((outer, ppp, down)) = seen {
+        if choice == Some(RecordingChoice::Drag) {
+            // Where on it the pointer took hold (pixels), and from now on it stays where it's put.
+            svc.controls_drag = screengrabcraft_desktop::cloak::cursor_position().map(|(x, y)| (x as f32 - outer.x * ppp, y as f32 - outer.y * ppp));
+            svc.controls_at = Some(outer);
+        }
+        match svc.controls_drag {
+            // Dragged: it follows the pointer on the desktop, nothing else moving it meanwhile.
+            Some((gx, gy)) if down => {
+                if let Some((x, y)) = screengrabcraft_desktop::cloak::cursor_position() {
+                    svc.controls_at = Some(pos2((x as f32 - gx) / ppp.max(0.5), (y as f32 - gy) / ppp.max(0.5)));
+                }
+                ctx.request_repaint();
+            }
+            Some(_) => svc.controls_drag = None,
+            None => {}
+        }
     }
     ctx.request_repaint_after(std::time::Duration::from_millis(250));
     match choice {

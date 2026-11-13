@@ -135,6 +135,8 @@ pub struct Service {
     pub controls_hidden: bool,
     /// Where the owner dragged the recording's controls to (its window's place, in points).
     pub controls_at: Option<egui::Pos2>,
+    /// The controls being dragged: where on them the pointer took hold (pixels).
+    pub controls_drag: Option<(f32, f32)>,
     /// The winit monitors, for placing the overlay on each: position, size and name.
     pub screens: Vec<((i32, i32), (u32, u32), String)>,
     root_shown: bool,
@@ -211,6 +213,7 @@ impl Service {
             restarting: None,
             controls_hidden: false,
             controls_at: None,
+            controls_drag: None,
             screens: Vec::new(),
             root_shown: false,
             frame_frames: 0,
@@ -747,7 +750,10 @@ impl Service {
         }
         if self.restarting.is_none() {
             self.keys.while_recording(false, &self.settings.hotkeys);
+            // The next recording's controls go beside its area (Restart keeps them where they are).
+            self.controls_at = None;
         }
+        self.controls_drag = None;
         self.controls_hidden = false;
     }
 

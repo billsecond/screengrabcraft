@@ -106,6 +106,23 @@ struct App {
     warm: bool,
     /// When the program started, until its first frame is drawn (for the log).
     started: Option<std::time::Instant>,
+    /// The window is being brought to the owner: its size is looked at once it's no longer
+    /// minimized (frames left to look in).
+    size_check: u8,
+}
+
+/// The smallest the window is ever shown at for the owner, and the size given to one found
+/// smaller (points).
+const SHOWN_MIN: (f64, f64) = (760.0, 480.0);
+const SHOWN_USUAL: (f64, f64) = (1320.0, 860.0);
+
+/// The size to give a window of `inner` (physical pixels, at `scale`) that's being shown, when
+/// it's smaller than the editor is ever shown at; None when it's fine. Windows can leave a window
+/// kept out of sight squeezed to a sliver at the top left of the screen.
+fn rescued_size(inner: (u32, u32), scale: f64) -> Option<(f64, f64)> {
+    let scale = if scale.is_finite() { scale.max(0.5) } else { 1.0 };
+    let (w, h) = (f64::from(inner.0) / scale, f64::from(inner.1) / scale);
+    (w < SHOWN_MIN.0 - 1.0 || h < SHOWN_MIN.1 - 1.0).then_some(SHOWN_USUAL)
 }
 
 impl App {
@@ -154,6 +171,43 @@ impl App {
         }
     }
 
+    /// Out of sight, the window is never seen: if Windows shows it anyway (as a sliver at the top
+    /// left of the screen), it's hidden again at once.
+    fn keep_out_of_sight(&self, frame: &eframe::Frame) {
+        if let Some(w) = frame.winit_window()
+            && w.is_visible() == Some(true)
+        {
+            w.set_visible(false);
+            log::warn!("the window kept out of sight was shown by something else; hidden again");
+        }
+    }
+
+    /// Being brought to the owner: never as a sliver. Once it's no longer minimized, a window
+    /// smaller than the editor is ever shown at gets its usual size back.
+    fn check_size(&mut self, frame: &eframe::Frame) {
+        if self.size_check == 0 {
+            return;
+        }
+        let Some(w) = frame.winit_window() else {
+            self.size_check = 0;
+            return;
+        };
+        if w.is_minimized() == Some(true) {
+            self.size_check -= 1;
+            return;
+        }
+        self.size_check = 0;
+        let s = w.inner_size();
+        if let Some((x, y)) = rescued_size((s.width, s.height), w.scale_factor()) {
+            log::warn!("the window was {} × {} as it was shown; given its usual size", s.width, s.height);
+            let _ = w.request_inner_size(winit::dpi::LogicalSize::new(x, y));
+            if let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) {
+                let p = m.position();
+                w.set_outer_position(winit::dpi::PhysicalPosition::new(p.x + 40, p.y + 40));
+            }
+        }
+    }
+
     /// The window was closed (and nothing is left unsaved): out of sight, with an empty picture.
     fn go_out_of_sight(&mut self, ctx: &egui::Context) {
         store::save_editor_settings(&self.editor.settings);
@@ -172,6 +226,7 @@ impl eframe::App for App {
             cloak::cloak(frame, false);
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
+        self.check_size(frame);
         for args in self.guard.handed() {
             if let [word] = args.as_slice()
                 && word.starts_with("--")
@@ -205,10 +260,8 @@ impl eframe::App for App {
             for a in args.iter().filter(|a| !a.starts_with("--")) {
                 self.editor.open_path(ctx, a);
             }
-            if args.iter().any(|a| a == launch::CAPTIONS_COMING)
-                && let Some(v) = self.editor.video.as_mut()
-            {
-                v.expect_captions(ctx.input(|i| i.time));
+            if args.iter().any(|a| a == launch::CAPTIONS_COMING) {
+                self.editor.expect_captions(ctx.input(|i| i.time));
             }
             if args.iter().any(|a| !a.starts_with("--")) {
                 log::info!("opened what was handed over in {} ms", t.elapsed().as_millis());
@@ -216,6 +269,9 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            // Its size is looked at once it's back (a few frames, while it's restored).
+            self.size_check = 5;
+            ctx.request_repaint();
         }
         // Out of the picture for a capture by a service that has gone since (the watch thread
         // wakes it then).
@@ -241,8 +297,10 @@ impl eframe::App for App {
                 log::info!("the capture service has gone; the editor kept ready ends too");
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
-            // Nothing to do out of sight once the first frame has readied the fonts and the drawing.
+            // Nothing to do out of sight once the first frame has readied the fonts and the drawing,
+            // but to see that it stays out of sight.
             if self.warm {
+                self.keep_out_of_sight(frame);
                 return;
             }
         }
@@ -367,8 +425,8 @@ fn main() -> std::process::ExitCode {
             for f in &files {
                 editor.open_path(&ctx, f);
             }
-            if coming && let Some(v) = editor.video.as_mut() {
-                v.expect_captions(0.0);
+            if coming {
+                editor.expect_captions(0.0);
             }
             log::info!("start: editor ready after {} ms", started.elapsed().as_millis());
             if standby {
@@ -384,6 +442,7 @@ fn main() -> std::process::ExitCode {
                 standby,
                 warm: false,
                 started: Some(started),
+                size_check: 0,
             }))
         }),
     );
@@ -408,9 +467,10 @@ fn watch_the_service(ctx: egui::Context) {
         loop {
             std::thread::sleep(WATCH);
             let now = instance::running("service");
-            if was && !now {
-                ctx.request_repaint();
-            }
+            // A frame now and then also sees that a window out of sight stays so (one frame:
+            // nothing is drawn out of sight).
+            let _ = was && !now;
+            ctx.request_repaint();
             was = now;
         }
     });
@@ -428,6 +488,23 @@ fn simplify(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_window_squeezed_to_a_sliver_gets_its_usual_size_back() {
+        // As Windows left it: a sliver at the top left.
+        assert_eq!(rescued_size((70, 60), 1.0), Some(SHOWN_USUAL));
+        assert_eq!(rescued_size((160, 28), 1.5), Some(SHOWN_USUAL));
+        // Narrow or short only, at any scale.
+        assert_eq!(rescued_size((2000, 300), 1.0), Some(SHOWN_USUAL));
+        assert_eq!(rescued_size((1000, 1000), 2.0), Some(SHOWN_USUAL), "500 × 500 points");
+        // A window the owner sized is left as it is, down to the smallest the editor allows.
+        assert_eq!(rescued_size((2579, 1839), 1.5), None);
+        assert_eq!(rescued_size((760, 480), 1.0), None);
+        assert_eq!(rescued_size((1140, 720), 1.5), None);
+        // Nonsense scales don't panic.
+        assert_eq!(rescued_size((100, 100), f64::NAN), Some(SHOWN_USUAL));
+        assert_eq!(rescued_size((u32::MAX, u32::MAX), 0.0), None);
+    }
 
     #[test]
     fn a_window_in_use_steps_aside_for_a_capture_and_comes_back_with_the_keyboard() {

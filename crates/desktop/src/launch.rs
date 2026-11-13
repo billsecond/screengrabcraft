@@ -126,6 +126,9 @@ pub fn reveal(path: &Path) -> Result<(), String> {
         // picks the file out where Explorer's /select at times only opens the folder. On a thread
         // of its own, as it wants a COM apartment of its own; Explorer's /select if it fails.
         let file = std::path::PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+        // The folder's window is Explorer's, and Windows keeps a program from coming to the front
+        // over the one in use: this program, in use as it asks, lets it.
+        let _ = winsafe::AllowSetForegroundWindow(None);
         return std::thread::Builder::new()
             .name("reveal".into())
             .spawn(move || {

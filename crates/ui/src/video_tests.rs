@@ -582,3 +582,52 @@ fn live_recording_shows_its_camera_in_the_editor() {
     }
     assert!(differ_at.iter().all(|d| *d > 2_000), "the camera is seen in the editor: {differ_at:?}");
 }
+
+/// A host whose recordings are on its disk (here, in memory): they're read on a thread of their
+/// own, as the desktop's are.
+struct DiskHost {
+    recording: Vec<u8>,
+}
+
+impl crate::services::Services for DiskHost {
+    fn open_recording(&self, _path: &str) -> Result<Box<dyn screengrabcraft_media::recording::Source>, String> {
+        Ok(Box::new(self.recording.clone()))
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_recording_from_the_disk_says_its_opening_then_opens() {
+    let mut ed = Editor::new(Box::new(DiskHost { recording: meeting() }), EditorSettings::default());
+    let ctx = egui::Context::default();
+    ed.open_path(&ctx, "C:/Captures/Long meeting.sgvideo");
+    ed.expect_captions(0.0);
+    assert!(ed.opening_video.is_some(), "read on a thread of its own");
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(1);
+    // Read meanwhile: the window says so (unless it was quicker than a frame).
+    let shown = h.query_by_label("Opening the Recording").is_some();
+    for _ in 0..200 {
+        if h.state().video.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    let v = h.state().video.as_ref().expect("the recording opened");
+    assert_eq!(v.session.timeline.length(), 4_000_000);
+    assert!(v.captions_coming.is_some(), "captions said to be coming while it was read are waited for");
+    assert!(h.state().opening_video.is_none());
+    h.run_steps(2);
+    assert!(h.query_by_label("Opening the Recording").is_none());
+    let _ = shown;
+}
