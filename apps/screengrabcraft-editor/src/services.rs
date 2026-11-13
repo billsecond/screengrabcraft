@@ -13,7 +13,9 @@ use screengrabcraft_media::recording::{self, FileSource, Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
-use screengrabcraft_ui::services::{DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoJob};
+use screengrabcraft_ui::services::{
+    DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoFormat, VideoJob,
+};
 
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
@@ -359,6 +361,10 @@ impl Services for DesktopServices {
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new().append(true).open(path).map_err(|e| e.to_string())?;
         f.write_all(bytes).and_then(|()| f.sync_data()).map_err(|e| e.to_string())
+    }
+
+    fn video_formats(&self) -> Vec<VideoFormat> {
+        crate::video::formats()
     }
 
     fn export_video(&self, job: VideoJob) -> Result<VideoExport, String> {

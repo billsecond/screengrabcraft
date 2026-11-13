@@ -20,7 +20,6 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_engine::VideoSession;
@@ -30,9 +29,12 @@ use screengrabcraft_media::recording::{self, Recording, StreamKind};
 use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
+mod export_window;
+pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
+
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
-use crate::services::{Filter, SoundOut, VideoExport, VideoJob};
+use crate::services::{Filter, SoundOut, VideoFormat};
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -161,9 +163,13 @@ pub struct VideoView {
     saved: u64,
     seen: u64,
     changed_at: f64,
-    export: Option<VideoExport>,
-    /// The last video made.
-    pub exported: Option<String>,
+    /// Export Video's window: choosing, the video being made, or the video made.
+    pub export: Option<ExportStep>,
+    /// What Export Video was last set to (offered again).
+    export_last: Option<(VideoFormat, CaptionsIn)>,
+    /// Export Transcript was pressed before there were captions: they're being made, and the
+    /// transcript is asked for when they come.
+    pub transcript_after: Option<TranscriptFormat>,
     waves: BTreeMap<u8, Vec<(i16, i16)>>,
     /// The volume slider being dragged.
     volume_drag: bool,
@@ -256,7 +262,8 @@ impl VideoView {
             seen: 0,
             changed_at: 0.0,
             export: None,
-            exported: None,
+            export_last: None,
+            transcript_after: None,
             waves,
             volume_drag: false,
             captions,
@@ -309,9 +316,21 @@ impl VideoView {
 
     /// Export Transcript: asks where to save what was said in the video as edited (words cut or
     /// muted are left out), as a transcript or as subtitles; in a browser it's downloaded.
-    pub fn export_transcript(&self, ed: &mut Editor, ctx: &egui::Context, format: TranscriptFormat) {
+    /// A recording with no captions yet has them made first (on this computer), and the
+    /// transcript is asked for when they come.
+    pub fn export_transcript(&mut self, ed: &mut Editor, ctx: &egui::Context, format: TranscriptFormat) {
         if self.cues.is_empty() {
-            ed.error(ctx, "There are no captions to export: Make Captions writes down what was said");
+            if self.captions.is_none() && self.has_sound && self.path.is_some() {
+                if self.captions_coming.is_none() {
+                    self.make_captions(ed, ctx);
+                }
+                if self.captions_coming.is_some() {
+                    self.transcript_after = Some(format);
+                    ed.toast(ctx, "Making the captions first, on this computer: you'll choose where the transcript goes when they're ready");
+                }
+                return;
+            }
+            ed.error(ctx, "There's nothing said to export: the words were all cut or muted");
             return;
         }
         let name = format.file_name(&self.name);
@@ -323,6 +342,11 @@ impl VideoView {
         } else if let Err(e) = ed.services.download(&name, format.write(&self.cues).as_bytes()) {
             ed.error(ctx, e);
         }
+    }
+
+    /// Whether Export Transcript has something to save, or captions it can make first.
+    fn can_export_transcript(&self) -> bool {
+        !self.cues.is_empty() || (self.captions.is_none() && self.has_sound && self.path.is_some())
     }
 
     /// Whether to look for captions now: while there are none, or some are coming.
@@ -454,35 +478,20 @@ impl VideoView {
         }
     }
 
-    pub fn start_export(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if self.export.is_some() {
-            return;
-        }
-        let Some(path) = &self.path else {
-            ed.error(ctx, "Only a recording opened from a file can be made into a video here");
-            return;
-        };
-        let out = std::path::Path::new(path).with_extension("mp4").to_string_lossy().to_string();
-        let job = VideoJob {
-            recording: self.rec.clone(),
-            timeline: self.session.timeline.clone(),
-            out,
-            max_size: (1920, 1080),
-            fps: self.rec.header.fps.clamp(5, 60),
-            captions: (!self.cues.is_empty()).then(|| self.cues.to_vec()),
-            burn: self.session.timeline.captions.burn && !self.cues.is_empty(),
-        };
-        match ed.services.export_video(job) {
-            Ok(x) => self.export = Some(x),
-            Err(e) => ed.error(ctx, e),
-        }
-    }
-
     /// Work done every frame: the playhead while playing, saving edits, the export, the captions.
     fn tick(&mut self, ed: &mut Editor, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         self.poll_captions(ed, ctx, now);
         self.place_captions();
+        // Export Transcript waiting for captions: asked for once they've come, let go if none do.
+        if let Some(f) = self.transcript_after {
+            if !self.cues.is_empty() {
+                self.transcript_after = None;
+                self.export_transcript(ed, ctx, f);
+            } else if self.captions_coming.is_none() {
+                self.transcript_after = None;
+            }
+        }
         if let Some(p) = &self.playing {
             let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from + ((now - p.since).max(0.0) * 1e6) as u64);
             if at >= self.length() {
@@ -502,27 +511,12 @@ impl VideoView {
         } else if self.session.revision() != self.saved {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
-        if let Some(x) = &self.export {
-            let done = x.done.lock().ok().and_then(|mut d| d.take());
-            match done {
-                Some(Ok(path)) => {
-                    ed.toast(ctx, format!("Video saved: {}", crate::editor::file_name(&path)));
-                    self.exported = Some(path);
-                    self.export = None;
-                }
-                Some(Err(e)) => {
-                    if !x.cancel.load(Ordering::SeqCst) {
-                        ed.error(ctx, format!("The video could not be made: {e}"));
-                    }
-                    self.export = None;
-                }
-                None => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
-            }
-        }
+        self.poll_export(ed, ctx);
     }
 
     fn keys(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if ed.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+        // Export Video's windows take the keys (Enter, Esc) while one is up.
+        if ed.dialog.is_some() || self.export.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let now = ctx.input(|i| i.time);
@@ -538,7 +532,7 @@ impl VideoView {
             ed.services.request_open();
         }
         if pressed(cmd(Key::E)) {
-            self.start_export(ed, ctx);
+            self.open_export(ed, ctx);
         }
         if pressed(cmd(Key::X)) && self.range.is_some() {
             self.delete(ed, ctx);
@@ -589,8 +583,8 @@ impl VideoView {
                         ui.close();
                     }
                     ui.separator();
-                    if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video").shortcut_text("Ctrl+E")).clicked() {
-                        self.start_export(ed, &ctx);
+                    if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video…").shortcut_text("Ctrl+E")).clicked() {
+                        self.open_export(ed, &ctx);
                         ui.close();
                     }
                     if let Some(p) = &self.path
@@ -610,7 +604,7 @@ impl VideoView {
                             ui.close();
                         }
                     }
-                    if !self.cues.is_empty() {
+                    if self.can_export_transcript() {
                         if ui.button("Export Transcript…").on_hover_text("What was said, as a text file (.txt)").clicked() {
                             self.export_transcript(ed, &ctx, TranscriptFormat::Text);
                             ui.close();
@@ -691,10 +685,6 @@ impl VideoView {
                         if ui.checkbox(&mut show, "Captions on the Picture").changed() {
                             self.run(ed, &ctx, "video.captions", json!({"show": show}));
                         }
-                        let mut burn = c.burn;
-                        if ui.checkbox(&mut burn, "Captions in the Video Made").on_hover_text("Burned into the MP4's pictures").changed() {
-                            self.run(ed, &ctx, "video.captions", json!({"burn": burn}));
-                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {
@@ -759,42 +749,25 @@ impl VideoView {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                        match &self.export {
-                            Some(x) => {
-                                if widgets::button(ui, "Cancel").clicked() {
-                                    x.cancel.store(true, Ordering::SeqCst);
-                                }
-                                let p = x.progress.load(Ordering::SeqCst).min(1000) as f32 / 1000.0;
-                                ui.add(egui::ProgressBar::new(p).desired_width(160.0).show_percentage());
-                                ui.label(RichText::new("Making the video…").color(t.muted));
-                            }
-                            None => {
-                                if widgets::primary_button(ui, "Export Video").on_hover_text("Make an MP4 of the video as edited (Ctrl+E)").clicked()
-                                {
-                                    self.start_export(ed, &ctx);
-                                }
-                                if self.has_sound {
-                                    let why_not = if self.captions.is_none() {
-                                        "No captions yet: Make Captions (under the tracks) writes down what was said"
-                                    } else {
-                                        "Nothing said is left in the video as edited"
-                                    };
-                                    let r = ui.add_enabled_ui(!self.cues.is_empty(), |ui| widgets::button(ui, "Export Transcript")).inner;
-                                    if r.on_hover_text("Save what was said as a transcript (.txt) or subtitles (.srt)")
-                                        .on_disabled_hover_text(why_not)
-                                        .clicked()
-                                    {
-                                        self.export_transcript(ed, &ctx, TranscriptFormat::Text);
-                                    }
-                                }
-                                if let Some(p) = self.exported.clone() {
-                                    if widgets::button(ui, "Show in folder").clicked() {
-                                        ed.services.open_folder(Some(&p));
-                                    }
-                                    if widgets::button(ui, "Play video").on_hover_text(crate::editor::file_name(&p)).clicked() {
-                                        ed.services.open_with_system(&p);
-                                    }
-                                }
+                        let tip = "Choose where the video goes, what it's made as and whether its captions go with it (Ctrl+E)";
+                        if widgets::primary_button(ui, "Export Video").on_hover_text(tip).clicked() {
+                            self.open_export(ed, &ctx);
+                        }
+                        if self.has_sound {
+                            let tip = if !self.cues.is_empty() {
+                                "Save what was said as a transcript (.txt) or subtitles (.srt)"
+                            } else {
+                                "This recording has no captions yet: they're made first, on this computer, then you choose where the transcript goes"
+                            };
+                            let why_not = if self.transcript_after.is_some() {
+                                "Making the captions first, on this computer…"
+                            } else {
+                                "Nothing said is left in the video as edited"
+                            };
+                            let can = self.can_export_transcript() && self.transcript_after.is_none();
+                            let r = ui.add_enabled_ui(can, |ui| widgets::button(ui, "Export Transcript")).inner;
+                            if r.on_hover_text(tip).on_disabled_hover_text(why_not).clicked() {
+                                self.export_transcript(ed, &ctx, TranscriptFormat::Text);
                             }
                         }
                     });
@@ -1047,14 +1020,8 @@ impl VideoView {
             let c = self.session.timeline.captions;
             let mut show = c.show;
             let r = ui.put(Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(60.0, 20.0)), egui::Checkbox::new(&mut show, "Show"));
-            if r.on_hover_text("The captions on the picture here").changed() {
+            if r.on_hover_text("The captions on the picture here (Export Video asks whether they go in the video)").changed() {
                 self.run(ed, &ctx, "video.captions", json!({"show": show}));
-            }
-            let mut burn = c.burn;
-            let r =
-                ui.put(Rect::from_min_size(row.min + vec2(74.0, 24.0), vec2(row.width() - 80.0, 20.0)), egui::Checkbox::new(&mut burn, "In video"));
-            if r.on_hover_text("Burned into the pictures of the video made").changed() {
-                self.run(ed, &ctx, "video.captions", json!({"burn": burn}));
             }
         } else if self.captions_coming.is_some() {
             ui.painter_at(row).text(row.min + vec2(14.0, 26.0), egui::Align2::LEFT_TOP, "Being made…", egui::FontId::proportional(11.0), t.muted);
@@ -1323,6 +1290,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     v.timeline(ed, ui);
     v.camera_panel(ed, ui);
     v.preview(ed, ui);
+    v.export_windows(ed, &ctx);
     // Something else was opened meanwhile (from the strip): this one's edits are written first.
     if ed.video_epoch == epoch && ed.video.is_none() {
         ed.video = Some(v);

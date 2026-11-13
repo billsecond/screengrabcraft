@@ -57,20 +57,68 @@ pub struct VideoExport {
     pub done: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
+/// What a video is made as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoFormat {
+    /// MP4 with H.264 pictures and AAC sound: every player opens it.
+    Mp4,
+    /// MP4 with AV1 pictures and Opus sound: smaller, but older players (Windows Media Player
+    /// among them) can't open it.
+    Mp4Av1,
+    /// An animated GIF: no sound, smaller pictures; for short clips.
+    Gif,
+}
+
+impl VideoFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 => "MP4 video: plays everywhere (H.264)",
+            VideoFormat::Mp4Av1 => "MP4 video: smaller, newer players only (AV1)",
+            VideoFormat::Gif => "Animated GIF: no sound, for short clips",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 | VideoFormat::Mp4Av1 => "mp4",
+            VideoFormat::Gif => "gif",
+        }
+    }
+
+    /// Its file type in a save dialog.
+    pub fn filter(self) -> Filter {
+        match self {
+            VideoFormat::Mp4 | VideoFormat::Mp4Av1 => ("MP4 video", &["mp4"]),
+            VideoFormat::Gif => ("Animated GIF", &["gif"]),
+        }
+    }
+
+    /// Whether it has a sound track (and so whether subtitles beside it make sense).
+    pub fn has_sound(self) -> bool {
+        self != VideoFormat::Gif
+    }
+}
+
 /// What to make a video from.
 #[derive(Clone)]
 pub struct VideoJob {
     pub recording: std::sync::Arc<Recording>,
     pub timeline: Timeline,
-    /// Where it's wanted; the host picks a free name beside it if that one is taken.
+    /// Where it's wanted.
     pub out: String,
+    /// Whether `out` was picked in a save dialog (a file there is replaced); else the host picks
+    /// a free name beside it if that one is taken.
+    pub replace: bool,
+    pub format: VideoFormat,
     /// The largest it's made.
     pub max_size: (u32, u32),
     pub fps: u32,
-    /// The captions as they fall on the edited video, if there are some: written beside it
-    /// (`.srt` and `.txt`), and burned into its pictures if `burn`.
+    /// The captions as they fall on the edited video, if there are some: burned into its
+    /// pictures if `burn`, written beside it as subtitles (`.srt`, the video's name) if
+    /// `subtitles`.
     pub captions: Option<Vec<Cue>>,
     pub burn: bool,
+    pub subtitles: bool,
 }
 
 /// Sound the host is playing; dropping it stops it.
@@ -160,7 +208,8 @@ pub trait Services {
         None
     }
 
-    /// Shows a folder (the captures folder when `path` is none) in the file manager.
+    /// Shows a file selected in its folder in the file manager, or a folder (the captures folder
+    /// when `path` is none).
     fn open_folder(&self, _path: Option<&str>) {}
 
     /// Asks the capture service for a new capture.
@@ -194,7 +243,12 @@ pub trait Services {
         Err("files are not available here".to_string())
     }
 
-    /// Starts making an MP4 (on a thread of the host's).
+    /// What videos can be made here, the one to offer first first (none in a browser).
+    fn video_formats(&self) -> Vec<VideoFormat> {
+        Vec::new()
+    }
+
+    /// Starts making a video (on a thread of the host's).
     fn export_video(&self, _job: VideoJob) -> Result<VideoExport, String> {
         Err("videos are made by the editor on the desktop".to_string())
     }

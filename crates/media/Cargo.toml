@@ -26,5 +26,9 @@ crc32fast = { workspace = true }
 rav1e = { workspace = true }
 rusty-opus = { workspace = true }
 
+# H.264 and AAC by Windows' own encoders (its media transcoder), for videos every player opens.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = ["Foundation", "Media_Core", "Media_MediaProperties", "Media_Transcoding", "Security_Cryptography", "Storage", "Storage_Streams"] }
+
 [dev-dependencies]
 proptest = { workspace = true }

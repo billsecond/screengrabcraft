@@ -14,6 +14,10 @@ use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys};
 pub enum Target {
     Capture(CaptureMode),
     Editor,
+    /// While recording: pause it or go on.
+    Pause,
+    /// While recording: stop it and keep it.
+    Stop,
 }
 
 /// The system's key code for a key name of [`screengrabcraft_model::settings::KEYS`].
@@ -119,6 +123,9 @@ pub fn logo_name() -> &'static str {
 pub struct Registered {
     manager: Option<GlobalHotKeyManager>,
     active: Vec<(HotKey, Target)>,
+    /// Pause and Stop, registered only while a recording runs (F9 and F10 are other programs'
+    /// the rest of the time).
+    during: Vec<(HotKey, Target)>,
     pub problems: Vec<String>,
 }
 
@@ -132,7 +139,40 @@ impl Registered {
             }
         };
         let problems = if manager.is_none() { vec![no_shortcuts_text()] } else { Vec::new() };
-        Registered { manager, active: Vec::new(), problems }
+        Registered { manager, active: Vec::new(), during: Vec::new(), problems }
+    }
+
+    /// Takes the recording's own shortcuts (Pause, Stop) while one runs, and gives them back
+    /// after. A key a capture already has, or another program, is left alone (and logged).
+    pub fn while_recording(&mut self, on: bool, keys: &Hotkeys) {
+        let Some(manager) = &self.manager else { return };
+        for (k, _) in self.during.drain(..) {
+            let _ = manager.unregister(k);
+        }
+        if !on {
+            return;
+        }
+        for (key, target) in [(keys.pause.as_ref(), Target::Pause), (keys.stop.as_ref(), Target::Stop)] {
+            let Some(hk) = key.and_then(to_system) else { continue };
+            if self.active.iter().chain(&self.during).any(|(k, _)| *k == hk) {
+                log::warn!("{} is already a shortcut; it isn't the recording's too", key.map(|k| k.display(logo_name())).unwrap_or_default());
+                continue;
+            }
+            match manager.register(hk) {
+                Ok(()) => self.during.push((hk, target)),
+                Err(e) => log::warn!("the recording's shortcut couldn't be had: {e}"),
+            }
+        }
+    }
+
+    /// A recording shortcut as menus show it, if it's set.
+    pub fn recording_label(keys: &Hotkeys, target: Target) -> Option<String> {
+        let k = match target {
+            Target::Pause => keys.pause.as_ref(),
+            Target::Stop => keys.stop.as_ref(),
+            _ => None,
+        };
+        k.map(|k| k.display(logo_name()))
     }
 
     /// Whether this system lets a program have global shortcuts at all.
@@ -173,7 +213,7 @@ impl Registered {
 
     /// What a pressed shortcut is for.
     pub fn target(&self, id: u32) -> Option<Target> {
-        self.active.iter().find(|(k, _)| k.id() == id).map(|(_, t)| *t)
+        self.active.iter().chain(&self.during).find(|(k, _)| k.id() == id).map(|(_, t)| *t)
     }
 
     /// The shortcut registered for a mode, for menus.

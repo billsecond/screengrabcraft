@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/screengrabcraft", "apps/screengrabcraft-editor", "apps/screengrabcraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.1.35"
+version = "0.1.37"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.91"
@@ -48,6 +48,8 @@ lz4_flex = { version = "0.14", default-features = false, features = ["safe-encod
 crc32fast = "1.4"
 rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }
 rusty-opus = "1.0.2"
+# Windows' own H.264 and AAC encoders, through its media transcoder (safe Windows Runtime calls).
+windows = { version = "0.62", default-features = false }
 
 # Speech to text after a recording (Whisper, on the processor): the tensor library written in
 # Rust, its FFT, and casts for aligned copies. Not in the browser build.

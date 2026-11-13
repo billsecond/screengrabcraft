@@ -12,12 +12,12 @@ use std::time::Duration;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use screengrabcraft_media::export::{self, ExportSettings};
+use screengrabcraft_media::export::{self, Codec, ExportSettings};
 use screengrabcraft_media::recording::{FileSource, Recording, ScreenDecoder, StreamKind};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_media::{captions, compose};
 use screengrabcraft_model::{Color, Raster};
-use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoJob};
+use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoFormat, VideoJob};
 
 /// `path`, or `name (2).ext` and on beside it if that is taken.
 fn free(path: &Path) -> PathBuf {
@@ -35,30 +35,43 @@ fn free(path: &Path) -> PathBuf {
         .unwrap_or_else(|| dir.join(format!("{stem} {}.{ext}", std::process::id())))
 }
 
-/// Starts making the MP4; the answer comes back through the job's `done`.
+/// What this computer can make, the one every player opens first.
+pub fn formats() -> Vec<VideoFormat> {
+    let mut f = Vec::with_capacity(3);
+    if Codec::H264.available() {
+        f.push(VideoFormat::Mp4);
+    }
+    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif]);
+    f
+}
+
+/// Starts making the video; the answer comes back through the job's `done`.
 pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String> {
     let x = VideoExport::default();
-    let out = free(Path::new(&job.out));
+    // A name picked in the save dialog was agreed to be replaced; the one offered isn't.
+    let out = if job.replace { PathBuf::from(&job.out) } else { free(Path::new(&job.out)) };
     let (progress, cancel, done) = (x.progress.clone(), x.cancel.clone(), x.done.clone());
     std::thread::Builder::new()
         .name("export".into())
         .spawn(move || {
-            let settings = ExportSettings { max_width: job.max_size.0, max_height: job.max_size.1, fps: job.fps, ..ExportSettings::default() };
+            let codec = if job.format == VideoFormat::Mp4 { Codec::H264 } else { Codec::Av1 };
+            let settings = ExportSettings { max_width: job.max_size.0, max_height: job.max_size.1, fps: job.fps, codec, ..ExportSettings::default() };
             let captions = job.captions.filter(|c| !c.is_empty());
             let burned = captions.clone().filter(|_| job.burn).map(Arc::new);
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                export::export_with_captions(job.recording, &job.timeline, burned, &out, settings, &progress, &cancel)
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job.format {
+                VideoFormat::Gif => export::export_gif(job.recording, &job.timeline, burned, &out, settings, &progress, &cancel),
+                VideoFormat::Mp4 | VideoFormat::Mp4Av1 => {
+                    export::export_with_captions(job.recording, &job.timeline, burned, &out, settings, &progress, &cancel)
+                }
             }));
             let result = match made {
                 Ok(Ok(e)) => {
-                    log::info!("made a video: {} × {}, {} frames, {} bytes", e.width, e.height, e.frames, e.bytes);
-                    // The captions beside it, as they fall on it (players pick up a .srt of the same name).
-                    if let Some(c) = &captions {
-                        for (ext, text) in [("txt", captions::to_text(c)), ("srt", captions::to_srt(c))] {
-                            let side = out.with_extension(ext);
-                            if let Err(e) = screengrabcraft_desktop::store::write_atomic(&side, text.as_bytes()) {
-                                log::warn!("the video's captions could not be written beside it ({}): {e}", side.display());
-                            }
+                    log::info!("made a video ({:?}): {} × {}, {} frames, {} bytes", job.format, e.width, e.height, e.frames, e.bytes);
+                    // The subtitles beside it, as they fall on it (players pick up a .srt of the same name).
+                    if let Some(c) = captions.as_ref().filter(|_| job.subtitles && job.format.has_sound()) {
+                        let side = out.with_extension("srt");
+                        if let Err(e) = screengrabcraft_desktop::store::write_atomic(&side, captions::to_srt(c).as_bytes()) {
+                            log::warn!("the video's subtitles could not be written beside it ({}): {e}", side.display());
                         }
                     }
                     Ok(out.to_string_lossy().to_string())

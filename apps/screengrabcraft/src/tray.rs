@@ -11,7 +11,7 @@
 
 use screengrabcraft_desktop::tray_icon::{Look, pixels, record_dot};
 use screengrabcraft_model::{CaptureMode, Settings};
-use tray_icon::menu::{IconMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, IconMenuItem, Menu, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::hotkeys::Registered;
@@ -28,6 +28,61 @@ pub enum Item {
     CheckUpdates,
     InstallUpdate,
     Quit,
+    /// While recording (its own menu): pause it or go on.
+    PauseRecording,
+    /// Throw it away and start the same again.
+    RestartRecording,
+    /// Show the recording's controls, or put them away in the tray.
+    ToggleControls,
+    /// The red border round the area, on or off.
+    ToggleBorder,
+    /// Stop and throw it away.
+    DiscardRecording,
+}
+
+/// How a recording is, for its menu.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecordingState {
+    pub paused: bool,
+    /// Whether it can be paused at all (a scrolling capture can't).
+    pub can_pause: bool,
+    /// Its controls are on the screen (not put away in the tray).
+    pub controls: bool,
+    pub border: bool,
+    /// Its shortcuts, as menus show them.
+    pub pause_key: Option<String>,
+    pub stop_key: Option<String>,
+}
+
+/// One entry of the menu shown while a recording runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RecordingEntry {
+    /// Words only: what's going on.
+    Heading(String),
+    Item(String, Item),
+    /// An item with a tick when on.
+    Check(String, Item, bool),
+    Separator,
+}
+
+/// The menu while a recording runs: what's going on, Pause or Resume, Stop and Save, Restart;
+/// the controls shown or put away, the red border; Discard, set apart.
+pub fn recording_entries(s: &RecordingState) -> Vec<RecordingEntry> {
+    use RecordingEntry as E;
+    let mut e = vec![E::Heading(if s.paused { "Recording paused".to_string() } else { "Recording…".to_string() }), E::Separator];
+    if s.can_pause {
+        let words = if s.paused { "Resume Recording" } else { "Pause Recording" };
+        e.push(E::Item(label(words, s.pause_key.clone()), Item::PauseRecording));
+    }
+    e.push(E::Item(label("Stop and Save", s.stop_key.clone()), Item::StopRecording));
+    e.push(E::Item("Restart Recording".to_string(), Item::RestartRecording));
+    e.push(E::Separator);
+    let controls = if s.controls { "Hide the Controls in the Tray" } else { "Show the Controls" };
+    e.push(E::Item(controls.to_string(), Item::ToggleControls));
+    e.push(E::Check("Red Border Round the Area".to_string(), Item::ToggleBorder, s.border));
+    e.push(E::Separator);
+    e.push(E::Item("Discard Recording".to_string(), Item::DiscardRecording));
+    e
 }
 
 /// One entry of the menu, in order.
@@ -110,6 +165,11 @@ pub struct Tray {
     recording: bool,
     /// The update waiting, as its item says it (`Install Update 0.1.8`); see `crate::update`.
     pub update: Option<String>,
+    /// The menu of captures, kept while the recording's own menu is shown.
+    main: Option<Menu>,
+    /// The recording's menu as it was last built, and its items.
+    shown: Option<RecordingState>,
+    recording_items: Vec<(MenuId, Item)>,
 }
 
 fn icon(look: Look) -> Option<Icon> {
@@ -128,8 +188,19 @@ fn label(text: &str, shortcut: Option<String>) -> String {
 impl Tray {
     /// Builds the tray icon and menu (on the main thread, with the event loop running).
     pub fn new(settings: &Settings, keys: &Registered) -> Tray {
-        let mut t = Tray { icon: None, items: Vec::new(), stoppers: Vec::new(), production: None, recording: false, update: None };
+        let mut t = Tray {
+            icon: None,
+            items: Vec::new(),
+            stoppers: Vec::new(),
+            production: None,
+            recording: false,
+            update: None,
+            main: None,
+            shown: None,
+            recording_items: Vec::new(),
+        };
         let menu = t.menu(settings, keys);
+        t.main = Some(menu.clone());
         let look = if cfg!(target_os = "macos") { Look::Template } else { Look::Normal };
         let mut b = TrayIconBuilder::new()
             .with_tooltip("ScreenGrabCraft — capture the screen")
@@ -214,7 +285,11 @@ impl Tray {
     pub fn rebuild(&mut self, settings: &Settings, keys: &Registered) {
         self.items.clear();
         let menu = self.menu(settings, keys);
-        if let Some(i) = &self.icon {
+        self.main = Some(menu.clone());
+        // While a recording runs its own menu stays; the new one is shown after.
+        if let Some(i) = &self.icon
+            && self.shown.is_none()
+        {
             i.set_menu(Some(Box::new(menu)));
         }
         let r = self.recording;
@@ -223,7 +298,58 @@ impl Tray {
     }
 
     pub fn item(&self, id: &MenuId) -> Option<Item> {
-        self.items.iter().find(|(i, _)| i == id).map(|(_, it)| *it)
+        self.items.iter().chain(&self.recording_items).find(|(i, _)| i == id).map(|(_, it)| *it)
+    }
+
+    /// While a recording runs, its own menu (built again when `state` changes), which a click on
+    /// the icon opens too (Windows, macOS; elsewhere the icon's menu opens as the desktop
+    /// opens it). None: the captures' menu again.
+    pub fn show_recording(&mut self, state: Option<RecordingState>) {
+        if self.shown == state {
+            return;
+        }
+        let Some(i) = &self.icon else {
+            self.shown = state;
+            return;
+        };
+        match &state {
+            Some(s) => {
+                let menu = Menu::new();
+                self.recording_items.clear();
+                for entry in recording_entries(s) {
+                    match entry {
+                        RecordingEntry::Heading(text) => {
+                            let _ = menu.append(&MenuItem::new(text, false, None));
+                        }
+                        RecordingEntry::Item(text, item) => {
+                            let mi = MenuItem::new(text, true, None);
+                            self.recording_items.push((mi.id().clone(), item));
+                            let _ = menu.append(&mi);
+                        }
+                        RecordingEntry::Check(text, item, on) => {
+                            let mi = CheckMenuItem::new(text, true, on, None);
+                            self.recording_items.push((mi.id().clone(), item));
+                            let _ = menu.append(&mi);
+                        }
+                        RecordingEntry::Separator => {
+                            let _ = menu.append(&PredefinedMenuItem::separator());
+                        }
+                    }
+                }
+                i.set_menu(Some(Box::new(menu)));
+                i.set_show_menu_on_left_click(true);
+                let tip = if s.paused { "ScreenGrabCraft — recording paused" } else { "ScreenGrabCraft — recording (click for its menu)" };
+                let _ = i.set_tooltip(Some(tip));
+            }
+            None => {
+                self.recording_items.clear();
+                if let Some(m) = &self.main {
+                    i.set_menu(Some(Box::new(m.clone())));
+                }
+                i.set_show_menu_on_left_click(cfg!(target_os = "macos"));
+            }
+        }
+        self.shown = state;
     }
 
     /// Shows that a recording is running: a red dot, Record GIF and Record Video stop it, and
@@ -238,7 +364,8 @@ impl Tray {
             let _ = if on { i.set_icon(icon(Look::Recording)) } else { i.set_icon_templated(icon(Look::Template)) };
             #[cfg(not(target_os = "macos"))]
             let _ = i.set_icon(icon(if on { Look::Recording } else { Look::Normal }));
-            let _ = i.set_tooltip(Some(if on { "ScreenGrabCraft — recording (click to stop)" } else { "ScreenGrabCraft — capture the screen" }));
+            let _ =
+                i.set_tooltip(Some(if on { "ScreenGrabCraft — recording (click for its menu)" } else { "ScreenGrabCraft — capture the screen" }));
         }
         for s in &self.stoppers {
             s.item.set_text(if on { "Stop Recording" } else { s.text.as_str() });

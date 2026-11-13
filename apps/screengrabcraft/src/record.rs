@@ -14,7 +14,7 @@ use screengrabcraft_capture::Monitor;
 use screengrabcraft_capture::audio::{self, AudioCapture, AudioSource, SoundBlock};
 use screengrabcraft_capture::camera::{self, CameraCapture};
 use screengrabcraft_media::compose;
-use screengrabcraft_media::export::{self, ExportSettings, Exporter};
+use screengrabcraft_media::export::{self, Codec, ExportSettings, Exporter};
 use screengrabcraft_media::recording::{self, FileSource, Header, RecordingWriter, StreamInfo, StreamKind};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::settings::VideoOptions;
@@ -52,6 +52,11 @@ pub struct Recording {
     pub desktop: IRect,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// Paused: nothing is recorded meanwhile, and the recording runs on after it without a gap.
+    paused: Arc<AtomicBool>,
+    /// Time spent paused before the pause now, and when the pause now began.
+    paused_before: Duration,
+    paused_at: Option<Instant>,
     /// Frames so far (GIF), or the joined picture's height (scrolling).
     pub progress: Arc<AtomicU32>,
     /// Frames that could not be joined lately (scrolling): the owner scrolled too fast.
@@ -72,7 +77,31 @@ impl Recording {
     /// really began).
     pub fn elapsed(&self) -> Duration {
         let Some(from) = self.begun.lock().ok().and_then(|b| *b) else { return Duration::ZERO };
-        self.stopped.map_or_else(|| from.elapsed(), |at| at.saturating_duration_since(from))
+        let until = self.stopped.unwrap_or_else(Instant::now);
+        let paused = self.paused_before + self.paused_at.map_or(Duration::ZERO, |p| until.saturating_duration_since(p.max(from)));
+        until.saturating_duration_since(from).saturating_sub(paused)
+    }
+
+    /// Whether it can be paused (a scrolling capture can't).
+    pub fn can_pause(&self) -> bool {
+        self.kind != Kind::Scrolling
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Pauses it, or goes on recording.
+    pub fn set_paused(&mut self, paused: bool) {
+        if !self.can_pause() || self.stopping() || paused == self.is_paused() {
+            return;
+        }
+        if paused {
+            self.paused_at = Some(Instant::now());
+        } else if let Some(at) = self.paused_at.take() {
+            self.paused_before += at.elapsed();
+        }
+        self.paused.store(paused, Ordering::SeqCst);
     }
 
     /// Whether it has been asked to stop and is finishing.
@@ -112,12 +141,13 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(AtomicU32::new(0));
     let lost = Arc::new(AtomicU32::new(0));
-    let (s, c, p, l) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone());
+    let paused = Arc::new(AtomicBool::new(false));
+    let (s, c, p, l, z) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone());
     let handle = std::thread::Builder::new()
         .name(format!("{kind:?}").to_lowercase())
         .spawn(move || {
             let out = match kind {
-                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &p, &wake),
+                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &wake),
                 Kind::Scrolling => scrolling(monitor, area, &s, &c, &p, &l, &wake),
                 Kind::Video | Kind::Production => Err("a video is started with start_video".to_string()),
             };
@@ -131,6 +161,9 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
         desktop,
         stop,
         cancel,
+        paused,
+        paused_before: Duration::ZERO,
+        paused_at: None,
         progress,
         lost,
         saving: Arc::default(),
@@ -148,6 +181,7 @@ fn gif(
     max_secs: u32,
     stop: &AtomicBool,
     cancel: &AtomicBool,
+    paused: &AtomicBool,
     progress: &AtomicU32,
     wake: &egui::Context,
 ) -> Result<Output, String> {
@@ -163,7 +197,26 @@ fn gif(
     let mut due = Instant::now();
     let mut frames = 0u32;
     let limit = Duration::from_secs(u64::from(max_secs.clamp(1, 600)));
-    while !stop.load(Ordering::SeqCst) && started.elapsed() < limit {
+    // Paused: no frames are taken and the time doesn't count (the frame before a pause lasts as
+    // long as it would have without it).
+    let (mut paused_since, mut paused_total): (Option<Instant>, Duration) = (None, Duration::ZERO);
+    let recorded = |since: Option<Instant>, total: Duration| started.elapsed().saturating_sub(total + since.map_or(Duration::ZERO, |p| p.elapsed()));
+    while !stop.load(Ordering::SeqCst) && recorded(paused_since, paused_total) < limit {
+        match (paused.load(Ordering::SeqCst), paused_since) {
+            (true, None) => paused_since = Some(Instant::now()),
+            (false, Some(p)) => {
+                let d = p.elapsed();
+                paused_total += d;
+                last += d;
+                paused_since = None;
+            }
+            _ => {}
+        }
+        if paused_since.is_some() {
+            std::thread::sleep(tick);
+            due = Instant::now();
+            continue;
+        }
         let at = Instant::now();
         match grab() {
             Ok(frame) if frame.width() == area.w && frame.height() == area.h => {
@@ -182,6 +235,10 @@ fn gif(
         // On a steady beat: what a frame took comes off the wait for the next.
         due = (due + tick).max(Instant::now());
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    // Stopped while paused: the pause doesn't count either.
+    if let Some(p) = paused_since {
+        last += p.elapsed();
     }
     let (_, n) = writer.finish(at_least(last.elapsed()).as_millis().min(u128::from(u32::MAX)) as u32).map_err(|e| e.to_string())?;
     if cancel.load(Ordering::SeqCst) || n == 0 {
@@ -370,6 +427,9 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         desktop: plan.desktop,
         stop: Arc::default(),
         cancel: Arc::default(),
+        paused: Arc::default(),
+        paused_before: Duration::ZERO,
+        paused_at: None,
         progress: Arc::default(),
         lost: Arc::default(),
         saving: Arc::default(),
@@ -380,12 +440,14 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
     };
     let (stop, cancel, progress, saving, levels, sources, begun) =
         (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone(), r.begun.clone());
+    let paused = r.paused.clone();
     let handle = std::thread::Builder::new()
         .name("video".into())
         .spawn(move || {
             let shared = Shared {
                 stop: &stop,
                 cancel: &cancel,
+                paused: &paused,
                 progress: &progress,
                 saving: &saving,
                 levels: &levels,
@@ -404,6 +466,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
 struct Shared<'a> {
     stop: &'a AtomicBool,
     cancel: &'a AtomicBool,
+    paused: &'a AtomicBool,
     progress: &'a AtomicU32,
     saving: &'a AtomicU32,
     levels: &'a [AtomicU32; 2],
@@ -425,6 +488,94 @@ impl Shared<'_> {
             *b = Some(at);
         }
         self.wake.request_repaint();
+    }
+}
+
+/// The stretches a recording was paused, as times since it began: what fell in them is left out,
+/// and what came after is moved back by them, so the recording runs on without a gap.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Pauses {
+    done: Vec<(Duration, Duration)>,
+    /// The pause going on, since when.
+    since: Option<Duration>,
+}
+
+/// A time as sound samples (per channel) at the recording's rate.
+fn to_samples(d: Duration) -> u64 {
+    (d.as_micros() as u64).saturating_mul(u64::from(audio::RATE)) / 1_000_000
+}
+
+impl Pauses {
+    /// Follows the pause switch, at `now` (since the recording began).
+    fn follow(&mut self, paused: bool, now: Duration) {
+        match (paused, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(from)) => {
+                self.done.push((from, now.max(from)));
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Time paused up to `now`.
+    fn total(&self, now: Duration) -> Duration {
+        let done: Duration = self.done.iter().map(|(a, b)| b.saturating_sub(*a)).sum();
+        done + self.since.map_or(Duration::ZERO, |s| now.saturating_sub(s))
+    }
+
+    /// Where something from `t` goes in the recording; None if it came while paused.
+    fn place(&self, t: Duration) -> Option<Duration> {
+        let mut before = Duration::ZERO;
+        for &(a, b) in &self.done {
+            if t >= b {
+                before += b.saturating_sub(a);
+            } else if t >= a {
+                return None;
+            }
+        }
+        if self.since.is_some_and(|s| t >= s) {
+            return None;
+        }
+        Some(t.saturating_sub(before))
+    }
+
+    /// Sound from sample `first` (`channels` interleaved) with what came while paused left out,
+    /// in pieces, each where it goes in the recording.
+    fn place_sound(&self, first: u64, samples: &[i16], channels: usize) -> Vec<(u64, Vec<i16>)> {
+        let ch = channels.max(1);
+        let end = first.saturating_add((samples.len() / ch) as u64);
+        let mut spans: Vec<(u64, u64)> = self.done.iter().map(|&(a, b)| (to_samples(a), to_samples(b))).collect();
+        if let Some(s) = self.since {
+            spans.push((to_samples(s), u64::MAX));
+        }
+        let piece = |from: u64, to: u64| -> Vec<i16> {
+            let (a, b) = (((from - first) as usize).saturating_mul(ch), ((to - first) as usize).saturating_mul(ch));
+            samples.get(a..b.min(samples.len())).map(<[i16]>::to_vec).unwrap_or_default()
+        };
+        let (mut out, mut cursor, mut shift) = (Vec::new(), first, 0u64);
+        for (a, b) in spans {
+            if b <= cursor {
+                shift = shift.saturating_add(b.saturating_sub(a));
+                continue;
+            }
+            if a >= end {
+                break;
+            }
+            if a > cursor {
+                out.push((cursor.saturating_sub(shift), piece(cursor, a)));
+            }
+            shift = shift.saturating_add(b.saturating_sub(a));
+            cursor = b.max(cursor);
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            out.push((cursor.saturating_sub(shift), piece(cursor, end)));
+        }
+        out.retain(|(_, s)| !s.is_empty());
+        out
     }
 }
 
@@ -534,9 +685,9 @@ fn open_devices(o: &VideoOptions, started: Instant, s: &Shared, camera: Option<C
 }
 
 /// When in the recording a camera picture belongs (its time counts from before the recording
-/// began, by `lead`); None for one from before it began.
-fn camera_pts(f: &camera::CameraFrame, lead: Duration) -> Option<u64> {
-    f.at.checked_sub(lead).map(|t| t.as_micros() as u64)
+/// began, by `lead`); None for one from before it began, or from while it was paused.
+fn camera_pts(f: &camera::CameraFrame, lead: Duration, pauses: &Pauses) -> Option<u64> {
+    f.at.checked_sub(lead).and_then(|t| pauses.place(t)).map(|t| t.as_micros() as u64)
 }
 
 fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
@@ -629,24 +780,30 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         _ => None,
     };
     let feeding = AtomicBool::new(true);
+    let mut pauses = Pauses::default();
     let (frames, live) = std::thread::scope(|scope| {
         let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
-        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut());
+        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses);
         feeding.store(false, Ordering::SeqCst);
         let live = feeder.and_then(|h| h.join().ok()).flatten();
         (frames, live)
     });
-    let duration = started.elapsed().as_micros() as u64;
+    // Stopped while paused: the pause ends where the recording does.
+    let end = started.elapsed();
+    pauses.follow(false, end);
+    let duration = end.saturating_sub(pauses.total(end)).as_micros() as u64;
     // What the devices still hold, then they're let go (the camera's light goes off).
     if let Some(a) = d.system {
-        send_sound(&tx, 1, a.stop());
+        let ch = a.channels;
+        send_sound(&tx, 1, a.stop(), &pauses, ch);
     }
     if let Some(a) = d.mic {
-        send_sound(&tx, 2, a.stop());
+        let ch = a.channels;
+        send_sound(&tx, 2, a.stop(), &pauses, ch);
     }
     if let Some(c) = d.camera {
         for f in c.stop() {
-            if let Some(pts) = camera_pts(&f, d.camera_lead) {
+            if let Some(pts) = camera_pts(&f, d.camera_lead, &pauses) {
                 let _ = tx.send(Item::Camera(pts, f.jpeg));
             }
         }
@@ -702,13 +859,15 @@ impl Heard {
     }
 }
 
-/// Hands sound to the writer; how much it was.
-fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>) -> Heard {
+/// Hands sound to the writer, what came while paused left out; how much came.
+fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>, pauses: &Pauses, channels: u8) -> Heard {
     let mut h = Heard::default();
     for b in blocks {
         h.samples = h.samples.saturating_add(b.samples.len());
         h.peak = h.peak.max(b.samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0));
-        let _ = tx.send(Item::Sound(id, b));
+        for (first, samples) in pauses.place_sound(b.first, &b.samples, usize::from(channels)) {
+            let _ = tx.send(Item::Sound(id, SoundBlock { first, samples }));
+        }
     }
     h
 }
@@ -815,7 +974,9 @@ impl ScreenSource {
 }
 
 /// The screen on a steady beat (if it's recorded), with the devices' sound and pictures passed on
-/// as they come. The number of screen pictures taken, or why there were none.
+/// as they come, the pause switch followed (`pauses`). The number of screen pictures taken, or
+/// why there were none.
+#[allow(clippy::too_many_arguments)]
 fn record_screen(
     plan: &VideoPlan,
     s: &Shared,
@@ -824,6 +985,7 @@ fn record_screen(
     waiting: &AtomicUsize,
     started: Instant,
     mut screen: Option<&mut ScreenSource>,
+    pauses: &mut Pauses,
 ) -> Result<u32, String> {
     let tick = Duration::from_secs_f64(1.0 / f64::from(plan.fps.clamp(5, 30)));
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
@@ -839,12 +1001,18 @@ fn record_screen(
     let (mut mic, mut system) = (Heard::default(), Heard::default());
     let channels = |a: &Option<AudioCapture>| a.as_ref().map_or(1, |a| a.channels);
     let (mic_ch, system_ch) = (channels(&d.mic), channels(&d.system));
-    while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
+    // The time recorded (pauses don't count) is what the limit is on.
+    while !s.stop.load(Ordering::SeqCst) && started.elapsed().saturating_sub(pauses.total(started.elapsed())) < limit {
         let at = started.elapsed();
-        if let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab) {
+        pauses.follow(s.paused.load(Ordering::SeqCst), at);
+        // While paused the screen isn't taken; the devices go on, and what they send is left out.
+        let place = pauses.place(at);
+        if let Some(pts) = place
+            && let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab)
+        {
             if waiting.load(Ordering::SeqCst) < WAITING {
                 waiting.fetch_add(1, Ordering::SeqCst);
-                let _ = tx.send(Item::Screen(at.as_micros() as u64, pic));
+                let _ = tx.send(Item::Screen(pts.as_micros() as u64, pic));
                 frames += 1;
                 s.progress.store(frames, Ordering::SeqCst);
             } else {
@@ -852,19 +1020,22 @@ fn record_screen(
             }
         }
         if let Some(a) = &d.system {
-            system.add(send_sound(tx, 1, a.take()));
+            system.add(send_sound(tx, 1, a.take(), pauses, system_ch));
             s.levels[0].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(a) = &d.mic {
-            mic.add(send_sound(tx, 2, a.take()));
+            mic.add(send_sound(tx, 2, a.take(), pauses, mic_ch));
             s.levels[1].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(c) = &d.camera {
             for f in c.take() {
-                // Any still on their way from before the recording began are left out.
-                if let Some(pts) = camera_pts(&f, d.camera_lead) {
+                // Any still on their way from before the recording began are left out, and any
+                // from while it's paused.
+                if f.at >= d.camera_lead {
                     camera_pictures = camera_pictures.saturating_add(1);
                     last_picture = at;
+                }
+                if let Some(pts) = camera_pts(&f, d.camera_lead, pauses) {
                     let _ = tx.send(Item::Camera(pts, f.jpeg));
                 }
             }
@@ -921,6 +1092,11 @@ fn record_screen(
 /// The MP4 started as the recording starts (none if it can't be: it's then made after).
 fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Exporter, Arc<AtomicBool>)> {
     let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
+    // Only AV1 is made as it's recorded; an MP4 every player opens (H.264, on Windows) is made
+    // from the recording when it stops.
+    if settings.codec != Codec::Av1 {
+        return None;
+    }
     let (w, h) = compose::fit(size.0, size.1, settings.max_width, settings.max_height);
     let with_sound = d.system.is_some() || d.mic.is_some();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1112,6 +1288,78 @@ mod tests {
     }
 
     #[test]
+    fn what_comes_while_paused_is_left_out_and_the_rest_moves_back() {
+        let ms = Duration::from_millis;
+        let mut p = Pauses::default();
+        p.follow(false, ms(500));
+        p.follow(true, ms(1000));
+        assert_eq!(p.place(ms(900)), Some(ms(900)));
+        assert_eq!(p.place(ms(1200)), None, "while paused");
+        p.follow(false, ms(3000));
+        assert_eq!(p.place(ms(3500)), Some(ms(1500)), "two seconds back");
+        assert_eq!(p.total(ms(4000)), ms(2000));
+        // Sound across the pause (mono, 0.99 s to 3.01 s): the part before it, and the part after
+        // it right where the first ends.
+        let (first, end) = (to_samples(ms(990)), to_samples(ms(3010)));
+        let samples: Vec<i16> = (0..end - first).map(|i| (i % 1000) as i16).collect();
+        let pieces = p.place_sound(first, &samples, 1);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!((pieces[0].0, pieces[0].1.len() as u64), (first, to_samples(ms(1000)) - first));
+        assert_eq!((pieces[1].0, pieces[1].1.len() as u64), (to_samples(ms(1000)), end - to_samples(ms(3000))));
+        assert_eq!(pieces[1].1.first(), samples.get((to_samples(ms(3000)) - first) as usize));
+        // Stereo keeps its pairs; sound wholly inside the pause is left out.
+        assert!(p.place_sound(to_samples(ms(1500)), &[1, 2, 3, 4], 2).is_empty());
+        assert_eq!(p.place_sound(to_samples(ms(3500)), &[1, 2, 3, 4], 2), vec![(to_samples(ms(1500)), vec![1, 2, 3, 4])]);
+        // Paused again until it stops: everything from then on is left out.
+        p.follow(true, ms(5000));
+        assert_eq!(p.place(ms(5100)), None);
+        assert_eq!(p.total(ms(6000)), ms(3000));
+        assert!(p.place_sound(to_samples(ms(5500)), &[1, 2], 1).is_empty());
+    }
+
+    #[test]
+    fn the_clock_stands_still_while_paused_and_scrolling_cant_be() {
+        let mut rec = start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, egui::Context::default()).unwrap();
+        rec.set_paused(true);
+        assert!(!rec.is_paused(), "a scrolling capture isn't paused");
+        rec.cancel();
+        let off = VideoOptions {
+            system_sound: false,
+            system_sound_name: None,
+            microphone: false,
+            microphone_name: None,
+            camera: false,
+            camera_index: None,
+            captions: false,
+        };
+        let plan = VideoPlan {
+            kind: Kind::Production,
+            screen: Screen::Off,
+            desktop: IRect::new(0, 0, 10, 10),
+            fps: 30,
+            max_secs: 60,
+            options: off,
+            out: std::env::temp_dir().join(format!("sgc-paused-{}.sgvideo", std::process::id())),
+            max_size: (1920, 1080),
+            created: String::new(),
+        };
+        let mut rec = start_video(plan, egui::Context::default()).unwrap();
+        if let Ok(mut b) = rec.begun.lock() {
+            *b = Some(Instant::now());
+        }
+        rec.set_paused(true);
+        assert!(rec.is_paused());
+        let at = rec.elapsed();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(rec.elapsed() <= at + Duration::from_millis(5), "the time shown stands still while paused");
+        rec.set_paused(false);
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(rec.elapsed() >= at + Duration::from_millis(30), "and goes on after");
+        rec.cancel();
+        assert!(!rec.is_paused() || rec.stopping());
+    }
+
+    #[test]
     fn stopping_stops_the_clock_at_once() {
         let off = VideoOptions {
             system_sound: false,
@@ -1176,10 +1424,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let block = |v: i16| SoundBlock { first: 0, samples: vec![v; 4800] };
         let mut h = Heard::default();
-        h.add(send_sound(&tx, 2, vec![block(0), block(0)]));
+        h.add(send_sound(&tx, 2, vec![block(0), block(0)], &Pauses::default(), 1));
         assert!(h.silent(), "nothing at all");
         assert!((h.secs(1) - 0.2).abs() < 1e-9);
-        h.add(send_sound(&tx, 2, vec![block(-40)]));
+        h.add(send_sound(&tx, 2, vec![block(-40)], &Pauses::default(), 1));
         assert!(!h.silent(), "a little hiss is a microphone that hears");
         assert_eq!(h.peak, 40);
         assert!(!Heard::default().silent(), "no sound at all isn't silence heard");

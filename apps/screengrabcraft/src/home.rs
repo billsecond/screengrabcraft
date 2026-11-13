@@ -416,7 +416,18 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             keys.editor = e;
             changed = true;
         }
+        let mut p = keys.pause.clone();
+        if hotkey_row(ui, "Pause or Resume Recording", &mut p, defaults.pause.clone()) {
+            keys.pause = p;
+            changed = true;
+        }
+        let mut s = keys.stop.clone();
+        if hotkey_row(ui, "Stop Recording", &mut s, defaults.stop.clone()) {
+            keys.stop = s;
+            changed = true;
+        }
     });
+    ui.label(RichText::new("Pause and Stop are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
     if changed {
         svc.settings.hotkeys = keys;
         svc.apply_settings();

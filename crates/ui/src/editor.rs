@@ -189,6 +189,8 @@ pub struct Editor {
     pub(crate) saving_project: bool,
     /// Export Transcript's save dialog is open, for this kind of file.
     pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
+    /// Export Video's Change… save dialog is open.
+    pub(crate) saving_video: bool,
     toast: Option<(String, f64, bool)>,
     /// The strip's thumbnails, with the time of the picture each was made from.
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
@@ -252,6 +254,7 @@ impl Editor {
             saving: None,
             saving_project: false,
             saving_transcript: None,
+            saving_video: false,
             toast: None,
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
@@ -729,6 +732,7 @@ impl Editor {
     pub fn save_as(&mut self) {
         self.saving = None;
         self.saving_transcript = None;
+        self.saving_video = false;
         let name = format!("{}.{PROJECT_EXT}", self.name);
         if self.services.has_paths() {
             self.saving_project = true;
@@ -743,6 +747,7 @@ impl Editor {
         self.saving = Some(format);
         self.saving_project = false;
         self.saving_transcript = None;
+        self.saving_video = false;
         let name = format!("{}.{}", self.name, format.extension());
         if self.services.has_paths() {
             let exts: &'static [&'static str] = match format {
@@ -813,7 +818,11 @@ impl Editor {
             None => format!("{path}.{}", format.extension()),
         };
         match self.services.write_file(&path, format.write(&cues).as_bytes()) {
-            Ok(()) => self.toast(ctx, format!("Exported {}", file_name(&path))),
+            Ok(()) => {
+                self.toast(ctx, format!("Exported {}", file_name(&path)));
+                // Where it went: its folder, with it selected.
+                self.services.open_folder(Some(&path));
+            }
             Err(e) => self.error(ctx, format!("{path}: {e}")),
         }
     }
@@ -827,7 +836,11 @@ impl Editor {
                 }
             }
             DialogResult::SaveTo(path) => {
-                if let Some(format) = self.saving_transcript.take() {
+                if std::mem::take(&mut self.saving_video) {
+                    if let Some(v) = self.video.as_mut() {
+                        v.export_saved_to(&path);
+                    }
+                } else if let Some(format) = self.saving_transcript.take() {
                     self.write_transcript(ctx, &path, format);
                 } else if self.saving_project && !path.to_ascii_lowercase().ends_with(&format!(".{PROJECT_EXT}")) {
                     // Saved under a picture's name: that is an export.
@@ -849,6 +862,7 @@ impl Editor {
                 self.saving = None;
                 self.saving_project = false;
                 self.saving_transcript = None;
+                self.saving_video = false;
             }
         }
     }

@@ -12,6 +12,8 @@ pub mod captions;
 pub mod compose;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;
+#[cfg(target_os = "windows")]
+mod h264;
 pub mod mp4;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod opus;

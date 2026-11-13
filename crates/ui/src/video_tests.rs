@@ -154,14 +154,39 @@ fn a_damaged_recording_is_an_error_not_a_crash() {
 struct CaptionHost {
     asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
-    jobs: std::sync::Arc<std::sync::Mutex<Vec<(Option<usize>, bool)>>>,
+    jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
+    /// The last video being made, to finish by hand.
+    making: std::sync::Arc<std::sync::Mutex<Option<crate::services::VideoExport>>>,
     /// The names offered in save dialogs, the answer the next dialog gives, the files written.
     offered: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
     written: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Files shown in their folder (`folder:`) or opened (`open:`).
+    shown: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// What a video job asked for.
+#[derive(Clone, Debug, PartialEq)]
+struct Job {
+    out: String,
+    replace: bool,
+    format: crate::services::VideoFormat,
+    captions: Option<usize>,
+    burn: bool,
+    subtitles: bool,
 }
 
 impl crate::services::Services for CaptionHost {
+    fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
+        use crate::services::VideoFormat;
+        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif]
+    }
+    fn open_folder(&self, path: Option<&str>) {
+        self.shown.lock().unwrap().push(format!("folder:{}", path.unwrap_or("")));
+    }
+    fn open_with_system(&self, path: &str) {
+        self.shown.lock().unwrap().push(format!("open:{path}"));
+    }
     fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
         self.offered.lock().unwrap().push(suggested_name.to_string());
     }
@@ -184,8 +209,17 @@ impl crate::services::Services for CaptionHost {
         Ok(())
     }
     fn export_video(&self, job: crate::services::VideoJob) -> Result<crate::services::VideoExport, String> {
-        self.jobs.lock().unwrap().push((job.captions.as_ref().map(Vec::len), job.burn));
-        Ok(crate::services::VideoExport::default())
+        self.jobs.lock().unwrap().push(Job {
+            out: job.out.clone(),
+            replace: job.replace,
+            format: job.format,
+            captions: job.captions.as_ref().map(Vec::len),
+            burn: job.burn,
+            subtitles: job.subtitles,
+        });
+        let x = crate::services::VideoExport::default();
+        *self.making.lock().unwrap() = Some(x.clone());
+        Ok(x)
     }
 }
 
@@ -245,13 +279,9 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
         let v = h.state().video.as_ref().unwrap();
         assert_eq!(v.cues.len(), 2);
     }
-    for label in ["Captions", "Show", "In video"] {
+    for label in ["Captions", "Show"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
-    // In video, then export: the job carries the captions and burns them.
-    h.get_by_label("In video").click();
-    h.run_steps(2);
-    assert!(h.state().video.as_ref().unwrap().session.timeline.captions.burn);
     if let Some(v) = h.state_mut().video.as_mut() {
         v.playhead = 2_500_000;
     }
@@ -261,9 +291,21 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
     {
         let _ = img.save(format!("{dir}/video-captions.png"));
     }
+    // Export Video, captions on the picture: the job carries the captions and burns them.
     h.get_by_label("Export Video").click();
     h.run_steps(2);
-    assert_eq!(host.jobs.lock().unwrap().as_slice(), &[(Some(2), true)]);
+    h.get_by_label("On the picture (always shown)").click();
+    h.run_steps(1);
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.captions, job.burn, job.subtitles), (Some(2), true, false));
+    // Done: the window says so (the next test looks at it); closed here.
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.mp4".into()));
+    h.run_steps(2);
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
     // Muting the microphone takes your line off the video (and the timeline).
     if let Some(v) = h.state_mut().video.as_mut() {
         let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
@@ -291,10 +333,12 @@ fn export_transcript_saves_what_was_said_as_text_or_subtitles() {
         h.run_steps(2);
         host.written.lock().unwrap().pop().unwrap()
     };
-    // A transcript: both speakers, with when each started.
+    // A transcript: both speakers, with when each started. Then its folder is shown, with it
+    // selected.
     let (path, text) = save(&mut h, "C:/Notes/Meeting.txt");
     assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production transcript.txt"]);
     assert_eq!(path, "C:/Notes/Meeting.txt");
+    assert_eq!(host.shown.lock().unwrap().as_slice(), ["folder:C:/Notes/Meeting.txt"]);
     assert_eq!(text, "[0:00:00] You: Here's the new login page.\n[0:00:02] Others: It looks good to me.\n");
     // A name ending .srt is subtitles.
     let (_, srt) = save(&mut h, "C:/Notes/Meeting.srt");
@@ -323,11 +367,119 @@ fn export_transcript_saves_what_was_said_as_text_or_subtitles() {
 fn export_transcript_waits_for_captions() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
-    // There, but nothing to save until captions are made.
+    // A recording with no captions yet: they're asked for first, and nothing is saved meanwhile.
     h.get_by_label("Export Transcript").click();
     h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Captures/Production.sgvideo"]);
     assert!(host.offered.lock().unwrap().is_empty());
-    assert!(h.state().saving_transcript.is_none());
+    assert!(h.state().video.as_ref().unwrap().transcript_after.is_some());
+    // They've come: where the transcript goes is asked at once.
+    *host.ready.lock().unwrap() = Some(captions());
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.expect_captions(0.0);
+    }
+    h.run_steps(3);
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production transcript.txt"]);
+    assert!(h.state().video.as_ref().unwrap().transcript_after.is_none());
+}
+
+#[test]
+fn export_video_asks_where_and_how_shows_its_progress_then_play_and_show_in_folder() {
+    use crate::services::{DialogResult, VideoFormat};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    let shot = |h: &mut Harness<'_, Editor>, name: &str| {
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/{name}.png"));
+        }
+    };
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    // Beside the recording, every player's MP4, the captions as subtitles beside it.
+    for label in ["Save as", "Format", "Closed captions (AI generated)", "Production.mp4", "As a subtitles file beside it (.srt)"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "export-video");
+    // Change…: the save dialog, and a name without its extension gets it.
+    h.get_by_label("Change…").click();
+    h.run_steps(2);
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production.mp4"]);
+    *host.answer.lock().unwrap() = Some(DialogResult::SaveTo("D:/Videos/Demo".into()));
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Demo.mp4").next().is_some());
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        job,
+        Job { out: "D:/Videos/Demo.mp4".into(), replace: true, format: VideoFormat::Mp4, captions: Some(2), burn: false, subtitles: true }
+    );
+    // Being made: a window with its progress and Cancel; the tool bar has no Show in folder.
+    let making = host.making.lock().unwrap().clone().unwrap();
+    making.progress.store(400, std::sync::atomic::Ordering::SeqCst);
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Exporting Video").next().is_some() || h.query_all_by_label_contains("Making").next().is_some());
+    assert!(h.query_all_by_label("Show in folder").next().is_none());
+    shot(&mut h, "export-video-making");
+    // Made: Play Video, Show in Folder (the file selected), Close.
+    *making.done.lock().unwrap() = Some(Ok("D:/Videos/Demo.mp4".into()));
+    h.run_steps(2);
+    for label in ["Play Video", "Show in Folder", "Close", "Its subtitles are beside it: Demo.srt"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "export-video-made");
+    h.get_by_label("Show in Folder").click();
+    h.run_steps(2);
+    assert_eq!(host.shown.lock().unwrap().as_slice(), ["folder:D:/Videos/Demo.mp4"]);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
+    // Offered again as it was last set.
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(crate::video::ExportStep::Choose(c)) => assert_eq!((c.format, c.captions), (VideoFormat::Mp4, crate::video::CaptionsIn::Subtitles)),
+        _ => panic!("the Export Video window is open"),
+    }
+}
+
+#[test]
+fn a_gif_has_no_subtitles_and_cancelling_says_so() {
+    use crate::services::VideoFormat;
+    use crate::video::{CaptionsIn, ExportStep};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    // Picked as a name ending .gif in the save dialog: a GIF, its captions on the picture.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("C:/Clips/Demo.gif");
+    }
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => {
+            assert_eq!((c.format, c.captions, c.path.as_str()), (VideoFormat::Gif, CaptionsIn::Picture, "C:/Clips/Demo.gif"));
+        }
+        _ => panic!("the Export Video window is open"),
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.format, job.burn, job.subtitles), (VideoFormat::Gif, true, false));
+    // Cancel (once the window has settled where it's shown): the job is told, and when it
+    // stops nothing is left open.
+    h.run_steps(2);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    let making = host.making.lock().unwrap().clone().unwrap();
+    assert!(making.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    *making.done.lock().unwrap() = Some(Err("cancelled".into()));
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
 }
 
 #[test]

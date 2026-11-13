@@ -82,6 +82,15 @@ pub struct Notice {
     pub error: bool,
 }
 
+/// How a recording was started, to start it the same way again.
+#[derive(Clone, Debug, PartialEq)]
+enum Again {
+    /// A GIF or a scrolling capture of part of a monitor.
+    Area { kind: record::Kind, monitor: u32, area: IRect, desktop: IRect },
+    /// A video (Record Video or Video Production).
+    Video { mode: CaptureMode, screen: record::Screen, desktop: IRect },
+}
+
 pub struct Service {
     pub settings: Settings,
     pub keys: Registered,
@@ -118,6 +127,14 @@ pub struct Service {
     editor_aside: bool,
     pub notice: Option<Notice>,
     pub recording: Option<Recording>,
+    /// How the recording going on was started, to start it the same way again (Restart).
+    again: Option<Again>,
+    /// A recording thrown away for Restart: the new one starts once it has let go of its devices.
+    restarting: Option<(Recording, Again)>,
+    /// The recording's controls are put away in the tray (Minimize, or no room off the area).
+    pub controls_hidden: bool,
+    /// Where the owner dragged the recording's controls to (its window's place, in points).
+    pub controls_at: Option<egui::Pos2>,
     /// The winit monitors, for placing the overlay on each: position, size and name.
     pub screens: Vec<((i32, i32), (u32, u32), String)>,
     root_shown: bool,
@@ -190,6 +207,10 @@ impl Service {
             editor_aside: false,
             notice: None,
             recording: None,
+            again: None,
+            restarting: None,
+            controls_hidden: false,
+            controls_at: None,
             screens: Vec::new(),
             root_shown: false,
             frame_frames: 0,
@@ -207,6 +228,7 @@ impl Service {
             || self.after_countdown.is_some()
             || self.production_at.is_some()
             || self.recording.is_some()
+            || self.restarting.is_some()
             || self.keeping
             || self.chosen.is_some()
     }
@@ -233,7 +255,10 @@ impl Service {
     /// Opens Video Production's Recorder, or brings it to the front.
     pub fn open_recorder(&mut self) {
         match &mut self.recorder {
-            Some(r) => r.focus = true,
+            Some(r) => {
+                r.hidden = false;
+                r.focus = true;
+            }
             None => self.recorder = Some(crate::recorder::Recorder::open()),
         }
     }
@@ -283,7 +308,7 @@ impl Service {
         }
         let monitors = screengrabcraft_capture::monitors().unwrap_or_default();
         match record::production_screen(&r, &monitors, None) {
-            Ok((screen, place)) => self.start_video(CaptureMode::Production, screen, place),
+            Ok((screen, place)) => self.start_again(Again::Video { mode: CaptureMode::Production, screen, desktop: place }),
             Err(e) => self.notify("The recording could not start", e, None, None, true),
         }
     }
@@ -358,8 +383,15 @@ impl Service {
     fn handle(&mut self, msg: Msg) {
         match msg {
             Msg::TrayClick => {
-                if self.recording.is_some() {
-                    self.stop_recording(false);
+                if self.recording.is_some() || self.restarting.is_some() {
+                    // On Windows and macOS the click opens the recording's menu; where it can't
+                    // (Linux, the BSDs) it brings the controls back.
+                    if !cfg!(any(target_os = "windows", target_os = "macos")) {
+                        self.controls_hidden = false;
+                    }
+                } else if self.recorder.as_ref().is_some_and(|r| r.hidden) {
+                    // The Recorder put away in the tray comes back.
+                    self.open_recorder();
                 } else {
                     self.start(CaptureMode::Region, 0);
                 }
@@ -371,6 +403,11 @@ impl Service {
                     Some(Item::Capture(m)) => self.start(m, 0),
                     Some(Item::Delayed(s)) => self.start(CaptureMode::Region, s),
                     Some(Item::StopRecording) => self.stop_recording(false),
+                    Some(Item::PauseRecording) => self.toggle_pause(),
+                    Some(Item::RestartRecording) => self.restart_recording(),
+                    Some(Item::ToggleControls) => self.controls_hidden = !self.controls_hidden,
+                    Some(Item::ToggleBorder) => self.toggle_border(),
+                    Some(Item::DiscardRecording) => self.stop_recording(true),
                     Some(Item::Editor) => {
                         if let Err(e) = launch::open_editor(&[]) {
                             self.notify("The editor could not be started", e, None, None, true);
@@ -389,6 +426,8 @@ impl Service {
                 }
             }
             Msg::Hotkey(id) => match self.keys.target(id) {
+                Some(Target::Pause) => self.toggle_pause(),
+                Some(Target::Stop) => self.stop_recording(false),
                 Some(Target::Capture(CaptureMode::Gif)) if self.recording.is_some() => self.stop_recording(false),
                 Some(Target::Capture(CaptureMode::Scrolling | CaptureMode::Video | CaptureMode::Production)) if self.recording.is_some() => {
                     self.stop_recording(false)
@@ -628,17 +667,11 @@ impl Service {
         match run.mode {
             CaptureMode::Gif | CaptureMode::Scrolling => {
                 let kind = if run.mode == CaptureMode::Gif { record::Kind::Gif } else { record::Kind::Scrolling };
-                match record::start(kind, m.id, area, desktop, self.settings.gif_frame_rate, self.settings.gif_max_secs, self.ctx.clone()) {
-                    Ok(r) => {
-                        self.recording = Some(r);
-                        if let Some(t) = &mut self.tray {
-                            t.set_recording(true);
-                        }
-                    }
-                    Err(e) => self.notify("The recording could not start", e, None, None, true),
-                }
+                self.start_again(Again::Area { kind, monitor: m.id, area, desktop });
             }
-            CaptureMode::Video | CaptureMode::Production => self.start_video(run.mode, record::Screen::Part { monitor: m.id, area }, desktop),
+            CaptureMode::Video | CaptureMode::Production => {
+                self.start_again(Again::Video { mode: run.mode, screen: record::Screen::Part { monitor: m.id, area }, desktop });
+            }
             _ => {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
                 let origin = (area.x.max(0) as u32, area.y.max(0) as u32);
@@ -677,14 +710,91 @@ impl Service {
         }
     }
 
+    /// Starts a recording as `again` says (the first time, or again for Restart).
+    fn start_again(&mut self, again: Again) {
+        let started = match &again {
+            Again::Area { kind, monitor, area, desktop } => {
+                record::start(*kind, *monitor, *area, *desktop, self.settings.gif_frame_rate, self.settings.gif_max_secs, self.ctx.clone())
+            }
+            Again::Video { mode, screen, desktop } => self.start_video(*mode, screen.clone(), *desktop),
+        };
+        match started {
+            Ok(r) => self.recording_began(r, again),
+            Err(e) => self.notify("The recording could not start", e, None, None, true),
+        }
+    }
+
+    /// A recording has begun: its shortcuts are taken, the tray shows its menu, and its controls
+    /// are shown (where they can be kept out of the recording; else they wait in the tray).
+    fn recording_began(&mut self, r: Recording, again: Again) {
+        self.recording = Some(r);
+        self.again = Some(again);
+        self.controls_hidden = !crate::popups::controls_fit(self);
+        if let Some(t) = &mut self.tray {
+            t.set_recording(true);
+        }
+        self.keys.while_recording(true, &self.settings.hotkeys);
+        self.sync_tray();
+    }
+
+    /// The recording is over (kept, thrown away, or failed): the shortcuts are given back and the
+    /// tray shows the captures again.
+    fn recording_over(&mut self) {
+        self.recording = None;
+        if let Some(t) = &mut self.tray {
+            t.set_recording(false);
+            t.show_recording(None);
+        }
+        if self.restarting.is_none() {
+            self.keys.while_recording(false, &self.settings.hotkeys);
+        }
+        self.controls_hidden = false;
+    }
+
+    /// The tray's recording menu as things are now.
+    fn sync_tray(&mut self) {
+        let state = self.recording.as_ref().map(|r| crate::tray::RecordingState {
+            paused: r.is_paused(),
+            can_pause: r.can_pause() && !r.stopping(),
+            controls: !self.controls_hidden,
+            border: self.settings.recording_border,
+            pause_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Pause),
+            stop_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Stop),
+        });
+        if let Some(t) = &mut self.tray {
+            t.show_recording(state);
+        }
+    }
+
+    /// Pauses the recording, or goes on with it.
+    pub fn toggle_pause(&mut self) {
+        if let Some(r) = &mut self.recording {
+            let paused = r.is_paused();
+            r.set_paused(!paused);
+        }
+        self.sync_tray();
+    }
+
+    /// The red border round the area, off or on (and so for the next recordings too).
+    pub fn toggle_border(&mut self) {
+        self.settings.recording_border = !self.settings.recording_border;
+        store::save_settings(&self.settings);
+        self.sync_tray();
+    }
+
+    /// Throws the recording away and starts the same again, once it has let go of its devices.
+    pub fn restart_recording(&mut self) {
+        let (Some(mut r), Some(again)) = (self.recording.take(), self.again.clone()) else { return };
+        r.cancel();
+        self.restarting = Some((r, again));
+        self.recording_over();
+    }
+
     /// Starts recording a video of `screen`; its control window is placed by `desktop`.
-    fn start_video(&mut self, mode: CaptureMode, screen: record::Screen, desktop: IRect) {
+    fn start_video(&mut self, mode: CaptureMode, screen: record::Screen, desktop: IRect) -> Result<Recording, String> {
         let production = mode == CaptureMode::Production;
         let dir = paths::captures_dir(&self.settings);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.notify("The recording could not start", format!("{}: {e}", dir.display()), None, None, true);
-            return;
-        }
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let now = screengrabcraft_desktop::time::now();
         let source = if production { "Video Production" } else { "Video" };
         let name = screengrabcraft_model::settings::expand_name(&self.settings.file_name, now, source, 1);
@@ -704,42 +814,44 @@ impl Service {
             max_size: if s.video_full_size { (7680, 4320) } else { (1920, 1080) },
             created: format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", now.year, now.month, now.day, now.hour, now.minute, now.second),
         };
-        match record::start_video(plan, self.ctx.clone()) {
-            Ok(r) => {
-                self.recording = Some(r);
-                if let Some(t) = &mut self.tray {
-                    t.set_recording(true);
-                }
-            }
-            Err(e) => self.notify("The recording could not start", e, None, None, true),
-        }
+        record::start_video(plan, self.ctx.clone())
     }
 
     pub fn stop_recording(&mut self, cancel: bool) {
         let Some(r) = self.recording.as_mut() else { return };
         if !cancel {
             r.stop();
+            // Its controls come back to show it finishing (a video is made after).
+            self.controls_hidden = !crate::popups::controls_fit(self);
+            self.sync_tray();
             return;
         }
         r.cancel();
         // Nothing is kept, so nothing is waited for: the control goes at once, and the recording
         // ends on its own and throws its file away.
-        self.recording = None;
-        if let Some(t) = &mut self.tray {
-            t.set_recording(false);
-        }
+        self.recording_over();
     }
 
     fn poll_recording(&mut self) {
+        // Restart: the new recording starts once the old one has let go of its devices.
+        if self.restarting.as_ref().is_some_and(|(r, _)| r.finished())
+            && let Some((mut old, again)) = self.restarting.take()
+        {
+            let _ = old.take();
+            self.start_again(again);
+            if self.recording.is_none() {
+                self.keys.while_recording(false, &self.settings.hotkeys);
+            }
+        }
         let Some(rec) = self.recording.as_mut() else { return };
-        let Some(result) = rec.take() else { return };
+        let Some(result) = rec.take() else {
+            self.sync_tray();
+            return;
+        };
         // A camera or a microphone asked for and not had is said plainly once the recording is
         // over (during it, only a mark on its controls says so).
         let missing = matches!(result, Ok(record::Output::Video(..) | record::Output::Production(_))).then(|| record::missing_after(rec)).flatten();
-        self.recording = None;
-        if let Some(t) = &mut self.tray {
-            t.set_recording(false);
-        }
+        self.recording_over();
         match result {
             Ok(record::Output::Gif(tmp, frames)) => {
                 let dir = paths::captures_dir(&self.settings);
@@ -851,6 +963,7 @@ impl Service {
         // once it has been: Windows shows a window without activating it only the first time, so
         // showing it again would take the keyboard from the program the owner is typing in.
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
+        let busy = busy || self.restarting.is_some();
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
@@ -868,6 +981,7 @@ impl Service {
         // Timers: countdown seconds, notices and recordings tick without input.
         if self.countdown.is_some()
             || self.recording.is_some()
+            || self.restarting.is_some()
             || self.after_countdown.is_some()
             || self.production_at.is_some()
             || self.freezing.is_some()

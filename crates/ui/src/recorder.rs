@@ -14,15 +14,19 @@ use screengrabcraft_model::{MonitorChoice, RecordArea, RecorderOptions};
 
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
-use crate::widgets::{self, CONTROL_RADIUS, StandardButton};
+use crate::widgets::{self, StandardButton};
 
-/// The window's size.
-pub const SIZE: Vec2 = vec2(640.0, 684.0);
-/// The camera's picture while it's tested, at most.
-const PREVIEW: Vec2 = vec2(160.0, 120.0);
+/// The window's size: four cards side by side, Record under them.
+pub const SIZE: Vec2 = vec2(1012.0, 418.0);
+/// Each card, and the room between them.
+const CARD: Vec2 = vec2(232.0, 250.0);
+const CARD_GAP: f32 = 14.0;
+/// The camera's picture in its card (16:9, as wide as the card).
+const PREVIEW: Vec2 = vec2(204.0, 115.0);
 /// The size of the Record button: larger than the others, as the window's one big action.
-const RECORD_SIZE: Vec2 = vec2(136.0, 40.0);
-const TILE: Vec2 = vec2(106.0, 76.0);
+const RECORD_SIZE: Vec2 = vec2(170.0, 46.0);
+/// A square choosing the area.
+const CHIP: Vec2 = vec2(36.0, 34.0);
 
 /// A monitor the Recorder offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -90,6 +94,8 @@ pub struct RecorderView {
     /// The owner has asked to see the camera (its Test): the service shows what it sends while
     /// this is on and the camera is.
     pub watch: bool,
+    /// How to pause and stop the recording, said beside Record (`F9 pauses, F10 stops`).
+    pub hint: Option<String>,
 }
 
 /// The camera while it's tested, as the service has it.
@@ -106,34 +112,13 @@ pub enum CameraPreview {
     Failed(String),
 }
 
-/// What the camera sends while it's tested: its picture, or why there's none.
-fn camera_preview(ui: &mut Ui, camera: &CameraPreview) {
-    let t = Tokens::get(ui.ctx());
-    ui.horizontal_top(|ui| match camera {
-        CameraPreview::Live(texture) => {
-            let s = texture.size_vec2();
-            let f = (PREVIEW.x / s.x.max(1.0)).min(PREVIEW.y / s.y.max(1.0));
-            let resp = ui.add(egui::Image::new((texture.id(), s * f)).corner_radius(6));
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "The camera's picture"));
-            note(ui, "What the camera sends.");
-        }
-        CameraPreview::Off | CameraPreview::Starting => {
-            let (rect, _) = ui.allocate_exact_size(vec2(PREVIEW.x, PREVIEW.x * 0.75), Sense::hover());
-            ui.painter().rect(rect, 6.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
-            note(ui, "Starting the camera…");
-        }
-        CameraPreview::Failed(why) => {
-            ui.set_max_width(400.0);
-            ui.add(egui::Label::new(RichText::new(why.as_str()).size(12.5).color(t.danger)).wrap());
-        }
-    });
-}
-
 /// What the Recorder's buttons do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RecorderChoice {
     Record,
     Cancel,
+    /// Put the Recorder away in the tray (its icon brings it back).
+    Hide,
 }
 
 /// The red of the Record button: as it is, under the pointer, pressed.
@@ -143,35 +128,6 @@ fn reds(dark: bool) -> [Color32; 3] {
     } else {
         [Color32::from_rgb(0xD3, 0x2F, 0x2F), Color32::from_rgb(0xE5, 0x39, 0x35), Color32::from_rgb(0xB7, 0x1C, 0x1C)]
     }
-}
-
-/// The big red Record button: a white dot and the word.
-fn record_button(ui: &mut Ui, enabled: bool) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let (rect, resp) = ui.allocate_exact_size(RECORD_SIZE, if enabled { Sense::click() } else { Sense::hover() });
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Record"));
-    let [red, hot, down] = reds(t.dark);
-    let fill = if !enabled {
-        t.control
-    } else if resp.is_pointer_button_down_on() {
-        down
-    } else if resp.hovered() {
-        hot
-    } else {
-        red
-    };
-    let p = ui.painter();
-    p.rect(rect, CONTROL_RADIUS, fill, Stroke::new(1.0, if enabled { fill } else { t.border }), StrokeKind::Inside);
-    let ink = if enabled { Color32::WHITE } else { t.muted };
-    let galley = p.layout_no_wrap("Record".to_string(), widgets::strong_font(ui.ctx(), 15.0), ink);
-    let dot = 12.0;
-    let x = rect.center().x - (dot + 8.0 + galley.size().x) / 2.0;
-    p.circle_filled(pos2(x + dot / 2.0, rect.center().y), dot / 2.0, ink);
-    p.galley(pos2(x + dot + 8.0, rect.center().y - galley.size().y / 2.0), galley, ink);
-    if resp.has_focus() {
-        p.rect_stroke(rect.expand(2.0), CONTROL_RADIUS + 2, Stroke::new(1.5, t.text), StrokeKind::Inside);
-    }
-    if enabled { resp.on_hover_text("Start the recording") } else { resp.on_hover_text("Turn on something to record first") }
 }
 
 /// An on/off switch with its words after it; the whole of it can be clicked.
@@ -216,56 +172,6 @@ fn paint_fixed(p: &egui::Painter, rect: Rect, color: Color32) {
     }
 }
 
-/// A choice of area: its picture and its name, outlined in the accent colour when chosen.
-fn area_tile(ui: &mut Ui, area: RecordArea, selected: bool) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let enabled = ui.is_enabled();
-    let (rect, resp) = ui.allocate_exact_size(TILE, Sense::click());
-    let label = area.label();
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, label));
-    let fill = if selected {
-        t.selected
-    } else if resp.hovered() && enabled {
-        t.hover
-    } else {
-        t.window
-    };
-    let edge = if selected { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.border) };
-    let p = ui.painter();
-    p.rect(rect, 8.0, fill, edge, StrokeKind::Inside);
-    let ink = if !enabled {
-        t.muted
-    } else if selected {
-        t.accent
-    } else {
-        t.text
-    };
-    let pic = Rect::from_center_size(pos2(rect.center().x, rect.min.y + 27.0), vec2(28.0, 28.0));
-    match area {
-        RecordArea::Region => icons::paint(p, pic, Icon::Region, ink),
-        RecordArea::Window => icons::paint(p, pic, Icon::Window, ink),
-        RecordArea::Screen => icons::paint(p, pic, Icon::Screen, ink),
-        RecordArea::AllScreens => icons::paint(p, pic, Icon::AllScreens, ink),
-        RecordArea::Fixed => paint_fixed(p, pic, ink),
-    }
-    p.text(
-        pos2(rect.center().x, rect.max.y - 16.0),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(13.0),
-        if enabled { t.text } else { t.muted },
-    );
-    if resp.has_focus() {
-        p.rect_stroke(rect.expand(2.0), 10.0, Stroke::new(1.5, t.text), StrokeKind::Inside);
-    }
-    resp
-}
-
-fn heading(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).font(widgets::strong_font(ui.ctx(), 15.0)));
-    ui.add_space(6.0);
-}
-
 /// Said under the microphone when it's the camera's own and the camera is on.
 pub const OWN_MICROPHONE_NOTE: &str =
     "That's the camera's own microphone. Some cameras send no video while it records: if the camera stays off, choose another microphone.";
@@ -282,7 +188,12 @@ fn is_own_microphone(microphone: &str, camera: &str) -> bool {
 
 fn note(ui: &mut Ui, text: impl Into<String>) {
     let t = Tokens::get(ui.ctx());
-    ui.add(egui::Label::new(RichText::new(text.into()).size(12.5).color(t.muted)).wrap());
+    ui.add(egui::Label::new(RichText::new(text.into()).size(12.0).color(t.muted)).wrap());
+}
+
+fn warning(ui: &mut Ui, text: impl Into<String>) {
+    let t = Tokens::get(ui.ctx());
+    ui.add(egui::Label::new(RichText::new(text.into()).size(12.0).color(t.danger)).wrap());
 }
 
 fn monitor_label(m: &RecorderMonitor, i: usize) -> String {
@@ -297,56 +208,155 @@ pub fn chosen_monitor(rec: &RecorderOptions, monitors: &[RecorderMonitor]) -> Op
     rec.monitor.as_ref().and_then(|c| c.pick(&list)).or(main)
 }
 
-/// What happens once Record is pressed, said in the footer.
+/// What happens once Record is pressed.
 fn next_step(rec: &RecorderOptions) -> &'static str {
     if !rec.screen {
-        return "Recording starts at once. Stop it from its control or the tray.";
+        return "Recording starts as soon as you press Record.";
     }
     match rec.area {
-        RecordArea::Region => "Next, drag out the area to record.",
-        RecordArea::Window => "Next, click the window to record.",
-        RecordArea::Fixed => "Next, click where the frame goes.",
-        RecordArea::Screen | RecordArea::AllScreens => {
-            "Recording starts at once. Its control goes on a screen that isn't recorded; if there's none, stop it from the tray icon."
-        }
+        RecordArea::Region => "Press Record, then drag out the area to record.",
+        RecordArea::Window => "Press Record, then click the window to record.",
+        RecordArea::Fixed => "Press Record, then click where the frame goes.",
+        RecordArea::Screen | RecordArea::AllScreens => "Recording starts as soon as you press Record.",
     }
 }
 
-fn area_section(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions, devices: &RecorderDevices) {
-    heading(ui, "Area");
-    ui.add_enabled_ui(rec.screen, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            for area in RecordArea::ALL {
-                if area_tile(ui, area, rec.area == area).clicked() {
-                    rec.area = area;
-                }
+/// An on/off switch with no words of its own (its card says what it is): `label` names it for
+/// screen readers and tips.
+fn toggle(ui: &mut Ui, on: &mut bool, label: &str, enabled: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(42.0, 24.0), if enabled { Sense::click() } else { Sense::hover() });
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let shown = *on && enabled;
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, shown, label));
+    let track = Rect::from_center_size(rect.center(), vec2(40.0, 22.0));
+    let (fill, edge, knob) = match (enabled, shown) {
+        (true, true) => (if resp.hovered() { t.accent_hover } else { t.accent }, t.accent, t.accent_text),
+        (true, false) => (if resp.hovered() { t.control_hover } else { t.control }, t.control_border, t.text),
+        (false, _) => (t.control, t.border, t.border),
+    };
+    let p = ui.painter();
+    p.rect(track, 11.0, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
+    let kx = if shown { track.max.x - 11.0 } else { track.min.x + 11.0 };
+    p.circle_filled(pos2(kx, track.center().y), 7.0, knob);
+    if resp.has_focus() {
+        p.rect_stroke(track.expand(2.0), 13.0, Stroke::new(1.5, t.text), StrokeKind::Inside);
+    }
+    resp.on_hover_text(if shown { format!("Turn the {} off", label.to_lowercase()) } else { format!("Record the {}", label.to_lowercase()) })
+}
+
+/// One of the Recorder's cards: its picture, its name and its switch along the top, then what's
+/// in it (greyed while it's off). True when the switch was turned.
+fn card(ui: &mut Ui, icon: Icon, title: &str, on: &mut bool, enabled: bool, add: impl FnOnce(&mut Ui, bool)) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(CARD, Sense::hover());
+    let lit = *on && enabled;
+    let (fill, edge) = if lit { (t.window, Stroke::new(1.5, t.accent)) } else { (t.panel, Stroke::new(1.0, t.border)) };
+    ui.painter().rect(rect, 12.0, fill, edge, StrokeKind::Inside);
+    let inner = rect.shrink2(vec2(14.0, 12.0));
+    // Drawn inside the card's own place (a child that takes no more room in the row).
+    let mut ui = ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::top_down(Align::Min)));
+    let (top, _) = ui.allocate_exact_size(vec2(inner.width(), 26.0), Sense::hover());
+    let p = ui.painter();
+    let badge = Rect::from_min_size(pos2(top.min.x, top.center().y - 14.0), vec2(28.0, 28.0));
+    p.rect_filled(badge, 7.0, if lit { t.selected } else { t.control });
+    icons::paint(p, badge.shrink(5.0), icon, if lit { t.accent } else { t.muted });
+    p.text(
+        pos2(badge.max.x + 10.0, top.center().y),
+        Align2::LEFT_CENTER,
+        title,
+        widgets::strong_font(ui.ctx(), 15.0),
+        if enabled { t.text } else { t.muted },
+    );
+    let at = Rect::from_min_max(pos2(top.max.x - 44.0, top.min.y), top.max);
+    let changed = toggle(&mut ui.new_child(egui::UiBuilder::new().max_rect(at)), on, title, enabled).changed();
+    ui.add_space(12.0);
+    let lit = *on && enabled;
+    ui.add_enabled_ui(lit, |ui| add(ui, lit));
+    changed
+}
+
+/// A choice of area: a small square with its picture, outlined in the accent colour when chosen.
+fn area_chip(ui: &mut Ui, area: RecordArea, selected: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let enabled = ui.is_enabled();
+    let (rect, resp) = ui.allocate_exact_size(CHIP, Sense::click());
+    let label = area.label();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::RadioButton, enabled, selected, label));
+    let fill = if selected {
+        t.selected
+    } else if resp.hovered() && enabled {
+        t.hover
+    } else {
+        t.control
+    };
+    let edge = if selected { Stroke::new(1.5, t.accent) } else { Stroke::new(1.0, t.border) };
+    let p = ui.painter();
+    p.rect(rect, 7.0, fill, edge, StrokeKind::Inside);
+    let ink = if !enabled {
+        t.muted
+    } else if selected {
+        t.accent
+    } else {
+        t.text
+    };
+    let pic = Rect::from_center_size(rect.center(), vec2(22.0, 22.0));
+    match area {
+        RecordArea::Region => icons::paint(p, pic, Icon::Region, ink),
+        RecordArea::Window => icons::paint(p, pic, Icon::Window, ink),
+        RecordArea::Screen => icons::paint(p, pic, Icon::Screen, ink),
+        RecordArea::AllScreens => icons::paint(p, pic, Icon::AllScreens, ink),
+        RecordArea::Fixed => paint_fixed(p, pic, ink),
+    }
+    if resp.has_focus() {
+        p.rect_stroke(rect.expand(2.0), 9.0, Stroke::new(1.5, t.text), StrokeKind::Inside);
+    }
+    resp.on_hover_text(label)
+}
+
+/// The Screen card's contents: the area chosen from its squares, and what goes with it.
+fn screen_card(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions, devices: &RecorderDevices) {
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        for area in RecordArea::ALL {
+            if area_chip(ui, area, rec.area == area).clicked() {
+                rec.area = area;
             }
-        });
-        ui.add_space(10.0);
-        if !rec.screen {
-            return;
-        }
-        match rec.area {
-            RecordArea::Region => note(ui, "Drag out the area after you press Record. Its size is shown as you drag."),
-            RecordArea::Window => {
-                note(ui, "Click the window after you press Record. The video keeps to where the window was then; it doesn't follow it if it moves.")
-            }
-            RecordArea::Screen => monitor_choice(ui, rec, devices),
-            RecordArea::AllScreens => note(
-                ui,
-                match (devices.monitors.len(), devices.all_screens) {
-                    (0, _) => "No monitor was found.".to_string(),
-                    (1, _) => "There's one monitor: it's recorded whole.".to_string(),
-                    (n, Some((w, h))) => format!("All {n} monitors in one video, {w} × {h}, as they are placed side by side."),
-                    (n, None) => format!("All {n} monitors in one video."),
-                },
-            ),
-            RecordArea::Fixed => fixed_choice(ui, view, rec, devices),
         }
     });
-    if !rec.screen {
-        note(ui, "The screen is off, so there's no area to choose.");
+    ui.add_space(10.0);
+    ui.label(RichText::new(area_name(rec.area)).font(widgets::strong_font(ui.ctx(), 14.0)).color(t.text));
+    ui.add_space(4.0);
+    match rec.area {
+        RecordArea::Region => note(ui, "Drag out the area after you press Record. Its size is shown as you drag."),
+        RecordArea::Window => note(ui, "Click the window after you press Record. The video keeps to where the window was then."),
+        RecordArea::Screen => monitor_choice(ui, rec, devices),
+        RecordArea::AllScreens => note(
+            ui,
+            match (devices.monitors.len(), devices.all_screens) {
+                (0, _) => "No monitor was found.".to_string(),
+                (1, _) => "There's one monitor: it's recorded whole.".to_string(),
+                (n, Some((w, h))) => format!("All {n} monitors in one video, {w} × {h}, as they're placed."),
+                (n, None) => format!("All {n} monitors in one video."),
+            },
+        ),
+        RecordArea::Fixed => fixed_choice(ui, view, rec, devices),
+    }
+}
+
+/// The area's name as the card heads its details (the squares themselves are named for screen
+/// readers and in their tips).
+fn area_name(area: RecordArea) -> &'static str {
+    match area {
+        RecordArea::Region => "An area you drag out",
+        RecordArea::Window => "One window",
+        RecordArea::Screen => "One whole monitor",
+        RecordArea::AllScreens => "Every monitor",
+        RecordArea::Fixed => "A frame of a set size",
     }
 }
 
@@ -357,15 +367,12 @@ fn monitor_choice(ui: &mut Ui, rec: &mut RecorderOptions, devices: &RecorderDevi
     }
     let chosen = chosen_monitor(rec, &devices.monitors);
     let shown = chosen.and_then(|i| devices.monitors.get(i).map(|m| monitor_label(m, i))).unwrap_or_default();
-    ui.horizontal(|ui| {
-        ui.label("Monitor");
-        egui::ComboBox::from_id_salt("recorder-monitor").width(340.0).selected_text(shown).show_ui(ui, |ui| {
-            for (i, m) in devices.monitors.iter().enumerate() {
-                if ui.selectable_label(chosen == Some(i), monitor_label(m, i)).clicked() {
-                    rec.monitor = Some(MonitorChoice { name: m.name.clone(), x: m.x, y: m.y });
-                }
+    egui::ComboBox::from_id_salt("recorder-monitor").width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
+        for (i, m) in devices.monitors.iter().enumerate() {
+            if ui.selectable_label(chosen == Some(i), monitor_label(m, i)).clicked() {
+                rec.monitor = Some(MonitorChoice { name: m.name.clone(), x: m.x, y: m.y });
             }
-        });
+        }
     });
 }
 
@@ -398,56 +405,45 @@ fn fixed_choice(ui: &mut Ui, view: &mut RecorderView, rec: &mut RecorderOptions,
         _ => "A size of your own".to_string(),
     };
     let (max_w, max_h) = largest(&devices.monitors);
-    ui.horizontal(|ui| {
-        ui.label("Size");
-        // Short enough to stay in the window: the list scrolls.
-        egui::ComboBox::from_id_salt("recorder-size").width(250.0).height(300.0).selected_text(shown).show_ui(ui, |ui| {
-            for (group, sizes) in listed_sizes(&devices.monitors) {
-                if sizes.is_empty() {
-                    continue;
-                }
-                ui.label(RichText::new(group).size(12.5).color(t.muted));
-                for (w, h, what) in sizes {
-                    if ui.selectable_label(!*custom && (w, h) == (rec.width, rec.height), format!("{w} × {h} — {what}")).clicked() {
-                        (rec.width, rec.height) = (w, h);
-                        *custom = false;
-                    }
-                }
-                ui.separator();
+    // Short enough to stay in the window: the list scrolls.
+    egui::ComboBox::from_id_salt("recorder-size").width(ui.available_width()).height(260.0).truncate().selected_text(shown).show_ui(ui, |ui| {
+        for (group, sizes) in listed_sizes(&devices.monitors) {
+            if sizes.is_empty() {
+                continue;
             }
-            if ui.selectable_label(*custom, "A size of your own").clicked() {
-                *custom = true;
+            ui.label(RichText::new(group).size(12.5).color(t.muted));
+            for (w, h, what) in sizes {
+                if ui.selectable_label(!*custom && (w, h) == (rec.width, rec.height), format!("{w} × {h} — {what}")).clicked() {
+                    (rec.width, rec.height) = (w, h);
+                    *custom = false;
+                }
             }
-        });
-        if *custom {
+            ui.separator();
+        }
+        if ui.selectable_label(*custom, "A size of your own").clicked() {
+            *custom = true;
+        }
+    });
+    if *custom {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
             ui.add(egui::DragValue::new(&mut rec.width).range(FIXED_MIN..=max_w).speed(2.0));
             ui.label("×");
             ui.add(egui::DragValue::new(&mut rec.height).range(FIXED_MIN..=max_h).speed(2.0));
             ui.label("pixels");
-        }
-    });
+        });
+    }
     ui.add_space(4.0);
     if fits(rec.width, rec.height, &devices.monitors) {
-        note(ui, "Click where the frame goes after you press Record. Only the sizes that fit on your monitors are listed.");
+        note(ui, "Click where the frame goes after you press Record.");
     } else {
-        note(ui, "This is bigger than your monitors, so it's made smaller, keeping its shape. Click where the frame goes after you press Record.");
+        note(ui, "This is bigger than your monitors, so it's made smaller, keeping its shape.");
     }
 }
 
-/// The microphone's meter, or a Test button that asks for it.
-/// A sound level meter (with Test to start listening), named `name`.
-fn level_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel, name: &str, test_tip: &str) {
+/// A sound's live level, as wide as its card (or why it can't be heard).
+fn level_meter(ui: &mut Ui, level: &MicLevel, name: &str) {
     let t = Tokens::get(ui.ctx());
-    if !view.listen {
-        let resp = ui.add(StandardButton::new("Test"));
-        // Named for what it tests: there is one for the microphone and one for the computer's sound.
-        let what = format!("Test the {}", name.trim_end_matches(" level").to_lowercase());
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, &what));
-        if resp.on_hover_text(test_tip).clicked() {
-            view.listen = true;
-        }
-        return;
-    }
     match level {
         MicLevel::Failed(why) => {
             ui.label(RichText::new("Can't hear it").size(12.5).color(t.danger)).on_hover_text(why.as_str());
@@ -457,7 +453,7 @@ fn level_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel, name: &st
         }
         MicLevel::Off | MicLevel::Starting | MicLevel::Level(_) => {
             let v = if let MicLevel::Level(l) = level { l.clamp(0.0, 1.0) } else { 0.0 };
-            let (rect, resp) = ui.allocate_exact_size(vec2(96.0, 10.0), Sense::hover());
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ProgressIndicator, true, name));
             let p = ui.painter();
             p.rect(rect, 5.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
@@ -472,184 +468,118 @@ fn level_meter(ui: &mut Ui, view: &mut RecorderView, level: &MicLevel, name: &st
     }
 }
 
-fn inputs_section(
-    ui: &mut Ui,
-    view: &mut RecorderView,
-    rec: &mut RecorderOptions,
-    o: &mut VideoOptions,
-    d: &RecorderDevices,
-    mic: &MicLevel,
-    sound: &MicLevel,
-    camera_view: &CameraPreview,
-) {
-    heading(ui, "Inputs");
-    egui::Grid::new("recorder-inputs").num_columns(2).spacing([18.0, 8.0]).min_col_width(170.0).min_row_height(widgets::BUTTON_SIZE.y).show(
-        ui,
-        |ui| {
-            switch(ui, &mut rec.screen, "Screen", true);
-            note(ui, if rec.screen { "What the area shows." } else { "Not recorded." });
-            ui.end_row();
-
-            let mut camera = o.camera && d.camera_supported;
-            if switch(ui, &mut camera, "Camera", d.camera_supported).changed() {
-                o.camera = camera;
-            }
-            ui.horizontal(|ui| {
-                if !d.camera_supported {
-                    note(ui, "Cameras can't be recorded on this system yet.");
-                    return;
-                }
-                let list = d.cameras.as_deref().unwrap_or_default();
-                ui.add_enabled_ui(o.camera, |ui| {
-                    let shown = o
-                        .camera_index
-                        .and_then(|i| list.iter().find(|c| c.0 == i).map(|c| c.1.clone()))
-                        .or_else(|| list.first().map(|c| c.1.clone()))
-                        .unwrap_or_else(|| if d.cameras.is_some() { "No camera was found".to_string() } else { "The first camera".to_string() });
-                    egui::ComboBox::from_id_salt("recorder-camera").width(260.0).selected_text(shown).show_ui(ui, |ui| {
-                        for (i, name) in list {
-                            ui.selectable_value(&mut o.camera_index, Some(*i), name);
-                        }
-                    });
-                });
-                // Test: what the camera sends, shown below; Stop lets it go again.
-                if o.camera {
-                    let (label, what, tip) = if view.watch {
-                        ("Stop", "Stop testing the camera", "Stop showing the camera (it's let go)")
-                    } else {
-                        ("Test", "Test the camera", "See what the camera sends")
-                    };
-                    let resp = ui.add(StandardButton::new(label));
-                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, what));
-                    if resp.on_hover_text(tip).clicked() {
-                        view.watch = !view.watch;
-                    }
-                }
-            });
-            ui.end_row();
-            let was = o.microphone;
-            switch(ui, &mut o.microphone, "Microphone", true);
-            // Turning it on here is asking to hear it; turning it off stops the listening.
-            if o.microphone != was {
-                view.listen = o.microphone;
-            }
-            ui.horizontal(|ui| {
-                ui.add_enabled_ui(o.microphone, |ui| {
-                    let default = match &d.default_microphone {
-                        Some(n) => format!("The system's default ({n})"),
-                        None => "The system's default".to_string(),
-                    };
-                    let shown = o.microphone_name.clone().unwrap_or_else(|| default.clone());
-                    // A long name is shortened, not let push the meter off the window.
-                    ui.set_max_width(260.0);
-                    egui::ComboBox::from_id_salt("recorder-mic").width(260.0).truncate().selected_text(shown).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut o.microphone_name, None, default);
-                        for m in &d.microphones {
-                            ui.selectable_value(&mut o.microphone_name, Some(m.clone()), m);
-                        }
-                    });
-                });
-                if o.microphone {
-                    level_meter(ui, view, mic, "Microphone level", "Listen to the microphone, to see that it hears you");
-                }
-            });
-            ui.end_row();
-            // The camera's own microphone, with the camera on: some cameras send no video while
-            // theirs records (the recording then turns it off for the camera).
-            let camera_name = o
-                .camera_index
-                .and_then(|i| d.cameras.as_deref().unwrap_or_default().iter().find(|c| c.0 == i).map(|c| c.1.clone()))
-                .or_else(|| d.cameras.as_deref().and_then(|l| l.first()).map(|c| c.1.clone()));
-            let mic_name = o.microphone_name.clone().or_else(|| d.default_microphone.clone());
-            if o.camera
-                && o.microphone
-                && let (Some(cam), Some(m)) = (camera_name, mic_name)
-                && is_own_microphone(&m, &cam)
-            {
-                ui.label("");
-                note(ui, OWN_MICROPHONE_NOTE);
-                ui.end_row();
-            }
-            // None at all (over Remote Desktop, only one the Remote Desktop app shares is there).
-            if o.microphone && d.microphones.is_empty() {
-                ui.label("");
-                note(ui, NO_MICROPHONE_NOTE);
-                ui.end_row();
-            }
-            // Tested, and it hears nothing at all: why, and what helps.
-            if o.microphone && view.listen && matches!(mic, MicLevel::Silent) {
-                ui.label("");
-                let t = Tokens::get(ui.ctx());
-                ui.add(egui::Label::new(RichText::new(SILENT_MICROPHONE).size(12.5).color(t.danger)).wrap());
-                ui.end_row();
-            }
-
-            let mut on = o.system_sound && d.system_sound;
-            let was = on;
-            if switch(ui, &mut on, "Computer sound", d.system_sound).changed() {
-                o.system_sound = on;
-            }
-            // As with the microphone: turning it on here is asking to hear it.
-            if on && !was {
-                view.listen = true;
-            }
-            if !d.system_sound_platform {
-                note(ui, "Only on Windows: this system has no way to record what it plays.");
-            } else if !d.system_sound {
-                note(ui, "No sound output was found.");
-            } else {
-                // Which speaker's sound: what plays through another one isn't heard.
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(o.system_sound, |ui| {
-                        let default = match &d.default_speaker {
-                            Some(n) => format!("The system's default ({n})"),
-                            None => "The system's default".to_string(),
-                        };
-                        let shown = o.system_sound_name.clone().unwrap_or_else(|| default.clone());
-                        ui.set_max_width(260.0);
-                        egui::ComboBox::from_id_salt("recorder-speaker").width(260.0).truncate().selected_text(shown).show_ui(ui, |ui| {
-                            ui.selectable_value(&mut o.system_sound_name, None, default);
-                            for s in &d.speakers {
-                                ui.selectable_value(&mut o.system_sound_name, Some(s.clone()), s);
-                            }
-                        });
-                    });
-                    if o.system_sound {
-                        level_meter(ui, view, sound, "Computer sound level", "Listen to what the computer plays, to see it's heard");
-                    }
-                });
-            }
-            ui.end_row();
-
-            // Captions need something to hear: the microphone (you) or the computer (the others).
-            let hears = o.microphone || (o.system_sound && d.system_sound);
-            let mut captions = o.captions && hears;
-            if switch(ui, &mut captions, "Captions", hears).changed() {
-                o.captions = captions;
-            }
-            note(
-                ui,
-                if hears {
-                    "What you and the others say, written down on this computer after the recording."
-                } else {
-                    "They need the microphone or the computer's sound."
-                },
-            );
-            ui.end_row();
-        },
-    );
-    // The camera's Test: its picture (or why there's none) under the inputs, lined up with them.
-    if o.camera && d.camera_supported && view.watch {
-        ui.add_space(10.0);
-        ui.horizontal_top(|ui| {
-            ui.add_space(188.0);
-            camera_preview(ui, camera_view);
-        });
+/// The camera's card: its live picture (or why there's none) and which camera.
+fn camera_card(ui: &mut Ui, on: bool, o: &mut VideoOptions, d: &RecorderDevices, camera_view: &CameraPreview) {
+    let t = Tokens::get(ui.ctx());
+    if !d.camera_supported {
+        note(ui, "Cameras can't be recorded on this system yet.");
+        return;
     }
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), PREVIEW.y), Sense::hover());
+    let p = ui.painter();
+    match (on, camera_view) {
+        (true, CameraPreview::Live(texture)) => {
+            let s = texture.size_vec2();
+            let f = (rect.width() / s.x.max(1.0)).min(rect.height() / s.y.max(1.0));
+            let shown = Rect::from_center_size(rect.center(), s * f);
+            p.rect_filled(rect, 8.0, Color32::BLACK);
+            let resp = ui.put(shown, egui::Image::new((texture.id(), s * f)).corner_radius(8));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "The camera's picture"));
+        }
+        (true, CameraPreview::Failed(why)) => {
+            p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(8.0)), |ui| warning(ui, why.as_str()));
+        }
+        (true, _) => {
+            p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            p.text(rect.center(), Align2::CENTER_CENTER, "Starting the camera…", FontId::proportional(12.5), t.muted);
+        }
+        (false, _) => {
+            p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            icons::paint(p, Rect::from_center_size(rect.center() - vec2(0.0, 10.0), vec2(30.0, 30.0)), Icon::Camera, t.muted);
+            p.text(rect.center() + vec2(0.0, 18.0), Align2::CENTER_CENTER, "Camera off", FontId::proportional(12.5), t.muted);
+        }
+    }
+    ui.add_space(10.0);
+    let list = d.cameras.as_deref().unwrap_or_default();
+    let shown = o
+        .camera_index
+        .and_then(|i| list.iter().find(|c| c.0 == i).map(|c| c.1.clone()))
+        .or_else(|| list.first().map(|c| c.1.clone()))
+        .unwrap_or_else(|| if d.cameras.is_some() { "No camera was found".to_string() } else { "The first camera".to_string() });
+    egui::ComboBox::from_id_salt("recorder-camera").width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
+        for (i, name) in list {
+            ui.selectable_value(&mut o.camera_index, Some(*i), name);
+        }
+    });
 }
 
-/// The Recorder's contents: the area, the inputs, and Record and Cancel along the bottom. Changes
-/// the choices in place; returns the button pressed (Enter is Record, Esc is Cancel).
+/// A sound's card: which device, and its live level.
+#[allow(clippy::too_many_arguments)]
+fn sound_card(
+    ui: &mut Ui,
+    id: &str,
+    chosen: &mut Option<String>,
+    default: &Option<String>,
+    devices: &[String],
+    level: &MicLevel,
+    meter: &str,
+    on: bool,
+) {
+    let label = match default {
+        Some(n) => format!("The system's default ({n})"),
+        None => "The system's default".to_string(),
+    };
+    let shown = chosen.clone().unwrap_or_else(|| label.clone());
+    egui::ComboBox::from_id_salt(id).width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
+        ui.selectable_value(chosen, None, label);
+        for m in devices {
+            ui.selectable_value(chosen, Some(m.clone()), m);
+        }
+    });
+    ui.add_space(14.0);
+    if on {
+        level_meter(ui, level, meter);
+    } else {
+        level_meter(ui, &MicLevel::Off, meter);
+    }
+    ui.add_space(8.0);
+}
+
+/// The big red Record button: a white dot and the word.
+fn record_button(ui: &mut Ui, enabled: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(RECORD_SIZE, if enabled { Sense::click() } else { Sense::hover() });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, "Record"));
+    let [red, hot, down] = reds(t.dark);
+    let fill = if !enabled {
+        t.control
+    } else if resp.is_pointer_button_down_on() {
+        down
+    } else if resp.hovered() {
+        hot
+    } else {
+        red
+    };
+    let p = ui.painter();
+    p.rect(rect, RECORD_SIZE.y / 2.0, fill, Stroke::new(1.0, if enabled { fill } else { t.border }), StrokeKind::Inside);
+    let ink = if enabled { Color32::WHITE } else { t.muted };
+    let galley = p.layout_no_wrap("Record".to_string(), widgets::strong_font(ui.ctx(), 16.0), ink);
+    let dot = 14.0;
+    let x = rect.center().x - (dot + 10.0 + galley.size().x) / 2.0;
+    p.circle_filled(pos2(x + dot / 2.0, rect.center().y), dot / 2.0, ink);
+    p.galley(pos2(x + dot + 10.0, rect.center().y - galley.size().y / 2.0), galley, ink);
+    if resp.has_focus() {
+        p.rect_stroke(rect.expand(2.0), RECORD_SIZE.y / 2.0 + 2.0, Stroke::new(1.5, t.text), StrokeKind::Inside);
+    }
+    if enabled { resp.on_hover_text("Start the recording") } else { resp.on_hover_text("Turn on something to record first") }
+}
+
+/// The Recorder's contents: a card for each thing it records (the screen, the camera, the
+/// microphone, the computer's sound) with its switch, its choices and what it sees or hears live;
+/// then Captions, and Record and Cancel along the bottom. Changes the choices in place; returns
+/// the button pressed (Enter is Record, Esc is Cancel).
+#[allow(clippy::too_many_arguments)]
 pub fn recorder_ui(
     ui: &mut Ui,
     view: &mut RecorderView,
@@ -665,44 +595,139 @@ pub fn recorder_ui(
     // focused control (a number being typed, a switch) is that control's.
     let popup = egui::Popup::is_any_open(ui.ctx());
     let typing = ui.memory(|m| m.focused().is_some());
+    // What's on is seen and heard live (the camera's picture, the sounds' meters), as the owner
+    // turned it on to record it.
+    view.listen = true;
+    view.watch = true;
     let can = rec.records_anything(sources, devices.system_sound, devices.camera_supported);
     let mut choice = None;
     let footer = egui::Panel::bottom("recorder-footer")
         .resizable(false)
-        .frame(Frame::NONE.fill(t.footer).inner_margin(Margin::symmetric(widgets::PADDING, 14)))
+        .frame(Frame::NONE.fill(t.footer).inner_margin(Margin::symmetric(widgets::PADDING + 4, 14)))
         .show(ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = widgets::GAP;
-                // The default first and Cancel last, or the other way round on a Mac.
-                let mac = cfg!(target_os = "macos");
-                let cancel = |ui: &mut Ui| ui.add(StandardButton::new("Cancel")).clicked();
-                if mac {
-                    if record_button(ui, can).clicked() {
-                        choice = Some(RecorderChoice::Record);
-                    }
-                    if cancel(ui) {
-                        choice = Some(RecorderChoice::Cancel);
-                    }
-                } else {
-                    if cancel(ui) {
-                        choice = Some(RecorderChoice::Cancel);
-                    }
-                    if record_button(ui, can).clicked() {
-                        choice = Some(RecorderChoice::Record);
-                    }
+            ui.horizontal(|ui| {
+                // Captions need something to hear: the microphone (you) or the computer (the others).
+                let hears = sources.microphone || (sources.system_sound && devices.system_sound);
+                let mut captions = sources.captions && hears;
+                if switch(ui, &mut captions, "Captions", hears).changed() {
+                    sources.captions = captions;
                 }
-                ui.add_space(12.0);
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(RichText::new(next_step(rec)).size(12.5).color(t.muted)).truncate());
+                let words =
+                    if hears { "Written down on this computer after the recording" } else { "They need the microphone or the computer's sound" };
+                ui.label(RichText::new(words).size(12.0).color(t.muted));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = widgets::GAP + 2.0;
+                    // The default first and Cancel last, or the other way round on a Mac.
+                    let cancel = |ui: &mut Ui| ui.add(StandardButton::new("Cancel")).clicked();
+                    if cfg!(target_os = "macos") {
+                        if record_button(ui, can).clicked() {
+                            choice = Some(RecorderChoice::Record);
+                        }
+                        if cancel(ui) {
+                            choice = Some(RecorderChoice::Cancel);
+                        }
+                    } else {
+                        if cancel(ui) {
+                            choice = Some(RecorderChoice::Cancel);
+                        }
+                        if record_button(ui, can).clicked() {
+                            choice = Some(RecorderChoice::Record);
+                        }
+                    }
+                    if let Some(hint) = &view.hint {
+                        ui.add_space(6.0);
+                        ui.label(RichText::new(hint).size(12.0).color(t.muted));
+                    }
                 });
             });
         });
     let line = footer.response.rect;
     ui.painter().hline(line.x_range(), line.top(), Stroke::new(1.0, t.border));
-    egui::CentralPanel::default().frame(Frame::NONE.fill(t.panel).inner_margin(Margin::symmetric(22, 18))).show(ui, |ui| {
-        area_section(ui, view, rec, devices);
-        ui.add_space(20.0);
-        inputs_section(ui, view, rec, sources, devices, mic, sound, camera);
+    egui::CentralPanel::default().frame(Frame::NONE.fill(t.panel).inner_margin(Margin::symmetric(20, 16))).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("New Recording").font(widgets::strong_font(ui.ctx(), 20.0)).color(t.text));
+                ui.label(RichText::new(next_step(rec)).size(12.5).color(t.muted));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                if icons::button(ui, Icon::Minimize, "Put the Recorder away in the tray (click the tray icon to bring it back)", false, true)
+                    .clicked()
+                {
+                    choice = Some(RecorderChoice::Hide);
+                }
+            });
+        });
+        ui.add_space(14.0);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = CARD_GAP;
+            let mut screen = rec.screen;
+            if card(ui, Icon::Screen, "Screen", &mut screen, true, |ui, _| screen_card(ui, view, rec, devices)) {
+                rec.screen = screen;
+            }
+            let mut camera_on = sources.camera && devices.camera_supported;
+            let shown = camera_on;
+            if card(ui, Icon::Camera, "Camera", &mut camera_on, devices.camera_supported, |ui, _| camera_card(ui, shown, sources, devices, camera)) {
+                sources.camera = camera_on;
+            }
+            let mut mic_on = sources.microphone;
+            let mic_shown = mic_on;
+            if card(ui, Icon::Microphone, "Microphone", &mut mic_on, true, |ui, _| {
+                sound_card(
+                    ui,
+                    "recorder-mic",
+                    &mut sources.microphone_name,
+                    &devices.default_microphone,
+                    &devices.microphones,
+                    mic,
+                    "Microphone level",
+                    mic_shown,
+                );
+                // The camera's own microphone, with the camera on: some cameras send no video
+                // while theirs records (the recording then lets the camera go).
+                let camera_name = sources
+                    .camera_index
+                    .and_then(|i| devices.cameras.as_deref().unwrap_or_default().iter().find(|c| c.0 == i).map(|c| c.1.clone()))
+                    .or_else(|| devices.cameras.as_deref().and_then(|l| l.first()).map(|c| c.1.clone()));
+                let mic_name = sources.microphone_name.clone().or_else(|| devices.default_microphone.clone());
+                if sources.camera
+                    && let (Some(cam), Some(m)) = (camera_name, mic_name)
+                    && is_own_microphone(&m, &cam)
+                {
+                    note(ui, OWN_MICROPHONE_NOTE);
+                }
+                if devices.microphones.is_empty() {
+                    note(ui, NO_MICROPHONE_NOTE);
+                }
+                if matches!(mic, MicLevel::Silent) {
+                    warning(ui, SILENT_MICROPHONE);
+                }
+            }) {
+                sources.microphone = mic_on;
+            }
+            let mut sound_on = sources.system_sound && devices.system_sound;
+            let sound_shown = sound_on;
+            if card(ui, Icon::Speaker, "Computer sound", &mut sound_on, devices.system_sound, |ui, _| {
+                if !devices.system_sound_platform {
+                    note(ui, "Only on Windows: this system has no way to record what it plays.");
+                } else if !devices.system_sound {
+                    note(ui, "No sound output was found.");
+                } else {
+                    sound_card(
+                        ui,
+                        "recorder-speaker",
+                        &mut sources.system_sound_name,
+                        &devices.default_speaker,
+                        &devices.speakers,
+                        sound,
+                        "Computer sound level",
+                        sound_shown,
+                    );
+                    note(ui, "What plays through these speakers, like the others in a call.");
+                }
+            }) {
+                sources.system_sound = sound_on;
+            }
+        });
         ui.add_space(10.0);
         if !rec.records_anything(sources, devices.system_sound, devices.camera_supported) {
             ui.label(RichText::new("Turn on at least one of these to record.").color(t.danger));
@@ -927,7 +952,7 @@ mod tests {
         h.run_steps(2);
         let r = &h.state().settings.recorder;
         assert_eq!((r.width, r.height), (540, 960));
-        h.get_by_label_contains("Only the sizes that fit on your monitors are listed.");
+        h.get_by_label_contains("Click where the frame goes after you press Record.");
     }
 
     #[test]
@@ -1033,41 +1058,6 @@ mod tests {
     }
 
     #[test]
-    fn the_cameras_test_shows_its_picture_or_why_there_is_none() {
-        let mut s = Settings::default();
-        s.production.camera = true;
-        s.production.microphone = true;
-        let mut h = harness(s, devices());
-        h.run_steps(2);
-        // Test turns the watching on; the service then says how the camera is.
-        h.get_by_label("Test the camera").click();
-        h.run_steps(2);
-        assert!(h.state().view.watch);
-        h.get_by_label_contains("Starting the camera");
-        // Its picture.
-        let grey = egui::ColorImage::new([64, 48], vec![egui::Color32::from_gray(128); 64 * 48]);
-        let texture = h.ctx.load_texture("camera-test", grey, egui::TextureOptions::LINEAR);
-        h.state_mut().camera = CameraPreview::Live(texture);
-        h.run_steps(2);
-        h.get_by_label("The camera's picture");
-        h.get_by_label_contains("What the camera sends");
-        if let Ok(dir) = std::env::var("SGC_SHOTS")
-            && let Ok(img) = h.render()
-        {
-            let _ = img.save(format!("{dir}/recorder-camera-test.png"));
-        }
-        // None: why, in plain words.
-        h.state_mut().camera = CameraPreview::Failed("Webcam sends no video while its own microphone is on.".into());
-        h.run_steps(2);
-        h.get_by_label_contains("sends no video while its own microphone is on");
-        // Stop lets it go.
-        h.get_by_label("Stop testing the camera").click();
-        h.run_steps(2);
-        assert!(!h.state().view.watch);
-        assert!(h.query_by_label_contains("sends no video").is_none());
-    }
-
-    #[test]
     fn a_microphone_that_hears_only_silence_is_said_so() {
         let mut s = Settings::default();
         s.production.microphone = true;
@@ -1089,29 +1079,61 @@ mod tests {
     }
 
     #[test]
-    fn the_microphone_is_listened_to_only_when_asked() {
+    fn the_camera_is_seen_live_while_its_on_or_why_there_is_none() {
         let mut s = Settings::default();
-        s.production.microphone = false;
+        s.production.camera = true;
+        s.production.microphone = true;
         let mut h = harness(s, devices());
         h.run_steps(2);
-        assert!(!h.state().view.listen);
-        // Turned on here: that's asking to hear it.
-        press(&mut h, "Microphone");
-        assert!(h.state().view.listen);
+        // On: watched at once (the service then says how the camera is).
+        assert!(h.state().view.watch);
+        let grey = egui::ColorImage::new([64, 48], vec![egui::Color32::from_gray(128); 64 * 48]);
+        let texture = h.ctx.load_texture("camera-test", grey, egui::TextureOptions::LINEAR);
+        h.state_mut().camera = CameraPreview::Live(texture.clone());
+        h.state_mut().mic = MicLevel::Level(0.35);
+        h.run_steps(2);
+        h.get_by_label("The camera's picture");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder.png"));
+        }
+        // None: why, in plain words.
+        h.state_mut().camera = CameraPreview::Failed("Webcam sends no video while its own microphone is on.".into());
+        h.run_steps(2);
+        h.get_by_label_contains("sends no video while its own microphone is on");
+        // Off: no picture, whatever the service still has.
+        h.state_mut().camera = CameraPreview::Live(texture);
+        press(&mut h, "Camera");
+        assert!(!h.state().settings.production.camera);
+        assert!(h.query_by_label("The camera's picture").is_none());
+    }
+
+    #[test]
+    fn the_sounds_are_heard_live_while_theyre_on() {
+        let mut s = Settings::default();
+        s.production.microphone = true;
+        let mut h = harness(s, devices());
         h.state_mut().mic = MicLevel::Level(0.4);
         h.run_steps(2);
-        h.get_by_label("Microphone level");
-        press(&mut h, "Microphone");
-        assert!(!h.state().view.listen, "off: no longer listened to");
-        // On from before: a Test button, and nothing heard until it's pressed.
-        let mut h = harness(Settings::default(), devices());
-        h.run_steps(2);
-        assert!(h.query_by_label("Microphone level").is_none());
-        press(&mut h, "Test the microphone");
         assert!(h.state().view.listen);
+        h.get_by_label("Microphone level");
         h.state_mut().mic = MicLevel::Failed("no microphone".into());
         h.run_steps(2);
         h.get_by_label("Can't hear it");
+        // Off: nothing said about hearing it.
+        press(&mut h, "Microphone");
+        assert!(!h.state().settings.production.microphone);
+        assert!(h.query_by_label("Can't hear it").is_none());
+    }
+
+    #[test]
+    fn the_recorder_can_be_put_away_in_the_tray() {
+        let mut h = harness(Settings::default(), devices());
+        h.run_steps(2);
+        h.get_by_label("Put the Recorder away in the tray (click the tray icon to bring it back)").click();
+        h.run_steps(1);
+        assert_eq!(h.state().pressed, Some(RecorderChoice::Hide));
     }
 
     #[test]

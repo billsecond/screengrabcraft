@@ -34,6 +34,14 @@ pub fn plain_windows(title: &str, rgb: [u8; 3]) {
     imp::plain_windows(title, rgb);
 }
 
+/// Keeps the calling thread's windows titled `title` out of every screen capture and recording,
+/// this program's own included, each once: they're seen on the screen and nowhere else (the
+/// controls of a recording, wherever they're dragged). Windows 10 2004 and later; elsewhere it
+/// does nothing. Call it on the thread that made the windows, once they're made.
+pub fn keep_out_of_captures(title: &str) {
+    imp::keep_out_of_captures(title);
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::Mutex;
@@ -45,6 +53,29 @@ mod imp {
     static CALMED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
     /// The windows made plain already.
     static PLAIN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+    /// The windows kept out of captures already.
+    static UNSEEN: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+
+    pub fn keep_out_of_captures(title: &str) {
+        use winsafe::co;
+        let mut unseen = UNSEEN.lock().unwrap_or_else(|e| e.into_inner());
+        let mut there = Vec::new();
+        let _ = EnumThreadWindows(GetCurrentThreadId(), |h: HWND| {
+            let i = id(&h);
+            there.push(i);
+            if !unseen.contains(&i) && h.GetWindowText().is_ok_and(|t| t == title) {
+                match h.SetWindowDisplayAffinity(co::WDA::EXCLUDEFROMCAPTURE) {
+                    Ok(()) => unseen.push(i),
+                    Err(e) => {
+                        log::warn!("a window couldn't be kept out of captures: {e}");
+                        unseen.push(i);
+                    }
+                }
+            }
+            true
+        });
+        unseen.retain(|i| there.contains(i));
+    }
 
     pub fn plain_windows(title: &str, rgb: [u8; 3]) {
         use winsafe::{COLORREF, co};
@@ -115,6 +146,8 @@ mod imp {
     }
 
     pub fn plain_windows(_title: &str, _rgb: [u8; 3]) {}
+
+    pub fn keep_out_of_captures(_title: &str) {}
 }
 
 #[cfg(test)]
