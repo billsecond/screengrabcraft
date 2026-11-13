@@ -37,6 +37,10 @@ pub struct Composer {
     camera_frame: Option<(usize, Raster)>,
     /// Captions drawn on the picture (in timeline time), if any.
     captions: Option<Arc<Vec<Cue>>>,
+    /// The media bin's pictures, for the layers' items.
+    media: Arc<dyn crate::layer_draw::MediaStore>,
+    texts: crate::layer_draw::TextCache,
+    pictures: crate::layer_draw::PictureCache,
     pub width: u32,
     pub height: u32,
 }
@@ -46,7 +50,24 @@ impl Composer {
     pub fn new(rec: Arc<Recording>, timeline: &Timeline, width: u32, height: u32) -> Composer {
         let screen = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i).map(|t| (i, ScreenDecoder::new(t.stream))));
         let camera = timeline.find(StreamKind::Camera).and_then(|i| timeline.tracks.get(i).map(|t| (i, t.stream)));
-        Composer { rec, screen, camera, camera_frame: None, captions: None, width: width.max(2), height: height.max(2) }
+        Composer {
+            rec,
+            screen,
+            camera,
+            camera_frame: None,
+            captions: None,
+            media: Arc::new(crate::layer_draw::NoMedia),
+            texts: Default::default(),
+            pictures: Default::default(),
+            width: width.max(2),
+            height: height.max(2),
+        }
+    }
+
+    /// The media bin's pictures, for the layers' media items (without them, only their words and
+    /// transitions are drawn).
+    pub fn set_media(&mut self, media: Arc<dyn crate::layer_draw::MediaStore>) {
+        self.media = media;
     }
 
     /// The picture at timeline time `t` µs. A hidden track (`muted`) isn't in it: without the
@@ -77,6 +98,8 @@ impl Composer {
                 fill_camera(&mut out, &cam);
             }
         }
+        // The layers over it (media, titles, overlays, transitions), the captions over them.
+        crate::layer_draw::draw_layers(&mut out, timeline, self.media.as_ref(), t, &mut self.texts, &mut self.pictures);
         if let Some(cues) = &self.captions {
             draw_captions(&mut out, &captions::showing(cues, t));
         }
@@ -262,18 +285,42 @@ pub fn fill_camera(out: &mut Raster, cam: &Raster) {
     }
 }
 
-/// Draws the camera's picture in its corner of `out`, in its shape.
-pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
-    let layout = timeline.camera;
-    let (ow, oh) = (out.width() as f32, out.height() as f32);
+/// Where the camera's picture goes on a `ow × oh` video, for a camera picture of `aspect`
+/// (width over height): x, y, width, height in pixels. In its corner, or where it was dragged
+/// (kept whole on the picture).
+pub fn camera_rect(layout: &crate::timeline::CameraLayout, aspect: f32, ow: f32, oh: f32) -> (f32, f32, f32, f32) {
     let margin = (ow * 0.025).round();
     let mut cw = (ow * layout.size.clamp(0.1, 0.5)).round().max(8.0);
-    let aspect = cam.width() as f32 / cam.height().max(1) as f32;
+    let aspect = if aspect.is_finite() && aspect > 0.0 { aspect } else { 4.0 / 3.0 };
     let mut ch = if layout.shape == CameraShape::Circle { cw } else { (cw / aspect.max(0.1)).round() };
     if ch > oh - margin * 2.0 {
         ch = (oh - margin * 2.0).max(8.0);
         cw = if layout.shape == CameraShape::Circle { ch } else { (ch * aspect).round() };
     }
+    cw = cw.min(ow).max(1.0);
+    ch = ch.min(oh).max(1.0);
+    let (x, y) = match layout.at {
+        Some([x, y]) => ((x * ow - cw / 2.0).round(), (y * oh - ch / 2.0).round()),
+        None => (
+            match layout.corner {
+                Corner::TopLeft | Corner::BottomLeft => margin,
+                Corner::TopRight | Corner::BottomRight => ow - margin - cw,
+            },
+            match layout.corner {
+                Corner::TopLeft | Corner::TopRight => margin,
+                Corner::BottomLeft | Corner::BottomRight => oh - margin - ch,
+            },
+        ),
+    };
+    (x.clamp(0.0, (ow - cw).max(0.0)), y.clamp(0.0, (oh - ch).max(0.0)), cw, ch)
+}
+
+/// Draws the camera's picture in its place on `out`, in its shape.
+pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
+    let layout = timeline.camera;
+    let (ow, oh) = (out.width() as f32, out.height() as f32);
+    let aspect = cam.width() as f32 / cam.height().max(1) as f32;
+    let (x0, y0, cw, ch) = camera_rect(&layout, aspect, ow, oh);
     // A circle shows the middle of the picture, square.
     let source = if layout.shape == CameraShape::Circle {
         let side = cam.width().min(cam.height());
@@ -282,16 +329,7 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
         Some(cam.clone())
     };
     let Some(small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
-    let x0 = match layout.corner {
-        Corner::TopLeft | Corner::BottomLeft => margin,
-        Corner::TopRight | Corner::BottomRight => ow - margin - cw,
-    }
-    .max(0.0) as usize;
-    let y0 = match layout.corner {
-        Corner::TopLeft | Corner::TopRight => margin,
-        Corner::BottomLeft | Corner::BottomRight => oh - margin - ch,
-    }
-    .max(0.0) as usize;
+    let (x0, y0) = (x0 as usize, y0 as usize);
     let (sw, ow_px) = (small.width() as usize, out.width() as usize);
     let dst = out.pixels_mut();
     for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
@@ -311,9 +349,16 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
 }
 
 /// The edited sound: `count` stereo samples from timeline sample `first`, every track that
-/// isn't muted mixed at its volume. Interleaved, -1 to 1.
+/// isn't muted mixed at its volume. Interleaved, -1 to 1. (The layers' media have no sound
+/// here: see [`mix_with`].)
 pub fn mix(rec: &Recording, timeline: &Timeline, first: u64, count: usize) -> Vec<f32> {
+    mix_with(rec, timeline, &crate::layer_draw::NoMedia, first, count)
+}
+
+/// [`mix`], with the sound of the layers' media from `media`.
+pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_draw::MediaStore, first: u64, count: usize) -> Vec<f32> {
     let mut out = vec![0f32; count * 2];
+    crate::layer_draw::mix_layers(&mut out, timeline, media, first, count);
     let end = first.saturating_add(count as u64);
     for t in &timeline.tracks {
         if t.muted || t.kind.is_video() || t.volume <= 0.0 {

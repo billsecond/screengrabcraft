@@ -25,6 +25,7 @@ use crate::MediaError;
 use crate::captions::Cue;
 use crate::compose::{self, Composer};
 use crate::export::{ExportSettings, Exported};
+use crate::layer_draw::MediaStore;
 use crate::recording::Recording;
 use crate::timeline::Timeline;
 use crate::yuv::I420;
@@ -41,6 +42,8 @@ struct Feed {
     rec: Arc<Recording>,
     timeline: Arc<Timeline>,
     composer: Composer,
+    /// The media bin's sound, for the layers' items.
+    media: Arc<dyn MediaStore>,
     width: u32,
     height: u32,
     fps: u64,
@@ -79,7 +82,7 @@ impl Feed {
         let first = self.next_sample;
         let n = PIECE.min(self.samples - first);
         self.next_sample += n;
-        let mixed = compose::mix(&self.rec, &self.timeline, first, n as usize);
+        let mixed = compose::mix_with(&self.rec, &self.timeline, self.media.as_ref(), first, n as usize);
         let mut bytes = Vec::with_capacity(mixed.len() * 2);
         for v in &mixed {
             bytes.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
@@ -145,6 +148,7 @@ fn transcode(
     rec: &Arc<Recording>,
     timeline: &Arc<Timeline>,
     captions: &Option<Arc<Vec<Cue>>>,
+    media: &Arc<dyn MediaStore>,
     part: &Path,
     size: (u32, u32),
     fps: u64,
@@ -158,10 +162,12 @@ fn transcode(
     let length = timeline.length();
     let mut composer = Composer::new(rec.clone(), timeline, w, h);
     composer.set_captions(captions.clone());
+    composer.set_media(media.clone());
     let feed = Arc::new(Mutex::new(Feed {
         rec: rec.clone(),
         timeline: timeline.clone(),
         composer,
+        media: media.clone(),
         width: w,
         height: h,
         fps,
@@ -236,10 +242,12 @@ fn transcode(
 /// Makes `out` (written beside it first, then put in place) from the recording as edited, with
 /// captions (in timeline time) burned into the pictures if there are some. `progress` goes from
 /// 0 to 1000; setting `cancel` stops it and leaves nothing behind.
+#[allow(clippy::too_many_arguments)]
 pub fn export(
     rec: Arc<Recording>,
     timeline: &Timeline,
     captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
     out: &Path,
     s: ExportSettings,
     progress: &AtomicU32,
@@ -251,7 +259,7 @@ pub fn export(
     }
     let (w, h) = crate::export::video_size(&rec, &s);
     let fps = u64::from(s.fps.clamp(1, 60));
-    let with_sound = timeline.tracks.iter().any(|t| !t.kind.is_video() && !t.muted && !t.clips.is_empty());
+    let with_sound = crate::export::has_sound(timeline);
     let part: PathBuf = out.with_extension("mp4.part");
     let timeline = Arc::new(timeline.clone());
     // The transcoder's requests come on Windows' own threads: these are shared with them, and
@@ -267,7 +275,8 @@ pub fn export(
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
-        let go = |hardware: bool| transcode(&rec, &timeline, &captions, &part, (w, h), fps, with_sound, hardware, &inner_progress, &inner_cancel);
+        let go =
+            |hardware: bool| transcode(&rec, &timeline, &captions, &media, &part, (w, h), fps, with_sound, hardware, &inner_progress, &inner_cancel);
         // The video hardware first; if it can't, the processor.
         let mut r = go(true);
         if let Err(e) = &r

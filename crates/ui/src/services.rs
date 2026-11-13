@@ -25,6 +25,8 @@ pub enum DialogResult {
     Opened(Vec<OpenedFile>),
     /// A path to save to (the editor writes the file).
     SaveTo(String),
+    /// Files to bring into the video editor's media bin (paths; they're read where they are).
+    Import(Vec<String>),
     Cancelled,
 }
 
@@ -119,6 +121,8 @@ pub struct VideoJob {
     pub captions: Option<Vec<Cue>>,
     pub burn: bool,
     pub subtitles: bool,
+    /// The media bin's pictures and sound, for the layers' items.
+    pub media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
 }
 
 /// Sound the host is playing; dropping it stops it.
@@ -248,13 +252,29 @@ pub trait Services {
         Vec::new()
     }
 
+    /// Asks for files to bring into the video editor's media bin (pictures, sound, recordings);
+    /// the answer comes through [`Services::poll_dialog`] as [`DialogResult::Import`].
+    fn request_import(&self) {}
+
+    /// Starts reading a file for the media bin (on a thread of the host's).
+    fn load_media(&self, _path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        Err("media is brought in by the editor on the desktop".to_string())
+    }
+
     /// Starts making a video (on a thread of the host's).
     fn export_video(&self, _job: VideoJob) -> Result<VideoExport, String> {
         Err("videos are made by the editor on the desktop".to_string())
     }
 
-    /// Plays the edited sound from `from_us`, until it's dropped.
-    fn play_sound(&self, _recording: std::sync::Arc<Recording>, _timeline: Timeline, _from_us: u64) -> Option<Box<dyn SoundOut>> {
+    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, until it's
+    /// dropped.
+    fn play_sound(
+        &self,
+        _recording: std::sync::Arc<Recording>,
+        _timeline: Timeline,
+        _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
+        _from_us: u64,
+    ) -> Option<Box<dyn SoundOut>> {
         None
     }
 

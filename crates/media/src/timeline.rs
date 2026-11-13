@@ -85,6 +85,10 @@ pub struct CameraLayout {
     pub size: f32,
     #[serde(default)]
     pub shape: CameraShape,
+    /// Dragged on the picture: its middle (shares of the video's width and height), else it's
+    /// in its corner.
+    #[serde(default)]
+    pub at: Option<[f32; 2]>,
 }
 
 fn camera_size() -> f32 {
@@ -93,7 +97,7 @@ fn camera_size() -> f32 {
 
 impl Default for CameraLayout {
     fn default() -> CameraLayout {
-        CameraLayout { corner: Corner::default(), size: camera_size(), shape: CameraShape::default() }
+        CameraLayout { corner: Corner::default(), size: camera_size(), shape: CameraShape::default(), at: None }
     }
 }
 
@@ -125,6 +129,13 @@ pub struct Timeline {
     pub camera: CameraLayout,
     #[serde(default)]
     pub captions: CaptionOptions,
+    /// Layers of items added over and beside the recording (see [`crate::layers`]), the later
+    /// ones on top.
+    #[serde(default)]
+    pub layers: Vec<crate::layers::Layer>,
+    /// The media bin: files brought in for the layers.
+    #[serde(default)]
+    pub media: Vec<crate::layers::MediaItem>,
 }
 
 impl Timeline {
@@ -140,7 +151,7 @@ impl Timeline {
                 Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips }
             })
             .collect();
-        Timeline { tracks, camera: CameraLayout::default(), captions: CaptionOptions::default() }
+        Timeline { tracks, camera: CameraLayout::default(), captions: CaptionOptions::default(), layers: Vec::new(), media: Vec::new() }
     }
 
     /// Edits read from a file, made safe for this recording: tracks it doesn't have go, tracks
@@ -178,12 +189,15 @@ impl Timeline {
             tracks.push(t);
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
-        Timeline { tracks, camera: self.camera, captions: self.captions }
+        self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]);
+        let mut checked = Timeline { tracks, camera: self.camera, captions: self.captions, layers: self.layers, media: self.media };
+        checked.check_layers();
+        checked
     }
 
-    /// How long the edited video is: to the end of the last clip.
+    /// How long the edited video is: to the end of the last clip, or of the last item added.
     pub fn length(&self) -> u64 {
-        self.tracks.iter().filter_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(0)
+        self.tracks.iter().filter_map(|t| t.clips.last()).map(Clip::end).max().unwrap_or(0).max(self.layers_length())
     }
 
     pub fn track(&self, i: usize) -> Result<&Track, EditError> {
@@ -233,6 +247,7 @@ impl Timeline {
             out.retain(|c| c.len >= MIN_CLIP_US);
             t.clips = out;
         }
+        self.cut_layers(from, to);
         Ok(())
     }
 
@@ -339,6 +354,8 @@ mod tests {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
+            layers: Vec::new(),
+            media: Vec::new(),
         }
     }
 

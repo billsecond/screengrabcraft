@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use screengrabcraft_desktop::{clipboard, launch, paths, store};
 use screengrabcraft_media::captions::Captions;
+use screengrabcraft_media::layer_draw::MediaStore;
+use screengrabcraft_media::media_store::MediaJob;
 use screengrabcraft_media::recording::{self, FileSource, Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
@@ -371,8 +373,50 @@ impl Services for DesktopServices {
         crate::video::export(job, self.ctx.clone())
     }
 
-    fn play_sound(&self, recording: Arc<Recording>, timeline: Timeline, from_us: u64) -> Option<Box<dyn SoundOut>> {
-        match crate::video::Sound::start(recording, timeline, from_us) {
+    fn request_import(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("import-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Import Media")
+                    .set_directory(&start)
+                    .add_filter("Pictures, sound and videos", screengrabcraft_media::media_store::EXTENSIONS)
+                    .add_filter("Videos", &["mp4", "m4v", "mov", REC])
+                    .add_filter("Sound", &["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga"])
+                    .add_filter("Pictures", PICTURES)
+                    .add_filter("All files", &["*"])
+                    .pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Import(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn load_media(&self, path: &str) -> Result<MediaJob, String> {
+        let job: MediaJob = Arc::default();
+        let (out, wake, path) = (job.clone(), self.ctx.clone(), PathBuf::from(path));
+        std::thread::Builder::new()
+            .name("media".into())
+            .spawn(move || {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| crate::video::read_media(&path)))
+                    .unwrap_or_else(|_| Err("something went wrong while reading it".to_string()));
+                if let Err(e) = &r {
+                    log::warn!("bringing a file into the media bin: {e}");
+                }
+                *out.lock().unwrap_or_else(PoisonError::into_inner) = Some(r);
+                wake.request_repaint();
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(job)
+    }
+
+    fn play_sound(&self, recording: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Option<Box<dyn SoundOut>> {
+        match crate::video::Sound::start(recording, timeline, media, from_us) {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
                 log::warn!("playing the sound: {e}");

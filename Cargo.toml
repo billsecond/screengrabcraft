@@ -4,7 +4,7 @@ members = ["crates/*", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/screengrabcraft", "apps/screengrabcraft-editor", "apps/screengrabcraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.1.39"
+version = "0.1.40"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.91"
@@ -48,6 +48,8 @@ lz4_flex = { version = "0.14", default-features = false, features = ["safe-encod
 crc32fast = "1.4"
 rav1e = { version = "0.8.1", default-features = false, features = ["threading"] }
 rusty-opus = "1.0.2"
+# Sound files brought into the video editor (MP3, AAC and M4A, WAV, FLAC, Ogg): decoded in Rust.
+symphonia = { version = "0.5", default-features = false, features = ["mp3", "aac", "isomp4", "wav", "pcm", "flac", "ogg", "vorbis", "adpcm"] }
 # Windows' own H.264 and AAC encoders, through its media transcoder (safe Windows Runtime calls).
 windows = { version = "0.62", default-features = false }
 

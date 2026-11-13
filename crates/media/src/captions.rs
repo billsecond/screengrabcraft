@@ -214,6 +214,8 @@ mod tests {
             tracks: vec![track(0, StreamKind::Screen), track(1, StreamKind::SystemSound), track(2, StreamKind::Microphone)],
             camera: CameraLayout::default(),
             captions: Default::default(),
+            layers: Vec::new(),
+            media: Vec::new(),
         }
     }
 

@@ -20,6 +20,7 @@ use crate::MediaError;
 use crate::av1::{Av1Encoder, Av1Settings, Coded};
 use crate::captions::Cue;
 use crate::compose::{self, Composer};
+use crate::layer_draw::MediaStore;
 use crate::mp4::{AudioTrack, Mp4Writer, Sample, VideoTrack};
 use crate::opus::{self, OpusEncoder};
 use crate::recording::{Recording, StreamKind};
@@ -111,6 +112,7 @@ struct Job {
     rec: Arc<Recording>,
     timeline: Arc<Timeline>,
     captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
 }
 
 type Done = (usize, Result<Vec<Coded>, MediaError>);
@@ -135,6 +137,8 @@ pub struct Exporter {
     latest: Option<(Arc<Recording>, Arc<Timeline>)>,
     /// Captions burned into the pictures (timeline time).
     captions: Option<Arc<Vec<Cue>>>,
+    /// The media bin, for the layers' pictures and sound.
+    media: Arc<dyn MediaStore>,
     finished: bool,
 }
 
@@ -202,6 +206,7 @@ impl Exporter {
             written: 0,
             latest: None,
             captions: None,
+            media: Arc::new(crate::layer_draw::NoMedia),
             finished: false,
         })
     }
@@ -214,6 +219,11 @@ impl Exporter {
     /// now on.
     pub fn set_captions(&mut self, cues: Option<Arc<Vec<Cue>>>) {
         self.captions = cues;
+    }
+
+    /// The media bin's pictures and sound, for the layers' items.
+    pub fn set_media(&mut self, media: Arc<dyn MediaStore>) {
+        self.media = media;
     }
 
     /// Pictures in `length` µs.
@@ -232,7 +242,7 @@ impl Exporter {
     }
 
     fn send(&mut self, k: usize, end: u64, rec: &Arc<Recording>, timeline: &Arc<Timeline>) -> Result<(), MediaError> {
-        let job = Job { k, end, rec: rec.clone(), timeline: timeline.clone(), captions: self.captions.clone() };
+        let job = Job { k, end, rec: rec.clone(), timeline: timeline.clone(), captions: self.captions.clone(), media: self.media.clone() };
         let sent = self.jobs.as_ref().map(|j| j.send(job).is_ok()).unwrap_or(false);
         if !sent {
             return Err(MediaError::Encode("the encoders stopped".to_string()));
@@ -288,7 +298,7 @@ impl Exporter {
                 to = to.min(timeline.length());
             }
             let (a, b) = (compose::to_samples(from), compose::to_samples(to.max(from)));
-            let pcm = compose::mix(rec, timeline, a, (b - a) as usize);
+            let pcm = compose::mix_with(rec, timeline, self.media.as_ref(), a, (b - a) as usize);
             let mut packets = enc.push(&pcm)?;
             if last {
                 packets.extend(enc.finish()?);
@@ -384,6 +394,7 @@ fn encode(job: &Job, av1: Av1Settings, fps: u32, cancel: &AtomicBool) -> Result<
     let per = STRETCH_SECS * u64::from(fps);
     let mut composer = Composer::new(job.rec.clone(), &job.timeline, av1.width, av1.height);
     composer.set_captions(job.captions.clone());
+    composer.set_media(job.media.clone());
     let mut enc = Av1Encoder::new(av1)?;
     let mut coded = Vec::with_capacity(per as usize);
     for f in (job.k as u64 * per)..job.end {
@@ -422,6 +433,32 @@ pub fn export_with_captions(
     progress: &AtomicU32,
     cancel: &AtomicBool,
 ) -> Result<Exported, MediaError> {
+    export_with(rec, timeline, captions, Arc::new(crate::layer_draw::NoMedia), out, s, progress, cancel)
+}
+
+/// Whether the video made has sound: a sound track, or media that plays on a layer.
+pub fn has_sound(timeline: &Timeline) -> bool {
+    use crate::layers::{MediaKind, What};
+    let tracks = timeline.tracks.iter().any(|t| !t.kind.is_video() && !t.muted && !t.clips.is_empty());
+    let layers = timeline.layers.iter().filter(|l| !l.hidden).flat_map(|l| l.items.iter()).any(|i| match &i.what {
+        What::Media { id } => timeline.media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture),
+        _ => false,
+    });
+    tracks || layers
+}
+
+/// [`export_with_captions`], with the media bin's pictures and sound for the layers' items.
+#[allow(clippy::too_many_arguments)]
+pub fn export_with(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    s: ExportSettings,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
     if timeline.length() == 0 {
         return Err(MediaError::Encode("there's nothing left to make a video of".to_string()));
     }
@@ -430,17 +467,17 @@ pub fn export_with_captions(
     }
     #[cfg(target_os = "windows")]
     if s.codec == Codec::H264 {
-        return crate::h264::export(rec, timeline, captions, out, s, progress, cancel);
+        return crate::h264::export(rec, timeline, captions, media, out, s, progress, cancel);
     }
     if !s.codec.available() {
         return Err(MediaError::Encode(format!("{:?} videos can't be made on this computer", s.codec)));
     }
     let (w, h) = video_size(&rec, &s);
-    let with_sound = timeline.tracks.iter().any(|t| !t.kind.is_video() && !t.muted && !t.clips.is_empty());
     // The caller's cancel is watched here and passed on to the encoders.
     let stop = Arc::new(AtomicBool::new(false));
-    let mut exporter = Exporter::new(out, w, h, with_sound, s, stop.clone())?;
+    let mut exporter = Exporter::new(out, w, h, has_sound(timeline), s, stop.clone())?;
     exporter.set_captions(captions);
+    exporter.set_media(media);
     std::thread::scope(|scope| {
         let watcher = scope.spawn(|| {
             while !stop.load(Ordering::SeqCst) {
@@ -465,10 +502,12 @@ pub const GIF_FPS: u32 = 10;
 /// An animated GIF of the recording as edited (GIFs have no sound), with captions (in timeline
 /// time) burned into the pictures if there are some. Written beside `out` first, then put in
 /// place; `progress` goes from 0 to 1000; setting `cancel` stops it and leaves nothing behind.
+#[allow(clippy::too_many_arguments)]
 pub fn export_gif(
     rec: Arc<Recording>,
     timeline: &Timeline,
     captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
     out: &Path,
     s: ExportSettings,
     progress: &AtomicU32,
@@ -488,6 +527,7 @@ pub fn export_gif(
     let mut gif = screengrabcraft_render::anim::GifWriter::new(BufWriter::new(File::create(&part)?), w, h).map_err(encode)?;
     let mut composer = Composer::new(rec, timeline, w, h);
     composer.set_captions(captions);
+    composer.set_media(media);
     let mut stopped = None;
     for f in 0..frames {
         if cancel.load(Ordering::SeqCst) {
@@ -665,14 +705,36 @@ mod tests {
         let dir = dir("gif");
         let out = dir.join("clip.gif");
         let progress = AtomicU32::new(0);
-        let done = export_gif(rec.clone(), &tl, None, &out, ExportSettings::default(), &progress, &AtomicBool::new(false)).unwrap();
+        let done = export_gif(
+            rec.clone(),
+            &tl,
+            None,
+            Arc::new(crate::layer_draw::NoMedia),
+            &out,
+            ExportSettings::default(),
+            &progress,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         assert_eq!((done.width, done.height, done.frames), (96, 60, 20));
         assert_eq!(progress.load(Ordering::SeqCst), 1000);
         let bytes = std::fs::read(&out).unwrap();
         assert!(bytes.starts_with(b"GIF89a"));
         assert!(!out.with_extension("gif.part").exists());
         let gone = dir.join("gone.gif");
-        assert!(export_gif(rec, &tl, None, &gone, ExportSettings::default(), &AtomicU32::new(0), &AtomicBool::new(true)).is_err());
+        assert!(
+            export_gif(
+                rec,
+                &tl,
+                None,
+                Arc::new(crate::layer_draw::NoMedia),
+                &gone,
+                ExportSettings::default(),
+                &AtomicU32::new(0),
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
         assert!(!gone.exists() && !gone.with_extension("gif.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }

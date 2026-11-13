@@ -30,7 +30,22 @@ use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
 mod export_window;
+mod library;
+pub use library::{LibDrop, LibTab};
+
 pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
+
+/// A layer item being moved or trimmed on the timeline: its layer (it may move to another, of
+/// its kind; `from` is where it started), and where it was taken hold of (µs into it), or which
+/// end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ItemDrag {
+    Move { layer: u32, item: u32, grab: u64, from: u32 },
+    Trim { layer: u32, item: u32, start: bool },
+}
+
+/// The band above the layers that a drop on makes a layer of its own.
+const NEW_LAYER_H: f32 = 22.0;
 
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
@@ -156,7 +171,7 @@ pub struct VideoView {
     /// A stretch chosen on the timeline.
     pub range: Option<(u64, u64)>,
     /// The timeline's zoom: pixels a second (0 until it's first fitted).
-    pps: f32,
+    pub pps: f32,
     scroll: f32,
     drag: Option<Drag>,
     /// The last revision written to the file, and when the edits last changed.
@@ -170,6 +185,28 @@ pub struct VideoView {
     /// Export Transcript was pressed before there were captions: they're being made, and the
     /// transcript is asked for when they come.
     pub transcript_after: Option<TranscriptFormat>,
+    /// The media bin's files as read, for the layers.
+    pub library: Arc<screengrabcraft_media::media_store::MediaLibrary>,
+    /// Files being brought in, and files of the bin being read again (a recording reopened).
+    pub importing: Vec<library::Importing>,
+    rereading: Vec<(u32, screengrabcraft_media::media_store::MediaJob)>,
+    /// The layer item chosen (its layer, itself).
+    pub item: Option<(u32, u32)>,
+    /// The camera chosen on the picture (to move and resize it there).
+    pub camera_chosen: bool,
+    /// The library panel at the left: shown, and which tab.
+    pub library_open: bool,
+    pub lib_tab: LibTab,
+    /// The library's thumbnails, by template or media.
+    thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Something being moved or resized on the picture.
+    canvas_drag: Option<library::CanvasDrag>,
+    /// A layer item being moved or trimmed on the timeline.
+    item_drag: Option<ItemDrag>,
+    /// Where the picture was last shown (screen points).
+    pub picture_rect: Option<Rect>,
+    /// Where the timeline's lane was last drawn, and where its rows start (for finding things on it).
+    pub lane_rect: Option<(Rect, f32)>,
     waves: BTreeMap<u8, Vec<(i16, i16)>>,
     /// The volume slider being dragged.
     volume_drag: bool,
@@ -264,7 +301,9 @@ impl VideoView {
         let captions = rec.captions.clone().filter(|c| !c.is_empty());
         let has_sound = rec.header.streams.iter().any(|s| Speaker::of(s.kind).is_some());
         let rec = Arc::new(rec);
-        let composer = Composer::new(rec.clone(), &session.timeline, w, h);
+        let library = Arc::new(screengrabcraft_media::media_store::MediaLibrary::default());
+        let mut composer = Composer::new(rec.clone(), &session.timeline, w, h);
+        composer.set_media(library.clone());
         VideoView {
             rec,
             session,
@@ -286,6 +325,18 @@ impl VideoView {
             export: None,
             export_last: None,
             transcript_after: None,
+            library,
+            importing: Vec::new(),
+            rereading: Vec::new(),
+            item: None,
+            camera_chosen: false,
+            library_open: true,
+            lib_tab: LibTab::default(),
+            thumbs: Default::default(),
+            canvas_drag: None,
+            item_drag: None,
+            picture_rect: None,
+            lane_rect: None,
             waves,
             volume_drag: false,
             captions,
@@ -446,7 +497,7 @@ impl VideoView {
         if self.playhead >= self.length() {
             self.playhead = 0;
         }
-        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.playhead);
+        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead);
         self.playing = Some(Playing { since: now, from: self.playhead, sound });
     }
 
@@ -476,6 +527,8 @@ impl VideoView {
         if let Some((a, b)) = self.range.take() {
             self.run(ed, ctx, "video.cut", json!({"from": a, "to": b}));
             self.playhead = a.min(self.length());
+        } else if let Some((layer, item)) = self.item.take() {
+            self.run(ed, ctx, "video.deleteItem", json!({"layer": layer, "item": item}));
         } else if let Some((t, c)) = self.selected.take() {
             self.run(ed, ctx, "video.deleteClip", json!({"track": t, "clip": c}));
         }
@@ -504,6 +557,7 @@ impl VideoView {
     fn tick(&mut self, ed: &mut Editor, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         self.poll_captions(ed, ctx, now);
+        self.poll_media(ed, ctx);
         self.place_captions();
         // Export Transcript waiting for captions: asked for once they've come, let go if none do.
         if let Some(f) = self.transcript_after {
@@ -604,6 +658,10 @@ impl VideoView {
                         }
                         ui.close();
                     }
+                    if ui.button("Import Media…").on_hover_text("Pictures, sound files and recordings for the Media Bin").clicked() {
+                        ed.services.request_import();
+                        ui.close();
+                    }
                     ui.separator();
                     if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video…").shortcut_text("Ctrl+E")).clicked() {
                         self.open_export(ed, &ctx);
@@ -667,8 +725,15 @@ impl VideoView {
                         self.split(ed, &ctx);
                         ui.close();
                     }
-                    let what = if self.range.is_some() { "Cut the Stretch" } else { "Delete the Clip" };
-                    if ui.add_enabled(self.range.is_some() || self.selected.is_some(), egui::Button::new(what).shortcut_text("Del")).clicked() {
+                    let what = if self.item.is_some() {
+                        "Delete the Item"
+                    } else if self.range.is_some() {
+                        "Cut the Stretch"
+                    } else {
+                        "Delete the Clip"
+                    };
+                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
+                    if ui.add_enabled(any, egui::Button::new(what).shortcut_text("Del")).clicked() {
                         self.delete(ed, &ctx);
                         ui.close();
                     }
@@ -693,6 +758,7 @@ impl VideoView {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.library_open, "Library and Media Bin");
                     if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
                         ed.services.save_settings(&ed.settings);
                     }
@@ -729,6 +795,13 @@ impl VideoView {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                    let lib = ui
+                        .add(egui::Button::new(RichText::new("Library").size(13.5)).selected(self.library_open).min_size(vec2(70.0, 28.0)))
+                        .on_hover_text("Titles, lower thirds, overlays, transitions and your own media, to drag onto the timeline");
+                    if lib.clicked() {
+                        self.library_open = !self.library_open;
+                    }
+                    ui.add_space(4.0);
                     if icons::button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
                         ed.services.request_open();
                     }
@@ -746,12 +819,14 @@ impl VideoView {
                     if widgets::button(ui, "Split").on_hover_text("Split at the playhead (S): the selected clip's track, or all of them").clicked() {
                         self.split(ed, &ctx);
                     }
-                    let tip = if self.range.is_some() {
+                    let tip = if self.item.is_some() {
+                        "Take the chosen item off its layer (Del)"
+                    } else if self.range.is_some() {
                         "Take the chosen stretch out of every track (Del)"
                     } else {
                         "Delete the selected clip, leaving a gap (Del)"
                     };
-                    let any = self.range.is_some() || self.selected.is_some();
+                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
                     if ui
                         .add_enabled_ui(any, |ui| widgets::button(ui, if self.range.is_some() { "Cut" } else { "Delete" }))
                         .inner
@@ -915,13 +990,20 @@ impl VideoView {
             let whole = ui.max_rect().shrink(16.0);
             let area = Rect::from_min_max(whole.min, pos2(whole.max.x, (whole.max.y - CONTROLS).max(whole.min.y)));
             let mut bottom = area.max.y;
+            let mut shown_at = None;
             if let Some(tex) = &self.texture {
                 let size = tex.size_vec2();
                 let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
                 let r = Rect::from_center_size(area.center(), size * f);
                 ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+                shown_at = Some(r);
                 bottom = r.max.y;
+            }
+            // The picture is a designer too: what's chosen on it is moved and resized there.
+            if let Some(r) = shown_at {
+                self.picture_rect = Some(r);
+                self.designer(ui, r);
             }
             let now = ui.ctx().input(|i| i.time);
             let playing = self.playing.is_some();
@@ -984,6 +1066,58 @@ impl VideoView {
                 let _ = self.session.drag("video.volume", &p);
             } else {
                 self.run(ed, &ctx, "video.volume", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+            self.volume_drag = false;
+        }
+    }
+
+    /// A layer's header: its name, shown or not, its volume (a sound layer) and a way to delete it.
+    fn layer_header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect, layer: &screengrabcraft_media::layers::Layer) {
+        use screengrabcraft_media::layers::LayerKind;
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let colour = match layer.kind {
+            LayerKind::Picture => Color32::from_rgb(0xD9, 0x7B, 0x29),
+            LayerKind::Sound => Color32::from_rgb(0x2F, 0x80, 0xED),
+        };
+        ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, colour);
+        let painter = ui.painter_at(row);
+        painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, &layer.name, egui::FontId::proportional(13.0), t.text);
+        let del = Rect::from_min_size(pos2(row.max.x - 26.0, row.min.y + 3.0), vec2(22.0, 18.0));
+        let r = ui.put(del, egui::Button::new(RichText::new("×").size(14.0)).frame(false));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Delete {}", layer.name)));
+        if r.on_hover_text("Delete this layer and what's on it").clicked() {
+            if self.item.is_some_and(|(l, _)| l == layer.id) {
+                self.item = None;
+            }
+            self.run(ed, &ctx, "video.deleteLayer", json!({"layer": layer.id}));
+            return;
+        }
+        let show = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(58.0, 20.0));
+        let mut shown = !layer.hidden;
+        let tip = if layer.kind == LayerKind::Sound { "Heard in the video (untick to mute it)" } else { "Seen in the video (untick to hide it)" };
+        if ui.put(show, egui::Checkbox::new(&mut shown, "Show")).on_hover_text(tip).changed() {
+            self.run(ed, &ctx, "video.layer", json!({"layer": layer.id, "hidden": !shown}));
+        }
+        if layer.kind != LayerKind::Sound {
+            return;
+        }
+        let vol = Rect::from_min_size(row.min + vec2(72.0, 24.0), vec2(row.width() - 80.0, 20.0));
+        let mut v = layer.volume * 100.0;
+        let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
+        if r.drag_started() {
+            self.session.begin("Volume");
+            self.volume_drag = true;
+        }
+        if r.changed() {
+            let p = json!({"layer": layer.id, "volume": v / 100.0});
+            if self.volume_drag {
+                let _ = self.session.drag("video.layer", &p);
+            } else {
+                self.run(ed, &ctx, "video.layer", p)
             }
         }
         if r.drag_stopped() {
@@ -1060,10 +1194,15 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         let tracks = self.session.timeline.tracks.clone();
+        // The layers above the tracks, the top one first (it's drawn over the others), and a band
+        // above them that a drop on makes a layer of its own.
+        let layers: Vec<screengrabcraft_media::layers::Layer> = self.session.timeline.layers.iter().rev().cloned().collect();
+        let media = self.session.timeline.media.clone();
+        let nl = layers.len();
         // The captions' row, under the tracks, when there's sound to have words in.
         let caption_row = self.has_sound;
-        let rows = tracks.len().max(1) + usize::from(caption_row);
-        let height = RULER_H + rows as f32 * ROW_H + 10.0;
+        let rows = nl + tracks.len().max(1) + usize::from(caption_row);
+        let height = RULER_H + NEW_LAYER_H + rows as f32 * ROW_H + 10.0;
         egui::Panel::bottom("video_timeline")
             .exact_size(height)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(0, 4)))
@@ -1078,8 +1217,18 @@ impl VideoView {
                 let (pps, scroll) = (self.pps, self.scroll);
                 let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(pps)) as f32 - scroll;
                 let us_of = |x: f32| (f64::from((x - lane.min.x + scroll).max(0.0)) / f64::from(pps) * 1e6) as u64;
-                let row_rect =
-                    |i: usize| Rect::from_min_size(pos2(full.min.x, full.min.y + RULER_H + i as f32 * ROW_H), vec2(full.width(), ROW_H - 4.0));
+                let rows_top = full.min.y + RULER_H + NEW_LAYER_H;
+                // Row `i` of everything: the layers first, then the tracks.
+                let any_row = |i: usize| Rect::from_min_size(pos2(full.min.x, rows_top + i as f32 * ROW_H), vec2(full.width(), ROW_H - 4.0));
+                let row_rect = |i: usize| any_row(i + nl);
+                let band = Rect::from_min_max(pos2(lane.min.x, full.min.y + RULER_H), pos2(lane.max.x, rows_top - 2.0));
+                // The layer under a height, by its id; whether it's the band.
+                let layer_at = |y: f32| -> Option<u32> {
+                    let r = ((y - rows_top) / ROW_H).floor();
+                    (r >= 0.0 && (r as usize) < nl).then(|| layers.get(r as usize).map(|l| l.id)).flatten()
+                };
+                let in_band = |y: f32| y >= band.min.y && y < rows_top;
+                self.lane_rect = Some((lane, rows_top));
                 // The lane takes the pointer first; the headers have their own controls.
                 let resp = ui.interact(lane, ui.id().with("lane"), Sense::click_and_drag());
                 let painter = ui.painter_at(full);
@@ -1100,6 +1249,55 @@ impl VideoView {
                         t.muted,
                     );
                     s += step;
+                }
+                // The band for a new layer, lit while something from the library is over it.
+                let carrying = egui::DragAndDrop::has_payload_of_type::<LibDrop>(&ctx) || matches!(self.item_drag, Some(ItemDrag::Move { .. }));
+                let over_band = resp.hover_pos().or_else(|| ctx.pointer_hover_pos()).is_some_and(|p| band.contains(p));
+                let band_fill = if carrying && over_band { t.accent.gamma_multiply(0.35) } else { t.toolbar.gamma_multiply(0.6) };
+                painter.rect_filled(band, 3.0, band_fill);
+                let band_words =
+                    if carrying { "Drop here for a layer of its own" } else { "Layers: drag titles, overlays and media here from the Library" };
+                painter.text(band.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, band_words, egui::FontId::proportional(11.0), t.muted);
+                // The layers and their items.
+                for (k, layer) in layers.iter().enumerate() {
+                    let row = any_row(k);
+                    let lane_row = Rect::from_min_max(pos2(lane.min.x, row.min.y), pos2(lane.max.x, row.max.y));
+                    painter.rect_filled(lane_row, 0.0, if k % 2 == 0 { t.window } else { t.panel });
+                    for item in &layer.items {
+                        let r = Rect::from_min_max(pos2(x_of(item.at), row.min.y + 3.0), pos2(x_of(item.end()), row.max.y - 3.0));
+                        if r.max.x < lane.min.x || r.min.x > lane.max.x {
+                            continue;
+                        }
+                        let colour = if layer.hidden { Color32::from_gray(140) } else { library::item_colour(item, &media) };
+                        painter.rect_filled(r, 4.0, colour.gamma_multiply(0.45));
+                        painter.rect_stroke(r, 4.0, Stroke::new(1.0, colour), StrokeKind::Inside);
+                        painter.with_clip_rect(r.shrink(2.0)).text(
+                            r.min + vec2(8.0, 6.0),
+                            egui::Align2::LEFT_TOP,
+                            item.label(&media),
+                            egui::FontId::proportional(12.0),
+                            t.text,
+                        );
+                        if self.item == Some((layer.id, item.id)) {
+                            painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
+                        }
+                    }
+                }
+                // Something from the library over the timeline: where it would go.
+                if let (Some(what), Some(p)) = (resp.dnd_hover_payload::<LibDrop>(), ctx.pointer_hover_pos()) {
+                    let len = match what.as_ref() {
+                        LibDrop::Template(key) => screengrabcraft_media::layers::template(key).map(|t| t.item.len).unwrap_or(3_000_000),
+                        LibDrop::Media(id) => {
+                            media.iter().find(|m| m.id == *id).map(|m| if m.duration > 0 { m.duration } else { 5_000_000 }).unwrap_or(3_000_000)
+                        }
+                    };
+                    let y = match layer_at(p.y) {
+                        Some(_) => any_row(((p.y - rows_top) / ROW_H).floor().max(0.0) as usize),
+                        None => band,
+                    };
+                    let ghost = Rect::from_min_max(pos2(p.x, y.min.y + 2.0), pos2(x_of(us_of(p.x) + len), y.max.y - 2.0));
+                    painter.rect_filled(ghost, 4.0, t.accent.gamma_multiply(0.25));
+                    painter.rect_stroke(ghost, 4.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
                 }
                 // The rows and their clips.
                 for (i, track) in tracks.iter().enumerate() {
@@ -1171,6 +1369,17 @@ impl VideoView {
                 // The headers, over the left of the rows.
                 painter.rect_filled(Rect::from_min_max(full.min, pos2(lane.min.x, full.max.y)), 0.0, t.panel);
                 painter.line_segment([pos2(lane.min.x, full.min.y), pos2(lane.min.x, full.max.y)], Stroke::new(1.0, t.border));
+                painter.text(
+                    pos2(full.min.x + 14.0, band.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    if nl == 0 { "Layers" } else { "Layers (top is in front)" },
+                    egui::FontId::proportional(11.0),
+                    t.muted,
+                );
+                for (k, layer) in layers.iter().enumerate() {
+                    let row = any_row(k);
+                    self.layer_header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), layer);
+                }
                 for (i, track) in tracks.iter().enumerate() {
                     let row = row_rect(i);
                     self.header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), i, track);
@@ -1181,35 +1390,127 @@ impl VideoView {
                 }
                 // The pointer on the lane.
                 let row_at = |y: f32| -> Option<usize> {
-                    let r = ((y - full.min.y - RULER_H) / ROW_H).floor();
+                    let r = ((y - rows_top) / ROW_H).floor() - nl as f32;
                     (r >= 0.0 && (r as usize) < tracks.len()).then_some(r as usize)
+                };
+                // Whether `x` is on a block from `a` to `b`: None if not, else which end it's at.
+                let on_block = |a: f32, b: f32, x: f32| -> Option<Option<bool>> {
+                    if x < a - EDGE || x > b + EDGE {
+                        return None;
+                    }
+                    Some(if (x - a).abs() <= EDGE {
+                        Some(true)
+                    } else if (x - b).abs() <= EDGE {
+                        Some(false)
+                    } else {
+                        None
+                    })
                 };
                 let clip_at = |track: usize, x: f32| -> Option<(usize, Option<bool>)> {
                     let tr = tracks.get(track)?;
-                    tr.clips.iter().enumerate().find_map(|(c, clip)| {
-                        let (a, b) = (x_of(clip.at), x_of(clip.end()));
-                        if x < a - EDGE || x > b + EDGE {
-                            return None;
-                        }
-                        let edge = if (x - a).abs() <= EDGE {
-                            Some(true)
-                        } else if (x - b).abs() <= EDGE {
-                            Some(false)
-                        } else {
-                            None
-                        };
-                        Some((c, edge))
-                    })
+                    tr.clips.iter().enumerate().find_map(|(c, clip)| on_block(x_of(clip.at), x_of(clip.end()), x).map(|e| (c, e)))
                 };
-                if let Some(p) = resp.hover_pos()
-                    && let Some(track) = row_at(p.y)
-                    && let Some((_, Some(_))) = clip_at(track, p.x)
-                {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                let layer_item_at = |layer: u32, x: f32| -> Option<(u32, Option<bool>)> {
+                    let l = layers.iter().find(|l| l.id == layer)?;
+                    l.items.iter().find_map(|it| on_block(x_of(it.at), x_of(it.end()), x).map(|e| (it.id, e)))
+                };
+                if let Some(p) = resp.hover_pos() {
+                    let on_edge = match layer_at(p.y) {
+                        Some(l) => matches!(layer_item_at(l, p.x), Some((_, Some(_)))),
+                        None => row_at(p.y).is_some_and(|track| matches!(clip_at(track, p.x), Some((_, Some(_))))),
+                    };
+                    if on_edge {
+                        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
                 }
-                if resp.drag_started()
-                    && let Some(p) = resp.interact_pointer_pos()
+                // Something from the library let go of here: on the layer under it (one of its
+                // kind, where it fits), else on a layer of its own.
+                if let Some(what) = resp.dnd_release_payload::<LibDrop>()
+                    && let Some(p) = ctx.pointer_interact_pos().or_else(|| ctx.pointer_hover_pos())
                 {
+                    let layer = if in_band(p.y) { None } else { layer_at(p.y) };
+                    self.drop_on_timeline(ed, &ctx, &what, layer, us_of(p.x));
+                }
+                // A layer's item taken hold of: moved, or trimmed by an end.
+                let mut item_grabbed = false;
+                if resp.drag_started()
+                    && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+                    && let Some(layer) = layer_at(p.y)
+                    && let Some((item, edge)) = layer_item_at(layer, p.x)
+                {
+                    item_grabbed = true;
+                    self.item = Some((layer, item));
+                    self.selected = None;
+                    self.camera_chosen = false;
+                    self.item_drag = Some(match edge {
+                        Some(start) => {
+                            self.session.begin("Trim");
+                            ItemDrag::Trim { layer, item, start }
+                        }
+                        None => {
+                            self.session.begin("Move");
+                            let at = self.session.timeline.item(layer, item).map(|i| i.at).unwrap_or(0);
+                            ItemDrag::Move { layer, item, grab: us_of(p.x).saturating_sub(at), from: layer }
+                        }
+                    });
+                }
+                if resp.dragged()
+                    && let (Some(p), Some(d)) = (resp.interact_pointer_pos(), self.item_drag)
+                {
+                    let us = us_of(p.x);
+                    match d {
+                        ItemDrag::Trim { layer, item, start } => {
+                            if let Some(it) = self.session.timeline.item(layer, item).cloned() {
+                                let (a, b) = if start { (us, it.end()) } else { (it.at, us) };
+                                let _ = self.session.drag("video.trimItem", &json!({"layer": layer, "item": item, "start": a, "end": b}));
+                            }
+                        }
+                        ItemDrag::Move { layer, item, grab, from } => {
+                            // Onto the layer under the pointer when it's of the item's kind.
+                            let kind = self.session.timeline.layer(layer).map(|l| l.kind);
+                            let to = layer_at(p.y).filter(|id| self.session.timeline.layer(*id).map(|l| l.kind) == kind).unwrap_or(layer);
+                            let params = json!({"layer": layer, "item": item, "toLayer": to, "at": us.saturating_sub(grab)});
+                            if let Ok(v) = self.session.drag("video.moveItem", &params) {
+                                let now_on = v.get("layer").and_then(Value::as_u64).map_or(layer, |l| l as u32);
+                                self.item_drag = Some(ItemDrag::Move { layer: now_on, item, grab, from });
+                                self.item = Some((now_on, item));
+                            }
+                        }
+                    }
+                    if p.x > lane.max.x - 20.0 {
+                        self.scroll += 8.0;
+                    } else if p.x < lane.min.x + 20.0 {
+                        self.scroll = (self.scroll - 8.0).max(0.0);
+                    }
+                }
+                if resp.drag_stopped()
+                    && let Some(d) = self.item_drag.take()
+                {
+                    if let ItemDrag::Move { layer, item, grab, from } = d {
+                        // Let go on the band: a layer of its own.
+                        if let Some(p) = ctx.pointer_interact_pos().or_else(|| ctx.pointer_hover_pos())
+                            && in_band(p.y)
+                            && let Ok(v) = self.session.drag(
+                                "video.moveItem",
+                                &json!({"layer": layer, "item": item, "toLayer": "new", "at": us_of(p.x).saturating_sub(grab)}),
+                            )
+                        {
+                            let now_on = v.get("layer").and_then(Value::as_u64).map_or(layer, |l| l as u32);
+                            self.item = Some((now_on, item));
+                        }
+                        // The layer it came from, left empty by it, goes.
+                        let now_on = self.item.map_or(layer, |(l, _)| l);
+                        if from != now_on && self.session.timeline.layer(from).is_some_and(|l| l.items.is_empty()) {
+                            let _ = self.session.drag("video.deleteLayer", &json!({"layer": from}));
+                        }
+                    }
+                    self.session.commit();
+                }
+                if !item_grabbed
+                    && resp.drag_started()
+                    && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+                {
+                    self.item_drag = None;
                     self.drag = Some(if p.y < ruler.max.y {
                         Drag::Scrub
                     } else if let Some(track) = row_at(p.y) {
@@ -1266,10 +1567,20 @@ impl VideoView {
                 if resp.clicked()
                     && let Some(p) = resp.interact_pointer_pos()
                 {
+                    let on_item = layer_at(p.y).and_then(|l| layer_item_at(l, p.x).map(|(i, _)| (l, i)));
                     match row_at(p.y).and_then(|track| clip_at(track, p.x).map(|(c, _)| (track, c))) {
-                        Some(sel) if p.y >= ruler.max.y => self.selected = Some(sel),
+                        _ if on_item.is_some() => {
+                            self.item = on_item;
+                            self.selected = None;
+                            self.camera_chosen = false;
+                        }
+                        Some(sel) if p.y >= ruler.max.y => {
+                            self.selected = Some(sel);
+                            self.item = None;
+                        }
                         _ => {
                             self.selected = None;
+                            self.item = None;
                             self.range = None;
                             self.seek(ed, us_of(p.x), now);
                         }
@@ -1310,7 +1621,10 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         crate::strip::show(ed, ui);
     }
     v.timeline(ed, ui);
-    v.camera_panel(ed, ui);
+    if !v.item_panel(ed, ui) {
+        v.camera_panel(ed, ui);
+    }
+    v.library_panel(ed, ui);
     v.preview(ed, ui);
     v.export_windows(ed, &ctx);
     // Something else was opened meanwhile (from the strip): this one's edits are written first.

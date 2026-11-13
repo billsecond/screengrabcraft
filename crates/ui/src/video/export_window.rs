@@ -136,6 +136,7 @@ impl VideoView {
             burn: captions.is_some() && c.captions == CaptionsIn::Picture,
             subtitles,
             captions,
+            media: self.library.clone(),
         };
         self.export_last = Some((c.format, c.captions));
         match ed.services.export_video(job) {

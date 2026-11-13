@@ -631,3 +631,281 @@ fn a_recording_from_the_disk_says_its_opening_then_opens() {
     assert!(h.query_by_label("Opening the Recording").is_none());
     let _ = shown;
 }
+
+// ---- the library and the media bin ----
+
+/// A host that brings files into the media bin at once: a red picture, a second of a tone.
+#[derive(Clone, Default)]
+struct MediaHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    imports: std::sync::Arc<std::sync::Mutex<usize>>,
+}
+
+impl crate::services::Services for MediaHost {
+    fn request_import(&self) {
+        *self.imports.lock().unwrap() += 1;
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn load_media(&self, path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let loaded = if path.ends_with(".png") {
+            let pic = Raster::filled(80, 40, Color::rgb(0xE0, 0x20, 0x20)).unwrap();
+            Loaded { kind: MediaKind::Picture, duration: 0, width: 80, height: 40, content: Content::Picture(pic) }
+        } else {
+            let tone: Vec<i16> = (0..48_000 * 2)
+                .flat_map(|i| {
+                    let v = ((i as f32 * 0.03).sin() * 12_000.0) as i16;
+                    [v, v]
+                })
+                .collect();
+            Loaded { kind: MediaKind::Sound, duration: 2_000_000, width: 0, height: 0, content: Content::Sound(tone) }
+        };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+}
+
+fn media_harness(host: MediaHost) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(host), EditorSettings::default());
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h
+}
+
+fn shot(h: &mut Harness<'_, Editor>, name: &str) {
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/{name}.png"));
+    }
+}
+
+/// How many of a picture's pixels are about this colour.
+fn count(pic: &Raster, c: [u8; 3]) -> usize {
+    pic.pixels().chunks(4).filter(|p| p[0].abs_diff(c[0]) < 30 && p[1].abs_diff(c[1]) < 30 && p[2].abs_diff(c[2]) < 30).count()
+}
+
+#[test]
+fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
+    let mut h = media_harness(MediaHost::default());
+    for label in ["Library", "Media", "Title", "Bar", "Callout", "Fade in from black", "Wipe"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert!(h.state().video.as_ref().unwrap().thumbnails_made() >= 6, "the cards show what they look like");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.run_steps(1);
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    h.get_by_label("Add Bar").click();
+    h.run_steps(3);
+    shot(&mut h, "video-library");
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let layers = &v.session.timeline.layers;
+        assert_eq!(layers.len(), 1, "a layer of its own");
+        assert_eq!(layers[0].items.len(), 1);
+        assert_eq!(layers[0].items[0].at, 1_000_000, "at the playhead");
+        assert!(v.item.is_some(), "and chosen");
+        let after = v.frame_at(1_500_000);
+        assert_ne!(before.pixels(), after.pixels(), "it's on the picture");
+    }
+    // Its panel: its words, how it comes and goes, and a way to delete it.
+    for label in ["Words", "Comes in", "Goes out", "Delete"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let (layer, item) = v.item.unwrap();
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "title": "Ada Lovelace"})).unwrap();
+    }
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let it = &v.session.timeline.layers[0].items[0];
+        assert!(matches!(&it.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Ada Lovelace"));
+    }
+    // Another at the same time on that layer never overlaps it: it goes after.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        let layer = v.session.timeline.layers[0].id;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("lower-line"), Some(layer), 1_200_000);
+        ed.video = Some(v);
+    }
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let items = &v.session.timeline.layers[0].items;
+        assert_eq!(items.len(), 2);
+        assert!(items[1].at >= items[0].end(), "{} {}", items[1].at, items[0].end());
+    }
+    // Del takes the chosen item off; Ctrl+Z puts it back.
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.layers[0].items.len(), 1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.layers[0].items.len(), 2);
+    // What's put after the end makes the video longer, to its end.
+    let last = v.session.timeline.layers[0].items.iter().map(|i| i.end()).max().unwrap();
+    assert_eq!(length(&h), last.max(4_000_000));
+}
+
+#[test]
+fn media_brought_in_goes_in_the_bin_then_onto_a_layer_of_its_kind() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::LayerKind;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    assert_eq!(*host.imports.lock().unwrap(), 1);
+    let picked = vec!["C:/Pictures/Logo.png".to_string(), "C:/Music/Song.mp3".to_string(), "C:/Notes/notes.txt".to_string()];
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(picked));
+    h.run_steps(4);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let names: Vec<&str> = v.session.timeline.media.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Logo.png", "Song.mp3"], "the text file is refused");
+    }
+    shot(&mut h, "video-media-bin");
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(2);
+    h.get_by_label("Add Song.mp3").click();
+    h.run_steps(3);
+    let v = h.state_mut().video.as_mut().unwrap();
+    let kinds: Vec<_> = v.session.timeline.layers.iter().map(|l| l.kind).collect();
+    assert_eq!(kinds, [LayerKind::Picture, LayerKind::Sound]);
+    // The picture is on the video, the sound in it.
+    let pic = v.frame_at(500_000);
+    assert!(count(&pic, [0xE0, 0x20, 0x20]) > 200, "the logo is on the picture");
+    let tl = v.session.timeline.clone();
+    let plain = screengrabcraft_media::compose::mix(&v.rec, &tl, 24_000, 4800);
+    let with = screengrabcraft_media::compose::mix_with(&v.rec, &tl, v.library.as_ref(), 24_000, 4800);
+    assert_ne!(plain, with, "the song is heard");
+    // Taken out of the bin, it's taken off the timeline too.
+    let id = v.session.timeline.media[0].id;
+    v.session.execute("video.removeMedia", &serde_json::json!({"id": id})).unwrap();
+    assert!(v.session.timeline.layers[0].items.is_empty());
+}
+
+#[test]
+fn a_title_dragged_from_the_library_onto_the_timeline_lands_where_it_was_let_go() {
+    let mut h = media_harness(MediaHost::default());
+    let card = h.get_by_label("Title").rect().center();
+    // The band above the tracks (just above the first track's Show): a layer of its own.
+    let show = h.query_all_by_label("Show").next().unwrap().rect();
+    let to = egui::pos2(show.max.x + 500.0, show.min.y - 32.0);
+    crate::tests::drag(&mut h, card, to);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.layers.len(), 1, "dropped on a layer of its own");
+    let at = v.session.timeline.layers[0].items[0].at;
+    assert!(at > 0, "where it was let go, not at the start: {at}");
+}
+
+#[test]
+fn a_layer_item_is_moved_along_then_onto_another_layer_then_trimmed_on_the_timeline() {
+    let mut h = media_harness(MediaHost::default());
+    let place = |h: &mut Harness<'_, Editor>, key: &'static str, at: u64| {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template(key), None, at);
+        let chosen = v.item.unwrap();
+        ed.video = Some(v);
+        chosen
+    };
+    let (a, ia) = place(&mut h, "title", 0);
+    let (b, ib) = place(&mut h, "callout", 8_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.pps = 0.0;
+    }
+    h.run_steps(3);
+    let rect = |h: &Harness<'_, Editor>, l: u32, i: u32| h.state().video.as_ref().unwrap().item_on_timeline(l, i).unwrap();
+    let pps = h.state().video.as_ref().unwrap().pps;
+    // Along its layer by a second.
+    let r = rect(&h, a, ia);
+    crate::tests::drag(&mut h, r.center(), r.center() + egui::vec2(pps, 0.0));
+    let at = h.state().video.as_ref().unwrap().session.timeline.item(a, ia).unwrap().at;
+    assert!((850_000..=1_150_000).contains(&at), "{at}");
+    // Onto the other layer: it goes there, and its own layer, left empty, goes.
+    let r = rect(&h, a, ia);
+    let to = egui::pos2(r.center().x, rect(&h, b, ib).center().y);
+    crate::tests::drag(&mut h, r.center(), to);
+    {
+        let tl = &h.state().video.as_ref().unwrap().session.timeline;
+        assert_eq!(tl.layers.len(), 1, "{:?}", tl.layers);
+        assert!(tl.item(b, ia).is_some(), "it's on the other layer, keeping its number");
+    }
+    // Trimmed by its end, a second shorter.
+    let len = h.state().video.as_ref().unwrap().session.timeline.item(b, ia).unwrap().len;
+    let r = rect(&h, b, ia);
+    let edge = egui::pos2(r.max.x - 2.0, r.center().y);
+    crate::tests::drag(&mut h, edge, edge - egui::vec2(pps, 0.0));
+    let after = h.state().video.as_ref().unwrap().session.timeline.item(b, ia).unwrap().len;
+    assert!(len - after > 800_000 && len - after < 1_200_000, "{len} → {after}");
+    // Each was one undo step.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    let tl = &h.state().video.as_ref().unwrap().session.timeline;
+    assert_eq!(tl.item(a, ia).map(|i| i.at), Some(0), "back as it was");
+}
+
+#[test]
+fn the_chosen_title_and_the_camera_are_dragged_and_resized_on_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 1_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title-box"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let place = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    let p0 = place(&h);
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    // Dragged by its middle: moved, as one undo step.
+    let from = egui::pos2(pic.min.x + pic.width() * p0.x, pic.min.y + pic.height() * p0.y);
+    crate::tests::drag(&mut h, from, from + egui::vec2(-pic.width() * 0.2, pic.height() * 0.15));
+    let p1 = place(&h);
+    assert!(p1.x < p0.x - 0.1 && p1.y > p0.y + 0.08, "{p0:?} → {p1:?}");
+    shot(&mut h, "video-designer");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(place(&h).x, p0.x, "one undo step puts it back");
+    // The camera: taken hold of on the picture and dragged to the middle.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.item = None;
+        let layer = v.session.timeline.layers[0].id;
+        v.session.execute("video.deleteLayer", &serde_json::json!({"layer": layer})).unwrap();
+    }
+    h.run_steps(2);
+    // (The timeline is a row shorter now, so the picture has moved.)
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    let cam = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera is on the picture");
+    crate::tests::drag(&mut h, cam.center(), pic.center());
+    let at = h.state().video.as_ref().unwrap().session.timeline.camera.at.expect("the camera has a place of its own");
+    assert!((at[0] - 0.5).abs() < 0.1 && (at[1] - 0.5).abs() < 0.12, "{at:?}");
+}

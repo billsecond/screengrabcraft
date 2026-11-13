@@ -957,6 +957,13 @@ impl Editor {
                     self.open_file(ctx, f);
                 }
             }
+            // Into the video editor's media bin.
+            DialogResult::Import(paths) => {
+                if let Some(mut v) = self.video.take() {
+                    v.import_paths(self, ctx, &paths);
+                    self.video = Some(v);
+                }
+            }
             DialogResult::SaveTo(path) => {
                 if std::mem::take(&mut self.saving_video) {
                     if let Some(v) = self.video.as_mut() {
@@ -1018,7 +1025,18 @@ impl Editor {
         }
         self.poll_dialogs(ctx);
         self.poll_opening(ctx);
-        let dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
+        let mut dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
+        // Onto the video editor: into its media bin, every one of them.
+        if !dropped.is_empty()
+            && let Some(mut v) = self.video.take()
+        {
+            let paths: Vec<String> = dropped.iter().filter(|f| f.path().is_absolute()).map(|f| f.path().to_string_lossy().to_string()).collect();
+            if !paths.is_empty() {
+                v.import_paths(self, ctx, &paths);
+                dropped.clear();
+            }
+            self.video = Some(v);
+        }
         for f in dropped.into_iter().take(1) {
             let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Dropped picture".to_string());
             #[cfg(not(target_arch = "wasm32"))]
