@@ -221,6 +221,14 @@ pub struct VideoView {
     pub has_sound: bool,
     /// Captions are being made (the service said so, or they were asked for here): since when.
     pub captions_coming: Option<f64>,
+    /// How far the recording's captions being made have got (0 to 1), as the service says.
+    pub captions_progress: Option<f32>,
+    /// The lines of the sound files and videos in the media bin (each in its own time), by id.
+    pub media_cues: std::collections::HashMap<u32, Vec<Cue>>,
+    /// The host's time of each one's captions last seen.
+    media_seen: std::collections::HashMap<u32, u64>,
+    /// Those being made: since when, and how far they've got.
+    pub media_coming: std::collections::HashMap<u32, (f64, Option<f32>)>,
     /// The host's time of the captions file last seen, and when to ask again.
     captions_seen: u64,
     next_poll: f64,
@@ -250,6 +258,7 @@ fn wave_samples(rec: &Recording, id: u8) -> u64 {
 }
 
 /// How many samples [`waves`] looks at in all (to say how far it has got).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn wave_work(rec: &Recording) -> u64 {
     rec.header.streams.iter().filter(|s| !s.kind.is_video()).map(|s| wave_samples(rec, s.id)).sum()
 }
@@ -345,6 +354,10 @@ impl VideoView {
             cues_for: None,
             has_sound,
             captions_coming: None,
+            captions_progress: None,
+            media_cues: Default::default(),
+            media_seen: Default::default(),
+            media_coming: Default::default(),
             captions_seen: 0,
             next_poll: 0.0,
         }
@@ -362,7 +375,7 @@ impl VideoView {
             return;
         }
         self.cues_for = Some(key);
-        self.cues = Arc::new(self.captions.as_ref().map(|c| c.on_timeline(&self.session.timeline)).unwrap_or_default());
+        self.cues = Arc::new(screengrabcraft_media::captions::edited_cues(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
         self.composer.set_captions(self.showing_captions().then(|| self.cues.clone()));
         self.shown = None;
     }
@@ -377,13 +390,143 @@ impl VideoView {
 
     /// Asks the host for captions.
     pub fn make_captions(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        let Some(path) = self.path.clone() else {
-            ed.error(ctx, "Only a recording opened from a file can have captions made");
+        self.transcribe(ed, ctx, false);
+    }
+
+    /// The sound files and videos in the media bin with sound to hear: id, name, path.
+    fn media_with_sound(&self) -> Vec<(u32, String, String)> {
+        use screengrabcraft_media::layers::MediaKind;
+        self.session
+            .timeline
+            .media
+            .iter()
+            .filter(|m| m.kind != MediaKind::Picture && !m.path.is_empty() && self.library.has_sound(m.id) != Some(false))
+            .map(|m| (m.id, m.name.clone(), m.path.clone()))
+            .collect()
+    }
+
+    /// Whether anything in the video can be heard: the recording, or what was put on its layers.
+    fn hears_anything(&self) -> bool {
+        self.has_sound || !self.media_with_sound().is_empty()
+    }
+
+    /// Whether there's something to transcribe: the recording (from a file) or its media.
+    fn can_transcribe(&self) -> bool {
+        (self.has_sound && self.path.is_some()) || !self.media_with_sound().is_empty()
+    }
+
+    /// Transcribe (or Transcribe Again, `again`): what's said in the video, on this computer, in
+    /// the background: the recording's tracks, and the sound files and videos put on its layers
+    /// (each in its own time, so its lines follow it wherever it's put).
+    pub fn transcribe(&mut self, ed: &mut Editor, ctx: &egui::Context, again: bool) {
+        let now = ctx.input(|i| i.time);
+        let mut asked = false;
+        if let Some(path) = self.path.clone().filter(|_| self.has_sound) {
+            let r = if again { ed.services.make_captions_again(&path) } else { ed.services.make_captions(&path) };
+            match r {
+                Ok(()) => {
+                    self.expect_captions(now);
+                    self.captions_progress = None;
+                    asked = true;
+                }
+                Err(e) => {
+                    ed.error(ctx, e);
+                    return;
+                }
+            }
+        }
+        for (id, name, path) in self.media_with_sound() {
+            if self.library.has_sound(id) != Some(true) || (!again && self.media_cues.contains_key(&id)) {
+                continue;
+            }
+            let r = if again { ed.services.make_captions_again(&path) } else { ed.services.make_captions(&path) };
+            match r {
+                Ok(()) => {
+                    self.media_coming.insert(id, (now, None));
+                    asked = true;
+                }
+                Err(e) => ed.error(ctx, format!("{name}: {e}")),
+            }
+        }
+        if asked {
+            self.next_poll = now;
+        } else if self.path.is_none() && self.has_sound {
+            ed.error(ctx, "Only a recording opened from a file can be transcribed");
+        }
+    }
+
+    /// A file put in the media bin: transcribed by itself when Settings says so.
+    pub(crate) fn media_added(&mut self, ed: &mut Editor, ctx: &egui::Context, id: u32, path: &str, hears: bool) {
+        if !hears || path.is_empty() || !ed.services.auto_captions() {
             return;
-        };
-        match ed.services.make_captions(&path) {
-            Ok(()) => self.expect_captions(ctx.input(|i| i.time)),
-            Err(e) => ed.error(ctx, e),
+        }
+        match ed.services.make_captions(path) {
+            Ok(()) => {
+                let now = ctx.input(|i| i.time);
+                self.media_coming.insert(id, (now, None));
+                self.next_poll = now;
+            }
+            Err(e) => log::warn!("transcribing what was brought in: {e}"),
+        }
+    }
+
+    /// What's being transcribed, for the status bar and the captions' header: what, and how far
+    /// it has got.
+    pub fn transcribing(&self) -> Option<(String, Option<f32>)> {
+        if self.captions_coming.is_some() {
+            return Some(("Transcribing…".to_string(), self.captions_progress));
+        }
+        let (id, (_, p)) = self.media_coming.iter().min_by_key(|(id, _)| **id)?;
+        let name = self.session.timeline.media.iter().find(|m| m.id == *id).map(|m| m.name.clone()).unwrap_or_default();
+        Some((format!("Transcribing {name}…"), *p))
+    }
+
+    /// The media bin's captions: those being made (how far, and whether they've come), and now
+    /// and then those made meanwhile (a recording opened again finds its media's).
+    fn poll_media_captions(&mut self, ed: &mut Editor, ctx: &egui::Context, now: f64) {
+        let media = self.media_with_sound();
+        for (id, name, path) in &media {
+            let coming = self.media_coming.get(id).copied();
+            if coming.is_some() {
+                match ed.services.captions_progress(path) {
+                    Some(Ok(p)) => {
+                        self.media_coming.insert(*id, (now, Some(p)));
+                    }
+                    Some(Err(why)) => {
+                        self.media_coming.remove(id);
+                        ed.error(ctx, format!("{name} couldn't be transcribed: {why}"));
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            let seen = self.media_seen.get(id).copied().unwrap_or(0);
+            if let Some((s, cues)) = ed.services.poll_media_captions(path, seen) {
+                self.media_seen.insert(*id, s);
+                let came = self.media_coming.remove(id).is_some();
+                if came {
+                    ed.toast(
+                        ctx,
+                        if cues.is_empty() { format!("No words were heard in {name}") } else { format!("{name} transcribed: {} lines", cues.len()) },
+                    );
+                }
+                self.media_cues.insert(*id, cues);
+                self.captions_rev += 1;
+            } else if let Some((since, _)) = coming
+                && now - since > CAPTIONS_WAIT
+            {
+                self.media_coming.remove(id);
+            } else {
+                // Looked for: from now on now and then, unless they're coming.
+                self.media_seen.entry(*id).or_insert(0);
+            }
+        }
+        // Taken out of the bin: its lines go too.
+        let before = self.media_cues.len();
+        self.media_cues.retain(|id, _| media.iter().any(|(m, _, _)| m == id));
+        self.media_coming.retain(|id, _| media.iter().any(|(m, _, _)| m == id));
+        if self.media_cues.len() != before {
+            self.captions_rev += 1;
         }
     }
 
@@ -399,7 +542,7 @@ impl VideoView {
                 }
                 if self.captions_coming.is_some() {
                     self.transcript_after = Some(format);
-                    ed.toast(ctx, "Making the captions first, on this computer: you'll choose where the transcript goes when they're ready");
+                    ed.toast(ctx, "Transcribing first, on this computer: you'll choose where the transcript goes when it's ready");
                 }
                 return;
             }
@@ -429,7 +572,9 @@ impl VideoView {
 
     /// Asks the host whether captions have come.
     fn poll_captions(&mut self, ed: &mut Editor, ctx: &egui::Context, now: f64) {
-        if !self.waiting_for_captions() {
+        let waiting = self.waiting_for_captions();
+        let media = !self.media_coming.is_empty() || self.media_with_sound().iter().any(|(id, _, _)| !self.media_seen.contains_key(id));
+        if !waiting && !media && self.media_with_sound().is_empty() {
             return;
         }
         if let Some(since) = self.captions_coming
@@ -437,12 +582,43 @@ impl VideoView {
         {
             self.captions_coming = None;
         }
-        if now >= self.next_poll {
-            // Often while they're coming; now and then otherwise (made by the service meanwhile).
-            self.next_poll = now + if self.captions_coming.is_some() { CAPTIONS_POLL } else { CAPTIONS_GLANCE };
+        let coming = self.captions_coming.is_some() || !self.media_coming.is_empty();
+        if coming {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(CAPTIONS_POLL));
+        }
+        if now < self.next_poll {
+            return;
+        }
+        // Often while they're coming; now and then otherwise (made by the service meanwhile).
+        self.next_poll = now + if coming || media { CAPTIONS_POLL } else { CAPTIONS_GLANCE };
+        self.poll_media_captions(ed, ctx, now);
+        if !waiting {
+            return;
+        }
+        // How far the recording's have got, or why they couldn't be made.
+        if self.captions_coming.is_some()
+            && let Some(path) = self.path.clone()
+        {
+            match ed.services.captions_progress(&path) {
+                Some(Ok(p)) => {
+                    self.captions_progress = Some(p);
+                    // Still at it: not given up on.
+                    self.captions_coming = Some(now);
+                }
+                Some(Err(why)) => {
+                    self.captions_coming = None;
+                    self.captions_progress = None;
+                    self.transcript_after = None;
+                    ed.error(ctx, format!("The recording couldn't be transcribed: {why}"));
+                }
+                None => {}
+            }
+        }
+        {
             if let Some(path) = self.path.clone()
                 && let Some((seen, caps)) = ed.services.poll_captions(&path, self.captions_seen)
             {
+                self.captions_progress = None;
                 self.captions_seen = seen;
                 // The service has written its answer: some lines, or none heard.
                 let came = self.captions_coming.take().is_some();
@@ -452,7 +628,7 @@ impl VideoView {
                         self.captions = Some(c);
                         self.captions_rev += 1;
                         if came {
-                            ed.toast(ctx, format!("Captions made: {n} lines"));
+                            ed.toast(ctx, format!("Transcribed: {n} lines"));
                         }
                     }
                     None if came => ed.toast(ctx, "No words were heard in this recording"),
@@ -673,16 +849,29 @@ impl VideoView {
                         ed.services.open_folder(Some(p));
                         ui.close();
                     }
-                    if self.has_sound && self.captions.is_none() {
-                        let can = self.path.is_some() && self.captions_coming.is_none();
+                    if self.hears_anything() {
+                        let can = self.can_transcribe() && self.transcribing().is_none();
+                        let again = self.captions.is_some() || !self.media_cues.is_empty();
+                        let label = if again { "Transcribe Again" } else { "Transcribe" };
                         if ui
-                            .add_enabled(can, egui::Button::new("Make Captions"))
-                            .on_hover_text("Write down what was said, on this computer, in the background")
+                            .add_enabled(can, egui::Button::new(label))
+                            .on_hover_text(
+                                "Write down what's said in the video, on this computer, in the background (the sound and videos you added included)",
+                            )
                             .clicked()
                         {
-                            self.make_captions(ed, &ctx);
+                            self.transcribe(ed, &ctx, again);
                             ui.close();
                         }
+                    }
+                    if ed.services.has_paths()
+                        && ui
+                            .button("Transcribe a Video or Sound File…")
+                            .on_hover_text("Any video or sound file, made by another program too: a transcript and subtitles beside it")
+                            .clicked()
+                    {
+                        ed.services.request_transcribe();
+                        ui.close();
                     }
                     if self.can_export_transcript() {
                         if ui.button("Export Transcript…").on_hover_text("What was said, as a text file (.txt)").clicked() {
@@ -857,7 +1046,7 @@ impl VideoView {
                                 "This recording has no captions yet: they're made first, on this computer, then you choose where the transcript goes"
                             };
                             let why_not = if self.transcript_after.is_some() {
-                                "Making the captions first, on this computer…"
+                                "Transcribing first, on this computer…"
                             } else {
                                 "Nothing said is left in the video as edited"
                             };
@@ -872,7 +1061,7 @@ impl VideoView {
             });
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&self, ui: &mut Ui, files: Option<(String, Option<f32>)>) {
         let t = Tokens::get(ui.ctx());
         egui::Panel::bottom("video_status")
             .exact_size(24.0)
@@ -892,14 +1081,16 @@ impl VideoView {
                     if !self.rec.finished {
                         ui.label(small("This recording stopped early: it's what was saved".to_string()));
                     }
-                    if let Some(c) = &self.captions {
-                        ui.label(small(format!("{} caption lines", c.cues.len())));
-                    } else if self.captions_coming.is_some() {
-                        ui.label(small("Making captions…".to_string()));
+                    if !self.cues.is_empty() {
+                        ui.label(small(format!("{} caption lines", self.cues.len())));
                     }
                     let saved = if self.session.revision() == self.saved { "Edits saved" } else { "Saving…" };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(small(saved.to_string()));
+                        // Transcribing: this video's, else files picked to transcribe.
+                        if let Some((text, p)) = self.transcribing().or_else(|| files.clone()) {
+                            crate::transcribe::indicator(ui, &text, p);
+                        }
                     });
                 });
             });
@@ -1132,14 +1323,17 @@ impl VideoView {
         let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(pps)) as f32 - scroll;
         painter.rect_filled(row, 0.0, t.window);
         if self.cues.is_empty() {
-            let status = if self.captions.is_some() {
-                "The captions' tracks were cut or muted where they were said."
-            } else if self.captions_coming.is_some() {
-                "Making captions on this computer… they appear here when they're ready."
-            } else if self.path.is_some() {
-                "No captions yet. Make Captions writes down what was said, on this computer."
+            let status = if let Some((_, p)) = self.transcribing() {
+                match p {
+                    Some(p) => format!("Transcribing on this computer… {:.0}%. The captions appear here when they're ready.", p * 100.0),
+                    None => "Transcribing on this computer… the captions appear here when they're ready.".to_string(),
+                }
+            } else if self.captions.is_some() || !self.media_cues.is_empty() {
+                "Nothing said is left in the video: it was cut, muted or hidden where it was said.".to_string()
+            } else if self.can_transcribe() {
+                "No captions yet. Transcribe writes down what's said in the video, on this computer.".to_string()
             } else {
-                "Captions are made of recordings saved in a file."
+                "Captions are made of recordings saved in a file.".to_string()
             };
             painter.text(pos2(lane.min.x + 12.0, row.center().y), egui::Align2::LEFT_CENTER, status, egui::FontId::proportional(12.0), t.muted);
             return;
@@ -1162,8 +1356,8 @@ impl VideoView {
         }
     }
 
-    /// The captions' header: Show (on the picture) and In video (burned into the MP4), or Make
-    /// Captions when there are none.
+    /// The captions' header: while they're being made, how far they've got; then Show (on the
+    /// picture) and Again (transcribe again); Transcribe when there are none.
     fn captions_header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -1172,19 +1366,32 @@ impl VideoView {
         ui.scope_builder(egui::UiBuilder::new().max_rect(title).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
             ui.label(RichText::new("Captions").size(13.0).color(t.text));
         });
-        if self.captions.is_some() {
+        if let Some((what, p)) = self.transcribing() {
+            let bar = Rect::from_min_size(row.min + vec2(12.0, 26.0), vec2(row.width() - 24.0, 16.0));
+            let words = match p {
+                Some(p) => format!("{:.0}%", p * 100.0),
+                None => "Waiting…".to_string(),
+            };
+            ui.put(bar, egui::ProgressBar::new(p.unwrap_or(0.0)).text(words).fill(t.accent).animate(p.is_none())).on_hover_text(what);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        } else if self.captions.is_some() || !self.media_cues.is_empty() {
             let c = self.session.timeline.captions;
             let mut show = c.show;
             let r = ui.put(Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(60.0, 20.0)), egui::Checkbox::new(&mut show, "Show"));
             if r.on_hover_text("The captions on the picture here (Export Video asks whether they go in the video)").changed() {
                 self.run(ed, &ctx, "video.captions", json!({"show": show}));
             }
-        } else if self.captions_coming.is_some() {
-            ui.painter_at(row).text(row.min + vec2(14.0, 26.0), egui::Align2::LEFT_TOP, "Being made…", egui::FontId::proportional(11.0), t.muted);
-        } else if self.path.is_some() {
-            let b = ui.put(Rect::from_min_size(row.min + vec2(10.0, 23.0), vec2(116.0, 21.0)), egui::Button::new("Make Captions"));
-            if b.on_hover_text("Write down what was said, on this computer, in the background").clicked() {
-                self.make_captions(ed, &ctx);
+            if self.can_transcribe() {
+                let b = ui.put(Rect::from_min_size(row.min + vec2(76.0, 23.0), vec2(80.0, 21.0)), egui::Button::new("Again"));
+                b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Transcribe Again"));
+                if b.on_hover_text("Transcribe again: what's said in the video, the sound and videos you added included").clicked() {
+                    self.transcribe(ed, &ctx, true);
+                }
+            }
+        } else if self.can_transcribe() {
+            let b = ui.put(Rect::from_min_size(row.min + vec2(10.0, 23.0), vec2(116.0, 21.0)), egui::Button::new("Transcribe"));
+            if b.on_hover_text("Write down what's said in the video, on this computer, in the background").clicked() {
+                self.transcribe(ed, &ctx, false);
             }
         }
     }
@@ -1200,7 +1407,7 @@ impl VideoView {
         let media = self.session.timeline.media.clone();
         let nl = layers.len();
         // The captions' row, under the tracks, when there's sound to have words in.
-        let caption_row = self.has_sound;
+        let caption_row = self.hears_anything();
         let rows = nl + tracks.len().max(1) + usize::from(caption_row);
         let height = RULER_H + NEW_LAYER_H + rows as f32 * ROW_H + 10.0;
         egui::Panel::bottom("video_timeline")
@@ -1616,7 +1823,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     v.tick(ed, &ctx);
     v.menu_bar(ed, ui);
     v.tool_bar(ed, ui);
-    v.status_bar(ui);
+    v.status_bar(ui, ed.transcripts.status());
     if ed.settings.show_tray {
         crate::strip::show(ed, ui);
     }

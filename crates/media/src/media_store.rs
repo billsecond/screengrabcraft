@@ -177,6 +177,18 @@ impl MediaLibrary {
         })
     }
 
+    /// Whether a file of the bin has sound to hear (none until it's read).
+    pub fn has_sound(&self, id: u32) -> Option<bool> {
+        let e = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        match e.get(&id)? {
+            Entry::Loading => None,
+            Entry::Failed(_) | Entry::Picture(_) => Some(false),
+            Entry::Sound(s) => Some(!s.is_empty()),
+            Entry::Clip(_, sound) => Some(sound.as_ref().is_some_and(|s| !s.is_empty())),
+            Entry::Video(v) => Some(v.rec.header.streams.iter().any(|s| matches!(s.kind, StreamKind::Microphone | StreamKind::SystemSound))),
+        }
+    }
+
     /// Whether a file of the bin has been handed here at all (read, being read, or failed).
     pub fn has(&self, id: u32) -> bool {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner).contains_key(&id)

@@ -163,6 +163,8 @@ pub struct Tray {
     /// Video Production…: not while a recording runs.
     production: Option<Marked>,
     recording: bool,
+    /// The file whose captions are being made, as the tooltip says.
+    transcribing: Option<String>,
     /// The update waiting, as its item says it (`Install Update 0.1.8`); see `crate::update`.
     pub update: Option<String>,
     /// The menu of captures, kept while the recording's own menu is shown.
@@ -194,6 +196,7 @@ impl Tray {
             stoppers: Vec::new(),
             production: None,
             recording: false,
+            transcribing: None,
             update: None,
             main: None,
             shown: None,
@@ -352,6 +355,24 @@ impl Tray {
         self.shown = state;
     }
 
+    /// Says in the tooltip which file's captions are being made (when nothing is recorded).
+    pub fn set_transcribing(&mut self, file: Option<String>) {
+        if self.transcribing == file {
+            return;
+        }
+        self.transcribing = file;
+        if self.recording {
+            return;
+        }
+        if let Some(i) = &self.icon {
+            let tip = match &self.transcribing {
+                Some(f) => format!("ScreenGrabCraft — transcribing {f}"),
+                None => "ScreenGrabCraft — capture the screen".to_string(),
+            };
+            let _ = i.set_tooltip(Some(tip));
+        }
+    }
+
     /// Shows that a recording is running: a red dot, Record GIF and Record Video stop it, and
     /// Video Production… waits until it's over.
     pub fn set_recording(&mut self, on: bool) {
@@ -364,8 +385,12 @@ impl Tray {
             let _ = if on { i.set_icon(icon(Look::Recording)) } else { i.set_icon_templated(icon(Look::Template)) };
             #[cfg(not(target_os = "macos"))]
             let _ = i.set_icon(icon(if on { Look::Recording } else { Look::Normal }));
-            let _ =
-                i.set_tooltip(Some(if on { "ScreenGrabCraft — recording (click for its menu)" } else { "ScreenGrabCraft — capture the screen" }));
+            let tip = match (on, &self.transcribing) {
+                (true, _) => "ScreenGrabCraft — recording (click for its menu)".to_string(),
+                (false, Some(f)) => format!("ScreenGrabCraft — transcribing {f}"),
+                (false, None) => "ScreenGrabCraft — capture the screen".to_string(),
+            };
+            let _ = i.set_tooltip(Some(tip));
         }
         for s in &self.stoppers {
             s.item.set_text(if on { "Stop Recording" } else { s.text.as_str() });

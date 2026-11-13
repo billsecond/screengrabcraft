@@ -27,6 +27,8 @@ pub enum DialogResult {
     SaveTo(String),
     /// Files to bring into the video editor's media bin (paths; they're read where they are).
     Import(Vec<String>),
+    /// Video or sound files to transcribe (paths).
+    Transcribe(Vec<String>),
     Cancelled,
 }
 
@@ -288,10 +290,38 @@ pub trait Services {
         None
     }
 
-    /// Asks for a recording's captions to be made (by the capture service, in the background).
-    fn make_captions(&self, _recording: &str) -> Result<(), String> {
+    /// Asks for the captions of a recording, a sound file or a video to be made (by the capture
+    /// service, in the background). A sound file's or a video's made before are kept.
+    fn make_captions(&self, _path: &str) -> Result<(), String> {
         Err("captions are made by the ScreenGrabCraft capture service on the desktop".to_string())
     }
+
+    /// [`Services::make_captions`], hearing it again even if its captions were made before.
+    fn make_captions_again(&self, path: &str) -> Result<(), String> {
+        self.make_captions(path)
+    }
+
+    /// How far the captions of a file being made have got (0 to 1), or why they couldn't be
+    /// made; none when nothing is being made of it.
+    fn captions_progress(&self, _path: &str) -> Option<Result<f32, String>> {
+        None
+    }
+
+    /// The captions of a sound file or a video (in its own time) when they've been made or
+    /// changed since `seen` (a time of the host's, 0 at first): that time, and the lines.
+    fn poll_media_captions(&self, _path: &str, _seen: u64) -> Option<(u64, Vec<Cue>)> {
+        None
+    }
+
+    /// Whether recordings, and what's put on their timelines, are transcribed by themselves
+    /// (Settings, Video).
+    fn auto_captions(&self) -> bool {
+        false
+    }
+
+    /// Asks for video or sound files to transcribe; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::Transcribe`].
+    fn request_transcribe(&self) {}
 
     /// The model Remove Background runs (on a thread of the editor's own; reading its file is
     /// left to the model's first use), or why there is none here.

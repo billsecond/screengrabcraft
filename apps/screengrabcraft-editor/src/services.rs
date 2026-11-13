@@ -443,8 +443,65 @@ impl Services for DesktopServices {
         Some((ms, recording::last_captions(&source, u64::MAX)))
     }
 
-    fn make_captions(&self, rec: &str) -> Result<(), String> {
-        launch::ask_captions(rec)
+    fn make_captions(&self, path: &str) -> Result<(), String> {
+        // What an earlier go said is no longer the news.
+        let _ = std::fs::remove_file(paths::captions_progress(Path::new(path)));
+        launch::ask_captions(path)
+    }
+
+    fn make_captions_again(&self, path: &str) -> Result<(), String> {
+        let _ = std::fs::remove_file(paths::captions_progress(Path::new(path)));
+        launch::ask_captions_again(path)
+    }
+
+    fn captions_progress(&self, path: &str) -> Option<Result<f32, String>> {
+        let said = std::fs::read_to_string(paths::captions_progress(Path::new(path))).ok()?;
+        let said: String = said.chars().take(400).collect();
+        match said.trim().strip_prefix("error:") {
+            Some(why) => Some(Err(why.trim().to_string())),
+            None => said.trim().parse::<u32>().ok().map(|n| Ok(n.min(1000) as f32 / 1000.0)),
+        }
+    }
+
+    fn poll_media_captions(&self, path: &str, seen: u64) -> Option<(u64, Vec<screengrabcraft_media::captions::Cue>)> {
+        let srt = paths::media_captions(Path::new(path))?;
+        let modified = std::fs::metadata(&srt).and_then(|m| m.modified()).ok()?;
+        let ms = modified.duration_since(std::time::UNIX_EPOCH).ok().map_or(1, |d| d.as_millis() as u64).max(1);
+        if ms == seen {
+            return None;
+        }
+        // Subtitles of at most 64 MB.
+        let len = std::fs::metadata(&srt).map(|m| m.len()).ok()?;
+        if len > 64 * 1024 * 1024 {
+            return None;
+        }
+        let text = std::fs::read_to_string(&srt).ok()?;
+        Some((ms, screengrabcraft_media::captions::from_srt(&text)))
+    }
+
+    fn auto_captions(&self) -> bool {
+        store::load_settings().production.captions
+    }
+
+    fn request_transcribe(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("transcribe-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Transcribe")
+                    .set_directory(&start)
+                    .add_filter("Videos and sound", &["mp4", "m4v", "mov", REC, "mp3", "wav", "m4a", "aac", "flac", "ogg", "oga"])
+                    .add_filter("All files", &["*"])
+                    .pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Transcribe(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
     }
 
     fn background_model(&self) -> Result<Arc<dyn Matting>, String> {

@@ -26,6 +26,9 @@ const MIN_PIECE_US: u64 = 250_000;
 pub enum Speaker {
     You,
     Others,
+    /// A sound file or video brought into the editor and put on the timeline (its lines have no
+    /// speaker named).
+    Media,
 }
 
 impl Speaker {
@@ -33,14 +36,15 @@ impl Speaker {
         match self {
             Speaker::You => "You",
             Speaker::Others => "Others",
+            Speaker::Media => "",
         }
     }
 
-    /// The track the words were heard on.
+    /// The track the words were heard on (media's words are heard as the computer's sound is).
     pub fn source(self) -> StreamKind {
         match self {
             Speaker::You => StreamKind::Microphone,
-            Speaker::Others => StreamKind::SystemSound,
+            Speaker::Others | Speaker::Media => StreamKind::SystemSound,
         }
     }
 
@@ -139,11 +143,119 @@ impl Captions {
     }
 }
 
+/// The lines of the sound files and videos on the timeline's layers, as they fall on the edited
+/// video: `of_media` holds each one's lines in its own time (by its id in the media bin); a
+/// line follows its item, and is left out where the item was trimmed, or its layer hidden or
+/// silenced.
+pub fn layer_cues(timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<Cue> {
+    use crate::layers::What;
+    let mut out = Vec::new();
+    for l in &timeline.layers {
+        if l.hidden || l.volume <= 0.0 {
+            continue;
+        }
+        for item in &l.items {
+            let What::Media { id } = &item.what else { continue };
+            let Some(cues) = of_media.get(id) else { continue };
+            let end_of_item = item.from.saturating_add(item.len);
+            for cue in cues.iter().take(MAX_CUES) {
+                let whole = cue.end.saturating_sub(cue.start);
+                let (from, to) = (cue.start.max(item.from), cue.end.min(end_of_item));
+                if to <= from {
+                    continue;
+                }
+                let piece = to - from;
+                if piece < MIN_PIECE_US.min(whole) {
+                    continue;
+                }
+                let start = item.at.saturating_add(from - item.from);
+                out.push(Cue { start, end: start.saturating_add(piece), speaker: cue.speaker, text: cue.text.clone() });
+            }
+            if out.len() > MAX_CUES {
+                break;
+            }
+        }
+    }
+    out.truncate(MAX_CUES);
+    out.sort_by_key(|c| (c.start, c.speaker));
+    out
+}
+
+/// Everything said in the edited video: the recording's lines (if it has captions) and the
+/// lines of what was put on its layers, in order.
+pub fn edited_cues(captions: Option<&Captions>, timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<Cue> {
+    let mut out = captions.map(|c| c.on_timeline(timeline)).unwrap_or_default();
+    out.extend(layer_cues(timeline, of_media));
+    out.sort_by_key(|c| (c.start, c.speaker));
+    out
+}
+
+/// Lines read from SubRip subtitles (`.srt`): `You:` and `Others:` lines are theirs, any other
+/// line is [`Speaker::Media`]'s. What isn't subtitles is left out; at most [`MAX_CUES`] lines.
+pub fn from_srt(text: &str) -> Vec<Cue> {
+    let time = |s: &str| -> Option<u64> {
+        let s = s.trim();
+        let (hms, ms) = s.split_once([',', '.']).unwrap_or((s, "0"));
+        let mut parts = hms.split(':').map(|p| p.trim().parse::<u64>().ok());
+        let (h, m, sec) = (parts.next()??, parts.next()??, parts.next()??);
+        if parts.next().is_some() || m >= 60 || sec >= 60 || h > 999 {
+            return None;
+        }
+        let ms: u64 = ms.trim().chars().take(3).collect::<String>().parse().ok()?;
+        Some(((h * 3600 + m * 60 + sec) * 1000 + ms) * 1000)
+    };
+    let mut out = Vec::new();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut lines = text.lines().take(MAX_CUES * 8).peekable();
+    while lines.peek().is_some() && out.len() < MAX_CUES {
+        // A block: its number (optional), its times, its words up to an empty line.
+        let mut block: Vec<&str> = Vec::new();
+        for l in lines.by_ref() {
+            if l.trim().is_empty() {
+                if block.is_empty() {
+                    continue;
+                }
+                break;
+            }
+            if block.len() < 12 {
+                block.push(l);
+            }
+        }
+        let Some(at) = block.iter().position(|l| l.contains("-->")) else { continue };
+        let Some((a, b)) = block.get(at).and_then(|l| l.split_once("-->")) else { continue };
+        // Anything after the end time (a position) is left out.
+        let b = b.split_whitespace().next().unwrap_or("");
+        let (Some(start), Some(end)) = (time(a), time(b)) else { continue };
+        let words = block.get(at + 1..).unwrap_or_default().join(" ");
+        let (speaker, words) = if let Some(w) = words.strip_prefix("You:") {
+            (Speaker::You, w)
+        } else if let Some(w) = words.strip_prefix("Others:") {
+            (Speaker::Others, w)
+        } else {
+            (Speaker::Media, words.as_str())
+        };
+        let text = clean_text(words);
+        if end > start && !text.is_empty() {
+            out.push(Cue { start, end, speaker, text });
+        }
+    }
+    out.sort_by_key(|c| (c.start, c.speaker));
+    out
+}
+
+/// What goes before a line's words: its speaker's name and a colon, or nothing.
+fn said_by(speaker: Speaker) -> String {
+    match speaker.label() {
+        "" => String::new(),
+        name => format!("{name}: "),
+    }
+}
+
 /// The lines showing at `t`: the latest one of each speaker that covers it, the others' first.
 pub fn showing(cues: &[Cue], t: u64) -> Vec<&Cue> {
-    let mut out: Vec<&Cue> = Vec::with_capacity(2);
+    let mut out: Vec<&Cue> = Vec::with_capacity(3);
     let upto = cues.partition_point(|c| c.start <= t);
-    for speaker in [Speaker::Others, Speaker::You] {
+    for speaker in [Speaker::Media, Speaker::Others, Speaker::You] {
         if let Some(c) = cues.get(..upto).unwrap_or_default().iter().rev().take(64).find(|c| c.speaker == speaker && c.end > t) {
             out.push(c);
         }
@@ -163,11 +275,12 @@ fn clock(us: u64) -> String {
     format!("{}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
 }
 
-/// The lines as SubRip subtitles (`.srt`), each with its speaker: `You: …`, `Others: …`.
+/// The lines as SubRip subtitles (`.srt`), each with its speaker: `You: …`, `Others: …` (a
+/// media file's lines have none).
 pub fn to_srt(cues: &[Cue]) -> String {
     let mut out = String::new();
     for (i, c) in cues.iter().enumerate() {
-        out.push_str(&format!("{}\n{} --> {}\n{}: {}\n\n", i + 1, srt_time(c.start), srt_time(c.end), c.speaker.label(), clean_text(&c.text)));
+        out.push_str(&format!("{}\n{} --> {}\n{}{}\n\n", i + 1, srt_time(c.start), srt_time(c.end), said_by(c.speaker), clean_text(&c.text)));
     }
     out
 }
@@ -188,7 +301,7 @@ pub fn to_text(cues: &[Cue]) -> String {
                 if last.is_some() {
                     out.push('\n');
                 }
-                out.push_str(&format!("[{}] {}: {}", clock(c.start), c.speaker.label(), text));
+                out.push_str(&format!("[{}] {}{}", clock(c.start), said_by(c.speaker), text));
             }
         }
         last = Some((c.speaker, last.filter(|(s, _)| *s == c.speaker).map_or(c.end, |(_, e)| e.max(c.end))));
@@ -288,5 +401,66 @@ mod tests {
         assert!(caps.model.len() <= 80 && !caps.model.contains('\n'));
         let many = Captions { cues: (0..MAX_CUES as u64 + 10).map(|i| cue(i, i + 1, Speaker::You, "x")).collect(), model: String::new() };
         assert_eq!(many.checked(u64::MAX).cues.len(), MAX_CUES);
+    }
+
+    #[test]
+    fn subtitles_are_read_back_as_they_were_written() {
+        let cues = vec![
+            cue(1_500_000, 3_250_000, Speaker::You, "Hello there."),
+            cue(3_500_000, 4_000_000, Speaker::Others, "Hi."),
+            cue(3_723_004_000, 3_725_000_000, Speaker::Media, "From the song."),
+        ];
+        let srt = to_srt(&cues);
+        assert!(srt.contains("\nFrom the song.\n"), "a media line has no speaker: {srt}");
+        assert_eq!(from_srt(&srt), cues);
+        assert_eq!(to_text(&cues[2..]), "[1:02:03] From the song.\n");
+        // Another program's subtitles: a byte-order mark, CRLF, two lines of words, a position.
+        let other =
+            "\u{feff}1\r\n00:00:01.000 --> 00:00:02,500 X1:40\r\nTwo\r\nlines\r\n\r\n\r\n2\r\n00:00:03,000 --> 00:00:04,000\r\nOthers: Yes\r\n";
+        assert_eq!(from_srt(other), vec![cue(1_000_000, 2_500_000, Speaker::Media, "Two lines"), cue(3_000_000, 4_000_000, Speaker::Others, "Yes")]);
+        // Junk is left out, never panicked over.
+        for junk in
+            ["", "-->", "1\n99:99:99,999 --> 00:00:01,000\nx", "a --> b\n\n\n", "00:00:05,000 --> 00:00:01,000\nbackwards", "\u{0}\u{ffff}-->:::,,"]
+        {
+            let _ = from_srt(junk);
+        }
+        assert!(from_srt("00:00:05,000 --> 00:00:01,000\nbackwards").is_empty());
+        assert!(from_srt(&"1\n00:00:01,000 --> 00:00:02,000\nx\n\n".repeat(MAX_CUES + 5)).len() <= MAX_CUES);
+    }
+
+    #[test]
+    fn a_sound_files_lines_follow_its_item_on_the_timeline() {
+        use crate::layers::{Item, LayerKind, MediaItem, MediaKind, What};
+        let mut tl = timeline();
+        let song = MediaItem {
+            name: "Song.mp3".into(),
+            path: "C:/Music/Song.mp3".into(),
+            kind: MediaKind::Sound,
+            duration: 30_000_000,
+            ..MediaItem::default()
+        };
+        let id = tl.add_media(song).unwrap();
+        // Two seconds into the song, at 5 s on the timeline, four seconds of it.
+        let item = Item { len: 4_000_000, from: 2_000_000, what: What::Media { id }, ..Item::default() };
+        let (layer, _) = tl.place(item, None, 5_000_000).unwrap();
+        assert_eq!(tl.layer(layer).unwrap().kind, LayerKind::Sound);
+        let mut of = std::collections::HashMap::new();
+        of.insert(
+            id,
+            vec![
+                cue(500_000, 1_500_000, Speaker::Media, "before the part used"),
+                cue(3_000_000, 4_000_000, Speaker::Media, "in it"),
+                cue(5_500_000, 7_000_000, Speaker::Media, "cut at its end"),
+            ],
+        );
+        let on = layer_cues(&tl, &of);
+        assert_eq!(on, vec![cue(6_000_000, 7_000_000, Speaker::Media, "in it"), cue(8_500_000, 9_000_000, Speaker::Media, "cut at its end")]);
+        // With the recording's own lines, in order.
+        let caps = Captions { cues: vec![cue(6_500_000, 8_000_000, Speaker::You, "And mine.")], model: String::new() };
+        let all = edited_cues(Some(&caps), &tl, &of);
+        assert_eq!(all.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["in it", "And mine.", "cut at its end"]);
+        // Its layer silenced: its lines go.
+        tl.set_layer(layer, None, Some(0.0), None).unwrap();
+        assert!(layer_cues(&tl, &of).is_empty());
     }
 }

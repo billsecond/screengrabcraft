@@ -116,10 +116,11 @@ fn main() -> ExitCode {
         // Its own log: what the service started it for, and how long it took.
         logging::to_file("captions");
         let Some(path) = args.get(i + 1) else {
-            eprintln!("usage: screengrabcraft --transcribe <recording.sgvideo>");
+            eprintln!("usage: screengrabcraft --transcribe <recording, sound file or video> [--again]");
             return ExitCode::FAILURE;
         };
-        return captions::run(path);
+        let again = args.get(i + 2).is_some_and(|a| a == captions::AGAIN);
+        return captions::run(path, again);
     }
     if args.iter().any(|a| a == "--background") {
         logging::to_file("supervisor");

@@ -308,7 +308,7 @@ impl VideoView {
             let why = if self.captions.is_some() {
                 "Nothing said is left in the video as edited."
             } else {
-                "This recording has no captions yet: Make Captions (under the tracks) writes down what was said, on this computer."
+                "This recording has no captions yet: Transcribe (under the tracks) writes down what was said, on this computer."
             };
             ui.label(RichText::new(why).color(t.muted));
             c.captions = CaptionsIn::Off;

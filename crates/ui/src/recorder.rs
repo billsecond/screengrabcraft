@@ -130,35 +130,6 @@ fn reds(dark: bool) -> [Color32; 3] {
     }
 }
 
-/// An on/off switch with its words after it; the whole of it can be clicked.
-fn switch(ui: &mut Ui, on: &mut bool, label: &str, enabled: bool) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let galley = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(14.0), if enabled { t.text } else { t.muted });
-    let (rect, mut resp) = ui.allocate_exact_size(vec2(40.0 + 10.0 + galley.size().x, 26.0), if enabled { Sense::click() } else { Sense::hover() });
-    if resp.clicked() {
-        *on = !*on;
-        resp.mark_changed();
-    }
-    let shown = *on;
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, enabled, shown, label));
-    let track = Rect::from_min_size(pos2(rect.min.x, rect.center().y - 10.0), vec2(40.0, 20.0));
-    let (fill, edge, knob) = match (enabled, shown) {
-        (true, true) => (if resp.hovered() { t.accent_hover } else { t.accent }, t.accent, t.accent_text),
-        (true, false) => (if resp.hovered() { t.control_hover } else { t.control }, t.control_border, t.text),
-        (false, true) => (t.control, t.border, t.muted),
-        (false, false) => (t.control, t.border, t.border),
-    };
-    let p = ui.painter();
-    p.rect(track, 10.0, fill, Stroke::new(1.0, edge), StrokeKind::Inside);
-    let kx = if shown { track.max.x - 10.0 } else { track.min.x + 10.0 };
-    p.circle_filled(pos2(kx, track.center().y), 6.0, knob);
-    p.galley(pos2(track.max.x + 10.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    if resp.has_focus() {
-        p.rect_stroke(track.expand(2.0), 12.0, Stroke::new(1.5, t.text), StrokeKind::Inside);
-    }
-    resp
-}
-
 /// The fixed-size area's picture: a frame with its width marked under it.
 fn paint_fixed(p: &egui::Painter, rect: Rect, color: Color32) {
     let s = rect.width().min(rect.height()) / 20.0;
@@ -606,15 +577,7 @@ pub fn recorder_ui(
         .frame(Frame::NONE.fill(t.footer).inner_margin(Margin::symmetric(widgets::PADDING + 4, 14)))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // Captions need something to hear: the microphone (you) or the computer (the others).
-                let hears = sources.microphone || (sources.system_sound && devices.system_sound);
-                let mut captions = sources.captions && hears;
-                if switch(ui, &mut captions, "Captions", hears).changed() {
-                    sources.captions = captions;
-                }
-                let words =
-                    if hears { "Written down on this computer after the recording" } else { "They need the microphone or the computer's sound" };
-                ui.label(RichText::new(words).size(12.0).color(t.muted));
+                // (Transcribing after the recording is a setting: Settings, Video.)
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = widgets::GAP + 2.0;
                     // The default first and Cancel last, or the other way round on a Mac.
@@ -818,20 +781,11 @@ mod tests {
     }
 
     #[test]
-    fn captions_are_on_and_need_something_to_hear() {
+    fn transcribing_is_a_setting_not_a_switch_of_the_recorder() {
         let mut h = harness(Settings::default(), devices());
         h.run_steps(2);
-        assert!(on(&h, "Captions"));
-        press(&mut h, "Captions");
-        assert!(!h.state().settings.production.captions);
-        press(&mut h, "Captions");
-        assert!(h.state().settings.production.captions);
-        // With neither the microphone nor the computer's sound there's nothing to hear.
-        press(&mut h, "Microphone");
-        press(&mut h, "Computer sound");
-        assert!(disabled(&h, "Captions") && !on(&h, "Captions"));
-        // The choice is kept for when there is again.
-        assert!(h.state().settings.production.captions);
+        assert!(h.query_by_label("Captions").is_none());
+        assert!(h.state().settings.production.captions, "on unless turned off in Settings");
     }
 
     #[test]

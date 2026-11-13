@@ -487,11 +487,11 @@ fn captions_can_be_asked_for_and_appear_when_theyre_made() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
     assert!(h.state().video.as_ref().unwrap().captions.is_none());
-    h.get_by_label("Make Captions").click();
+    h.get_by_label("Transcribe").click();
     h.run_steps(2);
     assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Captures/Production.sgvideo"]);
     assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
-    assert!(h.query_all_by_label("Make Captions").next().is_none(), "asked once");
+    assert!(h.query_all_by_label("Transcribe").next().is_none(), "asked once");
     // The service has made them: they come on the next look.
     *host.ready.lock().unwrap() = Some(captions());
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -508,7 +508,7 @@ fn captions_can_be_asked_for_and_appear_when_theyre_made() {
 fn a_recording_with_no_words_stops_waiting_for_captions() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
-    h.get_by_label("Make Captions").click();
+    h.get_by_label("Transcribe").click();
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
     // The service heard nothing: empty captions, and the editor stops saying they're coming.
@@ -635,15 +635,44 @@ fn a_recording_from_the_disk_says_its_opening_then_opens() {
 // ---- the library and the media bin ----
 
 /// A host that brings files into the media bin at once: a red picture, a second of a tone.
+/// It transcribes too, when told: the files asked for (`again:` before those heard again), how
+/// far each has got, the recording's captions and the media's lines once they're made.
 #[derive(Clone, Default)]
 struct MediaHost {
     answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
     imports: std::sync::Arc<std::sync::Mutex<usize>>,
+    auto: bool,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    progress: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<f32, String>>>>,
+    ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
+    media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
 }
 
 impl crate::services::Services for MediaHost {
     fn request_import(&self) {
         *self.imports.lock().unwrap() += 1;
+    }
+    fn auto_captions(&self) -> bool {
+        self.auto
+    }
+    fn make_captions(&self, path: &str) -> Result<(), String> {
+        self.asked.lock().unwrap().push(path.to_string());
+        Ok(())
+    }
+    fn make_captions_again(&self, path: &str) -> Result<(), String> {
+        self.asked.lock().unwrap().push(format!("again:{path}"));
+        Ok(())
+    }
+    fn captions_progress(&self, path: &str) -> Option<Result<f32, String>> {
+        self.progress.lock().unwrap().get(path).cloned()
+    }
+    fn poll_captions(&self, _recording: &str, seen: u64) -> Option<(u64, Option<screengrabcraft_media::captions::Captions>)> {
+        let ready = self.ready.lock().unwrap().clone();
+        (ready.is_some() && seen != 7).then_some((7, ready))
+    }
+    fn poll_media_captions(&self, path: &str, seen: u64) -> Option<(u64, Vec<screengrabcraft_media::captions::Cue>)> {
+        let (at, lines) = self.media_lines.lock().unwrap().get(path).cloned()?;
+        (at != seen).then_some((at, lines))
     }
     fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
         self.answer.lock().unwrap().take()
@@ -908,4 +937,73 @@ fn the_chosen_title_and_the_camera_are_dragged_and_resized_on_the_picture() {
     crate::tests::drag(&mut h, cam.center(), pic.center());
     let at = h.state().video.as_ref().unwrap().session.timeline.camera.at.expect("the camera has a place of its own");
     assert!((at[0] - 0.5).abs() < 0.1 && (at[1] - 0.5).abs() < 0.12, "{at:?}");
+}
+
+// ---- transcribing what's in the video ----
+
+#[test]
+fn transcribing_hears_the_sound_put_on_the_timeline_too_and_shows_how_far_it_has_got() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::captions::{Cue, Speaker};
+    const REC: &str = "C:/Captures/Production.sgvideo";
+    const SONG: &str = "C:/Music/Song.mp3";
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    // A song brought in and put on the timeline at 1 s.
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec![SONG.to_string()]));
+    h.run_steps(3);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Add Song.mp3").click();
+    h.run_steps(2);
+    assert!(host.asked.lock().unwrap().is_empty(), "not transcribed by itself unless Settings says so");
+    // Transcribe: the recording and the song, each heard on its own.
+    h.get_by_label("Transcribe").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), [REC, SONG]);
+    // How far it has got, in the captions' header and the status bar.
+    host.progress.lock().unwrap().insert(REC.to_string(), Ok(0.5));
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().transcribing(), Some(("Transcribing…".to_string(), Some(0.5))));
+    assert!(h.query_by_label("Transcribing… 50%").is_some(), "the status bar says so");
+    shot(&mut h, "video-transcribing");
+    // The song's lines come (in its own time): they're placed where it is on the timeline.
+    let line = |s, e, sp, t: &str| Cue { start: s, end: e, speaker: sp, text: t.to_string() };
+    host.media_lines.lock().unwrap().insert(SONG.to_string(), (5, vec![line(500_000, 1_500_000, Speaker::Media, "From the song.")]));
+    // Then the recording's.
+    host.progress.lock().unwrap().clear();
+    *host.ready.lock().unwrap() =
+        Some(screengrabcraft_media::captions::Captions { cues: vec![line(200_000, 900_000, Speaker::You, "Here it is.")], model: "test".into() });
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.transcribing().is_none());
+        let said: Vec<(u64, &str)> = v.cues.iter().map(|c| (c.start, c.text.as_str())).collect();
+        assert_eq!(said, [(200_000, "Here it is."), (1_500_000, "From the song.")], "the song's line where the song plays");
+    }
+    // Transcribe Again: both heard again.
+    h.get_by_label("Transcribe Again").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap()[2..], [format!("again:{REC}"), format!("again:{SONG}")]);
+    // A file that couldn't be heard says why, and isn't waited for.
+    host.progress.lock().unwrap().insert(SONG.to_string(), Err("it has no sound".into()));
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().media_coming.is_empty());
+}
+
+#[test]
+fn with_the_setting_on_sound_brought_in_is_transcribed_by_itself() {
+    use crate::services::DialogResult;
+    let host = MediaHost { auto: true, ..MediaHost::default() };
+    let mut h = media_harness(host.clone());
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Music/Song.mp3".to_string(), "C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(3);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Music/Song.mp3"], "the song, not the picture");
+    assert!(h.state().video.as_ref().unwrap().transcribing().is_some_and(|(t, _)| t == "Transcribing Song.mp3…"));
 }

@@ -149,6 +149,9 @@ impl VideoView {
                             self.library.insert(id, loaded.content);
                             self.shown = None;
                             ed.toast(ctx, format!("{name} is in the media bin"));
+                            // What's said in it, transcribed by itself when Settings says so.
+                            let hears = self.library.has_sound(id) == Some(true);
+                            self.media_added(ed, ctx, id, &path, hears);
                         }
                         Err(e) => ed.error(ctx, format!("{name}: {e}")),
                     }
@@ -721,6 +724,11 @@ impl VideoView {
         let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(self.pps)) as f32 - self.scroll;
         let top = rows_top + k as f32 * super::ROW_H;
         Some(Rect::from_min_max(pos2(x_of(it.at), top + 3.0), pos2(x_of(it.end()), top + super::ROW_H - 7.0)))
+    }
+
+    /// Asks the host about captions on the next frame (for tests).
+    pub fn poll_now(&mut self) {
+        self.next_poll = 0.0;
     }
 
     /// Where the camera is on the screen, as last shown (for tests).

@@ -23,6 +23,9 @@ pub const EDITOR_UNREADY: &str = "--end-standby";
 /// What the editor asks the capture service with for a recording's captions
 /// (`--captions <recording>`, [`ask_captions`]).
 pub const ASK_CAPTIONS: &str = "--captions";
+/// The same, to hear a file again even if its captions were made before (`--captions-again <file>`,
+/// [`ask_captions_again`]).
+pub const ASK_CAPTIONS_AGAIN: &str = "--captions-again";
 /// What the service opens a recording in the editor with when its captions are being made
 /// (`--captions-coming <recording>`): the editor says so until they come.
 pub const CAPTIONS_COMING: &str = "--captions-coming";
@@ -109,10 +112,16 @@ pub fn ask_service(args: &[String]) -> Result<(), String> {
     spawn(Path::new(SERVICE_BIN), args)
 }
 
-/// Asks the capture service to make a recording's captions (it makes one at a time, never while
+/// Asks the capture service to make the captions of a recording, a sound file or a video (it makes one at a time, never while
 /// recording); it starts if it isn't running.
 pub fn ask_captions(recording: &str) -> Result<(), String> {
     ask_service(&[ASK_CAPTIONS.to_string(), recording.to_string()])
+}
+
+/// Asks the capture service to make a file's captions again (a recording, a sound file or a video),
+/// even if they were made before.
+pub fn ask_captions_again(path: &str) -> Result<(), String> {
+    ask_service(&[ASK_CAPTIONS_AGAIN.to_string(), path.to_string()])
 }
 
 /// Shows a file selected in the file manager, or a folder.

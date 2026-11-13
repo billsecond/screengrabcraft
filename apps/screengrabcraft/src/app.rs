@@ -366,11 +366,12 @@ impl Service {
                     acted = true;
                     self.quit = true;
                 }
-                launch::ASK_CAPTIONS => {
+                launch::ASK_CAPTIONS | launch::ASK_CAPTIONS_AGAIN => {
                     acted = true;
+                    let again = a == launch::ASK_CAPTIONS_AGAIN;
                     match it.next().and_then(|p| crate::captions::wanted(p)) {
-                        Some(p) => self.captions.push(p),
-                        None => log::warn!("captions were asked for something that isn't a recording"),
+                        Some(p) => self.captions.push(p, again),
+                        None => log::warn!("captions were asked for something that isn't a recording, a sound file or a video"),
                     }
                 }
                 "--noop" | "--tray" | "--background" => acted = true,
@@ -883,7 +884,7 @@ impl Service {
                 // Its captions are made after it (the editor shows them when they come).
                 let mut args = vec![path.to_string_lossy().to_string()];
                 if self.settings.production.captions && (self.settings.production.microphone || self.settings.production.system_sound) {
-                    self.captions.push(path.clone());
+                    self.captions.push(path.clone(), false);
                     args.insert(0, launch::CAPTIONS_COMING.to_string());
                 }
                 if launch::open_editor(&args).is_ok() {
@@ -939,6 +940,9 @@ impl Service {
         }
         self.poll_recording();
         self.captions.tick(self.recording.is_some());
+        if let Some(t) = &mut self.tray {
+            t.set_transcribing(self.captions.now_hearing());
+        }
         if self.captions.busy() {
             ctx.request_repaint_after(Duration::from_secs(1));
         }

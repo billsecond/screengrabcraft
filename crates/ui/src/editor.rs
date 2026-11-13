@@ -191,6 +191,8 @@ pub struct Editor {
     pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
     /// Export Video's Change… save dialog is open.
     pub(crate) saving_video: bool,
+    /// Files being transcribed (Transcribe a Video or Sound File…).
+    pub transcripts: crate::transcribe::Transcripts,
     /// A recording being read on a thread of its own.
     pub(crate) opening_video: Option<OpeningVideo>,
     toast: Option<(String, f64, bool)>,
@@ -269,6 +271,7 @@ impl Editor {
             saving: None,
             saving_project: false,
             saving_transcript: None,
+            transcripts: Default::default(),
             saving_video: false,
             opening_video: None,
             toast: None,
@@ -957,6 +960,7 @@ impl Editor {
                     self.open_file(ctx, f);
                 }
             }
+            DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {
@@ -1025,6 +1029,7 @@ impl Editor {
         }
         self.poll_dialogs(ctx);
         self.poll_opening(ctx);
+        self.poll_transcripts(ctx);
         let mut dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
         // Onto the video editor: into its media bin, every one of them.
         if !dropped.is_empty()
@@ -1285,6 +1290,15 @@ impl Editor {
                     ui.separator();
                     if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         self.services.request_open();
+                        ui.close();
+                    }
+                    if self.services.has_paths()
+                        && ui
+                            .button("Transcribe a Video or Sound File…")
+                            .on_hover_text("What's said in it, written down on this computer: a transcript and subtitles beside it")
+                            .clicked()
+                    {
+                        self.services.request_transcribe();
                         ui.close();
                     }
                     let recent = self.settings.recent.clone();
@@ -1683,6 +1697,9 @@ impl Editor {
                             Status::Saved => Some(small(self.saver.note.clone().unwrap_or_else(|| "Saved".to_string()))),
                             Status::Failed(e) => Some(egui::RichText::new(format!("Not saved: {e}")).size(12.0).color(t.danger)),
                         };
+                        if let Some((text, progress)) = self.transcripts.status() {
+                            crate::transcribe::indicator(ui, &text, progress);
+                        }
                         if let Some(text) = said {
                             ui.add(egui::Label::new(text).truncate());
                         }

@@ -198,7 +198,7 @@ fn coverage(shape: CameraShape, x: f32, y: f32, w: f32, h: f32) -> f32 {
 /// The colour of a speaker's captions on the picture: the others' white, yours yellow.
 pub fn caption_colour(speaker: Speaker) -> screengrabcraft_model::Color {
     match speaker {
-        Speaker::Others => screengrabcraft_model::Color::WHITE,
+        Speaker::Others | Speaker::Media => screengrabcraft_model::Color::WHITE,
         Speaker::You => screengrabcraft_model::Color::rgb(0xFF, 0xE4, 0x5C),
     }
 }
