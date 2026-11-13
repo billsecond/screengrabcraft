@@ -155,9 +155,23 @@ struct CaptionHost {
     asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
     jobs: std::sync::Arc<std::sync::Mutex<Vec<(Option<usize>, bool)>>>,
+    /// The names offered in save dialogs, the answer the next dialog gives, the files written.
+    offered: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    written: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl crate::services::Services for CaptionHost {
+    fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
+        self.offered.lock().unwrap().push(suggested_name.to_string());
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.written.lock().unwrap().push((path.to_string(), String::from_utf8_lossy(bytes).to_string()));
+        Ok(())
+    }
     fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
     }
@@ -261,6 +275,59 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
     h.query_all_by_label("Show").last().unwrap().click();
     h.run_steps(2);
     assert!(!h.state().video.as_ref().unwrap().session.timeline.captions.show);
+}
+
+#[test]
+fn export_transcript_saves_what_was_said_as_text_or_subtitles() {
+    use crate::services::DialogResult;
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    let save = |h: &mut Harness<'_, Editor>, to: &str| {
+        h.get_by_label("Export Transcript").click();
+        h.run_steps(2);
+        *host.answer.lock().unwrap() = Some(DialogResult::SaveTo(to.to_string()));
+        h.run_steps(2);
+        host.written.lock().unwrap().pop().unwrap()
+    };
+    // A transcript: both speakers, with when each started.
+    let (path, text) = save(&mut h, "C:/Notes/Meeting.txt");
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production transcript.txt"]);
+    assert_eq!(path, "C:/Notes/Meeting.txt");
+    assert_eq!(text, "[0:00:00] You: Here's the new login page.\n[0:00:02] Others: It looks good to me.\n");
+    // A name ending .srt is subtitles.
+    let (_, srt) = save(&mut h, "C:/Notes/Meeting.srt");
+    assert!(srt.starts_with("1\n00:00:00,200 --> 00:00:01,800\nYou: Here's the new login page."), "{srt}");
+    // A name with no extension gets the transcript's.
+    let (path, _) = save(&mut h, "C:/Notes/Meeting");
+    assert_eq!(path, "C:/Notes/Meeting.txt");
+    // As edited: the microphone muted, your line is left out.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        v.session.execute("video.mute", &serde_json::json!({"track": mic, "muted": true})).unwrap();
+    }
+    h.run_steps(2);
+    let (_, text) = save(&mut h, "C:/Notes/Others.txt");
+    assert_eq!(text, "[0:00:02] Others: It looks good to me.\n");
+    // Cancelled, then a later save dialog's answer isn't taken for a transcript.
+    h.get_by_label("Export Transcript").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Cancelled);
+    h.run_steps(2);
+    assert!(h.state().saving_transcript.is_none());
+    assert!(host.written.lock().unwrap().is_empty());
+}
+
+#[test]
+fn export_transcript_waits_for_captions() {
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    // There, but nothing to save until captions are made.
+    h.get_by_label("Export Transcript").click();
+    h.run_steps(2);
+    assert!(host.offered.lock().unwrap().is_empty());
+    assert!(h.state().saving_transcript.is_none());
 }
 
 #[test]
