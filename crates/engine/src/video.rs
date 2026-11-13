@@ -265,7 +265,200 @@ fn captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn revert(s: &mut VideoSession, _: &Value) -> Result<Value> {
+    // The media bin stays (it's only what was brought in); the layers go.
+    let media = std::mem::take(&mut s.timeline.media);
     s.timeline = s.original.clone();
+    s.timeline.media = media;
+    Ok(json!({}))
+}
+
+// ---- the layers: media, titles, overlays, transitions (see `screengrabcraft_media::layers`) ----
+
+fn id(p: &Value, key: &str) -> Result<u32> {
+    let v = int(p, key)?;
+    u32::try_from(v).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
+}
+
+/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path, and
+/// whether its clicks are ringed.
+fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("the pointer's look is given as an object".to_string()));
+    }
+    let flag = |key: &str| -> Result<Option<bool>> {
+        match p.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
+        }
+    };
+    let (show, clicks, size, smooth) = (flag("show")?, flag("clicks")?, number(p, "size")?, number(p, "smooth")?);
+    let mut look = s.timeline.pointer;
+    look.show = show.unwrap_or(look.show);
+    look.clicks = clicks.unwrap_or(look.clicks);
+    look.size = size.unwrap_or(look.size);
+    look.smooth = smooth.unwrap_or(look.smooth);
+    s.timeline.pointer = look.checked();
+    Ok(json!({}))
+}
+
+/// A layer: its id, or `"new"` (or nothing) for a new one.
+fn layer_or_new(p: &Value, key: &str) -> Result<Option<u32>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s == "new" => Ok(None),
+        Some(_) => id(p, key).map(Some),
+    }
+}
+
+fn number(p: &Value, key: &str) -> Result<Option<f32>> {
+    match p.get(key) {
+        None => Ok(None),
+        Some(v) => {
+            v.as_f64().filter(|f| f.is_finite()).map(|f| Some(f as f32)).ok_or_else(|| EngineError::Params(format!("`{key}` must be a number")))
+        }
+    }
+}
+
+fn text(p: &Value, key: &str) -> Result<Option<String>> {
+    match p.get(key) {
+        None => Ok(None),
+        Some(v) => v.as_str().map(|s| Some(s.to_string())).ok_or_else(|| EngineError::Params(format!("`{key}` must be text"))),
+    }
+}
+
+fn add_media(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{MediaItem, MediaKind};
+    let kind = serde_json::from_value::<MediaKind>(p.get("kind").cloned().unwrap_or(Value::Null))
+        .map_err(|_| EngineError::Params("`kind` is picture, sound or video".to_string()))?;
+    let name = text(p, "name")?.unwrap_or_default();
+    let path = text(p, "path")?.unwrap_or_default();
+    let duration = if p.get("duration").is_some() { int(p, "duration")? } else { 0 };
+    let size = |k: &str| -> Result<u32> { if p.get(k).is_some() { Ok(id(p, k)?.min(100_000)) } else { Ok(0) } };
+    let m = MediaItem { id: 0, name, path, kind, duration, width: size("width")?, height: size("height")? };
+    let id = s.timeline.add_media(m).map_err(edit_err)?;
+    Ok(json!({"id": id}))
+}
+
+fn remove_media(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.remove_media(id(p, "id")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{Item, What, template};
+    let mut item = match (p.get("template").and_then(Value::as_str), p.get("media")) {
+        (Some(key), _) => template(key).map(|t| t.item).ok_or_else(|| EngineError::Params(format!("there's no `{key}` in the library")))?,
+        (None, Some(_)) => Item { what: What::Media { id: id(p, "media")? }, ..Item::default() },
+        (None, None) => return Err(EngineError::Params("say what to place: `template` or `media`".to_string())),
+    };
+    if let What::Text { title, subtitle, .. } = &mut item.what {
+        if let Some(t) = text(p, "title")? {
+            *title = t;
+        }
+        if let Some(t) = text(p, "subtitle")? {
+            *subtitle = t;
+        }
+    }
+    if p.get("len").is_some() {
+        item.len = int(p, "len")?;
+    }
+    let (layer, item) = s.timeline.place(item, layer_or_new(p, "layer")?, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
+}
+
+fn move_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (layer, item) = s.timeline.move_item(id(p, "layer")?, id(p, "item")?, layer_or_new(p, "toLayer")?, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
+}
+
+fn trim_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.trim_item(id(p, "layer")?, id(p, "item")?, int(p, "start")?, int(p, "end")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn delete_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.delete_item(id(p, "layer")?, id(p, "item")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{AnimKind, What};
+    let (title, subtitle, color) = (text(p, "title")?, text(p, "subtitle")?, text(p, "color")?);
+    let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
+    let anim = |k: &str| -> Result<Option<AnimKind>> {
+        match p.get(k) {
+            None => Ok(None),
+            Some(v) => serde_json::from_value::<AnimKind>(v.clone())
+                .map(Some)
+                .map_err(|_| EngineError::Params(format!("`{k}` is none, fade, slideLeft, slideRight, slideUp or pop"))),
+        }
+    };
+    let (intro, outro) = (anim("intro")?, anim("outro")?);
+    let (intro_len, outro_len) = (
+        if p.get("introLen").is_some() { Some(int(p, "introLen")?) } else { None },
+        if p.get("outroLen").is_some() { Some(int(p, "outroLen")?) } else { None },
+    );
+    s.timeline
+        .set_item(id(p, "layer")?, id(p, "item")?, |i| {
+            if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
+                if let Some(v) = title {
+                    *t = v;
+                }
+                if let Some(v) = subtitle {
+                    *st = v;
+                }
+                if let Some(v) = color {
+                    *c = v;
+                }
+            }
+            for (slot, v) in [(&mut i.place.x, x), (&mut i.place.y, y), (&mut i.place.w, w), (&mut i.place.opacity, opacity)] {
+                if let Some(v) = v {
+                    *slot = v;
+                }
+            }
+            if let Some(k) = intro {
+                i.intro.kind = k;
+            }
+            if let Some(k) = outro {
+                i.outro.kind = k;
+            }
+            if let Some(l) = intro_len {
+                i.intro.len = l.min(10_000_000);
+            }
+            if let Some(l) = outro_len {
+                i.outro.len = l.min(10_000_000);
+            }
+        })
+        .map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let hidden = match p.get("hidden") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`hidden` must be true or false".to_string()))?),
+    };
+    let name = text(p, "name")?;
+    s.timeline.set_layer(id(p, "layer")?, hidden, number(p, "volume")?, name.as_deref()).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn delete_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.delete_layer(id(p, "layer")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if p.get("corner").is_some_and(|v| !v.is_null()) || p.get("x").is_none() {
+        // Back in its corner.
+        s.timeline.camera.at = None;
+        return camera(s, p);
+    }
+    let (x, y) = (number(p, "x")?.unwrap_or(0.5), number(p, "y")?.unwrap_or(0.5));
+    s.timeline.camera.at = Some([x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
+    if let Some(size) = number(p, "size")? {
+        s.timeline.camera.size = size.clamp(0.1, 0.5);
+    }
     Ok(json!({}))
 }
 
@@ -290,7 +483,48 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         params: r#"{"show"?: bool, "burn"?: bool}: the captions on the picture in the editor, and burned into the video made"#,
         run: captions,
     },
+    VideoCommand {
+        id: "video.pointer",
+        label: "Pointer",
+        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool}: the mouse pointer on the video"#,
+        run: pointer,
+    },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
+    VideoCommand {
+        id: "video.addMedia",
+        label: "Import Media",
+        params: r#"{"kind": "picture"|"sound"|"video", "name": text, "path": text, "duration"?: µs, "width"?: px, "height"?: px}: into the media bin; its id"#,
+        run: add_media,
+    },
+    VideoCommand { id: "video.removeMedia", label: "Remove Media", params: r#"{"id": n}: out of the bin, with its items"#, run: remove_media },
+    VideoCommand {
+        id: "video.place",
+        label: "Add to the Timeline",
+        params: r#"{"template": key | "media": id, "at": µs, "layer"?: id|"new", "title"?: text, "subtitle"?: text, "len"?: µs}: where it fits, never over another"#,
+        run: place,
+    },
+    VideoCommand {
+        id: "video.moveItem",
+        label: "Move",
+        params: r#"{"layer": id, "item": id, "toLayer"?: id|"new", "at": µs}: the nearest place it fits"#,
+        run: move_item,
+    },
+    VideoCommand { id: "video.trimItem", label: "Trim", params: r#"{"layer": id, "item": id, "start": µs, "end": µs}"#, run: trim_item },
+    VideoCommand { id: "video.deleteItem", label: "Delete", params: r#"{"layer": id, "item": id}"#, run: delete_item },
+    VideoCommand {
+        id: "video.setItem",
+        label: "Change",
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs}"##,
+        run: set_item,
+    },
+    VideoCommand { id: "video.layer", label: "Layer", params: r#"{"layer": id, "hidden"?: bool, "volume"?: 0..2, "name"?: text}"#, run: layer },
+    VideoCommand { id: "video.deleteLayer", label: "Delete Layer", params: r#"{"layer": id}"#, run: delete_layer },
+    VideoCommand {
+        id: "video.cameraAt",
+        label: "Move Camera",
+        params: r#"{"x": -0.5..1.5, "y": -0.5..1.5, "size"?: 0.1..0.5}: its middle, as a share of the picture (past 0 or 1 it is off it); {"corner": …} puts it back in a corner"#,
+        run: camera_at,
+    },
 ];
 
 #[cfg(test)]
@@ -390,6 +624,8 @@ mod tests {
             json!({"track": 1e30, "clip": -1, "to": f64::MAX}),
             json!({"at": null, "track": "two"}),
             json!({"corner": "middle", "shape": 7, "size": "big", "muted": 3, "volume": null}),
+            json!({"layer": 1e30, "item": -1, "at": -3, "template": 5, "media": "x", "kind": "movie", "x": "far", "toLayer": [1], "start": "now"}),
+            json!({"layer": 999, "item": 999, "at": 0, "template": "no-such", "id": 999, "kind": "sound", "name": 5}),
             json!([1, 2, 3]),
             json!(null),
         ];
@@ -402,5 +638,50 @@ mod tests {
         assert!(s.execute("video.camera", &json!({"corner": "middle"})).is_err());
         assert!(s.execute("video.nothing", &json!({})).is_err());
         assert_eq!(s.timeline, before);
+    }
+}
+
+#[cfg(test)]
+mod layer_tests {
+    use screengrabcraft_media::recording::{Header, RecordingWriter, StreamInfo, StreamKind};
+    use screengrabcraft_model::{Color, Raster};
+
+    use super::*;
+
+    fn session() -> VideoSession {
+        let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
+        }
+        VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn a_lower_third_and_a_song_go_on_layers_of_their_own_and_undo() {
+        let mut s = session();
+        let placed =
+            s.execute("video.place", &json!({"template": "lower-bar", "at": 1_000_000, "title": "Ann Lee", "subtitle": "Engineer"})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        assert_eq!(s.undo_label(), Some("Add to the Timeline"));
+        match &s.timeline.item(layer, item).unwrap().what {
+            screengrabcraft_media::layers::What::Text { title, subtitle, .. } => {
+                assert_eq!((title.as_str(), subtitle.as_str()), ("Ann Lee", "Engineer"))
+            }
+            other => panic!("{other:?}"),
+        }
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "Song.mp3", "path": "C:/Song.mp3", "duration": 2_000_000})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": song["id"], "at": 0, "layer": layer})).unwrap();
+        assert_ne!(placed["layer"].as_u64().unwrap() as u32, layer, "sound on a sound layer, not the lower third's");
+        s.execute("video.setItem", &json!({"layer": layer, "item": item, "x": 0.8, "intro": "pop", "title": "Bo"})).unwrap();
+        assert_eq!(s.timeline.item(layer, item).unwrap().place.x, 0.8);
+        s.execute("video.cameraAt", &json!({"x": 0.3, "y": 0.4})).unwrap();
+        assert_eq!(s.timeline.camera.at, Some([0.3, 0.4]));
+        s.execute("video.cameraAt", &json!({"corner": "topLeft"})).unwrap();
+        assert_eq!(s.timeline.camera.at, None);
+        for _ in 0..6 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.layers.is_empty() && s.timeline.media.is_empty());
     }
 }

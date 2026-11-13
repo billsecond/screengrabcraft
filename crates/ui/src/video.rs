@@ -15,23 +15,41 @@
 //!
 //! Every edit is a `video.*` command of the engine's [`VideoSession`]; the edits are added to
 //! the recording file a moment after each change, and Export Video makes the MP4 beside it
-//! (with the captions beside it too, as `.srt` and `.txt`).
+//! (with the captions beside it too, as `.srt` and `.txt`). Export Transcript saves what was
+//! said, as edited, wherever the owner says: a transcript (`.txt`) or subtitles (`.srt`).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_engine::VideoSession;
-use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+use screengrabcraft_media::captions::{self, Captions, Cue, Speaker};
 use screengrabcraft_media::compose::{self, Composer};
 use screengrabcraft_media::recording::{self, Recording, StreamKind};
 use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
+mod export_window;
+mod library;
+pub use library::{LibDrop, LibTab};
+
+pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
+
+/// A layer item being moved or trimmed on the timeline: its layer (it may move to another, of
+/// its kind; `from` is where it started), and where it was taken hold of (µs into it), or which
+/// end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ItemDrag {
+    Move { layer: u32, item: u32, grab: u64, from: u32 },
+    Trim { layer: u32, item: u32, start: bool },
+}
+
+/// The band above the layers that a drop on makes a layer of its own.
+const NEW_LAYER_H: f32 = 22.0;
+
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
-use crate::services::{SoundOut, VideoExport, VideoJob};
+use crate::services::{Filter, SoundOut, VideoFormat};
 use crate::theme::Tokens;
 use crate::widgets;
 
@@ -55,6 +73,60 @@ const CAPTIONS_POLL: f64 = 2.0;
 const CAPTIONS_GLANCE: f64 = 15.0;
 /// Captions said to be coming that haven't after this long (seconds) can be asked for again.
 const CAPTIONS_WAIT: f64 = 30.0 * 60.0;
+
+/// What Export Transcript saves: the words as a transcript, or as subtitles.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TranscriptFormat {
+    /// A plain transcript (`.txt`): a paragraph for each turn, with when it started.
+    Text,
+    /// SubRip subtitles (`.srt`), for a video player or a video site.
+    Subtitles,
+}
+
+impl TranscriptFormat {
+    pub fn extension(self) -> &'static str {
+        match self {
+            TranscriptFormat::Text => "txt",
+            TranscriptFormat::Subtitles => "srt",
+        }
+    }
+
+    /// The one a file's name asks for, by its extension.
+    pub fn of_path(path: &str) -> Option<TranscriptFormat> {
+        let ext = std::path::Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+        match ext.as_str() {
+            "txt" => Some(TranscriptFormat::Text),
+            "srt" => Some(TranscriptFormat::Subtitles),
+            _ => None,
+        }
+    }
+
+    /// The lines written out this way.
+    pub fn write(self, cues: &[Cue]) -> String {
+        match self {
+            TranscriptFormat::Text => captions::to_text(cues),
+            TranscriptFormat::Subtitles => captions::to_srt(cues),
+        }
+    }
+
+    /// The name offered in the save dialog for a recording called `name`.
+    fn file_name(self, name: &str) -> String {
+        match self {
+            TranscriptFormat::Text => format!("{name} transcript.txt"),
+            TranscriptFormat::Subtitles => format!("{name} subtitles.srt"),
+        }
+    }
+
+    /// The save dialog's file types, this one first.
+    fn filters(self) -> [Filter; 2] {
+        const TEXT: Filter = ("Transcript", &["txt"]);
+        const SUBTITLES: Filter = ("Subtitles", &["srt"]);
+        match self {
+            TranscriptFormat::Text => [TEXT, SUBTITLES],
+            TranscriptFormat::Subtitles => [SUBTITLES, TEXT],
+        }
+    }
+}
 
 /// What a drag on the timeline is doing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,16 +171,42 @@ pub struct VideoView {
     /// A stretch chosen on the timeline.
     pub range: Option<(u64, u64)>,
     /// The timeline's zoom: pixels a second (0 until it's first fitted).
-    pps: f32,
+    pub pps: f32,
     scroll: f32,
     drag: Option<Drag>,
     /// The last revision written to the file, and when the edits last changed.
     saved: u64,
     seen: u64,
     changed_at: f64,
-    export: Option<VideoExport>,
-    /// The last video made.
-    pub exported: Option<String>,
+    /// Export Video's window: choosing, the video being made, or the video made.
+    pub export: Option<ExportStep>,
+    /// What Export Video was last set to (offered again).
+    export_last: Option<(VideoFormat, CaptionsIn)>,
+    /// Export Transcript was pressed before there were captions: they're being made, and the
+    /// transcript is asked for when they come.
+    pub transcript_after: Option<TranscriptFormat>,
+    /// The media bin's files as read, for the layers.
+    pub library: Arc<screengrabcraft_media::media_store::MediaLibrary>,
+    /// Files being brought in, and files of the bin being read again (a recording reopened).
+    pub importing: Vec<library::Importing>,
+    rereading: Vec<(u32, screengrabcraft_media::media_store::MediaJob)>,
+    /// The layer item chosen (its layer, itself).
+    pub item: Option<(u32, u32)>,
+    /// The camera chosen on the picture (to move and resize it there).
+    pub camera_chosen: bool,
+    /// The library panel at the left: shown, and which tab.
+    pub library_open: bool,
+    pub lib_tab: LibTab,
+    /// The library's thumbnails, by template or media.
+    thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    /// Something being moved or resized on the picture.
+    canvas_drag: Option<library::CanvasDrag>,
+    /// A layer item being moved or trimmed on the timeline.
+    item_drag: Option<ItemDrag>,
+    /// Where the picture was last shown (screen points).
+    pub picture_rect: Option<Rect>,
+    /// Where the timeline's lane was last drawn, and where its rows start (for finding things on it).
+    pub lane_rect: Option<(Rect, f32)>,
     waves: BTreeMap<u8, Vec<(i16, i16)>>,
     /// The volume slider being dragged.
     volume_drag: bool,
@@ -123,6 +221,14 @@ pub struct VideoView {
     pub has_sound: bool,
     /// Captions are being made (the service said so, or they were asked for here): since when.
     pub captions_coming: Option<f64>,
+    /// How far the recording's captions being made have got (0 to 1), as the service says.
+    pub captions_progress: Option<f32>,
+    /// The lines of the sound files and videos in the media bin (each in its own time), by id.
+    pub media_cues: std::collections::HashMap<u32, Vec<Cue>>,
+    /// The host's time of each one's captions last seen.
+    media_seen: std::collections::HashMap<u32, u64>,
+    /// Those being made: since when, and how far they've got.
+    pub media_coming: std::collections::HashMap<u32, (f64, Option<f32>)>,
     /// The host's time of the captions file last seen, and when to ask again.
     captions_seen: u64,
     next_poll: f64,
@@ -143,11 +249,27 @@ pub fn clock(us: u64) -> String {
     format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
 }
 
-/// Each sound track's peaks per 10 ms (for drawing its wave), the first two hours at most.
-fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
+/// Each sound track's peaks per 10 ms, for drawing its wave.
+pub(crate) type Waves = BTreeMap<u8, Vec<(i16, i16)>>;
+
+/// The samples of a sound track that are looked at for its wave: the first two hours at most.
+fn wave_samples(rec: &Recording, id: u8) -> u64 {
+    compose::to_samples(rec.stream_duration(id)).min(48_000 * 7200)
+}
+
+/// How many samples [`waves`] looks at in all (to say how far it has got).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn wave_work(rec: &Recording) -> u64 {
+    rec.header.streams.iter().filter(|s| !s.kind.is_video()).map(|s| wave_samples(rec, s.id)).sum()
+}
+
+/// Each sound track's peaks per 10 ms (for drawing its wave), the first two hours at most;
+/// `done` is told how many samples have been looked at so far.
+pub(crate) fn waves(rec: &Recording, done: &dyn Fn(u64)) -> Waves {
     let mut out = BTreeMap::new();
+    let mut so_far = 0u64;
     for s in rec.header.streams.iter().filter(|s| !s.kind.is_video()) {
-        let total = compose::to_samples(rec.stream_duration(s.id)).min(48_000 * 7200);
+        let total = wave_samples(rec, s.id);
         let ch = usize::from(s.channels.clamp(1, 2));
         let mut peaks = Vec::with_capacity((total / WAVE_STEP) as usize + 1);
         let mut at = 0u64;
@@ -160,6 +282,8 @@ fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
                 peaks.push((lo, hi));
             }
             at += n as u64;
+            so_far += n as u64;
+            done(so_far);
         }
         out.insert(s.id, peaks);
     }
@@ -168,6 +292,12 @@ fn waves(rec: &Recording) -> BTreeMap<u8, Vec<(i16, i16)>> {
 
 impl VideoView {
     pub fn new(rec: Recording, path: Option<String>, name: String) -> VideoView {
+        let waves = waves(&rec, &|_| {});
+        VideoView::with_waves(rec, waves, path, name)
+    }
+
+    /// [`VideoView::new`], its sound's waves worked out already (on another thread).
+    pub(crate) fn with_waves(rec: Recording, waves: Waves, path: Option<String>, name: String) -> VideoView {
         let session = VideoSession::new(&rec);
         let (w, h) = rec
             .header
@@ -177,11 +307,12 @@ impl VideoView {
             .or_else(|| rec.header.streams.iter().find(|s| s.kind == StreamKind::Camera))
             .map(|s| compose::fit(s.width, s.height, PREVIEW_MAX.0, PREVIEW_MAX.1))
             .unwrap_or((1280, 720));
-        let waves = waves(&rec);
         let captions = rec.captions.clone().filter(|c| !c.is_empty());
         let has_sound = rec.header.streams.iter().any(|s| Speaker::of(s.kind).is_some());
         let rec = Arc::new(rec);
-        let composer = Composer::new(rec.clone(), &session.timeline, w, h);
+        let library = Arc::new(screengrabcraft_media::media_store::MediaLibrary::default());
+        let mut composer = Composer::new(rec.clone(), &session.timeline, w, h);
+        composer.set_media(library.clone());
         VideoView {
             rec,
             session,
@@ -201,7 +332,20 @@ impl VideoView {
             seen: 0,
             changed_at: 0.0,
             export: None,
-            exported: None,
+            export_last: None,
+            transcript_after: None,
+            library,
+            importing: Vec::new(),
+            rereading: Vec::new(),
+            item: None,
+            camera_chosen: false,
+            library_open: true,
+            lib_tab: LibTab::default(),
+            thumbs: Default::default(),
+            canvas_drag: None,
+            item_drag: None,
+            picture_rect: None,
+            lane_rect: None,
             waves,
             volume_drag: false,
             captions,
@@ -210,6 +354,10 @@ impl VideoView {
             cues_for: None,
             has_sound,
             captions_coming: None,
+            captions_progress: None,
+            media_cues: Default::default(),
+            media_seen: Default::default(),
+            media_coming: Default::default(),
             captions_seen: 0,
             next_poll: 0.0,
         }
@@ -227,7 +375,7 @@ impl VideoView {
             return;
         }
         self.cues_for = Some(key);
-        self.cues = Arc::new(self.captions.as_ref().map(|c| c.on_timeline(&self.session.timeline)).unwrap_or_default());
+        self.cues = Arc::new(screengrabcraft_media::captions::edited_cues(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
         self.composer.set_captions(self.showing_captions().then(|| self.cues.clone()));
         self.shown = None;
     }
@@ -242,14 +390,179 @@ impl VideoView {
 
     /// Asks the host for captions.
     pub fn make_captions(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        let Some(path) = self.path.clone() else {
-            ed.error(ctx, "Only a recording opened from a file can have captions made");
-            return;
-        };
-        match ed.services.make_captions(&path) {
-            Ok(()) => self.expect_captions(ctx.input(|i| i.time)),
-            Err(e) => ed.error(ctx, e),
+        self.transcribe(ed, ctx, false);
+    }
+
+    /// The sound files and videos in the media bin with sound to hear: id, name, path.
+    fn media_with_sound(&self) -> Vec<(u32, String, String)> {
+        use screengrabcraft_media::layers::MediaKind;
+        self.session
+            .timeline
+            .media
+            .iter()
+            .filter(|m| m.kind != MediaKind::Picture && !m.path.is_empty() && self.library.has_sound(m.id) != Some(false))
+            .map(|m| (m.id, m.name.clone(), m.path.clone()))
+            .collect()
+    }
+
+    /// Whether anything in the video can be heard: the recording, or what was put on its layers.
+    fn hears_anything(&self) -> bool {
+        self.has_sound || !self.media_with_sound().is_empty()
+    }
+
+    /// Whether there's something to transcribe: the recording (from a file) or its media.
+    fn can_transcribe(&self) -> bool {
+        (self.has_sound && self.path.is_some()) || !self.media_with_sound().is_empty()
+    }
+
+    /// Transcribe (or Transcribe Again, `again`): what's said in the video, on this computer, in
+    /// the background: the recording's tracks, and the sound files and videos put on its layers
+    /// (each in its own time, so its lines follow it wherever it's put).
+    pub fn transcribe(&mut self, ed: &mut Editor, ctx: &egui::Context, again: bool) {
+        let now = ctx.input(|i| i.time);
+        let mut asked = false;
+        if let Some(path) = self.path.clone().filter(|_| self.has_sound) {
+            let r = if again { ed.services.make_captions_again(&path) } else { ed.services.make_captions(&path) };
+            match r {
+                Ok(()) => {
+                    self.expect_captions(now);
+                    self.captions_progress = None;
+                    asked = true;
+                }
+                Err(e) => {
+                    ed.error(ctx, e);
+                    return;
+                }
+            }
         }
+        for (id, name, path) in self.media_with_sound() {
+            if self.library.has_sound(id) != Some(true) || (!again && self.media_cues.contains_key(&id)) {
+                continue;
+            }
+            let r = if again { ed.services.make_captions_again(&path) } else { ed.services.make_captions(&path) };
+            match r {
+                Ok(()) => {
+                    self.media_coming.insert(id, (now, None));
+                    asked = true;
+                }
+                Err(e) => ed.error(ctx, format!("{name}: {e}")),
+            }
+        }
+        if asked {
+            self.next_poll = now;
+        } else if self.path.is_none() && self.has_sound {
+            ed.error(ctx, "Only a recording opened from a file can be transcribed");
+        }
+    }
+
+    /// A file put in the media bin: transcribed by itself when Settings says so.
+    pub(crate) fn media_added(&mut self, ed: &mut Editor, ctx: &egui::Context, id: u32, path: &str, hears: bool) {
+        if !hears || path.is_empty() || !ed.services.auto_captions() {
+            return;
+        }
+        match ed.services.make_captions(path) {
+            Ok(()) => {
+                let now = ctx.input(|i| i.time);
+                self.media_coming.insert(id, (now, None));
+                self.next_poll = now;
+            }
+            Err(e) => log::warn!("transcribing what was brought in: {e}"),
+        }
+    }
+
+    /// What's being transcribed, for the status bar and the captions' header: what, and how far
+    /// it has got.
+    pub fn transcribing(&self) -> Option<(String, Option<f32>)> {
+        if self.captions_coming.is_some() {
+            return Some(("Transcribing…".to_string(), self.captions_progress));
+        }
+        let (id, (_, p)) = self.media_coming.iter().min_by_key(|(id, _)| **id)?;
+        let name = self.session.timeline.media.iter().find(|m| m.id == *id).map(|m| m.name.clone()).unwrap_or_default();
+        Some((format!("Transcribing {name}…"), *p))
+    }
+
+    /// The media bin's captions: those being made (how far, and whether they've come), and now
+    /// and then those made meanwhile (a recording opened again finds its media's).
+    fn poll_media_captions(&mut self, ed: &mut Editor, ctx: &egui::Context, now: f64) {
+        let media = self.media_with_sound();
+        for (id, name, path) in &media {
+            let coming = self.media_coming.get(id).copied();
+            if coming.is_some() {
+                match ed.services.captions_progress(path) {
+                    Some(Ok(p)) => {
+                        self.media_coming.insert(*id, (now, Some(p)));
+                    }
+                    Some(Err(why)) => {
+                        self.media_coming.remove(id);
+                        ed.error(ctx, format!("{name} couldn't be transcribed: {why}"));
+                        continue;
+                    }
+                    None => {}
+                }
+            }
+            let seen = self.media_seen.get(id).copied().unwrap_or(0);
+            if let Some((s, cues)) = ed.services.poll_media_captions(path, seen) {
+                self.media_seen.insert(*id, s);
+                let came = self.media_coming.remove(id).is_some();
+                if came {
+                    ed.toast(
+                        ctx,
+                        if cues.is_empty() { format!("No words were heard in {name}") } else { format!("{name} transcribed: {} lines", cues.len()) },
+                    );
+                }
+                self.media_cues.insert(*id, cues);
+                self.captions_rev += 1;
+            } else if let Some((since, _)) = coming
+                && now - since > CAPTIONS_WAIT
+            {
+                self.media_coming.remove(id);
+            } else {
+                // Looked for: from now on now and then, unless they're coming.
+                self.media_seen.entry(*id).or_insert(0);
+            }
+        }
+        // Taken out of the bin: its lines go too.
+        let before = self.media_cues.len();
+        self.media_cues.retain(|id, _| media.iter().any(|(m, _, _)| m == id));
+        self.media_coming.retain(|id, _| media.iter().any(|(m, _, _)| m == id));
+        if self.media_cues.len() != before {
+            self.captions_rev += 1;
+        }
+    }
+
+    /// Export Transcript: asks where to save what was said in the video as edited (words cut or
+    /// muted are left out), as a transcript or as subtitles; in a browser it's downloaded.
+    /// A recording with no captions yet has them made first (on this computer), and the
+    /// transcript is asked for when they come.
+    pub fn export_transcript(&mut self, ed: &mut Editor, ctx: &egui::Context, format: TranscriptFormat) {
+        if self.cues.is_empty() {
+            if self.captions.is_none() && self.has_sound && self.path.is_some() {
+                if self.captions_coming.is_none() {
+                    self.make_captions(ed, ctx);
+                }
+                if self.captions_coming.is_some() {
+                    self.transcript_after = Some(format);
+                    ed.toast(ctx, "Transcribing first, on this computer: you'll choose where the transcript goes when it's ready");
+                }
+                return;
+            }
+            ed.error(ctx, "There's nothing said to export: the words were all cut or muted");
+            return;
+        }
+        let name = format.file_name(&self.name);
+        if ed.services.has_paths() {
+            ed.saving = None;
+            ed.saving_project = false;
+            ed.saving_transcript = Some(format);
+            ed.services.request_save(&name, &format.filters());
+        } else if let Err(e) = ed.services.download(&name, format.write(&self.cues).as_bytes()) {
+            ed.error(ctx, e);
+        }
+    }
+
+    /// Whether Export Transcript has something to save, or captions it can make first.
+    fn can_export_transcript(&self) -> bool {
+        !self.cues.is_empty() || (self.captions.is_none() && self.has_sound && self.path.is_some())
     }
 
     /// Whether to look for captions now: while there are none, or some are coming.
@@ -259,7 +572,9 @@ impl VideoView {
 
     /// Asks the host whether captions have come.
     fn poll_captions(&mut self, ed: &mut Editor, ctx: &egui::Context, now: f64) {
-        if !self.waiting_for_captions() {
+        let waiting = self.waiting_for_captions();
+        let media = !self.media_coming.is_empty() || self.media_with_sound().iter().any(|(id, _, _)| !self.media_seen.contains_key(id));
+        if !waiting && !media && self.media_with_sound().is_empty() {
             return;
         }
         if let Some(since) = self.captions_coming
@@ -267,12 +582,43 @@ impl VideoView {
         {
             self.captions_coming = None;
         }
-        if now >= self.next_poll {
-            // Often while they're coming; now and then otherwise (made by the service meanwhile).
-            self.next_poll = now + if self.captions_coming.is_some() { CAPTIONS_POLL } else { CAPTIONS_GLANCE };
+        let coming = self.captions_coming.is_some() || !self.media_coming.is_empty();
+        if coming {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(CAPTIONS_POLL));
+        }
+        if now < self.next_poll {
+            return;
+        }
+        // Often while they're coming; now and then otherwise (made by the service meanwhile).
+        self.next_poll = now + if coming || media { CAPTIONS_POLL } else { CAPTIONS_GLANCE };
+        self.poll_media_captions(ed, ctx, now);
+        if !waiting {
+            return;
+        }
+        // How far the recording's have got, or why they couldn't be made.
+        if self.captions_coming.is_some()
+            && let Some(path) = self.path.clone()
+        {
+            match ed.services.captions_progress(&path) {
+                Some(Ok(p)) => {
+                    self.captions_progress = Some(p);
+                    // Still at it: not given up on.
+                    self.captions_coming = Some(now);
+                }
+                Some(Err(why)) => {
+                    self.captions_coming = None;
+                    self.captions_progress = None;
+                    self.transcript_after = None;
+                    ed.error(ctx, format!("The recording couldn't be transcribed: {why}"));
+                }
+                None => {}
+            }
+        }
+        {
             if let Some(path) = self.path.clone()
                 && let Some((seen, caps)) = ed.services.poll_captions(&path, self.captions_seen)
             {
+                self.captions_progress = None;
                 self.captions_seen = seen;
                 // The service has written its answer: some lines, or none heard.
                 let came = self.captions_coming.take().is_some();
@@ -282,7 +628,7 @@ impl VideoView {
                         self.captions = Some(c);
                         self.captions_rev += 1;
                         if came {
-                            ed.toast(ctx, format!("Captions made: {n} lines"));
+                            ed.toast(ctx, format!("Transcribed: {n} lines"));
                         }
                     }
                     None if came => ed.toast(ctx, "No words were heard in this recording"),
@@ -327,7 +673,7 @@ impl VideoView {
         if self.playhead >= self.length() {
             self.playhead = 0;
         }
-        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.playhead);
+        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead);
         self.playing = Some(Playing { since: now, from: self.playhead, sound });
     }
 
@@ -357,6 +703,8 @@ impl VideoView {
         if let Some((a, b)) = self.range.take() {
             self.run(ed, ctx, "video.cut", json!({"from": a, "to": b}));
             self.playhead = a.min(self.length());
+        } else if let Some((layer, item)) = self.item.take() {
+            self.run(ed, ctx, "video.deleteItem", json!({"layer": layer, "item": item}));
         } else if let Some((t, c)) = self.selected.take() {
             self.run(ed, ctx, "video.deleteClip", json!({"track": t, "clip": c}));
         }
@@ -381,35 +729,21 @@ impl VideoView {
         }
     }
 
-    pub fn start_export(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if self.export.is_some() {
-            return;
-        }
-        let Some(path) = &self.path else {
-            ed.error(ctx, "Only a recording opened from a file can be made into a video here");
-            return;
-        };
-        let out = std::path::Path::new(path).with_extension("mp4").to_string_lossy().to_string();
-        let job = VideoJob {
-            recording: self.rec.clone(),
-            timeline: self.session.timeline.clone(),
-            out,
-            max_size: (1920, 1080),
-            fps: self.rec.header.fps.clamp(5, 60),
-            captions: (!self.cues.is_empty()).then(|| self.cues.to_vec()),
-            burn: self.session.timeline.captions.burn && !self.cues.is_empty(),
-        };
-        match ed.services.export_video(job) {
-            Ok(x) => self.export = Some(x),
-            Err(e) => ed.error(ctx, e),
-        }
-    }
-
     /// Work done every frame: the playhead while playing, saving edits, the export, the captions.
     fn tick(&mut self, ed: &mut Editor, ctx: &egui::Context) {
         let now = ctx.input(|i| i.time);
         self.poll_captions(ed, ctx, now);
+        self.poll_media(ed, ctx);
         self.place_captions();
+        // Export Transcript waiting for captions: asked for once they've come, let go if none do.
+        if let Some(f) = self.transcript_after {
+            if !self.cues.is_empty() {
+                self.transcript_after = None;
+                self.export_transcript(ed, ctx, f);
+            } else if self.captions_coming.is_none() {
+                self.transcript_after = None;
+            }
+        }
         if let Some(p) = &self.playing {
             let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from + ((now - p.since).max(0.0) * 1e6) as u64);
             if at >= self.length() {
@@ -429,27 +763,12 @@ impl VideoView {
         } else if self.session.revision() != self.saved {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
-        if let Some(x) = &self.export {
-            let done = x.done.lock().ok().and_then(|mut d| d.take());
-            match done {
-                Some(Ok(path)) => {
-                    ed.toast(ctx, format!("Video saved: {}", crate::editor::file_name(&path)));
-                    self.exported = Some(path);
-                    self.export = None;
-                }
-                Some(Err(e)) => {
-                    if !x.cancel.load(Ordering::SeqCst) {
-                        ed.error(ctx, format!("The video could not be made: {e}"));
-                    }
-                    self.export = None;
-                }
-                None => ctx.request_repaint_after(std::time::Duration::from_millis(200)),
-            }
-        }
+        self.poll_export(ed, ctx);
     }
 
     fn keys(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if ed.dialog.is_some() || ctx.egui_wants_keyboard_input() {
+        // Export Video's windows take the keys (Enter, Esc) while one is up.
+        if ed.dialog.is_some() || self.export.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let now = ctx.input(|i| i.time);
@@ -465,7 +784,7 @@ impl VideoView {
             ed.services.request_open();
         }
         if pressed(cmd(Key::E)) {
-            self.start_export(ed, ctx);
+            self.open_export(ed, ctx);
         }
         if pressed(cmd(Key::X)) && self.range.is_some() {
             self.delete(ed, ctx);
@@ -515,9 +834,13 @@ impl VideoView {
                         }
                         ui.close();
                     }
+                    if ui.button("Import Media…").on_hover_text("Pictures, sound files and recordings for the Media Bin").clicked() {
+                        ed.services.request_import();
+                        ui.close();
+                    }
                     ui.separator();
-                    if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video").shortcut_text("Ctrl+E")).clicked() {
-                        self.start_export(ed, &ctx);
+                    if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video…").shortcut_text("Ctrl+E")).clicked() {
+                        self.open_export(ed, &ctx);
                         ui.close();
                     }
                     if let Some(p) = &self.path
@@ -526,14 +849,37 @@ impl VideoView {
                         ed.services.open_folder(Some(p));
                         ui.close();
                     }
-                    if self.has_sound && self.captions.is_none() {
-                        let can = self.path.is_some() && self.captions_coming.is_none();
+                    if self.hears_anything() {
+                        let can = self.can_transcribe() && self.transcribing().is_none();
+                        let again = self.captions.is_some() || !self.media_cues.is_empty();
+                        let label = if again { "Transcribe Again" } else { "Transcribe" };
                         if ui
-                            .add_enabled(can, egui::Button::new("Make Captions"))
-                            .on_hover_text("Write down what was said, on this computer, in the background")
+                            .add_enabled(can, egui::Button::new(label))
+                            .on_hover_text(
+                                "Write down what's said in the video, on this computer, in the background (the sound and videos you added included)",
+                            )
                             .clicked()
                         {
-                            self.make_captions(ed, &ctx);
+                            self.transcribe(ed, &ctx, again);
+                            ui.close();
+                        }
+                    }
+                    if ed.services.has_paths()
+                        && ui
+                            .button("Transcribe a Video or Sound File…")
+                            .on_hover_text("Any video or sound file, made by another program too: a transcript and subtitles beside it")
+                            .clicked()
+                    {
+                        ed.services.request_transcribe();
+                        ui.close();
+                    }
+                    if self.can_export_transcript() {
+                        if ui.button("Export Transcript…").on_hover_text("What was said, as a text file (.txt)").clicked() {
+                            self.export_transcript(ed, &ctx, TranscriptFormat::Text);
+                            ui.close();
+                        }
+                        if ui.button("Export Subtitles…").on_hover_text("What was said, as subtitles (.srt) for a video player or site").clicked() {
+                            self.export_transcript(ed, &ctx, TranscriptFormat::Subtitles);
                             ui.close();
                         }
                     }
@@ -568,8 +914,15 @@ impl VideoView {
                         self.split(ed, &ctx);
                         ui.close();
                     }
-                    let what = if self.range.is_some() { "Cut the Stretch" } else { "Delete the Clip" };
-                    if ui.add_enabled(self.range.is_some() || self.selected.is_some(), egui::Button::new(what).shortcut_text("Del")).clicked() {
+                    let what = if self.item.is_some() {
+                        "Delete the Item"
+                    } else if self.range.is_some() {
+                        "Cut the Stretch"
+                    } else {
+                        "Delete the Clip"
+                    };
+                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
+                    if ui.add_enabled(any, egui::Button::new(what).shortcut_text("Del")).clicked() {
                         self.delete(ed, &ctx);
                         ui.close();
                     }
@@ -594,6 +947,7 @@ impl VideoView {
                     }
                 });
                 ui.menu_button("View", |ui| {
+                    ui.checkbox(&mut self.library_open, "Library and Media Bin");
                     if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
                         ed.services.save_settings(&ed.settings);
                     }
@@ -607,10 +961,6 @@ impl VideoView {
                         let mut show = c.show;
                         if ui.checkbox(&mut show, "Captions on the Picture").changed() {
                             self.run(ed, &ctx, "video.captions", json!({"show": show}));
-                        }
-                        let mut burn = c.burn;
-                        if ui.checkbox(&mut burn, "Captions in the Video Made").on_hover_text("Burned into the MP4's pictures").changed() {
-                            self.run(ed, &ctx, "video.captions", json!({"burn": burn}));
                         }
                     }
                 });
@@ -634,6 +984,13 @@ impl VideoView {
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
+                    let lib = ui
+                        .add(egui::Button::new(RichText::new("Library").size(13.5)).selected(self.library_open).min_size(vec2(70.0, 28.0)))
+                        .on_hover_text("Titles, lower thirds, overlays, transitions and your own media, to drag onto the timeline");
+                    if lib.clicked() {
+                        self.library_open = !self.library_open;
+                    }
+                    ui.add_space(4.0);
                     if icons::button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
                         ed.services.request_open();
                     }
@@ -651,12 +1008,14 @@ impl VideoView {
                     if widgets::button(ui, "Split").on_hover_text("Split at the playhead (S): the selected clip's track, or all of them").clicked() {
                         self.split(ed, &ctx);
                     }
-                    let tip = if self.range.is_some() {
+                    let tip = if self.item.is_some() {
+                        "Take the chosen item off its layer (Del)"
+                    } else if self.range.is_some() {
                         "Take the chosen stretch out of every track (Del)"
                     } else {
                         "Delete the selected clip, leaving a gap (Del)"
                     };
-                    let any = self.range.is_some() || self.selected.is_some();
+                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
                     if ui
                         .add_enabled_ui(any, |ui| widgets::button(ui, if self.range.is_some() { "Cut" } else { "Delete" }))
                         .inner
@@ -676,28 +1035,25 @@ impl VideoView {
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
-                        match &self.export {
-                            Some(x) => {
-                                if widgets::button(ui, "Cancel").clicked() {
-                                    x.cancel.store(true, Ordering::SeqCst);
-                                }
-                                let p = x.progress.load(Ordering::SeqCst).min(1000) as f32 / 1000.0;
-                                ui.add(egui::ProgressBar::new(p).desired_width(160.0).show_percentage());
-                                ui.label(RichText::new("Making the video…").color(t.muted));
-                            }
-                            None => {
-                                if widgets::primary_button(ui, "Export Video").on_hover_text("Make an MP4 of the video as edited (Ctrl+E)").clicked()
-                                {
-                                    self.start_export(ed, &ctx);
-                                }
-                                if let Some(p) = self.exported.clone() {
-                                    if widgets::button(ui, "Show in folder").clicked() {
-                                        ed.services.open_folder(Some(&p));
-                                    }
-                                    if widgets::button(ui, "Play video").on_hover_text(crate::editor::file_name(&p)).clicked() {
-                                        ed.services.open_with_system(&p);
-                                    }
-                                }
+                        let tip = "Choose where the video goes, what it's made as and whether its captions go with it (Ctrl+E)";
+                        if widgets::primary_button(ui, "Export Video").on_hover_text(tip).clicked() {
+                            self.open_export(ed, &ctx);
+                        }
+                        if self.has_sound {
+                            let tip = if !self.cues.is_empty() {
+                                "Save what was said as a transcript (.txt) or subtitles (.srt)"
+                            } else {
+                                "This recording has no captions yet: they're made first, on this computer, then you choose where the transcript goes"
+                            };
+                            let why_not = if self.transcript_after.is_some() {
+                                "Transcribing first, on this computer…"
+                            } else {
+                                "Nothing said is left in the video as edited"
+                            };
+                            let can = self.can_export_transcript() && self.transcript_after.is_none();
+                            let r = ui.add_enabled_ui(can, |ui| widgets::button(ui, "Export Transcript")).inner;
+                            if r.on_hover_text(tip).on_disabled_hover_text(why_not).clicked() {
+                                self.export_transcript(ed, &ctx, TranscriptFormat::Text);
                             }
                         }
                     });
@@ -705,7 +1061,7 @@ impl VideoView {
             });
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&self, ui: &mut Ui, files: Option<(String, Option<f32>)>) {
         let t = Tokens::get(ui.ctx());
         egui::Panel::bottom("video_status")
             .exact_size(24.0)
@@ -725,14 +1081,16 @@ impl VideoView {
                     if !self.rec.finished {
                         ui.label(small("This recording stopped early: it's what was saved".to_string()));
                     }
-                    if let Some(c) = &self.captions {
-                        ui.label(small(format!("{} caption lines", c.cues.len())));
-                    } else if self.captions_coming.is_some() {
-                        ui.label(small("Making captions…".to_string()));
+                    if !self.cues.is_empty() {
+                        ui.label(small(format!("{} caption lines", self.cues.len())));
                     }
                     let saved = if self.session.revision() == self.saved { "Edits saved" } else { "Saving…" };
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.label(small(saved.to_string()));
+                        // Transcribing: this video's, else files picked to transcribe.
+                        if let Some((text, p)) = self.transcribing().or_else(|| files.clone()) {
+                            crate::transcribe::indicator(ui, &text, p);
+                        }
                     });
                 });
             });
@@ -740,15 +1098,88 @@ impl VideoView {
 
     /// The camera's place in the picture.
     fn camera_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
-        let Some(track) = self.session.timeline.find(StreamKind::Camera) else { return };
+        let camera = self.session.timeline.find(StreamKind::Camera);
+        let pointer = !self.rec.pointer.is_empty();
+        if camera.is_none() && !pointer {
+            return;
+        }
         let t = Tokens::get(ui.ctx());
-        let ctx = ui.ctx().clone();
-        let cam = self.session.timeline.camera;
         egui::Panel::right("video_camera")
             .exact_size(236.0)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    if let Some(track) = camera {
+                        self.camera_section(ed, ui, track);
+                        ui.add_space(18.0);
+                    }
+                    if pointer {
+                        self.pointer_section(ed, ui);
+                    }
+                });
+            });
+    }
+
+    /// The mouse pointer on the video: shown or not, how large, how smooth, its clicks ringed.
+    fn pointer_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let look = self.session.timeline.pointer;
+        ui.label(RichText::new("Pointer").size(16.0).color(t.text));
+        ui.add_space(6.0);
+        let mut show = look.show;
+        if ui.checkbox(&mut show, "Show the mouse pointer").on_hover_text("The pointer as it was while recording").changed() {
+            self.run(ed, &ctx, "video.pointer", json!({"show": show}));
+        }
+        ui.add_enabled_ui(look.show, |ui| {
+            for (label, key, value, range, tip) in [
+                ("Size", "size", look.size * 100.0, 50.0..=400.0, "How large it's drawn: 100% is as it was on the screen"),
+                (
+                    "Smoother movement",
+                    "smooth",
+                    look.smooth * 100.0,
+                    0.0..=100.0,
+                    "Evens out its path. Clicks and drags stay exactly where they were",
+                ),
+            ] {
+                ui.add_space(6.0);
+                ui.label(RichText::new(label).color(t.muted));
+                let mut v = value;
+                let r = ui.add(egui::Slider::new(&mut v, range).suffix("%")).on_hover_text(tip);
+                if r.drag_started() {
+                    self.session.begin("Pointer");
+                }
+                if r.changed() {
+                    let p = json!({ key: v / 100.0 });
+                    if r.dragged() {
+                        let _ = self.session.drag("video.pointer", &p);
+                    } else {
+                        self.run(ed, &ctx, "video.pointer", p)
+                    }
+                }
+                if r.drag_stopped() {
+                    self.session.commit();
+                }
+            }
+            ui.add_space(6.0);
+            let mut clicks = look.clicks;
+            if ui
+                .checkbox(&mut clicks, "Show clicks")
+                .on_hover_text("A ring where a button is pressed: yellow for the left, blue for the right")
+                .changed()
+            {
+                self.run(ed, &ctx, "video.pointer", json!({"clicks": clicks}));
+            }
+        });
+    }
+
+    fn camera_section(&mut self, ed: &mut Editor, ui: &mut Ui, track: usize) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let cam = self.session.timeline.camera;
+        {
+            {
                 ui.label(RichText::new("Camera").size(16.0).color(t.text));
                 ui.add_space(8.0);
                 ui.label(RichText::new("Corner").color(t.muted));
@@ -802,7 +1233,8 @@ impl VideoView {
                 if hidden {
                     ui.label(RichText::new("The camera's clips were all deleted.").color(t.muted));
                 }
-            });
+            }
+        }
     }
 
     /// The picture at the playhead, fitted to the space.
@@ -820,16 +1252,24 @@ impl VideoView {
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
             // The picture, and under it the play button with the time.
-            let whole = ui.max_rect().shrink(16.0);
+            // Room left round the picture: things can be moved off its edges, and found there.
+            let whole = ui.max_rect().shrink(36.0);
             let area = Rect::from_min_max(whole.min, pos2(whole.max.x, (whole.max.y - CONTROLS).max(whole.min.y)));
             let mut bottom = area.max.y;
+            let mut shown_at = None;
             if let Some(tex) = &self.texture {
                 let size = tex.size_vec2();
                 let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
                 let r = Rect::from_center_size(area.center(), size * f);
                 ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
+                shown_at = Some(r);
                 bottom = r.max.y;
+            }
+            // The picture is a designer too: what's chosen on it is moved and resized there.
+            if let Some(r) = shown_at {
+                self.picture_rect = Some(r);
+                self.designer(ui, r);
             }
             let now = ui.ctx().input(|i| i.time);
             let playing = self.playing.is_some();
@@ -900,20 +1340,75 @@ impl VideoView {
         }
     }
 
+    /// A layer's header: its name, shown or not, its volume (a sound layer) and a way to delete it.
+    fn layer_header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect, layer: &screengrabcraft_media::layers::Layer) {
+        use screengrabcraft_media::layers::LayerKind;
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let colour = match layer.kind {
+            LayerKind::Picture => Color32::from_rgb(0xD9, 0x7B, 0x29),
+            LayerKind::Sound => Color32::from_rgb(0x2F, 0x80, 0xED),
+        };
+        ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, colour);
+        let painter = ui.painter_at(row);
+        painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, &layer.name, egui::FontId::proportional(13.0), t.text);
+        let del = Rect::from_min_size(pos2(row.max.x - 26.0, row.min.y + 3.0), vec2(22.0, 18.0));
+        let r = ui.put(del, egui::Button::new(RichText::new("×").size(14.0)).frame(false));
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Delete {}", layer.name)));
+        if r.on_hover_text("Delete this layer and what's on it").clicked() {
+            if self.item.is_some_and(|(l, _)| l == layer.id) {
+                self.item = None;
+            }
+            self.run(ed, &ctx, "video.deleteLayer", json!({"layer": layer.id}));
+            return;
+        }
+        let show = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(58.0, 20.0));
+        let mut shown = !layer.hidden;
+        let tip = if layer.kind == LayerKind::Sound { "Heard in the video (untick to mute it)" } else { "Seen in the video (untick to hide it)" };
+        if ui.put(show, egui::Checkbox::new(&mut shown, "Show")).on_hover_text(tip).changed() {
+            self.run(ed, &ctx, "video.layer", json!({"layer": layer.id, "hidden": !shown}));
+        }
+        if layer.kind != LayerKind::Sound {
+            return;
+        }
+        let vol = Rect::from_min_size(row.min + vec2(72.0, 24.0), vec2(row.width() - 80.0, 20.0));
+        let mut v = layer.volume * 100.0;
+        let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
+        if r.drag_started() {
+            self.session.begin("Volume");
+            self.volume_drag = true;
+        }
+        if r.changed() {
+            let p = json!({"layer": layer.id, "volume": v / 100.0});
+            if self.volume_drag {
+                let _ = self.session.drag("video.layer", &p);
+            } else {
+                self.run(ed, &ctx, "video.layer", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+            self.volume_drag = false;
+        }
+    }
+
     /// The captions' row on the timeline: a block for each line, in its speaker's track colour
     /// (faded when they're not on the picture), or where they stand.
     fn draw_captions_row(&self, painter: &egui::Painter, row: Rect, lane: Rect, pps: f32, scroll: f32, t: &Tokens) {
         let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(pps)) as f32 - scroll;
         painter.rect_filled(row, 0.0, t.window);
         if self.cues.is_empty() {
-            let status = if self.captions.is_some() {
-                "The captions' tracks were cut or muted where they were said."
-            } else if self.captions_coming.is_some() {
-                "Making captions on this computer… they appear here when they're ready."
-            } else if self.path.is_some() {
-                "No captions yet. Make Captions writes down what was said, on this computer."
+            let status = if let Some((_, p)) = self.transcribing() {
+                match p {
+                    Some(p) => format!("Transcribing on this computer… {:.0}%. The captions appear here when they're ready.", p * 100.0),
+                    None => "Transcribing on this computer… the captions appear here when they're ready.".to_string(),
+                }
+            } else if self.captions.is_some() || !self.media_cues.is_empty() {
+                "Nothing said is left in the video: it was cut, muted or hidden where it was said.".to_string()
+            } else if self.can_transcribe() {
+                "No captions yet. Transcribe writes down what's said in the video, on this computer.".to_string()
             } else {
-                "Captions are made of recordings saved in a file."
+                "Captions are made of recordings saved in a file.".to_string()
             };
             painter.text(pos2(lane.min.x + 12.0, row.center().y), egui::Align2::LEFT_CENTER, status, egui::FontId::proportional(12.0), t.muted);
             return;
@@ -936,8 +1431,8 @@ impl VideoView {
         }
     }
 
-    /// The captions' header: Show (on the picture) and In video (burned into the MP4), or Make
-    /// Captions when there are none.
+    /// The captions' header: while they're being made, how far they've got; then Show (on the
+    /// picture) and Again (transcribe again); Transcribe when there are none.
     fn captions_header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -946,25 +1441,32 @@ impl VideoView {
         ui.scope_builder(egui::UiBuilder::new().max_rect(title).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
             ui.label(RichText::new("Captions").size(13.0).color(t.text));
         });
-        if self.captions.is_some() {
+        if let Some((what, p)) = self.transcribing() {
+            let bar = Rect::from_min_size(row.min + vec2(12.0, 26.0), vec2(row.width() - 24.0, 16.0));
+            let words = match p {
+                Some(p) => format!("{:.0}%", p * 100.0),
+                None => "Waiting…".to_string(),
+            };
+            ui.put(bar, egui::ProgressBar::new(p.unwrap_or(0.0)).text(words).fill(t.accent).animate(p.is_none())).on_hover_text(what);
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        } else if self.captions.is_some() || !self.media_cues.is_empty() {
             let c = self.session.timeline.captions;
             let mut show = c.show;
             let r = ui.put(Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(60.0, 20.0)), egui::Checkbox::new(&mut show, "Show"));
-            if r.on_hover_text("The captions on the picture here").changed() {
+            if r.on_hover_text("The captions on the picture here (Export Video asks whether they go in the video)").changed() {
                 self.run(ed, &ctx, "video.captions", json!({"show": show}));
             }
-            let mut burn = c.burn;
-            let r =
-                ui.put(Rect::from_min_size(row.min + vec2(74.0, 24.0), vec2(row.width() - 80.0, 20.0)), egui::Checkbox::new(&mut burn, "In video"));
-            if r.on_hover_text("Burned into the pictures of the video made").changed() {
-                self.run(ed, &ctx, "video.captions", json!({"burn": burn}));
+            if self.can_transcribe() {
+                let b = ui.put(Rect::from_min_size(row.min + vec2(76.0, 23.0), vec2(80.0, 21.0)), egui::Button::new("Again"));
+                b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Transcribe Again"));
+                if b.on_hover_text("Transcribe again: what's said in the video, the sound and videos you added included").clicked() {
+                    self.transcribe(ed, &ctx, true);
+                }
             }
-        } else if self.captions_coming.is_some() {
-            ui.painter_at(row).text(row.min + vec2(14.0, 26.0), egui::Align2::LEFT_TOP, "Being made…", egui::FontId::proportional(11.0), t.muted);
-        } else if self.path.is_some() {
-            let b = ui.put(Rect::from_min_size(row.min + vec2(10.0, 23.0), vec2(116.0, 21.0)), egui::Button::new("Make Captions"));
-            if b.on_hover_text("Write down what was said, on this computer, in the background").clicked() {
-                self.make_captions(ed, &ctx);
+        } else if self.can_transcribe() {
+            let b = ui.put(Rect::from_min_size(row.min + vec2(10.0, 23.0), vec2(116.0, 21.0)), egui::Button::new("Transcribe"));
+            if b.on_hover_text("Write down what's said in the video, on this computer, in the background").clicked() {
+                self.transcribe(ed, &ctx, false);
             }
         }
     }
@@ -974,10 +1476,15 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         let tracks = self.session.timeline.tracks.clone();
+        // The layers above the tracks, the top one first (it's drawn over the others), and a band
+        // above them that a drop on makes a layer of its own.
+        let layers: Vec<screengrabcraft_media::layers::Layer> = self.session.timeline.layers.iter().rev().cloned().collect();
+        let media = self.session.timeline.media.clone();
+        let nl = layers.len();
         // The captions' row, under the tracks, when there's sound to have words in.
-        let caption_row = self.has_sound;
-        let rows = tracks.len().max(1) + usize::from(caption_row);
-        let height = RULER_H + rows as f32 * ROW_H + 10.0;
+        let caption_row = self.hears_anything();
+        let rows = nl + tracks.len().max(1) + usize::from(caption_row);
+        let height = RULER_H + NEW_LAYER_H + rows as f32 * ROW_H + 10.0;
         egui::Panel::bottom("video_timeline")
             .exact_size(height)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(0, 4)))
@@ -992,8 +1499,18 @@ impl VideoView {
                 let (pps, scroll) = (self.pps, self.scroll);
                 let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(pps)) as f32 - scroll;
                 let us_of = |x: f32| (f64::from((x - lane.min.x + scroll).max(0.0)) / f64::from(pps) * 1e6) as u64;
-                let row_rect =
-                    |i: usize| Rect::from_min_size(pos2(full.min.x, full.min.y + RULER_H + i as f32 * ROW_H), vec2(full.width(), ROW_H - 4.0));
+                let rows_top = full.min.y + RULER_H + NEW_LAYER_H;
+                // Row `i` of everything: the layers first, then the tracks.
+                let any_row = |i: usize| Rect::from_min_size(pos2(full.min.x, rows_top + i as f32 * ROW_H), vec2(full.width(), ROW_H - 4.0));
+                let row_rect = |i: usize| any_row(i + nl);
+                let band = Rect::from_min_max(pos2(lane.min.x, full.min.y + RULER_H), pos2(lane.max.x, rows_top - 2.0));
+                // The layer under a height, by its id; whether it's the band.
+                let layer_at = |y: f32| -> Option<u32> {
+                    let r = ((y - rows_top) / ROW_H).floor();
+                    (r >= 0.0 && (r as usize) < nl).then(|| layers.get(r as usize).map(|l| l.id)).flatten()
+                };
+                let in_band = |y: f32| y >= band.min.y && y < rows_top;
+                self.lane_rect = Some((lane, rows_top));
                 // The lane takes the pointer first; the headers have their own controls.
                 let resp = ui.interact(lane, ui.id().with("lane"), Sense::click_and_drag());
                 let painter = ui.painter_at(full);
@@ -1014,6 +1531,55 @@ impl VideoView {
                         t.muted,
                     );
                     s += step;
+                }
+                // The band for a new layer, lit while something from the library is over it.
+                let carrying = egui::DragAndDrop::has_payload_of_type::<LibDrop>(&ctx) || matches!(self.item_drag, Some(ItemDrag::Move { .. }));
+                let over_band = resp.hover_pos().or_else(|| ctx.pointer_hover_pos()).is_some_and(|p| band.contains(p));
+                let band_fill = if carrying && over_band { t.accent.gamma_multiply(0.35) } else { t.toolbar.gamma_multiply(0.6) };
+                painter.rect_filled(band, 3.0, band_fill);
+                let band_words =
+                    if carrying { "Drop here for a layer of its own" } else { "Layers: drag titles, overlays and media here from the Library" };
+                painter.text(band.left_center() + vec2(8.0, 0.0), egui::Align2::LEFT_CENTER, band_words, egui::FontId::proportional(11.0), t.muted);
+                // The layers and their items.
+                for (k, layer) in layers.iter().enumerate() {
+                    let row = any_row(k);
+                    let lane_row = Rect::from_min_max(pos2(lane.min.x, row.min.y), pos2(lane.max.x, row.max.y));
+                    painter.rect_filled(lane_row, 0.0, if k % 2 == 0 { t.window } else { t.panel });
+                    for item in &layer.items {
+                        let r = Rect::from_min_max(pos2(x_of(item.at), row.min.y + 3.0), pos2(x_of(item.end()), row.max.y - 3.0));
+                        if r.max.x < lane.min.x || r.min.x > lane.max.x {
+                            continue;
+                        }
+                        let colour = if layer.hidden { Color32::from_gray(140) } else { library::item_colour(item, &media) };
+                        painter.rect_filled(r, 4.0, colour.gamma_multiply(0.45));
+                        painter.rect_stroke(r, 4.0, Stroke::new(1.0, colour), StrokeKind::Inside);
+                        painter.with_clip_rect(r.shrink(2.0)).text(
+                            r.min + vec2(8.0, 6.0),
+                            egui::Align2::LEFT_TOP,
+                            item.label(&media),
+                            egui::FontId::proportional(12.0),
+                            t.text,
+                        );
+                        if self.item == Some((layer.id, item.id)) {
+                            painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
+                        }
+                    }
+                }
+                // Something from the library over the timeline: where it would go.
+                if let (Some(what), Some(p)) = (resp.dnd_hover_payload::<LibDrop>(), ctx.pointer_hover_pos()) {
+                    let len = match what.as_ref() {
+                        LibDrop::Template(key) => screengrabcraft_media::layers::template(key).map(|t| t.item.len).unwrap_or(3_000_000),
+                        LibDrop::Media(id) => {
+                            media.iter().find(|m| m.id == *id).map(|m| if m.duration > 0 { m.duration } else { 5_000_000 }).unwrap_or(3_000_000)
+                        }
+                    };
+                    let y = match layer_at(p.y) {
+                        Some(_) => any_row(((p.y - rows_top) / ROW_H).floor().max(0.0) as usize),
+                        None => band,
+                    };
+                    let ghost = Rect::from_min_max(pos2(p.x, y.min.y + 2.0), pos2(x_of(us_of(p.x) + len), y.max.y - 2.0));
+                    painter.rect_filled(ghost, 4.0, t.accent.gamma_multiply(0.25));
+                    painter.rect_stroke(ghost, 4.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
                 }
                 // The rows and their clips.
                 for (i, track) in tracks.iter().enumerate() {
@@ -1085,6 +1651,17 @@ impl VideoView {
                 // The headers, over the left of the rows.
                 painter.rect_filled(Rect::from_min_max(full.min, pos2(lane.min.x, full.max.y)), 0.0, t.panel);
                 painter.line_segment([pos2(lane.min.x, full.min.y), pos2(lane.min.x, full.max.y)], Stroke::new(1.0, t.border));
+                painter.text(
+                    pos2(full.min.x + 14.0, band.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    if nl == 0 { "Layers" } else { "Layers (top is in front)" },
+                    egui::FontId::proportional(11.0),
+                    t.muted,
+                );
+                for (k, layer) in layers.iter().enumerate() {
+                    let row = any_row(k);
+                    self.layer_header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), layer);
+                }
                 for (i, track) in tracks.iter().enumerate() {
                     let row = row_rect(i);
                     self.header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), i, track);
@@ -1095,35 +1672,127 @@ impl VideoView {
                 }
                 // The pointer on the lane.
                 let row_at = |y: f32| -> Option<usize> {
-                    let r = ((y - full.min.y - RULER_H) / ROW_H).floor();
+                    let r = ((y - rows_top) / ROW_H).floor() - nl as f32;
                     (r >= 0.0 && (r as usize) < tracks.len()).then_some(r as usize)
+                };
+                // Whether `x` is on a block from `a` to `b`: None if not, else which end it's at.
+                let on_block = |a: f32, b: f32, x: f32| -> Option<Option<bool>> {
+                    if x < a - EDGE || x > b + EDGE {
+                        return None;
+                    }
+                    Some(if (x - a).abs() <= EDGE {
+                        Some(true)
+                    } else if (x - b).abs() <= EDGE {
+                        Some(false)
+                    } else {
+                        None
+                    })
                 };
                 let clip_at = |track: usize, x: f32| -> Option<(usize, Option<bool>)> {
                     let tr = tracks.get(track)?;
-                    tr.clips.iter().enumerate().find_map(|(c, clip)| {
-                        let (a, b) = (x_of(clip.at), x_of(clip.end()));
-                        if x < a - EDGE || x > b + EDGE {
-                            return None;
-                        }
-                        let edge = if (x - a).abs() <= EDGE {
-                            Some(true)
-                        } else if (x - b).abs() <= EDGE {
-                            Some(false)
-                        } else {
-                            None
-                        };
-                        Some((c, edge))
-                    })
+                    tr.clips.iter().enumerate().find_map(|(c, clip)| on_block(x_of(clip.at), x_of(clip.end()), x).map(|e| (c, e)))
                 };
-                if let Some(p) = resp.hover_pos()
-                    && let Some(track) = row_at(p.y)
-                    && let Some((_, Some(_))) = clip_at(track, p.x)
-                {
-                    ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                let layer_item_at = |layer: u32, x: f32| -> Option<(u32, Option<bool>)> {
+                    let l = layers.iter().find(|l| l.id == layer)?;
+                    l.items.iter().find_map(|it| on_block(x_of(it.at), x_of(it.end()), x).map(|e| (it.id, e)))
+                };
+                if let Some(p) = resp.hover_pos() {
+                    let on_edge = match layer_at(p.y) {
+                        Some(l) => matches!(layer_item_at(l, p.x), Some((_, Some(_)))),
+                        None => row_at(p.y).is_some_and(|track| matches!(clip_at(track, p.x), Some((_, Some(_))))),
+                    };
+                    if on_edge {
+                        ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
                 }
-                if resp.drag_started()
-                    && let Some(p) = resp.interact_pointer_pos()
+                // Something from the library let go of here: on the layer under it (one of its
+                // kind, where it fits), else on a layer of its own.
+                if let Some(what) = resp.dnd_release_payload::<LibDrop>()
+                    && let Some(p) = ctx.pointer_interact_pos().or_else(|| ctx.pointer_hover_pos())
                 {
+                    let layer = if in_band(p.y) { None } else { layer_at(p.y) };
+                    self.drop_on_timeline(ed, &ctx, &what, layer, us_of(p.x));
+                }
+                // A layer's item taken hold of: moved, or trimmed by an end.
+                let mut item_grabbed = false;
+                if resp.drag_started()
+                    && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+                    && let Some(layer) = layer_at(p.y)
+                    && let Some((item, edge)) = layer_item_at(layer, p.x)
+                {
+                    item_grabbed = true;
+                    self.item = Some((layer, item));
+                    self.selected = None;
+                    self.camera_chosen = false;
+                    self.item_drag = Some(match edge {
+                        Some(start) => {
+                            self.session.begin("Trim");
+                            ItemDrag::Trim { layer, item, start }
+                        }
+                        None => {
+                            self.session.begin("Move");
+                            let at = self.session.timeline.item(layer, item).map(|i| i.at).unwrap_or(0);
+                            ItemDrag::Move { layer, item, grab: us_of(p.x).saturating_sub(at), from: layer }
+                        }
+                    });
+                }
+                if resp.dragged()
+                    && let (Some(p), Some(d)) = (resp.interact_pointer_pos(), self.item_drag)
+                {
+                    let us = us_of(p.x);
+                    match d {
+                        ItemDrag::Trim { layer, item, start } => {
+                            if let Some(it) = self.session.timeline.item(layer, item).cloned() {
+                                let (a, b) = if start { (us, it.end()) } else { (it.at, us) };
+                                let _ = self.session.drag("video.trimItem", &json!({"layer": layer, "item": item, "start": a, "end": b}));
+                            }
+                        }
+                        ItemDrag::Move { layer, item, grab, from } => {
+                            // Onto the layer under the pointer when it's of the item's kind.
+                            let kind = self.session.timeline.layer(layer).map(|l| l.kind);
+                            let to = layer_at(p.y).filter(|id| self.session.timeline.layer(*id).map(|l| l.kind) == kind).unwrap_or(layer);
+                            let params = json!({"layer": layer, "item": item, "toLayer": to, "at": us.saturating_sub(grab)});
+                            if let Ok(v) = self.session.drag("video.moveItem", &params) {
+                                let now_on = v.get("layer").and_then(Value::as_u64).map_or(layer, |l| l as u32);
+                                self.item_drag = Some(ItemDrag::Move { layer: now_on, item, grab, from });
+                                self.item = Some((now_on, item));
+                            }
+                        }
+                    }
+                    if p.x > lane.max.x - 20.0 {
+                        self.scroll += 8.0;
+                    } else if p.x < lane.min.x + 20.0 {
+                        self.scroll = (self.scroll - 8.0).max(0.0);
+                    }
+                }
+                if resp.drag_stopped()
+                    && let Some(d) = self.item_drag.take()
+                {
+                    if let ItemDrag::Move { layer, item, grab, from } = d {
+                        // Let go on the band: a layer of its own.
+                        if let Some(p) = ctx.pointer_interact_pos().or_else(|| ctx.pointer_hover_pos())
+                            && in_band(p.y)
+                            && let Ok(v) = self.session.drag(
+                                "video.moveItem",
+                                &json!({"layer": layer, "item": item, "toLayer": "new", "at": us_of(p.x).saturating_sub(grab)}),
+                            )
+                        {
+                            let now_on = v.get("layer").and_then(Value::as_u64).map_or(layer, |l| l as u32);
+                            self.item = Some((now_on, item));
+                        }
+                        // The layer it came from, left empty by it, goes.
+                        let now_on = self.item.map_or(layer, |(l, _)| l);
+                        if from != now_on && self.session.timeline.layer(from).is_some_and(|l| l.items.is_empty()) {
+                            let _ = self.session.drag("video.deleteLayer", &json!({"layer": from}));
+                        }
+                    }
+                    self.session.commit();
+                }
+                if !item_grabbed
+                    && resp.drag_started()
+                    && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
+                {
+                    self.item_drag = None;
                     self.drag = Some(if p.y < ruler.max.y {
                         Drag::Scrub
                     } else if let Some(track) = row_at(p.y) {
@@ -1180,10 +1849,20 @@ impl VideoView {
                 if resp.clicked()
                     && let Some(p) = resp.interact_pointer_pos()
                 {
+                    let on_item = layer_at(p.y).and_then(|l| layer_item_at(l, p.x).map(|(i, _)| (l, i)));
                     match row_at(p.y).and_then(|track| clip_at(track, p.x).map(|(c, _)| (track, c))) {
-                        Some(sel) if p.y >= ruler.max.y => self.selected = Some(sel),
+                        _ if on_item.is_some() => {
+                            self.item = on_item;
+                            self.selected = None;
+                            self.camera_chosen = false;
+                        }
+                        Some(sel) if p.y >= ruler.max.y => {
+                            self.selected = Some(sel);
+                            self.item = None;
+                        }
                         _ => {
                             self.selected = None;
+                            self.item = None;
                             self.range = None;
                             self.seek(ed, us_of(p.x), now);
                         }
@@ -1219,13 +1898,17 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     v.tick(ed, &ctx);
     v.menu_bar(ed, ui);
     v.tool_bar(ed, ui);
-    v.status_bar(ui);
+    v.status_bar(ui, ed.transcripts.status());
     if ed.settings.show_tray {
         crate::strip::show(ed, ui);
     }
     v.timeline(ed, ui);
-    v.camera_panel(ed, ui);
+    if !v.item_panel(ed, ui) {
+        v.camera_panel(ed, ui);
+    }
+    v.library_panel(ed, ui);
     v.preview(ed, ui);
+    v.export_windows(ed, &ctx);
     // Something else was opened meanwhile (from the strip): this one's edits are written first.
     if ed.video_epoch == epoch && ed.video.is_none() {
         ed.video = Some(v);

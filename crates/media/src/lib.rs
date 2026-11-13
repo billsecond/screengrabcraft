@@ -9,13 +9,22 @@
 #[cfg(not(target_arch = "wasm32"))]
 pub mod av1;
 pub mod captions;
+#[cfg(target_os = "windows")]
+pub mod clip;
 pub mod compose;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;
+#[cfg(target_os = "windows")]
+mod h264;
+pub mod layer_draw;
+pub mod layers;
+pub mod media_store;
 pub mod mp4;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod opus;
+pub mod pointer;
 pub mod recording;
+pub mod stock;
 pub mod timeline;
 pub mod yuv;
 

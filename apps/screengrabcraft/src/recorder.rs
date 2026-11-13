@@ -21,6 +21,9 @@ use crate::app::{APP_ID, ICON, Service};
 
 pub struct Recorder {
     pub focus: bool,
+    /// Put away in the tray (its Minimize): not shown, and nothing listened to or watched, until
+    /// the tray icon brings it back.
+    pub hidden: bool,
     view: RecorderView,
     devices: RecorderDevices,
     meter: Option<Meter>,
@@ -32,7 +35,7 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn open() -> Recorder {
-        Recorder { focus: true, view: RecorderView::default(), devices: find_devices(), meter: None, sound_meter: None, camera: None }
+        Recorder { focus: true, hidden: false, view: RecorderView::default(), devices: find_devices(), meter: None, sound_meter: None, camera: None }
     }
 
     /// The microphone meter's reading.
@@ -273,6 +276,24 @@ fn find_devices() -> RecorderDevices {
 
 pub fn show(svc: &mut Service, ctx: &egui::Context) {
     let Some(mut r) = svc.recorder.take() else { return };
+    if r.hidden {
+        // Put away: the microphone, the computer's sound and the camera are let go meanwhile.
+        let _ = r.level(false, &None, ctx);
+        let _ = r.sound_level(false, &None, ctx);
+        let _ = watch(&mut r.camera, None, None, ctx);
+        svc.recorder = Some(r);
+        return;
+    }
+    let keys = &svc.settings.hotkeys;
+    r.view.hint = match (
+        crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Pause),
+        crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Stop),
+    ) {
+        (Some(p), Some(s)) => Some(format!("{p} pauses, {s} stops")),
+        (Some(p), None) => Some(format!("{p} pauses")),
+        (None, Some(s)) => Some(format!("{s} stops")),
+        (None, None) => None,
+    };
     if svc.settings.production.camera && r.devices.camera_supported && r.devices.cameras.is_none() {
         r.devices.cameras = Some(screengrabcraft_capture::camera::cameras());
     }
@@ -304,6 +325,10 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
         if ui.ctx().input(|i| i.viewport().close_requested()) {
             choice = Some(RecorderChoice::Cancel);
         }
+        // Minimized: put away in the tray, as its own Minimize does.
+        if ui.ctx().input(|i| i.viewport().minimized) == Some(true) {
+            choice = Some(RecorderChoice::Hide);
+        }
         let mut rec = svc.settings.recorder.clone();
         let mut sources = svc.settings.production.clone();
         if let Some(c) = recorder::recorder_ui(ui, &mut r.view, &mut rec, &mut sources, &r.devices, &level, &sound, &camera_view) {
@@ -329,6 +354,10 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
             svc.record_production();
         }
         Some(RecorderChoice::Cancel) => {}
+        Some(RecorderChoice::Hide) => {
+            r.hidden = true;
+            svc.recorder = Some(r);
+        }
         None => svc.recorder = Some(r),
     }
 }

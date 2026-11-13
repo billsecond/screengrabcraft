@@ -187,6 +187,17 @@ pub struct Editor {
     /// What a save dialog that is open will save as.
     pub(crate) saving: Option<ImageFormat>,
     pub(crate) saving_project: bool,
+    /// While annotations are dragged off the picture and it grows to hold them: the picture as
+    /// it was before, in the grown one (what it is cut back to if the growth is not needed).
+    pub(crate) grown: Option<Rect>,
+    /// Export Transcript's save dialog is open, for this kind of file.
+    pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
+    /// Export Video's Change… save dialog is open.
+    pub(crate) saving_video: bool,
+    /// Files being transcribed (Transcribe a Video or Sound File…).
+    pub transcripts: crate::transcribe::Transcripts,
+    /// A recording being read on a thread of its own.
+    pub(crate) opening_video: Option<OpeningVideo>,
     toast: Option<(String, f64, bool)>,
     /// The strip's thumbnails, with the time of the picture each was made from.
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
@@ -207,6 +218,19 @@ pub struct Editor {
 }
 
 const TOAST_SECS: f64 = 3.5;
+
+/// A recording being read on a thread of its own (a long one takes a while).
+pub(crate) struct OpeningVideo {
+    pub name: String,
+    pub path: String,
+    /// How far: 0 to 1000 (reading it is the first tenth, its sound's waves the rest).
+    pub progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The recording and its sound's waves, or why not, once read.
+    #[allow(clippy::type_complexity)]
+    pub done: std::sync::Arc<std::sync::Mutex<Option<Result<(screengrabcraft_media::recording::Recording, crate::video::Waves), String>>>>,
+    /// The service said captions are being made for it.
+    pub captions_coming: bool,
+}
 
 impl Editor {
     pub fn new(services: Box<dyn Services>, settings: EditorSettings) -> Editor {
@@ -249,6 +273,11 @@ impl Editor {
             pending: None,
             saving: None,
             saving_project: false,
+            grown: None,
+            saving_transcript: None,
+            transcripts: Default::default(),
+            saving_video: false,
+            opening_video: None,
             toast: None,
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
@@ -273,6 +302,14 @@ impl Editor {
     }
 
     // ---- messages ----
+
+    /// The picture grew or was cut at its left or top, everything on it moving by `shift`: the view
+    /// stays on what it showed, and what is marked on the picture (an area, a crop) moves along.
+    pub(crate) fn picture_moved(&mut self, shift: screengrabcraft_model::Pt) {
+        self.view.grew(shift, &self.session.doc.base);
+        self.area = self.area.map(|a| a.translate(shift));
+        self.crop = self.crop.map(|c| c.translate(shift));
+    }
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         self.toast = Some((text.into(), ctx.input(|i| i.time), false));
@@ -428,27 +465,133 @@ impl Editor {
     pub fn open_video(&mut self, ctx: &egui::Context, source: Box<dyn screengrabcraft_media::recording::Source>, path: Option<String>, name: String) {
         match screengrabcraft_media::recording::Recording::open(source) {
             Ok(rec) => {
-                if let Some(mut old) = self.video.take() {
-                    old.save_now(self, ctx);
-                }
-                let stem = std::path::Path::new(&name).file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
-                self.video = Some(crate::video::VideoView::new(rec, path.clone(), stem));
-                self.video_path = path.clone();
-                self.video_epoch += 1;
-                if let Some(p) = &path {
-                    self.settings.remember(p);
-                    self.services.save_settings(&self.settings);
-                }
+                let waves = crate::video::waves(&rec, &|_| {});
+                self.show_video(ctx, rec, waves, path, &name, false);
             }
             Err(e) => self.error(ctx, format!("{name}: {e}")),
         }
     }
 
+    /// A recording read: the window becomes its video editor.
+    fn show_video(
+        &mut self,
+        ctx: &egui::Context,
+        rec: screengrabcraft_media::recording::Recording,
+        waves: crate::video::Waves,
+        path: Option<String>,
+        name: &str,
+        captions_coming: bool,
+    ) {
+        if let Some(mut old) = self.video.take() {
+            old.save_now(self, ctx);
+        }
+        let stem = std::path::Path::new(name).file_stem().and_then(|s| s.to_str()).unwrap_or("Video").to_string();
+        let mut view = crate::video::VideoView::with_waves(rec, waves, path.clone(), stem);
+        if captions_coming {
+            view.expect_captions(ctx.input(|i| i.time));
+        }
+        self.video = Some(view);
+        self.video_path = path.clone();
+        self.video_epoch += 1;
+        if let Some(p) = &path {
+            self.settings.remember(p);
+            self.services.save_settings(&self.settings);
+        }
+    }
+
+    /// The service says captions are being made for the recording just handed over: the video
+    /// editor waits for them (once it's open, if it's still being read).
+    pub fn expect_captions(&mut self, now: f64) {
+        if let Some(o) = &mut self.opening_video {
+            o.captions_coming = true;
+        } else if let Some(v) = self.video.as_mut() {
+            v.expect_captions(now);
+        }
+    }
+
     fn open_video_path(&mut self, ctx: &egui::Context, path: &str) {
         match self.services.open_recording(path) {
+            // A long recording takes a while to read: on a thread of its own, the window saying so
+            // meanwhile. (In a browser, at once.)
+            #[cfg(not(target_arch = "wasm32"))]
+            Ok(source) => self.open_video_in_background(ctx, source, path),
+            #[cfg(target_arch = "wasm32")]
             Ok(source) => self.open_video(ctx, source, Some(path.to_string()), file_name(path)),
             Err(e) => self.error(ctx, format!("{path}: {e}")),
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_video_in_background(&mut self, ctx: &egui::Context, source: Box<dyn screengrabcraft_media::recording::Source>, path: &str) {
+        use std::sync::atomic::Ordering;
+        let opening = OpeningVideo {
+            name: file_name(path),
+            path: path.to_string(),
+            progress: Default::default(),
+            done: Default::default(),
+            captions_coming: false,
+        };
+        let (progress, done, wake) = (opening.progress.clone(), opening.done.clone(), ctx.clone());
+        let spawned = std::thread::Builder::new().name("open-recording".into()).spawn(move || {
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let rec = screengrabcraft_media::recording::Recording::open(source).map_err(|e| e.to_string())?;
+                // Reading it is the first tenth; its sound's waves the rest.
+                progress.store(100, Ordering::Relaxed);
+                wake.request_repaint();
+                let all = crate::video::wave_work(&rec).max(1);
+                let waves = crate::video::waves(&rec, &|n| {
+                    progress.store(100 + (n.saturating_mul(900) / all).min(900) as u32, Ordering::Relaxed);
+                });
+                Ok((rec, waves))
+            }))
+            .unwrap_or_else(|_| Err("the recording couldn't be read".to_string()));
+            if let Ok(mut d) = done.lock() {
+                *d = Some(read);
+            }
+            wake.request_repaint();
+        });
+        match spawned {
+            Ok(_) => self.opening_video = Some(opening),
+            Err(e) => self.error(ctx, format!("{path}: {e}")),
+        }
+    }
+
+    /// A recording being read has been: its video editor, or why not.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    fn poll_opening(&mut self, ctx: &egui::Context) {
+        let Some(o) = &self.opening_video else { return };
+        let done = o.done.lock().ok().and_then(|mut d| d.take());
+        let Some(read) = done else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        };
+        let Some(o) = self.opening_video.take() else { return };
+        match read {
+            Ok((rec, waves)) => self.show_video(ctx, rec, waves, Some(o.path), &o.name, o.captions_coming),
+            Err(e) => self.error(ctx, format!("{}: {e}", o.name)),
+        }
+    }
+
+    /// While a recording is being read: a window saying so, with how far it has got.
+    fn opening_window(&self, ctx: &egui::Context) {
+        let Some(o) = &self.opening_video else { return };
+        let t = crate::theme::Tokens::get(ctx);
+        let p = o.progress.load(std::sync::atomic::Ordering::Relaxed).min(1000);
+        egui::Modal::new(egui::Id::new("opening-recording")).frame(crate::widgets::window_frame(&ctx.global_style())).show(ctx, |ui| {
+            ui.set_width(420.0);
+            crate::widgets::title_bar(ui, "Opening the Recording");
+            crate::widgets::content(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(18.0).color(t.accent));
+                    ui.label(egui::RichText::new(&o.name).strong().color(t.text));
+                });
+                ui.add_space(8.0);
+                let what = if p < 100 { "Reading the recording…" } else { "Drawing its sound…" };
+                ui.label(egui::RichText::new(what).color(t.muted));
+                ui.add_space(6.0);
+                ui.add(egui::ProgressBar::new(p as f32 / 1000.0).show_percentage().animate(true));
+            });
+        });
     }
 
     /// Opens a file by path through the host.
@@ -725,6 +868,8 @@ impl Editor {
     /// Save As…: asks where (in a browser, downloads the project).
     pub fn save_as(&mut self) {
         self.saving = None;
+        self.saving_transcript = None;
+        self.saving_video = false;
         let name = format!("{}.{PROJECT_EXT}", self.name);
         if self.services.has_paths() {
             self.saving_project = true;
@@ -738,6 +883,8 @@ impl Editor {
     pub fn export(&mut self, format: ImageFormat) {
         self.saving = Some(format);
         self.saving_project = false;
+        self.saving_transcript = None;
+        self.saving_video = false;
         let name = format!("{}.{}", self.name, format.extension());
         if self.services.has_paths() {
             let exts: &'static [&'static str] = match format {
@@ -795,6 +942,28 @@ impl Editor {
         }
     }
 
+    /// Export Transcript's file: what was said in the video as edited, as a transcript or as
+    /// subtitles by the name's extension (else as asked; a name with none is given that one's).
+    fn write_transcript(&mut self, ctx: &egui::Context, path: &str, asked: crate::video::TranscriptFormat) {
+        let Some(cues) = self.video.as_ref().map(|v| v.cues.clone()).filter(|c| !c.is_empty()) else {
+            self.error(ctx, "There are no captions to export");
+            return;
+        };
+        let format = crate::video::TranscriptFormat::of_path(path).unwrap_or(asked);
+        let path = match std::path::Path::new(path).extension() {
+            Some(_) => path.to_string(),
+            None => format!("{path}.{}", format.extension()),
+        };
+        match self.services.write_file(&path, format.write(&cues).as_bytes()) {
+            Ok(()) => {
+                self.toast(ctx, format!("Exported {}", file_name(&path)));
+                // Where it went: its folder, with it selected.
+                self.services.open_folder(Some(&path));
+            }
+            Err(e) => self.error(ctx, format!("{path}: {e}")),
+        }
+    }
+
     fn poll_dialogs(&mut self, ctx: &egui::Context) {
         let Some(answer) = self.services.poll_dialog() else { return };
         match answer {
@@ -803,8 +972,22 @@ impl Editor {
                     self.open_file(ctx, f);
                 }
             }
+            DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
+            // Into the video editor's media bin.
+            DialogResult::Import(paths) => {
+                if let Some(mut v) = self.video.take() {
+                    v.import_paths(self, ctx, &paths);
+                    self.video = Some(v);
+                }
+            }
             DialogResult::SaveTo(path) => {
-                if self.saving_project && !path.to_ascii_lowercase().ends_with(&format!(".{PROJECT_EXT}")) {
+                if std::mem::take(&mut self.saving_video) {
+                    if let Some(v) = self.video.as_mut() {
+                        v.export_saved_to(&path);
+                    }
+                } else if let Some(format) = self.saving_transcript.take() {
+                    self.write_transcript(ctx, &path, format);
+                } else if self.saving_project && !path.to_ascii_lowercase().ends_with(&format!(".{PROJECT_EXT}")) {
                     // Saved under a picture's name: that is an export.
                     let f = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).and_then(ImageFormat::from_extension);
                     match f {
@@ -823,6 +1006,8 @@ impl Editor {
             DialogResult::Cancelled => {
                 self.saving = None;
                 self.saving_project = false;
+                self.saving_transcript = None;
+                self.saving_video = false;
             }
         }
     }
@@ -855,7 +1040,20 @@ impl Editor {
             self.theme_applied = Some(self.settings.theme);
         }
         self.poll_dialogs(ctx);
-        let dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
+        self.poll_opening(ctx);
+        self.poll_transcripts(ctx);
+        let mut dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
+        // Onto the video editor: into its media bin, every one of them.
+        if !dropped.is_empty()
+            && let Some(mut v) = self.video.take()
+        {
+            let paths: Vec<String> = dropped.iter().filter(|f| f.path().is_absolute()).map(|f| f.path().to_string_lossy().to_string()).collect();
+            if !paths.is_empty() {
+                v.import_paths(self, ctx, &paths);
+                dropped.clear();
+            }
+            self.video = Some(v);
+        }
         for f in dropped.into_iter().take(1) {
             let name = f.path().file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Dropped picture".to_string());
             #[cfg(not(target_arch = "wasm32"))]
@@ -894,6 +1092,7 @@ impl Editor {
         if self.video.is_some() {
             crate::video::show(self, ui);
             crate::dialogs::show(self, &ctx);
+            self.opening_window(&ctx);
             self.paint_toast(&ctx);
             return;
         }
@@ -907,6 +1106,7 @@ impl Editor {
         crate::props::panel(self, ui);
         crate::canvas::show(self, ui);
         crate::dialogs::show(self, &ctx);
+        self.opening_window(&ctx);
         crate::background::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
@@ -1102,6 +1302,15 @@ impl Editor {
                     ui.separator();
                     if ui.add(egui::Button::new("Open…").shortcut_text("Ctrl+O")).clicked() {
                         self.services.request_open();
+                        ui.close();
+                    }
+                    if self.services.has_paths()
+                        && ui
+                            .button("Transcribe a Video or Sound File…")
+                            .on_hover_text("What's said in it, written down on this computer: a transcript and subtitles beside it")
+                            .clicked()
+                    {
+                        self.services.request_transcribe();
                         ui.close();
                     }
                     let recent = self.settings.recent.clone();
@@ -1500,6 +1709,9 @@ impl Editor {
                             Status::Saved => Some(small(self.saver.note.clone().unwrap_or_else(|| "Saved".to_string()))),
                             Status::Failed(e) => Some(egui::RichText::new(format!("Not saved: {e}")).size(12.0).color(t.danger)),
                         };
+                        if let Some((text, progress)) = self.transcripts.status() {
+                            crate::transcribe::indicator(ui, &text, progress);
+                        }
                         if let Some(text) = said {
                             ui.add(egui::Label::new(text).truncate());
                         }

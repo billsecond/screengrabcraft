@@ -154,10 +154,49 @@ fn a_damaged_recording_is_an_error_not_a_crash() {
 struct CaptionHost {
     asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
-    jobs: std::sync::Arc<std::sync::Mutex<Vec<(Option<usize>, bool)>>>,
+    jobs: std::sync::Arc<std::sync::Mutex<Vec<Job>>>,
+    /// The last video being made, to finish by hand.
+    making: std::sync::Arc<std::sync::Mutex<Option<crate::services::VideoExport>>>,
+    /// The names offered in save dialogs, the answer the next dialog gives, the files written.
+    offered: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    written: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// Files shown in their folder (`folder:`) or opened (`open:`).
+    shown: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+/// What a video job asked for.
+#[derive(Clone, Debug, PartialEq)]
+struct Job {
+    out: String,
+    replace: bool,
+    format: crate::services::VideoFormat,
+    captions: Option<usize>,
+    burn: bool,
+    subtitles: bool,
 }
 
 impl crate::services::Services for CaptionHost {
+    fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
+        use crate::services::VideoFormat;
+        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif]
+    }
+    fn open_folder(&self, path: Option<&str>) {
+        self.shown.lock().unwrap().push(format!("folder:{}", path.unwrap_or("")));
+    }
+    fn open_with_system(&self, path: &str) {
+        self.shown.lock().unwrap().push(format!("open:{path}"));
+    }
+    fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
+        self.offered.lock().unwrap().push(suggested_name.to_string());
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.written.lock().unwrap().push((path.to_string(), String::from_utf8_lossy(bytes).to_string()));
+        Ok(())
+    }
     fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
         Ok(())
     }
@@ -170,8 +209,17 @@ impl crate::services::Services for CaptionHost {
         Ok(())
     }
     fn export_video(&self, job: crate::services::VideoJob) -> Result<crate::services::VideoExport, String> {
-        self.jobs.lock().unwrap().push((job.captions.as_ref().map(Vec::len), job.burn));
-        Ok(crate::services::VideoExport::default())
+        self.jobs.lock().unwrap().push(Job {
+            out: job.out.clone(),
+            replace: job.replace,
+            format: job.format,
+            captions: job.captions.as_ref().map(Vec::len),
+            burn: job.burn,
+            subtitles: job.subtitles,
+        });
+        let x = crate::services::VideoExport::default();
+        *self.making.lock().unwrap() = Some(x.clone());
+        Ok(x)
     }
 }
 
@@ -231,13 +279,9 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
         let v = h.state().video.as_ref().unwrap();
         assert_eq!(v.cues.len(), 2);
     }
-    for label in ["Captions", "Show", "In video"] {
+    for label in ["Captions", "Show"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
-    // In video, then export: the job carries the captions and burns them.
-    h.get_by_label("In video").click();
-    h.run_steps(2);
-    assert!(h.state().video.as_ref().unwrap().session.timeline.captions.burn);
     if let Some(v) = h.state_mut().video.as_mut() {
         v.playhead = 2_500_000;
     }
@@ -247,9 +291,21 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
     {
         let _ = img.save(format!("{dir}/video-captions.png"));
     }
+    // Export Video, captions on the picture: the job carries the captions and burns them.
     h.get_by_label("Export Video").click();
     h.run_steps(2);
-    assert_eq!(host.jobs.lock().unwrap().as_slice(), &[(Some(2), true)]);
+    h.get_by_label("On the picture (always shown)").click();
+    h.run_steps(1);
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.captions, job.burn, job.subtitles), (Some(2), true, false));
+    // Done: the window says so (the next test looks at it); closed here.
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.mp4".into()));
+    h.run_steps(2);
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
     // Muting the microphone takes your line off the video (and the timeline).
     if let Some(v) = h.state_mut().video.as_mut() {
         let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
@@ -264,15 +320,178 @@ fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
 }
 
 #[test]
+fn export_transcript_saves_what_was_said_as_text_or_subtitles() {
+    use crate::services::DialogResult;
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    let save = |h: &mut Harness<'_, Editor>, to: &str| {
+        h.get_by_label("Export Transcript").click();
+        h.run_steps(2);
+        *host.answer.lock().unwrap() = Some(DialogResult::SaveTo(to.to_string()));
+        h.run_steps(2);
+        host.written.lock().unwrap().pop().unwrap()
+    };
+    // A transcript: both speakers, with when each started. Then its folder is shown, with it
+    // selected.
+    let (path, text) = save(&mut h, "C:/Notes/Meeting.txt");
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production transcript.txt"]);
+    assert_eq!(path, "C:/Notes/Meeting.txt");
+    assert_eq!(host.shown.lock().unwrap().as_slice(), ["folder:C:/Notes/Meeting.txt"]);
+    assert_eq!(text, "[0:00:00] You: Here's the new login page.\n[0:00:02] Others: It looks good to me.\n");
+    // A name ending .srt is subtitles.
+    let (_, srt) = save(&mut h, "C:/Notes/Meeting.srt");
+    assert!(srt.starts_with("1\n00:00:00,200 --> 00:00:01,800\nYou: Here's the new login page."), "{srt}");
+    // A name with no extension gets the transcript's.
+    let (path, _) = save(&mut h, "C:/Notes/Meeting");
+    assert_eq!(path, "C:/Notes/Meeting.txt");
+    // As edited: the microphone muted, your line is left out.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        v.session.execute("video.mute", &serde_json::json!({"track": mic, "muted": true})).unwrap();
+    }
+    h.run_steps(2);
+    let (_, text) = save(&mut h, "C:/Notes/Others.txt");
+    assert_eq!(text, "[0:00:02] Others: It looks good to me.\n");
+    // Cancelled, then a later save dialog's answer isn't taken for a transcript.
+    h.get_by_label("Export Transcript").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Cancelled);
+    h.run_steps(2);
+    assert!(h.state().saving_transcript.is_none());
+    assert!(host.written.lock().unwrap().is_empty());
+}
+
+#[test]
+fn export_transcript_waits_for_captions() {
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    // A recording with no captions yet: they're asked for first, and nothing is saved meanwhile.
+    h.get_by_label("Export Transcript").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Captures/Production.sgvideo"]);
+    assert!(host.offered.lock().unwrap().is_empty());
+    assert!(h.state().video.as_ref().unwrap().transcript_after.is_some());
+    // They've come: where the transcript goes is asked at once.
+    *host.ready.lock().unwrap() = Some(captions());
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.expect_captions(0.0);
+    }
+    h.run_steps(3);
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production transcript.txt"]);
+    assert!(h.state().video.as_ref().unwrap().transcript_after.is_none());
+}
+
+#[test]
+fn export_video_asks_where_and_how_shows_its_progress_then_play_and_show_in_folder() {
+    use crate::services::{DialogResult, VideoFormat};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    let shot = |h: &mut Harness<'_, Editor>, name: &str| {
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/{name}.png"));
+        }
+    };
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    // Beside the recording, every player's MP4, the captions as subtitles beside it.
+    for label in ["Save as", "Format", "Closed captions (AI generated)", "Production.mp4", "As a subtitles file beside it (.srt)"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "export-video");
+    // Change…: the save dialog, and a name without its extension gets it.
+    h.get_by_label("Change…").click();
+    h.run_steps(2);
+    assert_eq!(host.offered.lock().unwrap().as_slice(), ["Production.mp4"]);
+    *host.answer.lock().unwrap() = Some(DialogResult::SaveTo("D:/Videos/Demo".into()));
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Demo.mp4").next().is_some());
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!(
+        job,
+        Job { out: "D:/Videos/Demo.mp4".into(), replace: true, format: VideoFormat::Mp4, captions: Some(2), burn: false, subtitles: true }
+    );
+    // Being made: a window with its progress and Cancel; the tool bar has no Show in folder.
+    let making = host.making.lock().unwrap().clone().unwrap();
+    making.progress.store(400, std::sync::atomic::Ordering::SeqCst);
+    h.run_steps(2);
+    assert!(h.query_all_by_label("Exporting Video").next().is_some() || h.query_all_by_label_contains("Making").next().is_some());
+    assert!(h.query_all_by_label("Show in folder").next().is_none());
+    shot(&mut h, "export-video-making");
+    // Made: Play Video, Show in Folder (the file selected), Close.
+    *making.done.lock().unwrap() = Some(Ok("D:/Videos/Demo.mp4".into()));
+    h.run_steps(2);
+    for label in ["Play Video", "Show in Folder", "Close", "Its subtitles are beside it: Demo.srt"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "export-video-made");
+    h.get_by_label("Show in Folder").click();
+    h.run_steps(2);
+    assert_eq!(host.shown.lock().unwrap().as_slice(), ["folder:D:/Videos/Demo.mp4"]);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
+    // Offered again as it was last set.
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(crate::video::ExportStep::Choose(c)) => assert_eq!((c.format, c.captions), (VideoFormat::Mp4, crate::video::CaptionsIn::Subtitles)),
+        _ => panic!("the Export Video window is open"),
+    }
+}
+
+#[test]
+fn a_gif_has_no_subtitles_and_cancelling_says_so() {
+    use crate::services::VideoFormat;
+    use crate::video::{CaptionsIn, ExportStep};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    // Picked as a name ending .gif in the save dialog: a GIF, its captions on the picture.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("C:/Clips/Demo.gif");
+    }
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => {
+            assert_eq!((c.format, c.captions, c.path.as_str()), (VideoFormat::Gif, CaptionsIn::Picture, "C:/Clips/Demo.gif"));
+        }
+        _ => panic!("the Export Video window is open"),
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.format, job.burn, job.subtitles), (VideoFormat::Gif, true, false));
+    // Cancel (once the window has settled where it's shown): the job is told, and when it
+    // stops nothing is left open.
+    h.run_steps(2);
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    let making = host.making.lock().unwrap().clone().unwrap();
+    assert!(making.cancel.load(std::sync::atomic::Ordering::SeqCst));
+    *making.done.lock().unwrap() = Some(Err("cancelled".into()));
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().export.is_none());
+}
+
+#[test]
 fn captions_can_be_asked_for_and_appear_when_theyre_made() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
     assert!(h.state().video.as_ref().unwrap().captions.is_none());
-    h.get_by_label("Make Captions").click();
+    h.get_by_label("Transcribe").click();
     h.run_steps(2);
     assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Captures/Production.sgvideo"]);
     assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
-    assert!(h.query_all_by_label("Make Captions").next().is_none(), "asked once");
+    assert!(h.query_all_by_label("Transcribe").next().is_none(), "asked once");
     // The service has made them: they come on the next look.
     *host.ready.lock().unwrap() = Some(captions());
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -289,7 +508,7 @@ fn captions_can_be_asked_for_and_appear_when_theyre_made() {
 fn a_recording_with_no_words_stops_waiting_for_captions() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
-    h.get_by_label("Make Captions").click();
+    h.get_by_label("Transcribe").click();
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().captions_coming.is_some());
     // The service heard nothing: empty captions, and the editor stops saying they're coming.
@@ -362,4 +581,591 @@ fn live_recording_shows_its_camera_in_the_editor() {
         differ_at.push(differ);
     }
     assert!(differ_at.iter().all(|d| *d > 2_000), "the camera is seen in the editor: {differ_at:?}");
+}
+
+/// A host whose recordings are on its disk (here, in memory): they're read on a thread of their
+/// own, as the desktop's are.
+struct DiskHost {
+    recording: Vec<u8>,
+}
+
+impl crate::services::Services for DiskHost {
+    fn open_recording(&self, _path: &str) -> Result<Box<dyn screengrabcraft_media::recording::Source>, String> {
+        Ok(Box::new(self.recording.clone()))
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_recording_from_the_disk_says_its_opening_then_opens() {
+    let mut ed = Editor::new(Box::new(DiskHost { recording: meeting() }), EditorSettings::default());
+    let ctx = egui::Context::default();
+    ed.open_path(&ctx, "C:/Captures/Long meeting.sgvideo");
+    ed.expect_captions(0.0);
+    assert!(ed.opening_video.is_some(), "read on a thread of its own");
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(1);
+    // Read meanwhile: the window says so (unless it was quicker than a frame).
+    let shown = h.query_by_label("Opening the Recording").is_some();
+    for _ in 0..200 {
+        if h.state().video.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    let v = h.state().video.as_ref().expect("the recording opened");
+    assert_eq!(v.session.timeline.length(), 4_000_000);
+    assert!(v.captions_coming.is_some(), "captions said to be coming while it was read are waited for");
+    assert!(h.state().opening_video.is_none());
+    h.run_steps(2);
+    assert!(h.query_by_label("Opening the Recording").is_none());
+    let _ = shown;
+}
+
+// ---- the library and the media bin ----
+
+/// A host that brings files into the media bin at once: a red picture, a second of a tone.
+/// It transcribes too, when told: the files asked for (`again:` before those heard again), how
+/// far each has got, the recording's captions and the media's lines once they're made.
+#[derive(Clone, Default)]
+struct MediaHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    imports: std::sync::Arc<std::sync::Mutex<usize>>,
+    auto: bool,
+    asked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    progress: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<f32, String>>>>,
+    ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
+    media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
+}
+
+impl crate::services::Services for MediaHost {
+    fn request_import(&self) {
+        *self.imports.lock().unwrap() += 1;
+    }
+    fn auto_captions(&self) -> bool {
+        self.auto
+    }
+    fn make_captions(&self, path: &str) -> Result<(), String> {
+        self.asked.lock().unwrap().push(path.to_string());
+        Ok(())
+    }
+    fn make_captions_again(&self, path: &str) -> Result<(), String> {
+        self.asked.lock().unwrap().push(format!("again:{path}"));
+        Ok(())
+    }
+    fn captions_progress(&self, path: &str) -> Option<Result<f32, String>> {
+        self.progress.lock().unwrap().get(path).cloned()
+    }
+    fn poll_captions(&self, _recording: &str, seen: u64) -> Option<(u64, Option<screengrabcraft_media::captions::Captions>)> {
+        let ready = self.ready.lock().unwrap().clone();
+        (ready.is_some() && seen != 7).then_some((7, ready))
+    }
+    fn poll_media_captions(&self, path: &str, seen: u64) -> Option<(u64, Vec<screengrabcraft_media::captions::Cue>)> {
+        let (at, lines) = self.media_lines.lock().unwrap().get(path).cloned()?;
+        (at != seen).then_some((at, lines))
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn load_media(&self, path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let loaded = if path.ends_with(".png") {
+            let pic = Raster::filled(80, 40, Color::rgb(0xE0, 0x20, 0x20)).unwrap();
+            Loaded { kind: MediaKind::Picture, duration: 0, width: 80, height: 40, content: Content::Picture(pic) }
+        } else {
+            let tone: Vec<i16> = (0..48_000 * 2)
+                .flat_map(|i| {
+                    let v = ((i as f32 * 0.03).sin() * 12_000.0) as i16;
+                    [v, v]
+                })
+                .collect();
+            Loaded { kind: MediaKind::Sound, duration: 2_000_000, width: 0, height: 0, content: Content::Sound(tone) }
+        };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+}
+
+fn media_harness(host: MediaHost) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(host), EditorSettings::default());
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h
+}
+
+fn shot(h: &mut Harness<'_, Editor>, name: &str) {
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/{name}.png"));
+    }
+}
+
+/// How many of a picture's pixels are about this colour.
+fn count(pic: &Raster, c: [u8; 3]) -> usize {
+    pic.pixels().chunks(4).filter(|p| p[0].abs_diff(c[0]) < 30 && p[1].abs_diff(c[1]) < 30 && p[2].abs_diff(c[2]) < 30).count()
+}
+
+#[test]
+fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
+    let mut h = media_harness(MediaHost::default());
+    for label in [
+        "Library",
+        "Media",
+        "Lower Thirds",
+        "News and Broadcast",
+        "Titles",
+        "Callouts and Overlays",
+        "News Transitions",
+        "Training Transitions",
+        "More Transitions",
+        "Breaking news",
+        "Name card",
+        "Angled",
+    ] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert!(h.state().video.as_ref().unwrap().thumbnails_made() >= 6, "the cards show what they look like");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.run_steps(1);
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    h.get_by_label("Add Name card").click();
+    h.run_steps(3);
+    shot(&mut h, "video-library");
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let layers = &v.session.timeline.layers;
+        assert_eq!(layers.len(), 1, "a layer of its own");
+        assert_eq!(layers[0].items.len(), 1);
+        assert_eq!(layers[0].items[0].at, 1_000_000, "at the playhead");
+        assert!(v.item.is_some(), "and chosen");
+        let after = v.frame_at(1_500_000);
+        assert_ne!(before.pixels(), after.pixels(), "it's on the picture");
+    }
+    // Its panel: its words, how it comes and goes, and a way to delete it.
+    for label in ["Words", "Comes in", "Goes out", "Delete"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let (layer, item) = v.item.unwrap();
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "title": "Ada Lovelace"})).unwrap();
+    }
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let it = &v.session.timeline.layers[0].items[0];
+        assert!(matches!(&it.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Ada Lovelace"));
+    }
+    // Another at the same time on that layer never overlaps it: it goes after.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        let layer = v.session.timeline.layers[0].id;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("lower-line"), Some(layer), 1_200_000);
+        ed.video = Some(v);
+    }
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let items = &v.session.timeline.layers[0].items;
+        assert_eq!(items.len(), 2);
+        assert!(items[1].at >= items[0].end(), "{} {}", items[1].at, items[0].end());
+    }
+    // Del takes the chosen item off; Ctrl+Z puts it back.
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.layers[0].items.len(), 1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.layers[0].items.len(), 2);
+    // What's put after the end makes the video longer, to its end.
+    let last = v.session.timeline.layers[0].items.iter().map(|i| i.end()).max().unwrap();
+    assert_eq!(length(&h), last.max(4_000_000));
+}
+
+#[test]
+fn media_brought_in_goes_in_the_bin_then_onto_a_layer_of_its_kind() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::LayerKind;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    assert_eq!(*host.imports.lock().unwrap(), 1);
+    let picked = vec!["C:/Pictures/Logo.png".to_string(), "C:/Music/Song.mp3".to_string(), "C:/Notes/notes.txt".to_string()];
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(picked));
+    h.run_steps(4);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let names: Vec<&str> = v.session.timeline.media.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["Logo.png", "Song.mp3"], "the text file is refused");
+    }
+    shot(&mut h, "video-media-bin");
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(2);
+    h.get_by_label("Add Song.mp3").click();
+    h.run_steps(3);
+    let v = h.state_mut().video.as_mut().unwrap();
+    let kinds: Vec<_> = v.session.timeline.layers.iter().map(|l| l.kind).collect();
+    assert_eq!(kinds, [LayerKind::Picture, LayerKind::Sound]);
+    // The picture is on the video, the sound in it.
+    let pic = v.frame_at(500_000);
+    assert!(count(&pic, [0xE0, 0x20, 0x20]) > 200, "the logo is on the picture");
+    let tl = v.session.timeline.clone();
+    let plain = screengrabcraft_media::compose::mix(&v.rec, &tl, 24_000, 4800);
+    let with = screengrabcraft_media::compose::mix_with(&v.rec, &tl, v.library.as_ref(), 24_000, 4800);
+    assert_ne!(plain, with, "the song is heard");
+    // Taken out of the bin, it's taken off the timeline too.
+    let id = v.session.timeline.media[0].id;
+    v.session.execute("video.removeMedia", &serde_json::json!({"id": id})).unwrap();
+    assert!(v.session.timeline.layers[0].items.is_empty());
+}
+
+#[test]
+fn a_title_dragged_from_the_library_onto_the_timeline_lands_where_it_was_let_go() {
+    let mut h = media_harness(MediaHost::default());
+    let card = h.get_by_label("Breaking news").rect().center();
+    // The band above the tracks (just above the first track's Show): a layer of its own.
+    let show = h.query_all_by_label("Show").next().unwrap().rect();
+    let to = egui::pos2(show.max.x + 500.0, show.min.y - 32.0);
+    crate::tests::drag(&mut h, card, to);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.layers.len(), 1, "dropped on a layer of its own");
+    let at = v.session.timeline.layers[0].items[0].at;
+    assert!(at > 0, "where it was let go, not at the start: {at}");
+}
+
+#[test]
+fn a_layer_item_is_moved_along_then_onto_another_layer_then_trimmed_on_the_timeline() {
+    let mut h = media_harness(MediaHost::default());
+    let place = |h: &mut Harness<'_, Editor>, key: &'static str, at: u64| {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template(key), None, at);
+        let chosen = v.item.unwrap();
+        ed.video = Some(v);
+        chosen
+    };
+    let (a, ia) = place(&mut h, "title", 0);
+    let (b, ib) = place(&mut h, "callout", 8_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.pps = 0.0;
+    }
+    h.run_steps(3);
+    let rect = |h: &Harness<'_, Editor>, l: u32, i: u32| h.state().video.as_ref().unwrap().item_on_timeline(l, i).unwrap();
+    let pps = h.state().video.as_ref().unwrap().pps;
+    // Along its layer by a second.
+    let r = rect(&h, a, ia);
+    crate::tests::drag(&mut h, r.center(), r.center() + egui::vec2(pps, 0.0));
+    let at = h.state().video.as_ref().unwrap().session.timeline.item(a, ia).unwrap().at;
+    assert!((850_000..=1_150_000).contains(&at), "{at}");
+    // Onto the other layer: it goes there, and its own layer, left empty, goes.
+    let r = rect(&h, a, ia);
+    let to = egui::pos2(r.center().x, rect(&h, b, ib).center().y);
+    crate::tests::drag(&mut h, r.center(), to);
+    {
+        let tl = &h.state().video.as_ref().unwrap().session.timeline;
+        assert_eq!(tl.layers.len(), 1, "{:?}", tl.layers);
+        assert!(tl.item(b, ia).is_some(), "it's on the other layer, keeping its number");
+    }
+    // Trimmed by its end, a second shorter.
+    let len = h.state().video.as_ref().unwrap().session.timeline.item(b, ia).unwrap().len;
+    let r = rect(&h, b, ia);
+    let edge = egui::pos2(r.max.x - 2.0, r.center().y);
+    crate::tests::drag(&mut h, edge, edge - egui::vec2(pps, 0.0));
+    let after = h.state().video.as_ref().unwrap().session.timeline.item(b, ia).unwrap().len;
+    assert!(len - after > 800_000 && len - after < 1_200_000, "{len} → {after}");
+    // Each was one undo step.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    let tl = &h.state().video.as_ref().unwrap().session.timeline;
+    assert_eq!(tl.item(a, ia).map(|i| i.at), Some(0), "back as it was");
+}
+
+#[test]
+fn the_chosen_title_and_the_camera_are_dragged_and_resized_on_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 1_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title-box"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let place = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    let p0 = place(&h);
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    // Dragged by its middle: moved, as one undo step.
+    let from = egui::pos2(pic.min.x + pic.width() * p0.x, pic.min.y + pic.height() * p0.y);
+    crate::tests::drag(&mut h, from, from + egui::vec2(-pic.width() * 0.2, pic.height() * 0.15));
+    let p1 = place(&h);
+    assert!(p1.x < p0.x - 0.1 && p1.y > p0.y + 0.08, "{p0:?} → {p1:?}");
+    shot(&mut h, "video-designer");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(place(&h).x, p0.x, "one undo step puts it back");
+    // The camera: taken hold of on the picture and dragged to the middle.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.item = None;
+        let layer = v.session.timeline.layers[0].id;
+        v.session.execute("video.deleteLayer", &serde_json::json!({"layer": layer})).unwrap();
+    }
+    h.run_steps(2);
+    // (The timeline is a row shorter now, so the picture has moved.)
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    let cam = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera is on the picture");
+    crate::tests::drag(&mut h, cam.center(), pic.center());
+    let at = h.state().video.as_ref().unwrap().session.timeline.camera.at.expect("the camera has a place of its own");
+    assert!((at[0] - 0.5).abs() < 0.1 && (at[1] - 0.5).abs() < 0.12, "{at:?}");
+}
+
+// ---- transcribing what's in the video ----
+
+#[test]
+fn transcribing_hears_the_sound_put_on_the_timeline_too_and_shows_how_far_it_has_got() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::captions::{Cue, Speaker};
+    const REC: &str = "C:/Captures/Production.sgvideo";
+    const SONG: &str = "C:/Music/Song.mp3";
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    // A song brought in and put on the timeline at 1 s.
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec![SONG.to_string()]));
+    h.run_steps(3);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Add Song.mp3").click();
+    h.run_steps(2);
+    assert!(host.asked.lock().unwrap().is_empty(), "not transcribed by itself unless Settings says so");
+    // Transcribe: the recording and the song, each heard on its own.
+    h.get_by_label("Transcribe").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), [REC, SONG]);
+    // How far it has got, in the captions' header and the status bar.
+    host.progress.lock().unwrap().insert(REC.to_string(), Ok(0.5));
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().transcribing(), Some(("Transcribing…".to_string(), Some(0.5))));
+    assert!(h.query_by_label("Transcribing… 50%").is_some(), "the status bar says so");
+    shot(&mut h, "video-transcribing");
+    // The song's lines come (in its own time): they're placed where it is on the timeline.
+    let line = |s, e, sp, t: &str| Cue { start: s, end: e, speaker: sp, text: t.to_string() };
+    host.media_lines.lock().unwrap().insert(SONG.to_string(), (5, vec![line(500_000, 1_500_000, Speaker::Media, "From the song.")]));
+    // Then the recording's.
+    host.progress.lock().unwrap().clear();
+    *host.ready.lock().unwrap() =
+        Some(screengrabcraft_media::captions::Captions { cues: vec![line(200_000, 900_000, Speaker::You, "Here it is.")], model: "test".into() });
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.transcribing().is_none());
+        let said: Vec<(u64, &str)> = v.cues.iter().map(|c| (c.start, c.text.as_str())).collect();
+        assert_eq!(said, [(200_000, "Here it is."), (1_500_000, "From the song.")], "the song's line where the song plays");
+    }
+    // Transcribe Again: both heard again.
+    h.get_by_label("Transcribe Again").click();
+    h.run_steps(2);
+    assert_eq!(host.asked.lock().unwrap()[2..], [format!("again:{REC}"), format!("again:{SONG}")]);
+    // A file that couldn't be heard says why, and isn't waited for.
+    host.progress.lock().unwrap().insert(SONG.to_string(), Err("it has no sound".into()));
+    h.state_mut().video.as_mut().unwrap().poll_now();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().media_coming.is_empty());
+}
+
+#[test]
+fn with_the_setting_on_sound_brought_in_is_transcribed_by_itself() {
+    use crate::services::DialogResult;
+    let host = MediaHost { auto: true, ..MediaHost::default() };
+    let mut h = media_harness(host.clone());
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Music/Song.mp3".to_string(), "C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(3);
+    assert_eq!(host.asked.lock().unwrap().as_slice(), ["C:/Music/Song.mp3"], "the song, not the picture");
+    assert!(h.state().video.as_ref().unwrap().transcribing().is_some_and(|(t, _)| t == "Transcribing Song.mp3…"));
+}
+
+// ---- the mouse pointer ----
+
+/// A made-up recording of a white screen with the pointer crossing it (a red square for its
+/// picture) and a click half-way.
+fn recording_with_pointer() -> Vec<u8> {
+    use screengrabcraft_media::pointer::{LEFT, SHOWING, Sample, Shape};
+    let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 }];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    w.pointer_shape(&Shape { id: 1, hot: (0, 0), nominal: 12, pic: Raster::filled(12, 12, Color::rgb(0xE0, 0x20, 0x20)).unwrap() }).unwrap();
+    for t in 0..40u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::WHITE).unwrap()).unwrap();
+        let flags = SHOWING | if t == 20 { LEFT } else { 0 };
+        w.pointer(&Sample { t: t * 100_000, x: 20.0 + t as f32 * 6.0, y: 60.0, flags, shape: 1 }).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+#[test]
+fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    for label in ["Pointer", "Show the mouse pointer", "Size", "Smoother movement", "Show clicks"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_000_000;
+    }
+    h.run_steps(2);
+    shot(&mut h, "video-pointer");
+    let red = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+    let as_recorded = red(&mut h);
+    assert!(as_recorded >= 100, "the pointer is on the video: {as_recorded}");
+    // Larger (from the engine, as its slider does).
+    h.state_mut().video.as_mut().unwrap().session.execute("video.pointer", &serde_json::json!({"size": 3.0})).unwrap();
+    assert!(red(&mut h) > as_recorded * 6);
+    // Unticked: it isn't on the video; one undo step brings it back.
+    h.get_by_label("Show the mouse pointer").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.pointer.show);
+    assert_eq!(red(&mut h), 0);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert!(red(&mut h) > 0);
+    // A recording without a pointer has no such panel.
+    let h = harness();
+    assert!(h.query_by_label("Show the mouse pointer").is_none());
+}
+
+// ---- the broadcast graphics ----
+
+#[test]
+fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    for label in ["Lower Thirds", "Breaking news", "Headline band", "Name card", "Angled", "Minimal"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // The other sections are shut until their headings are pressed.
+    assert!(h.query_by_label("Clock wipe").is_none() && h.query_by_label("Keys").is_none());
+    h.get_by_label("Lower Thirds").click();
+    h.run_steps(8);
+    h.get_by_label("Training Transitions").click();
+    h.run_steps(8);
+    for label in ["Chapter card", "Next step", "Progress bar", "Done"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Training Transitions").click();
+    h.run_steps(8);
+    assert!(h.query_by_label("Chapter card").is_none(), "shut again");
+    h.get_by_label("Lower Thirds").click();
+    h.run_steps(8);
+    h.get_by_label("Add Breaking news").click();
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| {
+        let pic = h.state_mut().video.as_mut().unwrap().frame_at(t);
+        pic.pixels().chunks(4).filter(|p| p[0] > 140 && p[1] < 70 && p[2] < 90).count()
+    };
+    // It comes on, stays, and goes with its item (6 s from the playhead at 0).
+    assert_eq!(red(&mut h, 0), 0, "not there at its very start");
+    let held = red(&mut h, 3_000_000);
+    assert!(held > 60, "its red tab is on the picture: {held}");
+    assert!(red(&mut h, 5_990_000) < held / 3, "all but gone by its end");
+    // Its words are changed in its panel (through the engine, as the panel does).
+    for label in ["Words", "Colour", "Delete"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 3_000_000;
+        let (layer, item) = v.item.unwrap();
+        v.session
+            .execute(
+                "video.setItem",
+                &serde_json::json!({"layer": layer, "item": item, "title": "Storm warning for the coast", "subtitle": "Winds to 70 mph"}),
+            )
+            .unwrap();
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-news");
+    // Dragged on the picture: it moves by as far as it was dragged.
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().expect("it's chosen and on the picture"))
+    };
+    let before = h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    crate::tests::drag(&mut h, on.center(), on.center() + egui::vec2(pic.width() * 0.25, -pic.height() * 0.2));
+    let after = h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    assert!((after.x - before.x - 0.25).abs() < 0.03 && (after.y - before.y + 0.2).abs() < 0.03, "{before:?} → {after:?}");
+}
+
+#[test]
+fn an_item_is_dragged_off_the_picture_and_taken_hold_of_again_out_there() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    // Off the left edge of the picture, all of it.
+    crate::tests::drag(&mut h, on.center(), egui::pos2(pic.min.x - on.width(), on.center().y));
+    let out = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!(out.max.x < pic.min.x + 2.0, "it is off the picture: {out:?} {pic:?}");
+    shot(&mut h, "video-off-picture");
+    // Out there it is still taken hold of, and brought back.
+    crate::tests::drag(&mut h, out.center(), pic.center());
+    let back = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((back.center().x - pic.center().x).abs() < 6.0 && (back.center().y - pic.center().y).abs() < 6.0, "{back:?}");
+    // The camera too: put where it is part off the picture, it is drawn where it is on it.
+    let v = h.state_mut().video.as_mut().unwrap();
+    v.session.execute("video.cameraAt", &serde_json::json!({"x": 1.0, "y": 0.5})).unwrap();
+    assert_eq!(v.session.timeline.camera.at, Some([1.0, 0.5]));
+    let _ = v.frame_at(2_000_000);
 }

@@ -13,8 +13,10 @@ use std::time::{Duration, Instant};
 use screengrabcraft_capture::Monitor;
 use screengrabcraft_capture::audio::{self, AudioCapture, AudioSource, SoundBlock};
 use screengrabcraft_capture::camera::{self, CameraCapture};
+use screengrabcraft_capture::mouse;
 use screengrabcraft_media::compose;
-use screengrabcraft_media::export::{self, ExportSettings, Exporter};
+use screengrabcraft_media::export::{self, Codec, ExportSettings, Exporter};
+use screengrabcraft_media::pointer;
 use screengrabcraft_media::recording::{self, FileSource, Header, RecordingWriter, StreamInfo, StreamKind};
 use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::settings::VideoOptions;
@@ -52,6 +54,11 @@ pub struct Recording {
     pub desktop: IRect,
     stop: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+    /// Paused: nothing is recorded meanwhile, and the recording runs on after it without a gap.
+    paused: Arc<AtomicBool>,
+    /// Time spent paused before the pause now, and when the pause now began.
+    paused_before: Duration,
+    paused_at: Option<Instant>,
     /// Frames so far (GIF), or the joined picture's height (scrolling).
     pub progress: Arc<AtomicU32>,
     /// Frames that could not be joined lately (scrolling): the owner scrolled too fast.
@@ -72,7 +79,31 @@ impl Recording {
     /// really began).
     pub fn elapsed(&self) -> Duration {
         let Some(from) = self.begun.lock().ok().and_then(|b| *b) else { return Duration::ZERO };
-        self.stopped.map_or_else(|| from.elapsed(), |at| at.saturating_duration_since(from))
+        let until = self.stopped.unwrap_or_else(Instant::now);
+        let paused = self.paused_before + self.paused_at.map_or(Duration::ZERO, |p| until.saturating_duration_since(p.max(from)));
+        until.saturating_duration_since(from).saturating_sub(paused)
+    }
+
+    /// Whether it can be paused (a scrolling capture can't).
+    pub fn can_pause(&self) -> bool {
+        self.kind != Kind::Scrolling
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused_at.is_some()
+    }
+
+    /// Pauses it, or goes on recording.
+    pub fn set_paused(&mut self, paused: bool) {
+        if !self.can_pause() || self.stopping() || paused == self.is_paused() {
+            return;
+        }
+        if paused {
+            self.paused_at = Some(Instant::now());
+        } else if let Some(at) = self.paused_at.take() {
+            self.paused_before += at.elapsed();
+        }
+        self.paused.store(paused, Ordering::SeqCst);
     }
 
     /// Whether it has been asked to stop and is finishing.
@@ -112,12 +143,13 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(AtomicU32::new(0));
     let lost = Arc::new(AtomicU32::new(0));
-    let (s, c, p, l) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone());
+    let paused = Arc::new(AtomicBool::new(false));
+    let (s, c, p, l, z) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone());
     let handle = std::thread::Builder::new()
         .name(format!("{kind:?}").to_lowercase())
         .spawn(move || {
             let out = match kind {
-                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &p, &wake),
+                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &wake),
                 Kind::Scrolling => scrolling(monitor, area, &s, &c, &p, &l, &wake),
                 Kind::Video | Kind::Production => Err("a video is started with start_video".to_string()),
             };
@@ -131,6 +163,9 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
         desktop,
         stop,
         cancel,
+        paused,
+        paused_before: Duration::ZERO,
+        paused_at: None,
         progress,
         lost,
         saving: Arc::default(),
@@ -148,6 +183,7 @@ fn gif(
     max_secs: u32,
     stop: &AtomicBool,
     cancel: &AtomicBool,
+    paused: &AtomicBool,
     progress: &AtomicU32,
     wake: &egui::Context,
 ) -> Result<Output, String> {
@@ -163,7 +199,26 @@ fn gif(
     let mut due = Instant::now();
     let mut frames = 0u32;
     let limit = Duration::from_secs(u64::from(max_secs.clamp(1, 600)));
-    while !stop.load(Ordering::SeqCst) && started.elapsed() < limit {
+    // Paused: no frames are taken and the time doesn't count (the frame before a pause lasts as
+    // long as it would have without it).
+    let (mut paused_since, mut paused_total): (Option<Instant>, Duration) = (None, Duration::ZERO);
+    let recorded = |since: Option<Instant>, total: Duration| started.elapsed().saturating_sub(total + since.map_or(Duration::ZERO, |p| p.elapsed()));
+    while !stop.load(Ordering::SeqCst) && recorded(paused_since, paused_total) < limit {
+        match (paused.load(Ordering::SeqCst), paused_since) {
+            (true, None) => paused_since = Some(Instant::now()),
+            (false, Some(p)) => {
+                let d = p.elapsed();
+                paused_total += d;
+                last += d;
+                paused_since = None;
+            }
+            _ => {}
+        }
+        if paused_since.is_some() {
+            std::thread::sleep(tick);
+            due = Instant::now();
+            continue;
+        }
         let at = Instant::now();
         match grab() {
             Ok(frame) if frame.width() == area.w && frame.height() == area.h => {
@@ -182,6 +237,10 @@ fn gif(
         // On a steady beat: what a frame took comes off the wait for the next.
         due = (due + tick).max(Instant::now());
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
+    }
+    // Stopped while paused: the pause doesn't count either.
+    if let Some(p) = paused_since {
+        last += p.elapsed();
     }
     let (_, n) = writer.finish(at_least(last.elapsed()).as_millis().min(u128::from(u32::MAX)) as u32).map_err(|e| e.to_string())?;
     if cancel.load(Ordering::SeqCst) || n == 0 {
@@ -370,6 +429,9 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         desktop: plan.desktop,
         stop: Arc::default(),
         cancel: Arc::default(),
+        paused: Arc::default(),
+        paused_before: Duration::ZERO,
+        paused_at: None,
         progress: Arc::default(),
         lost: Arc::default(),
         saving: Arc::default(),
@@ -380,12 +442,14 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
     };
     let (stop, cancel, progress, saving, levels, sources, begun) =
         (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone(), r.begun.clone());
+    let paused = r.paused.clone();
     let handle = std::thread::Builder::new()
         .name("video".into())
         .spawn(move || {
             let shared = Shared {
                 stop: &stop,
                 cancel: &cancel,
+                paused: &paused,
                 progress: &progress,
                 saving: &saving,
                 levels: &levels,
@@ -404,6 +468,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
 struct Shared<'a> {
     stop: &'a AtomicBool,
     cancel: &'a AtomicBool,
+    paused: &'a AtomicBool,
     progress: &'a AtomicU32,
     saving: &'a AtomicU32,
     levels: &'a [AtomicU32; 2],
@@ -428,11 +493,258 @@ impl Shared<'_> {
     }
 }
 
+/// The stretches a recording was paused, as times since it began: what fell in them is left out,
+/// and what came after is moved back by them, so the recording runs on without a gap.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Pauses {
+    done: Vec<(Duration, Duration)>,
+    /// The pause going on, since when.
+    since: Option<Duration>,
+}
+
+/// A time as sound samples (per channel) at the recording's rate.
+fn to_samples(d: Duration) -> u64 {
+    (d.as_micros() as u64).saturating_mul(u64::from(audio::RATE)) / 1_000_000
+}
+
+impl Pauses {
+    /// Follows the pause switch, at `now` (since the recording began).
+    fn follow(&mut self, paused: bool, now: Duration) {
+        match (paused, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(from)) => {
+                self.done.push((from, now.max(from)));
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Time paused up to `now`.
+    fn total(&self, now: Duration) -> Duration {
+        let done: Duration = self.done.iter().map(|(a, b)| b.saturating_sub(*a)).sum();
+        done + self.since.map_or(Duration::ZERO, |s| now.saturating_sub(s))
+    }
+
+    /// Where something from `t` goes in the recording; None if it came while paused.
+    fn place(&self, t: Duration) -> Option<Duration> {
+        let mut before = Duration::ZERO;
+        for &(a, b) in &self.done {
+            if t >= b {
+                before += b.saturating_sub(a);
+            } else if t >= a {
+                return None;
+            }
+        }
+        if self.since.is_some_and(|s| t >= s) {
+            return None;
+        }
+        Some(t.saturating_sub(before))
+    }
+
+    /// Sound from sample `first` (`channels` interleaved) with what came while paused left out,
+    /// in pieces, each where it goes in the recording.
+    fn place_sound(&self, first: u64, samples: &[i16], channels: usize) -> Vec<(u64, Vec<i16>)> {
+        let ch = channels.max(1);
+        let end = first.saturating_add((samples.len() / ch) as u64);
+        let mut spans: Vec<(u64, u64)> = self.done.iter().map(|&(a, b)| (to_samples(a), to_samples(b))).collect();
+        if let Some(s) = self.since {
+            spans.push((to_samples(s), u64::MAX));
+        }
+        let piece = |from: u64, to: u64| -> Vec<i16> {
+            let (a, b) = (((from - first) as usize).saturating_mul(ch), ((to - first) as usize).saturating_mul(ch));
+            samples.get(a..b.min(samples.len())).map(<[i16]>::to_vec).unwrap_or_default()
+        };
+        let (mut out, mut cursor, mut shift) = (Vec::new(), first, 0u64);
+        for (a, b) in spans {
+            if b <= cursor {
+                shift = shift.saturating_add(b.saturating_sub(a));
+                continue;
+            }
+            if a >= end {
+                break;
+            }
+            if a > cursor {
+                out.push((cursor.saturating_sub(shift), piece(cursor, a)));
+            }
+            shift = shift.saturating_add(b.saturating_sub(a));
+            cursor = b.max(cursor);
+            if cursor >= end {
+                break;
+            }
+        }
+        if cursor < end {
+            out.push((cursor.saturating_sub(shift), piece(cursor, end)));
+        }
+        out.retain(|(_, s)| !s.is_empty());
+        out
+    }
+}
+
 /// What the writer thread is handed.
 enum Item {
     Screen(u64, Raster),
     Camera(u64, Vec<u8>),
     Sound(u8, SoundBlock),
+    Pointer(pointer::Sample),
+    PointerShape(Box<pointer::Shape>),
+}
+
+/// How often the pointer is looked at while recording: often enough that no click is missed.
+const POINTER_EVERY: Duration = Duration::from_millis(16);
+/// A pointer that isn't moving is still written this often.
+const POINTER_IDLE: Duration = Duration::from_millis(250);
+
+/// What the pointer's watcher has seen, each with when (since the recording began).
+type Seen = Arc<Mutex<Vec<(Duration, mouse::PointerState)>>>;
+
+/// The mouse pointer while a recording runs: watched on a thread of its own, its place worked
+/// out in the video's pixels, its pictures handed over the first time each shows.
+struct PointerFeed {
+    seen: Seen,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+    place: PointerPlace,
+    shapes: mouse::Shapes,
+    /// The pointers seen: each one's number in the recording (0: no picture, an arrow is drawn).
+    known: std::collections::HashMap<u64, u16>,
+}
+
+/// Desktop pixels to the video's: `(x - origin) * scale - shift`; and how much larger than its
+/// file's size the system draws a pointer there.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PointerPlace {
+    origin: (f64, f64),
+    scale: (f64, f64),
+    shift: (f64, f64),
+    grown: f32,
+}
+
+impl PointerPlace {
+    /// For a recording of `screen` (made `size` large); none if the screen isn't recorded, or
+    /// its monitor isn't among `monitors`.
+    fn of(screen: &Screen, size: (u32, u32), monitors: &[Monitor]) -> Option<PointerPlace> {
+        let find = |id: &u32| monitors.iter().find(|m| m.id == *id);
+        let corner = |r: IRect| (f64::from(r.x), f64::from(r.y));
+        let ratio = |r: IRect, size: (u32, u32)| (f64::from(size.0) / f64::from(r.w.max(1)), f64::from(size.1) / f64::from(r.h.max(1)));
+        match screen {
+            Screen::Off => None,
+            Screen::Part { monitor, area } => {
+                let m = find(monitor)?;
+                // A Retina display's picture has more pixels than the desktop has points.
+                let d = if cfg!(target_os = "macos") { f64::from(m.scale.max(1.0)) } else { 1.0 };
+                Some(PointerPlace { origin: corner(m.rect), scale: (d, d), shift: (f64::from(area.x), f64::from(area.y)), grown: m.scale.max(1.0) })
+            }
+            Screen::Monitor { monitor } => {
+                let m = find(monitor)?;
+                Some(PointerPlace { origin: corner(m.rect), scale: ratio(m.rect, size), shift: (0.0, 0.0), grown: m.scale.max(1.0) })
+            }
+            Screen::All { monitors: all, size } => {
+                let rects: Vec<IRect> = all.iter().map(|(_, r)| *r).collect();
+                let (desktop, _) = all_screens_size(&rects)?;
+                let s = ratio(desktop, *size);
+                let dpi = monitors.iter().find(|m| m.primary).map_or(1.0, |m| m.scale.max(1.0));
+                Some(PointerPlace { origin: corner(desktop), scale: s, shift: (0.0, 0.0), grown: dpi * s.0 as f32 })
+            }
+        }
+    }
+
+    /// A place on the desktop, in the video's pixels.
+    fn video(&self, x: i32, y: i32) -> (f32, f32) {
+        let vx = (f64::from(x) - self.origin.0) * self.scale.0 - self.shift.0;
+        let vy = (f64::from(y) - self.origin.1) * self.scale.1 - self.shift.1;
+        (vx as f32, vy as f32)
+    }
+}
+
+impl PointerFeed {
+    /// Starts watching the pointer for a recording of `screen` (none if it isn't recorded).
+    fn start(screen: &Screen, size: (u32, u32), started: Instant) -> Option<PointerFeed> {
+        let place = PointerPlace::of(screen, size, &screengrabcraft_capture::monitors().ok()?)?;
+        let seen: Seen = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (out, halt) = (seen.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name("pointer".into())
+            .spawn(move || {
+                let mut last: Option<(Duration, mouse::PointerState)> = None;
+                while !halt.load(Ordering::SeqCst) {
+                    let at = started.elapsed();
+                    if let Some(now) = mouse::state() {
+                        // Only what changed, and now and then while it's still.
+                        let news = last.is_none_or(|(t, was)| was != now || at.saturating_sub(t) >= POINTER_IDLE);
+                        if news {
+                            last = Some((at, now));
+                            if let Ok(mut v) = out.lock()
+                                && v.len() < 100_000
+                            {
+                                v.push((at, now));
+                            }
+                        }
+                    }
+                    std::thread::sleep(POINTER_EVERY);
+                }
+            })
+            .ok()?;
+        Some(PointerFeed { seen, stop, thread: Some(thread), place, shapes: mouse::Shapes::find(), known: Default::default() })
+    }
+
+    /// What was seen since the last look, handed to the writer: what came while paused left
+    /// out, a pointer's picture before the first sample that shows it.
+    fn pass_on(&mut self, tx: &std::sync::mpsc::Sender<Item>, pauses: &Pauses) {
+        let seen = self.seen.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+        for (at, st) in seen {
+            let Some(pts) = pauses.place(at) else { continue };
+            let shape = match self.known.get(&st.shape) {
+                Some(id) => *id,
+                None => {
+                    let next = (self.known.values().filter(|id| **id != 0).count() + 1) as u16;
+                    let id = match self.shapes.picture(st.shape).and_then(|p| shape_of(&p, next, self.place.grown)) {
+                        Some(s) if usize::from(next) < pointer::MAX_SHAPES => {
+                            let id = s.id;
+                            let _ = tx.send(Item::PointerShape(Box::new(s)));
+                            id
+                        }
+                        _ => 0,
+                    };
+                    if self.known.len() < 4096 {
+                        self.known.insert(st.shape, id);
+                    }
+                    id
+                }
+            };
+            let (x, y) = self.place.video(st.x, st.y);
+            let mut flags = 0u8;
+            for (on, bit) in [(st.visible, pointer::SHOWING), (st.left, pointer::LEFT), (st.right, pointer::RIGHT), (st.middle, pointer::MIDDLE)] {
+                if on {
+                    flags |= bit;
+                }
+            }
+            let _ = tx.send(Item::Pointer(pointer::Sample { t: pts.as_micros() as u64, x, y, flags, shape }));
+        }
+    }
+
+    fn end(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for PointerFeed {
+    /// However the recording ends, the watcher does.
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// A pointer's picture as the recording keeps it, drawn `grown` times its file's size.
+fn shape_of(p: &mouse::PointerPicture, id: u16, grown: f32) -> Option<pointer::Shape> {
+    let pic = Raster::new(p.width, p.height, p.rgba.clone()).ok()?;
+    // The picture may be larger than it's drawn (to stay sharp): its hot spot is in its pixels.
+    let nominal = (p.nominal as f32 * grown.clamp(0.25, 8.0)).round().clamp(8.0, 256.0) as u16;
+    Some(pointer::Shape { id, hot: (p.hot.0 as u16, p.hot.1 as u16), nominal, pic })
 }
 
 /// Screen pictures waiting to be written, at most (a slow disk loses pictures, not memory).
@@ -534,9 +846,9 @@ fn open_devices(o: &VideoOptions, started: Instant, s: &Shared, camera: Option<C
 }
 
 /// When in the recording a camera picture belongs (its time counts from before the recording
-/// began, by `lead`); None for one from before it began.
-fn camera_pts(f: &camera::CameraFrame, lead: Duration) -> Option<u64> {
-    f.at.checked_sub(lead).map(|t| t.as_micros() as u64)
+/// began, by `lead`); None for one from before it began, or from while it was paused.
+fn camera_pts(f: &camera::CameraFrame, lead: Duration, pauses: &Pauses) -> Option<u64> {
+    f.at.checked_sub(lead).and_then(|t| pauses.place(t)).map(|t| t.as_micros() as u64)
 }
 
 fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
@@ -612,6 +924,8 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
                     }
                     Item::Camera(pts, jpeg) => writer.jpeg_frame(3, pts, &jpeg),
                     Item::Sound(stream, b) => writer.audio(stream, b.first, &b.samples),
+                    Item::Pointer(s) => writer.pointer(&s),
+                    Item::PointerShape(s) => writer.pointer_shape(&s),
                 };
                 r.map_err(|e| e.to_string())?;
             }
@@ -629,24 +943,36 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         _ => None,
     };
     let feeding = AtomicBool::new(true);
+    let mut pauses = Pauses::default();
+    // The mouse pointer, kept apart from the pictures (drawn on the video after).
+    let mut pointer_feed = screen.as_ref().and_then(|src| PointerFeed::start(&plan.screen, src.size, started));
     let (frames, live) = std::thread::scope(|scope| {
         let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
-        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut());
+        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses, pointer_feed.as_mut());
         feeding.store(false, Ordering::SeqCst);
         let live = feeder.and_then(|h| h.join().ok()).flatten();
         (frames, live)
     });
-    let duration = started.elapsed().as_micros() as u64;
+    // Stopped while paused: the pause ends where the recording does.
+    let end = started.elapsed();
+    pauses.follow(false, end);
+    let duration = end.saturating_sub(pauses.total(end)).as_micros() as u64;
+    if let Some(p) = &mut pointer_feed {
+        p.end();
+        p.pass_on(&tx, &pauses);
+    }
     // What the devices still hold, then they're let go (the camera's light goes off).
     if let Some(a) = d.system {
-        send_sound(&tx, 1, a.stop());
+        let ch = a.channels;
+        send_sound(&tx, 1, a.stop(), &pauses, ch);
     }
     if let Some(a) = d.mic {
-        send_sound(&tx, 2, a.stop());
+        let ch = a.channels;
+        send_sound(&tx, 2, a.stop(), &pauses, ch);
     }
     if let Some(c) = d.camera {
         for f in c.stop() {
-            if let Some(pts) = camera_pts(&f, d.camera_lead) {
+            if let Some(pts) = camera_pts(&f, d.camera_lead, &pauses) {
                 let _ = tx.send(Item::Camera(pts, f.jpeg));
             }
         }
@@ -702,13 +1028,15 @@ impl Heard {
     }
 }
 
-/// Hands sound to the writer; how much it was.
-fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>) -> Heard {
+/// Hands sound to the writer, what came while paused left out; how much came.
+fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock>, pauses: &Pauses, channels: u8) -> Heard {
     let mut h = Heard::default();
     for b in blocks {
         h.samples = h.samples.saturating_add(b.samples.len());
         h.peak = h.peak.max(b.samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0));
-        let _ = tx.send(Item::Sound(id, b));
+        for (first, samples) in pauses.place_sound(b.first, &b.samples, usize::from(channels)) {
+            let _ = tx.send(Item::Sound(id, SoundBlock { first, samples }));
+        }
     }
     h
 }
@@ -815,7 +1143,9 @@ impl ScreenSource {
 }
 
 /// The screen on a steady beat (if it's recorded), with the devices' sound and pictures passed on
-/// as they come. The number of screen pictures taken, or why there were none.
+/// as they come, the pause switch followed (`pauses`). The number of screen pictures taken, or
+/// why there were none.
+#[allow(clippy::too_many_arguments)]
 fn record_screen(
     plan: &VideoPlan,
     s: &Shared,
@@ -824,6 +1154,8 @@ fn record_screen(
     waiting: &AtomicUsize,
     started: Instant,
     mut screen: Option<&mut ScreenSource>,
+    pauses: &mut Pauses,
+    mut pointer_feed: Option<&mut PointerFeed>,
 ) -> Result<u32, String> {
     let tick = Duration::from_secs_f64(1.0 / f64::from(plan.fps.clamp(5, 30)));
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
@@ -839,12 +1171,21 @@ fn record_screen(
     let (mut mic, mut system) = (Heard::default(), Heard::default());
     let channels = |a: &Option<AudioCapture>| a.as_ref().map_or(1, |a| a.channels);
     let (mic_ch, system_ch) = (channels(&d.mic), channels(&d.system));
-    while !s.stop.load(Ordering::SeqCst) && started.elapsed() < limit {
+    // The time recorded (pauses don't count) is what the limit is on.
+    while !s.stop.load(Ordering::SeqCst) && started.elapsed().saturating_sub(pauses.total(started.elapsed())) < limit {
         let at = started.elapsed();
-        if let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab) {
+        pauses.follow(s.paused.load(Ordering::SeqCst), at);
+        // While paused the screen isn't taken; the devices go on, and what they send is left out.
+        let place = pauses.place(at);
+        if let Some(p) = pointer_feed.as_deref_mut() {
+            p.pass_on(tx, pauses);
+        }
+        if let Some(pts) = place
+            && let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab)
+        {
             if waiting.load(Ordering::SeqCst) < WAITING {
                 waiting.fetch_add(1, Ordering::SeqCst);
-                let _ = tx.send(Item::Screen(at.as_micros() as u64, pic));
+                let _ = tx.send(Item::Screen(pts.as_micros() as u64, pic));
                 frames += 1;
                 s.progress.store(frames, Ordering::SeqCst);
             } else {
@@ -852,19 +1193,22 @@ fn record_screen(
             }
         }
         if let Some(a) = &d.system {
-            system.add(send_sound(tx, 1, a.take()));
+            system.add(send_sound(tx, 1, a.take(), pauses, system_ch));
             s.levels[0].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(a) = &d.mic {
-            mic.add(send_sound(tx, 2, a.take()));
+            mic.add(send_sound(tx, 2, a.take(), pauses, mic_ch));
             s.levels[1].store(a.level().to_bits(), Ordering::Relaxed);
         }
         if let Some(c) = &d.camera {
             for f in c.take() {
-                // Any still on their way from before the recording began are left out.
-                if let Some(pts) = camera_pts(&f, d.camera_lead) {
+                // Any still on their way from before the recording began are left out, and any
+                // from while it's paused.
+                if f.at >= d.camera_lead {
                     camera_pictures = camera_pictures.saturating_add(1);
                     last_picture = at;
+                }
+                if let Some(pts) = camera_pts(&f, d.camera_lead, pauses) {
                     let _ = tx.send(Item::Camera(pts, f.jpeg));
                 }
             }
@@ -921,6 +1265,11 @@ fn record_screen(
 /// The MP4 started as the recording starts (none if it can't be: it's then made after).
 fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Exporter, Arc<AtomicBool>)> {
     let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
+    // Only AV1 is made as it's recorded; an MP4 every player opens (H.264, on Windows) is made
+    // from the recording when it stops.
+    if settings.codec != Codec::Av1 {
+        return None;
+    }
     let (w, h) = compose::fit(size.0, size.1, settings.max_width, settings.max_height);
     let with_sound = d.system.is_some() || d.mic.is_some();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1040,6 +1389,36 @@ mod tests {
     }
 
     #[test]
+    fn the_pointer_is_placed_in_the_videos_pixels() {
+        let desk = desk();
+        let second = desk.iter().find(|m| !m.primary).unwrap().clone();
+        // A part of the second monitor: from its corner, less where the part starts.
+        let part = Screen::Part { monitor: second.id, area: IRect::new(100, 50, 640, 360) };
+        let p = PointerPlace::of(&part, (640, 360), &desk).unwrap();
+        assert_eq!(p.video(second.rect.x + 100, second.rect.y + 50), (0.0, 0.0));
+        assert_eq!(p.video(second.rect.x + 420, second.rect.y + 230), (320.0, 180.0));
+        // A whole monitor recorded at half its size: half the way along.
+        let whole = Screen::Monitor { monitor: second.id };
+        let p = PointerPlace::of(&whole, (second.rect.w / 2, second.rect.h / 2), &desk).unwrap();
+        assert_eq!(p.video(second.rect.x + 200, second.rect.y + 100), (100.0, 50.0));
+        // Every monitor: from the desktop's corner (left of the primary's, here or not).
+        let all: Vec<(u32, IRect)> = desk.iter().map(|m| (m.id, m.rect)).collect();
+        let rects: Vec<IRect> = all.iter().map(|(_, r)| *r).collect();
+        let (desktop, size) = all_screens_size(&rects).unwrap();
+        let p = PointerPlace::of(&Screen::All { monitors: all, size }, size, &desk).unwrap();
+        assert_eq!(p.video(desktop.x, desktop.y), (0.0, 0.0));
+        let (x, y) = p.video(desktop.x + desktop.w as i32, desktop.y + desktop.h as i32);
+        assert!((x - size.0 as f32).abs() < 1.0 && (y - size.1 as f32).abs() < 1.0);
+        // No screen recorded, or a monitor that's gone: no pointer.
+        assert!(PointerPlace::of(&Screen::Off, (1, 1), &desk).is_none());
+        assert!(PointerPlace::of(&Screen::Monitor { monitor: 999 }, (1, 1), &desk).is_none());
+        // A pointer's picture drawn half as large again where the display is scaled 150 %.
+        let pic = mouse::PointerPicture { width: 64, height: 64, rgba: vec![0; 64 * 64 * 4], hot: (3, 5), nominal: 32 };
+        let s = shape_of(&pic, 4, 1.5).unwrap();
+        assert_eq!((s.id, s.hot, s.nominal), (4, (3, 5), 48));
+    }
+
+    #[test]
     fn each_area_comes_to_its_own_plan() {
         let m = desk();
         let r = |area| RecorderOptions { area, ..RecorderOptions::default() };
@@ -1112,6 +1491,78 @@ mod tests {
     }
 
     #[test]
+    fn what_comes_while_paused_is_left_out_and_the_rest_moves_back() {
+        let ms = Duration::from_millis;
+        let mut p = Pauses::default();
+        p.follow(false, ms(500));
+        p.follow(true, ms(1000));
+        assert_eq!(p.place(ms(900)), Some(ms(900)));
+        assert_eq!(p.place(ms(1200)), None, "while paused");
+        p.follow(false, ms(3000));
+        assert_eq!(p.place(ms(3500)), Some(ms(1500)), "two seconds back");
+        assert_eq!(p.total(ms(4000)), ms(2000));
+        // Sound across the pause (mono, 0.99 s to 3.01 s): the part before it, and the part after
+        // it right where the first ends.
+        let (first, end) = (to_samples(ms(990)), to_samples(ms(3010)));
+        let samples: Vec<i16> = (0..end - first).map(|i| (i % 1000) as i16).collect();
+        let pieces = p.place_sound(first, &samples, 1);
+        assert_eq!(pieces.len(), 2);
+        assert_eq!((pieces[0].0, pieces[0].1.len() as u64), (first, to_samples(ms(1000)) - first));
+        assert_eq!((pieces[1].0, pieces[1].1.len() as u64), (to_samples(ms(1000)), end - to_samples(ms(3000))));
+        assert_eq!(pieces[1].1.first(), samples.get((to_samples(ms(3000)) - first) as usize));
+        // Stereo keeps its pairs; sound wholly inside the pause is left out.
+        assert!(p.place_sound(to_samples(ms(1500)), &[1, 2, 3, 4], 2).is_empty());
+        assert_eq!(p.place_sound(to_samples(ms(3500)), &[1, 2, 3, 4], 2), vec![(to_samples(ms(1500)), vec![1, 2, 3, 4])]);
+        // Paused again until it stops: everything from then on is left out.
+        p.follow(true, ms(5000));
+        assert_eq!(p.place(ms(5100)), None);
+        assert_eq!(p.total(ms(6000)), ms(3000));
+        assert!(p.place_sound(to_samples(ms(5500)), &[1, 2], 1).is_empty());
+    }
+
+    #[test]
+    fn the_clock_stands_still_while_paused_and_scrolling_cant_be() {
+        let mut rec = start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, egui::Context::default()).unwrap();
+        rec.set_paused(true);
+        assert!(!rec.is_paused(), "a scrolling capture isn't paused");
+        rec.cancel();
+        let off = VideoOptions {
+            system_sound: false,
+            system_sound_name: None,
+            microphone: false,
+            microphone_name: None,
+            camera: false,
+            camera_index: None,
+            captions: false,
+        };
+        let plan = VideoPlan {
+            kind: Kind::Production,
+            screen: Screen::Off,
+            desktop: IRect::new(0, 0, 10, 10),
+            fps: 30,
+            max_secs: 60,
+            options: off,
+            out: std::env::temp_dir().join(format!("sgc-paused-{}.sgvideo", std::process::id())),
+            max_size: (1920, 1080),
+            created: String::new(),
+        };
+        let mut rec = start_video(plan, egui::Context::default()).unwrap();
+        if let Ok(mut b) = rec.begun.lock() {
+            *b = Some(Instant::now());
+        }
+        rec.set_paused(true);
+        assert!(rec.is_paused());
+        let at = rec.elapsed();
+        std::thread::sleep(Duration::from_millis(60));
+        assert!(rec.elapsed() <= at + Duration::from_millis(5), "the time shown stands still while paused");
+        rec.set_paused(false);
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(rec.elapsed() >= at + Duration::from_millis(30), "and goes on after");
+        rec.cancel();
+        assert!(!rec.is_paused() || rec.stopping());
+    }
+
+    #[test]
     fn stopping_stops_the_clock_at_once() {
         let off = VideoOptions {
             system_sound: false,
@@ -1176,10 +1627,10 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let block = |v: i16| SoundBlock { first: 0, samples: vec![v; 4800] };
         let mut h = Heard::default();
-        h.add(send_sound(&tx, 2, vec![block(0), block(0)]));
+        h.add(send_sound(&tx, 2, vec![block(0), block(0)], &Pauses::default(), 1));
         assert!(h.silent(), "nothing at all");
         assert!((h.secs(1) - 0.2).abs() < 1e-9);
-        h.add(send_sound(&tx, 2, vec![block(-40)]));
+        h.add(send_sound(&tx, 2, vec![block(-40)], &Pauses::default(), 1));
         assert!(!h.silent(), "a little hiss is a microphone that hears");
         assert_eq!(h.peak, 40);
         assert!(!Heard::default().silent(), "no sound at all isn't silence heard");
@@ -1337,6 +1788,60 @@ mod tests {
             }
             Err(_) => std::fs::remove_file(&path).unwrap(),
         }
+    }
+
+    /// The real pointer through the real path: 2 s of a small area of the screen recorded for
+    /// editing, then opened to see that the pointer was followed and its picture kept; the
+    /// recording is deleted unshown. Run by hand only: `cargo test -p screengrabcraft
+    /// live_pointer -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn live_pointer() {
+        let monitor = screengrabcraft_capture::monitors().unwrap().into_iter().next().unwrap();
+        let area = IRect { x: 0, y: 0, w: 320, h: 200 };
+        let out = std::env::temp_dir().join(format!("sgc-pointer-{}.{}", std::process::id(), recording::EXT));
+        let plan = VideoPlan {
+            kind: Kind::Production,
+            screen: Screen::Part { monitor: monitor.id, area },
+            desktop: area,
+            fps: 30,
+            max_secs: 60,
+            options: VideoOptions {
+                system_sound: false,
+                system_sound_name: None,
+                microphone: false,
+                microphone_name: None,
+                camera: false,
+                camera_index: None,
+                captions: false,
+            },
+            out: out.clone(),
+            max_size: (1920, 1080),
+            created: String::new(),
+        };
+        let mut rec = start_video(plan, egui::Context::default()).unwrap();
+        std::thread::sleep(Duration::from_secs(2));
+        rec.stop();
+        let result = loop {
+            if let Some(r) = rec.take() {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(matches!(result, Ok(Output::Production(_))), "{:?}", result.err());
+        let r = screengrabcraft_media::recording::Recording::open(Box::new(FileSource::open(&out).unwrap())).unwrap();
+        let p = &r.pointer;
+        println!("{} pointer samples, {} clicks", p.samples().len(), p.clicks().len());
+        for s in p.shapes() {
+            println!("  pointer picture {}: {} × {}, drawn {} wide, points at {:?}", s.id, s.pic.width(), s.pic.height(), s.nominal, s.hot);
+        }
+        if let Some(s) = p.samples().first() {
+            println!("  first at ({:.0}, {:.0}), picture {}, showing {}", s.x, s.y, s.shape, s.flags & pointer::SHOWING != 0);
+        }
+        let followed = !p.is_empty();
+        drop(r);
+        std::fs::remove_file(&out).unwrap();
+        assert!(followed, "the pointer was followed");
     }
 
     /// The real path on the real screen: 3 s of a small area and the computer's sound, made into

@@ -242,6 +242,10 @@ pub struct Hotkeys {
     pub video: Option<Hotkey>,
     pub production: Option<Hotkey>,
     pub editor: Option<Hotkey>,
+    /// While a recording runs (only then are they taken from other programs): pause it or go on,
+    /// and stop it. F9 and F10, as screen recorders have them.
+    pub pause: Option<Hotkey>,
+    pub stop: Option<Hotkey>,
 }
 
 impl Hotkeys {
@@ -263,6 +267,9 @@ impl Hotkeys {
                 video: k("V"),
                 production: k("P"),
                 editor: k("E"),
+                // A Mac's top row is its media keys, so with Control and Shift there.
+                pause: k("F9"),
+                stop: k("F10"),
             }
         } else {
             Hotkeys {
@@ -278,6 +285,8 @@ impl Hotkeys {
                 video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
                 production: None,
                 editor: None,
+                pause: Some(Hotkey::new(false, false, false, false, "F9")),
+                stop: Some(Hotkey::new(false, false, false, false, "F10")),
             }
         }
     }
@@ -333,6 +342,12 @@ impl Hotkeys {
         let mut named: Vec<(&str, &Hotkey)> = CaptureMode::ALL.iter().filter_map(|m| self.get(*m).map(|k| (m.label(), k))).collect();
         if let Some(k) = &self.editor {
             named.push(("Open Editor", k));
+        }
+        if let Some(k) = &self.pause {
+            named.push(("Pause or Resume Recording", k));
+        }
+        if let Some(k) = &self.stop {
+            named.push(("Stop Recording", k));
         }
         let mut out = Vec::new();
         for (i, (a, ka)) in named.iter().enumerate() {
@@ -692,6 +707,10 @@ pub struct Settings {
     /// start. A file from before it existed gets the default, on.
     #[serde(default = "on")]
     pub keep_editor_ready: bool,
+    /// A red border round the area while it's recorded (turned off and on from the recording's
+    /// controls and the tray). On by default.
+    #[serde(default = "on")]
+    pub recording_border: bool,
 }
 
 fn on() -> bool {
@@ -728,6 +747,7 @@ impl Default for Settings {
             hide_editor: true,
             check_updates: true,
             keep_editor_ready: true,
+            recording_border: true,
         }
     }
 }

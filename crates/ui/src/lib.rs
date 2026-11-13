@@ -20,6 +20,7 @@ pub mod recorder;
 pub mod services;
 pub mod strip;
 pub mod theme;
+pub mod transcribe;
 pub mod video;
 pub mod widgets;
 

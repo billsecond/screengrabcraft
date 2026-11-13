@@ -43,6 +43,13 @@ pub const MAX_ZOOM: f32 = 32.0;
 
 impl View {
     /// Screen points per picture pixel.
+    /// The picture grew (or was cut) at its left or its top by `shift`, in place: the view stays on
+    /// what it was on, and is not fitted again for the new size.
+    pub fn grew(&mut self, shift: Pt, picture: &screengrabcraft_model::Raster) {
+        self.center = self.center.add(shift);
+        self.shown = Some(picture.clone());
+    }
+
     pub fn scale(&self) -> f32 {
         self.zoom / self.ppp.max(0.1)
     }
@@ -746,14 +753,23 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.touch();
             }
             Some(Drag::Move { ids, last }) => {
-                let d = ed.session.doc.limit_move(&ids, now.sub(last));
+                // Free to go off the picture (within reach): it grows to hold them, see-through
+                // where it is new, as far as they go.
+                let d = ed.session.doc.limit_move_near(&ids, now.sub(last), screengrabcraft_model::document::MAX_GROW);
                 for id in &ids {
                     if let Some(o) = ed.session.doc.get_mut(*id) {
                         o.shape.translate(d);
                     }
                 }
-                // Past the edge the pointer runs ahead, and the annotation waits for it to come back.
-                ed.drag = Some(Drag::Move { ids, last: last.add(d) });
+                let mut last = last.add(d);
+                let (w, h) = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
+                if let Some(shift) = ed.session.doc.bounds_of(&ids).and_then(|area| ed.session.doc.grow_to(area)) {
+                    last = last.add(shift);
+                    ed.picture_moved(shift);
+                    // What it was before it grew, to cut back to if the growth is not needed after all.
+                    ed.grown = Some(ed.grown.map_or(Rect::new(shift.x, shift.y, w, h), |r| r.translate(shift)));
+                }
+                ed.drag = Some(Drag::Move { ids, last });
                 ed.session.touch();
             }
             Some(Drag::Handle { id, handle }) => {
@@ -836,7 +852,15 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     click(ed, &ctx, press, shift);
                 }
             }
-            Some(Drag::Move { .. }) | Some(Drag::Handle { .. }) => ed.session.commit(),
+            Some(Drag::Move { .. }) | Some(Drag::Handle { .. }) => {
+                // Let go: the picture keeps only the growth that is needed for where things are now.
+                if let Some(keep) = ed.grown.take()
+                    && let Some(shift) = ed.session.doc.shrink_to(keep)
+                {
+                    ed.picture_moved(shift);
+                }
+                ed.session.commit()
+            }
             // Too small to be an area: none.
             Some(Drag::AreaNew { .. }) => {
                 if ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {

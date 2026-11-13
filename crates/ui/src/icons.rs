@@ -55,6 +55,18 @@ pub enum Icon {
     Eyedropper,
     /// The Selection tool: a box of dashes round part of the picture.
     Marquee,
+    /// Put a window away (in the tray).
+    Minimize,
+    /// Start again: a circling arrow.
+    Restart,
+    /// Record: a filled dot.
+    Record,
+    /// Stop: a filled square.
+    Stop,
+    Camera,
+    Microphone,
+    /// The computer's sound.
+    Speaker,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -368,6 +380,39 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             p.rect_filled(rect_at(5.0, 3.5, 8.5, 16.5), 0.8 * u, color);
             p.rect_filled(rect_at(11.5, 3.5, 15.0, 16.5), 0.8 * u, color);
         }
+        Icon::Minimize => line(at(4.0, 15.5), at(16.0, 15.5)),
+        Icon::Restart => {
+            // Most of a circle, and the arrow at its end.
+            let pts: Vec<Pos2> = (0..=24)
+                .map(|i| {
+                    let a = (40.0 + 290.0 * i as f32 / 24.0).to_radians();
+                    at(10.0 + 6.5 * a.cos(), 10.5 - 6.5 * a.sin())
+                })
+                .collect();
+            poly(pts, false);
+            fill_poly(vec![at(12.5, 2.0), at(17.5, 5.5), at(12.0, 8.0)], color);
+        }
+        Icon::Record => {
+            p.circle_filled(at(10.0, 10.0), 6.5 * u, color);
+        }
+        Icon::Stop => {
+            p.rect_filled(rect_at(4.5, 4.5, 15.5, 15.5), 1.2 * u, color);
+        }
+        Icon::Camera => {
+            p.rect_stroke(rect_at(2.5, 6.0, 13.5, 15.0), 1.5 * u, stroke, StrokeKind::Middle);
+            poly(vec![at(13.5, 9.0), at(17.5, 6.5), at(17.5, 14.5), at(13.5, 12.0)], true);
+        }
+        Icon::Microphone => {
+            p.rect_stroke(rect_at(7.5, 2.5, 12.5, 11.5), 2.5 * u, stroke, StrokeKind::Middle);
+            poly(vec![at(5.0, 9.0), at(5.0, 10.5), at(7.0, 13.5), at(10.0, 14.5), at(13.0, 13.5), at(15.0, 10.5), at(15.0, 9.0)], false);
+            line(at(10.0, 14.5), at(10.0, 17.5));
+            line(at(7.0, 17.5), at(13.0, 17.5));
+        }
+        Icon::Speaker => {
+            fill_poly(vec![at(3.0, 7.5), at(6.5, 7.5), at(10.5, 4.0), at(10.5, 16.0), at(6.5, 12.5), at(3.0, 12.5)], color);
+            poly(vec![at(13.0, 7.0), at(14.2, 8.5), at(14.6, 10.0), at(14.2, 11.5), at(13.0, 13.0)], false);
+            poly(vec![at(15.0, 4.5), at(17.0, 7.0), at(17.6, 10.0), at(17.0, 13.0), at(15.0, 15.5)], false);
+        }
     }
 }
 
@@ -407,5 +452,7 @@ pub fn button_sized(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled:
         t.text
     };
     paint(ui.painter(), rect.shrink(side * 0.2), icon, color);
+    // Screen readers (and tests) know it by what its tip says.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, tip));
     resp.on_hover_text(tip)
 }

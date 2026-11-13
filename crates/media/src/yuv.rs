@@ -74,6 +74,18 @@ impl I420 {
         let (w, h) = (ew as usize, eh as usize);
         I420 { width: ew, height: eh, y: vec![16; w * h], u: vec![128; w * h / 4], v: vec![128; w * h / 4] }
     }
+
+    /// The same picture as NV12 (the luma, then the chroma with U and V side by side), as
+    /// Windows' video encoders take it.
+    pub fn to_nv12(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.y.len() + self.u.len() * 2);
+        out.extend_from_slice(&self.y);
+        for (u, v) in self.u.iter().zip(&self.v) {
+            out.push(*u);
+            out.push(*v);
+        }
+        out
+    }
 }
 
 #[cfg(test)]
@@ -101,6 +113,12 @@ mod tests {
     fn sizes_that_dont_agree_are_refused() {
         assert!(I420::from_rgba(&[0; 15], 2, 2).is_none());
         assert!(I420::from_rgba(&[], 0, 0).is_none());
+    }
+
+    #[test]
+    fn nv12_has_the_luma_then_u_and_v_side_by_side() {
+        let f = I420 { width: 2, height: 2, y: vec![1, 2, 3, 4], u: vec![5], v: vec![6] };
+        assert_eq!(f.to_nv12(), vec![1, 2, 3, 4, 5, 6]);
     }
 
     #[test]

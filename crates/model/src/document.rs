@@ -57,6 +57,9 @@ pub enum DocError {
     NoImage(u64),
 }
 
+/// The furthest past its edges a picture grows when things are moved off them.
+pub const MAX_GROW: f32 = 4096.0;
+
 impl Document {
     pub fn new(base: Raster) -> Document {
         Document { base, objects: Vec::new(), images: BTreeMap::new(), meta: Meta::default(), next_id: 1 }
@@ -178,6 +181,74 @@ impl Document {
         area.map_or(d, |a| a.limit_move(d, self.bounds()))
     }
 
+    /// `d` cut down so that these annotations, moved by it together, stay within `reach` of the
+    /// picture (they may go off it: the picture grows to hold them, see [`Document::grow_to`]).
+    pub fn limit_move_near(&self, ids: &[ObjectId], d: Pt, reach: f32) -> Pt {
+        let b = self.bounds();
+        let reach = if reach.is_finite() { reach.clamp(0.0, MAX_GROW) } else { 0.0 };
+        let wide = Rect::new(b.x - reach, b.y - reach, b.w + reach * 2.0, b.h + reach * 2.0);
+        self.bounds_of(ids).map_or(d, |a| a.limit_move(d, wide))
+    }
+
+    /// The box round these annotations together.
+    pub fn bounds_of(&self, ids: &[ObjectId]) -> Option<Rect> {
+        ids.iter().filter_map(|id| self.get(*id)).map(|o| o.shape.bounds(&o.style)).reduce(Rect::union)
+    }
+
+    /// Makes the picture larger, see-through where it is new, so that `area` is on it. What was
+    /// on it keeps its place in the picture, so everything moves along if it grew to the left or
+    /// upwards: by how far. None when it need not grow, or would be too large to.
+    pub fn grow_to(&mut self, area: Rect) -> Option<Pt> {
+        if ![area.x, area.y, area.w, area.h].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let (w, h) = (self.width(), self.height());
+        let side = |v: f32| v.max(0.0).ceil().min(MAX_GROW * 2.0) as u32;
+        let (l, t) = (side(-area.x), side(-area.y));
+        let (r, d) = (side(area.right() - w as f32), side(area.bottom() - h as f32));
+        if l + t + r + d == 0 {
+            return None;
+        }
+        let (nw, nh) = (w.checked_add(l)?.checked_add(r)?, h.checked_add(t)?.checked_add(d)?);
+        let mut grown = Raster::filled(nw, nh, crate::Color::TRANSPARENT).ok()?;
+        let (row, new_row) = (w as usize * 4, nw as usize * 4);
+        let px = grown.pixels_mut();
+        for (y, line) in self.base.pixels().chunks_exact(row.max(1)).enumerate() {
+            let at = (y + t as usize) * new_row + l as usize * 4;
+            if let Some(dst) = px.get_mut(at..at + row) {
+                dst.copy_from_slice(line);
+            }
+        }
+        self.base = grown;
+        let shift = Pt::new(l as f32, t as f32);
+        if l > 0 || t > 0 {
+            self.map_objects(&|p| p.add(shift), 1.0);
+        }
+        Some(shift)
+    }
+
+    /// Cuts the picture back to `keep` (a part of it) and whatever its annotations take up
+    /// beyond that: growth that turned out not to be needed goes. How far everything moved
+    /// (back to the left, or up); none when nothing was cut.
+    pub fn shrink_to(&mut self, keep: Rect) -> Option<Pt> {
+        let (w, h) = (self.width(), self.height());
+        let need = self.objects.iter().map(|o| o.shape.bounds(&o.style)).fold(keep, Rect::union);
+        if ![need.x, need.y, need.w, need.h].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let (x0, y0) = (need.x.floor().clamp(0.0, w as f32) as u32, need.y.floor().clamp(0.0, h as f32) as u32);
+        let (x1, y1) = (need.right().ceil().clamp(0.0, w as f32) as u32, need.bottom().ceil().clamp(0.0, h as f32) as u32);
+        if (x0, y0, x1, y1) == (0, 0, w, h) || x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        self.base = self.base.crop(x0, y0, x1 - x0, y1 - y0)?;
+        let shift = Pt::new(-(x0 as f32), -(y0 as f32));
+        if x0 > 0 || y0 > 0 {
+            self.map_objects(&|p| p.add(shift), 1.0);
+        }
+        Some(shift)
+    }
+
     /// Moves an annotation onto the picture, as little as it takes.
     pub fn bring_inside(&mut self, id: ObjectId) {
         let bounds = self.bounds();
@@ -276,6 +347,36 @@ mod tests {
         assert!(moved.x < 10.0, "the one nearest the edge decides: {moved:?}");
         assert_eq!(d.limit_move(&[], Pt::new(500.0, 0.0)), Pt::new(500.0, 0.0), "nothing to stop");
         assert_eq!(d.limit_move(&[ObjectId(99)], Pt::new(500.0, 0.0)), Pt::new(500.0, 0.0));
+    }
+
+    #[test]
+    fn the_picture_grows_see_through_to_hold_what_is_moved_off_it_and_shrinks_back() {
+        let mut d = doc();
+        let a = d.add(rect(10.0), Style::default()).unwrap();
+        // Off the left and the top by 30 and 20: it may go (within reach), and the picture grows.
+        let moved = d.limit_move_near(&[a], Pt::new(-40.0, -20.0), MAX_GROW);
+        assert_eq!(moved, Pt::new(-40.0, -20.0));
+        d.get_mut(a).unwrap().shape.translate(moved);
+        let shift = d.grow_to(d.bounds_of(&[a]).unwrap()).unwrap();
+        assert!(shift.x >= 30.0 && shift.y >= 20.0, "{shift:?}");
+        assert_eq!((d.width(), d.height()), (100 + shift.x as u32, 80 + shift.y as u32));
+        // New pixels are see-through; the old picture is where it moved to.
+        assert_eq!(d.base.pixel(0, 0).map(|c| c.a), Some(0));
+        assert_eq!(d.base.pixel(shift.x as u32 + 5, shift.y as u32 + 5), Some(Color::WHITE));
+        let b = d.bounds_of(&[a]).unwrap();
+        assert!(d.bounds().encloses(b), "{b:?}");
+        // Moved back inside: the growth is not needed, and goes.
+        d.get_mut(a).unwrap().shape.translate(Pt::new(60.0, 40.0));
+        let keep = Rect::new(shift.x, shift.y, 100.0, 80.0);
+        let back = d.shrink_to(keep).unwrap();
+        assert_eq!((back, d.width(), d.height()), (Pt::new(-shift.x, -shift.y), 100, 80));
+        assert_eq!(d.shrink_to(d.bounds()), None, "nothing more to cut");
+        // Nothing to grow for; junk; and a move past its reach is cut down to it.
+        assert_eq!(d.grow_to(Rect::new(5.0, 5.0, 10.0, 10.0)), None);
+        assert_eq!(d.grow_to(Rect::new(f32::NAN, 0.0, f32::INFINITY, 1.0)), None);
+        assert!(d.grow_to(Rect::new(-1.0e30, 0.0, 1.0e30, 10.0)).is_some_and(|s| s.x <= MAX_GROW * 2.0));
+        let far = d.limit_move_near(&[a], Pt::new(1.0e9, 0.0), 50.0);
+        assert!(far.x > 0.0 && far.x < 1.0e5, "{far:?}");
     }
 
     #[test]

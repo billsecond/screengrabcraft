@@ -12,12 +12,13 @@ use std::time::Duration;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use screengrabcraft_media::export::{self, ExportSettings};
+use screengrabcraft_media::export::{self, Codec, ExportSettings};
+use screengrabcraft_media::layer_draw::MediaStore;
 use screengrabcraft_media::recording::{FileSource, Recording, ScreenDecoder, StreamKind};
 use screengrabcraft_media::timeline::Timeline;
-use screengrabcraft_media::{captions, compose};
+use screengrabcraft_media::{captions, compose, media_store};
 use screengrabcraft_model::{Color, Raster};
-use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoJob};
+use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoFormat, VideoJob};
 
 /// `path`, or `name (2).ext` and on beside it if that is taken.
 fn free(path: &Path) -> PathBuf {
@@ -35,30 +36,43 @@ fn free(path: &Path) -> PathBuf {
         .unwrap_or_else(|| dir.join(format!("{stem} {}.{ext}", std::process::id())))
 }
 
-/// Starts making the MP4; the answer comes back through the job's `done`.
+/// What this computer can make, the one every player opens first.
+pub fn formats() -> Vec<VideoFormat> {
+    let mut f = Vec::with_capacity(3);
+    if Codec::H264.available() {
+        f.push(VideoFormat::Mp4);
+    }
+    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif]);
+    f
+}
+
+/// Starts making the video; the answer comes back through the job's `done`.
 pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String> {
     let x = VideoExport::default();
-    let out = free(Path::new(&job.out));
+    // A name picked in the save dialog was agreed to be replaced; the one offered isn't.
+    let out = if job.replace { PathBuf::from(&job.out) } else { free(Path::new(&job.out)) };
     let (progress, cancel, done) = (x.progress.clone(), x.cancel.clone(), x.done.clone());
     std::thread::Builder::new()
         .name("export".into())
         .spawn(move || {
-            let settings = ExportSettings { max_width: job.max_size.0, max_height: job.max_size.1, fps: job.fps, ..ExportSettings::default() };
+            let codec = if job.format == VideoFormat::Mp4 { Codec::H264 } else { Codec::Av1 };
+            let settings = ExportSettings { max_width: job.max_size.0, max_height: job.max_size.1, fps: job.fps, codec, ..ExportSettings::default() };
             let captions = job.captions.filter(|c| !c.is_empty());
             let burned = captions.clone().filter(|_| job.burn).map(Arc::new);
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                export::export_with_captions(job.recording, &job.timeline, burned, &out, settings, &progress, &cancel)
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job.format {
+                VideoFormat::Gif => export::export_gif(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel),
+                VideoFormat::Mp4 | VideoFormat::Mp4Av1 => {
+                    export::export_with(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel)
+                }
             }));
             let result = match made {
                 Ok(Ok(e)) => {
-                    log::info!("made a video: {} × {}, {} frames, {} bytes", e.width, e.height, e.frames, e.bytes);
-                    // The captions beside it, as they fall on it (players pick up a .srt of the same name).
-                    if let Some(c) = &captions {
-                        for (ext, text) in [("txt", captions::to_text(c)), ("srt", captions::to_srt(c))] {
-                            let side = out.with_extension(ext);
-                            if let Err(e) = screengrabcraft_desktop::store::write_atomic(&side, text.as_bytes()) {
-                                log::warn!("the video's captions could not be written beside it ({}): {e}", side.display());
-                            }
+                    log::info!("made a video ({:?}): {} × {}, {} frames, {} bytes", job.format, e.width, e.height, e.frames, e.bytes);
+                    // The subtitles beside it, as they fall on it (players pick up a .srt of the same name).
+                    if let Some(c) = captions.as_ref().filter(|_| job.subtitles && job.format.has_sound()) {
+                        let side = out.with_extension("srt");
+                        if let Err(e) = screengrabcraft_desktop::store::write_atomic(&side, captions::to_srt(c).as_bytes()) {
+                            log::warn!("the video's subtitles could not be written beside it ({}): {e}", side.display());
                         }
                     }
                     Ok(out.to_string_lossy().to_string())
@@ -71,6 +85,99 @@ pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String>
         })
         .map_err(|e| e.to_string())?;
     Ok(x)
+}
+
+/// Files read for the media bin are no larger than this (a video file's sound is read as it
+/// comes, so this is for pictures and sound files).
+const MAX_MEDIA_FILE: u64 = 1024 * 1024 * 1024;
+
+/// Where a video file's pictures are kept while it's in the bin (they go when it does).
+#[cfg(target_os = "windows")]
+fn clips_dir() -> PathBuf {
+    std::env::temp_dir().join("ScreenGrabCraft").join("clips")
+}
+
+/// Leftovers of an editor that didn't close (a day old or more) are cleared away.
+#[cfg(target_os = "windows")]
+pub fn clear_old_clips() {
+    let Ok(entries) = std::fs::read_dir(clips_dir()) else { return };
+    let day = Duration::from_secs(24 * 3600);
+    for e in entries.flatten().take(1000) {
+        let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age >= day);
+        if old && e.file_name().to_string_lossy().starts_with("clip-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Reads a file for the media bin: a picture, a sound file, a recording, or a video file (its
+/// pictures by Windows' own decoders, its sound apart).
+pub fn read_media(path: &Path) -> Result<media_store::Loaded, String> {
+    use media_store::{Content, Loaded};
+    use screengrabcraft_media::layers::MediaKind;
+    let name = path.to_string_lossy().to_string();
+    let kind = media_store::kind_of(&name).ok_or("not a picture, a sound file or a video this program reads")?;
+    let ext = path.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    let read = |p: &Path| -> Result<Vec<u8>, String> {
+        let len = std::fs::metadata(p).map_err(|e| e.to_string())?.len();
+        if len > MAX_MEDIA_FILE {
+            return Err("the file is too large".to_string());
+        }
+        std::fs::read(p).map_err(|e| e.to_string())
+    };
+    match kind {
+        MediaKind::Picture => {
+            let pic = screengrabcraft_render::decode(&read(path)?).map_err(|e| format!("not a picture this program reads ({e})"))?;
+            Ok(Loaded { kind, duration: 0, width: pic.width(), height: pic.height(), content: Content::Picture(pic) })
+        }
+        MediaKind::Sound => {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            let (sound, duration) = media_store::decode_sound_file(file, &ext)?;
+            Ok(Loaded { kind, duration, width: 0, height: 0, content: Content::Sound(sound) })
+        }
+        MediaKind::Video if ext == screengrabcraft_media::recording::EXT => {
+            let rec = Recording::open(Box::new(FileSource::open(path).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
+            Ok(Loaded::recording(rec))
+        }
+        // A Lottie animation (a lower third or a transition made elsewhere).
+        MediaKind::Video if ext == "json" => {
+            let text = String::from_utf8(read(path)?).map_err(|_| "not a Lottie animation (it isn't text)".to_string())?;
+            media_store::LottieClip::loaded(&text)
+        }
+        MediaKind::Video => read_video_file(path, &ext),
+    }
+}
+
+/// A video file (MP4, MOV): its sound, and its pictures where this system can read them.
+fn read_video_file(path: &Path, ext: &str) -> Result<media_store::Loaded, String> {
+    use media_store::{Content, Loaded};
+    use screengrabcraft_media::layers::MediaKind;
+    let sound = std::fs::File::open(path).map_err(|e| e.to_string()).and_then(|f| media_store::decode_sound_file(f, ext));
+    let secs = sound.as_ref().ok().map(|(_, d)| d.div_ceil(1_000_000));
+    #[cfg(target_os = "windows")]
+    {
+        clear_old_clips();
+        match screengrabcraft_media::clip::Clip::open(path, &clips_dir(), secs) {
+            Ok(clip) => {
+                let (width, height, duration) = (clip.width, clip.height, clip.duration);
+                log::info!("a video file brought in: {width} × {height}, {} ms", duration / 1000);
+                let sound = sound.ok().map(|(s, _)| s);
+                return Ok(Loaded { kind: MediaKind::Video, duration, width, height, content: Content::Clip { frames: Box::new(clip), sound } });
+            }
+            Err(e) => {
+                log::warn!("a video file's pictures couldn't be read: {e}");
+                if sound.is_err() {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    let _ = secs;
+    // No pictures here: its sound, as a sound file.
+    match sound {
+        Ok((s, duration)) => Ok(Loaded { kind: MediaKind::Sound, duration, width: 0, height: 0, content: Content::Sound(s) }),
+        Err(e) => Err(format!("this system can't read its pictures, and its sound can't be read either ({e})")),
+    }
 }
 
 /// A small picture of a video for the strip: a recording's first picture, or a play sign for
@@ -142,7 +249,7 @@ const AHEAD_SECS: f64 = 0.25;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Sound {
-    pub fn start(rec: Arc<Recording>, timeline: Timeline, from_us: u64) -> Result<Sound, String> {
+    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Result<Sound, String> {
         let device = cpal::default_host().default_output_device().ok_or("there are no speakers")?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let rate = u64::from(config.sample_rate().max(1));
@@ -210,7 +317,7 @@ impl Sound {
                     let waiting = queue.lock().unwrap_or_else(PoisonError::into_inner).len();
                     if (waiting as f64) < rate as f64 * AHEAD_SECS && at48 < end {
                         let n = 4800usize;
-                        let mixed = compose::mix(&rec, &timeline, at48, n);
+                        let mixed = compose::mix_with(&rec, &timeline, media.as_ref(), at48, n);
                         at48 += n as u64;
                         let frames: Vec<[f32; 2]> = mixed.as_chunks::<2>().0.to_vec();
                         let mut out = Vec::with_capacity((n as f64 / step) as usize + 2);
@@ -249,7 +356,7 @@ pub struct Sound;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 impl Sound {
-    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _from_us: u64) -> Result<Sound, String> {
+    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64) -> Result<Sound, String> {
         Err("sound can't be played on this system yet".to_string())
     }
 }
@@ -297,7 +404,7 @@ mod tests {
         let tl = Timeline::new(&rec);
         let n = compose::to_samples(tl.length()) as usize;
         let loudest = compose::mix(&rec, &tl, 0, n).iter().fold(0f32, |m, s| m.max(s.abs()));
-        let sound = Sound::start(rec, tl, 0).expect("the speakers start");
+        let sound = Sound::start(rec, tl, Arc::new(screengrabcraft_media::layer_draw::NoMedia), 0).expect("the speakers start");
         std::thread::sleep(Duration::from_millis(2500));
         let at = sound.position_us().unwrap_or(0);
         println!("played to {:.2} s in 2.5 s; the loudest sound in it {loudest:.3}", at as f64 / 1e6);
