@@ -267,15 +267,14 @@ impl VideoView {
         ui.label(RichText::new("Drag one onto the timeline, or + to add it at the playhead.").size(12.0).color(t.muted));
         let lib = layers::library();
         ui.add_space(6.0);
-        // The cards keep the whole width of the panel under their heading.
-        ui.spacing_mut().indent = 0.0;
         // A section for each kind, opened and closed by its heading (the first is open).
         for g in Group::ALL {
             let cards: Vec<&layers::Template> = lib.iter().filter(|x| x.group == g).collect();
             egui::CollapsingHeader::new(RichText::new(g.label()).size(14.0).strong().color(t.text))
                 .id_salt(("library-section", g.label()))
                 .default_open(g == Group::LowerThirds)
-                .show(ui, |ui| {
+                // (Not set in from its heading: the cards keep the whole width of the panel.)
+                .show_unindented(ui, |ui| {
                     ui.add_space(4.0);
                     for row in cards.chunks(2) {
                         ui.horizontal(|ui| {
@@ -492,10 +491,14 @@ impl VideoView {
                         let size_label = if matches!(item.what, What::Text { .. }) { "Size" } else { "Width (share of the video's)" };
                         let (lo, hi) = if matches!(item.what, What::Text { .. }) { (0.3, 2.5) } else { (0.05, 1.0) };
                         self.slider(ui, size_label, item.place.w, lo, hi, "w", &set);
-                        self.slider(ui, "Across", item.place.x, 0.0, 1.0, "x", &set);
-                        self.slider(ui, "Down", item.place.y, 0.0, 1.0, "y", &set);
+                        self.slider(ui, "Across", item.place.x, -0.5, 1.5, "x", &set);
+                        self.slider(ui, "Down", item.place.y, -0.5, 1.5, "y", &set);
                         self.slider(ui, "Seen through it", 1.0 - item.place.opacity, 0.0, 0.9, "see", &set);
-                        ui.label(RichText::new("Drag it on the picture to move it; drag a corner to resize it.").size(11.5).color(t.muted));
+                        ui.label(
+                            RichText::new("Drag it on the picture to move it (off its edges too); drag a corner to resize it.")
+                                .size(11.5)
+                                .color(t.muted),
+                        );
                         ui.add_space(10.0);
                         for (label, key, anim) in [("Comes in", "intro", item.intro), ("Goes out", "outro", item.outro)] {
                             ui.horizontal(|ui| {
@@ -609,7 +612,8 @@ impl VideoView {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
         let f = pic.width() / (self.composer.width as f32).max(1.0);
-        let resp = ui.interact(pic, ui.id().with("designer"), Sense::click_and_drag());
+        // All round the picture too: what was moved off it is still taken hold of there.
+        let resp = ui.interact(ui.max_rect(), ui.id().with("designer"), Sense::click_and_drag());
         let video_at = |p: Pos2| ((p - pic.min) / f).to_pos2();
         let corners = |r: Rect| [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
         let chosen = self.chosen_rect(pic);

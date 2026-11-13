@@ -187,6 +187,9 @@ pub struct Editor {
     /// What a save dialog that is open will save as.
     pub(crate) saving: Option<ImageFormat>,
     pub(crate) saving_project: bool,
+    /// While annotations are dragged off the picture and it grows to hold them: the picture as
+    /// it was before, in the grown one (what it is cut back to if the growth is not needed).
+    pub(crate) grown: Option<Rect>,
     /// Export Transcript's save dialog is open, for this kind of file.
     pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
     /// Export Video's Change… save dialog is open.
@@ -270,6 +273,7 @@ impl Editor {
             pending: None,
             saving: None,
             saving_project: false,
+            grown: None,
             saving_transcript: None,
             transcripts: Default::default(),
             saving_video: false,
@@ -298,6 +302,14 @@ impl Editor {
     }
 
     // ---- messages ----
+
+    /// The picture grew or was cut at its left or top, everything on it moving by `shift`: the view
+    /// stays on what it showed, and what is marked on the picture (an area, a crop) moves along.
+    pub(crate) fn picture_moved(&mut self, shift: screengrabcraft_model::Pt) {
+        self.view.grew(shift, &self.session.doc.base);
+        self.area = self.area.map(|a| a.translate(shift));
+        self.crop = self.crop.map(|c| c.translate(shift));
+    }
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
         self.toast = Some((text.into(), ctx.input(|i| i.time), false));

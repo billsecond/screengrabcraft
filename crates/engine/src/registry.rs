@@ -367,11 +367,15 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn nudge(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = ids_param(s, p, true)?;
-    let d = s.doc.limit_move(&ids, Pt::new(num(p, "dx").unwrap_or(0.0), num(p, "dy").unwrap_or(0.0)));
-    for id in ids {
-        if let Some(o) = s.doc.get_mut(id) {
+    // Past an edge the picture grows to hold them, see-through where it is new.
+    let d = s.doc.limit_move_near(&ids, Pt::new(num(p, "dx").unwrap_or(0.0), num(p, "dy").unwrap_or(0.0)), screengrabcraft_model::document::MAX_GROW);
+    for id in &ids {
+        if let Some(o) = s.doc.get_mut(*id) {
             o.shape.translate(d);
         }
+    }
+    if let Some(area) = s.doc.bounds_of(&ids) {
+        s.doc.grow_to(area);
     }
     Ok(Value::Null)
 }

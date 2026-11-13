@@ -324,6 +324,10 @@ pub fn camera_rect(layout: &crate::timeline::CameraLayout, aspect: f32, ow: f32,
             },
         ),
     };
+    // In a corner it stays on the picture; put somewhere by hand it may be part off it, or all.
+    if layout.at.is_some() {
+        return (x, y, cw, ch);
+    }
     (x.clamp(0.0, (ow - cw).max(0.0)), y.clamp(0.0, (oh - ch).max(0.0)), cw, ch)
 }
 
@@ -341,8 +345,9 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
         Some(cam.clone())
     };
     let Some(small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
-    let (x0, y0) = (x0 as usize, y0 as usize);
-    let (sw, ow_px) = (small.width() as usize, out.width() as usize);
+    // (It may be part off the picture: only what is on it is drawn.)
+    let (x0, y0) = (x0 as i64, y0 as i64);
+    let (sw, ow_px, oh_px) = (small.width() as usize, out.width() as i64, out.height() as i64);
     let dst = out.pixels_mut();
     for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
         for (x, p) in row.as_chunks::<4>().0.iter().enumerate() {
@@ -350,7 +355,11 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
             if a <= 0.0 {
                 continue;
             }
-            let i = ((y0 + y) * ow_px + x0 + x) * 4;
+            let (dx, dy) = (x0 + x as i64, y0 + y as i64);
+            if dx < 0 || dy < 0 || dx >= ow_px || dy >= oh_px {
+                continue;
+            }
+            let i = ((dy * ow_px + dx) * 4) as usize;
             if let Some(d) = dst.get_mut(i..i + 3) {
                 for (dv, sv) in d.iter_mut().zip(p) {
                     *dv = (f32::from(*sv) * a + f32::from(*dv) * (1.0 - a)).round() as u8;

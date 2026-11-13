@@ -738,7 +738,9 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
         "News and Broadcast",
         "Titles",
         "Callouts and Overlays",
-        "Transitions",
+        "News Transitions",
+        "Training Transitions",
+        "More Transitions",
         "Breaking news",
         "Name card",
         "Angled",
@@ -1088,14 +1090,14 @@ fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
     assert!(h.query_by_label("Clock wipe").is_none() && h.query_by_label("Keys").is_none());
     h.get_by_label("Lower Thirds").click();
     h.run_steps(8);
-    h.get_by_label("Transitions").click();
+    h.get_by_label("Training Transitions").click();
     h.run_steps(8);
-    for label in ["Diagonal sweep", "Clock wipe", "Shutter", "Fade in from black"] {
+    for label in ["Chapter card", "Next step", "Progress bar", "Done"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
-    h.get_by_label("Transitions").click();
+    h.get_by_label("Training Transitions").click();
     h.run_steps(8);
-    assert!(h.query_by_label("Clock wipe").is_none(), "shut again");
+    assert!(h.query_by_label("Chapter card").is_none(), "shut again");
     h.get_by_label("Lower Thirds").click();
     h.run_steps(8);
     h.get_by_label("Add Breaking news").click();
@@ -1134,4 +1136,36 @@ fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
     crate::tests::drag(&mut h, on.center(), on.center() + egui::vec2(pic.width() * 0.25, -pic.height() * 0.2));
     let after = h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
     assert!((after.x - before.x - 0.25).abs() < 0.03 && (after.y - before.y + 0.2).abs() < 0.03, "{before:?} → {after:?}");
+}
+
+#[test]
+fn an_item_is_dragged_off_the_picture_and_taken_hold_of_again_out_there() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    // Off the left edge of the picture, all of it.
+    crate::tests::drag(&mut h, on.center(), egui::pos2(pic.min.x - on.width(), on.center().y));
+    let out = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!(out.max.x < pic.min.x + 2.0, "it is off the picture: {out:?} {pic:?}");
+    shot(&mut h, "video-off-picture");
+    // Out there it is still taken hold of, and brought back.
+    crate::tests::drag(&mut h, out.center(), pic.center());
+    let back = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((back.center().x - pic.center().x).abs() < 6.0 && (back.center().y - pic.center().y).abs() < 6.0, "{back:?}");
+    // The camera too: put where it is part off the picture, it is drawn where it is on it.
+    let v = h.state_mut().video.as_mut().unwrap();
+    v.session.execute("video.cameraAt", &serde_json::json!({"x": 1.0, "y": 0.5})).unwrap();
+    assert_eq!(v.session.timeline.camera.at, Some([1.0, 0.5]));
+    let _ = v.frame_at(2_000_000);
 }

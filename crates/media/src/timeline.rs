@@ -199,7 +199,7 @@ impl Timeline {
             tracks.push(t);
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
-        self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]);
+        self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
         let mut checked = Timeline {
             tracks,
             camera: self.camera,

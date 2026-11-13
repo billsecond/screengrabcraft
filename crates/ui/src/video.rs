@@ -1252,7 +1252,8 @@ impl VideoView {
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
             // The picture, and under it the play button with the time.
-            let whole = ui.max_rect().shrink(16.0);
+            // Room left round the picture: things can be moved off its edges, and found there.
+            let whole = ui.max_rect().shrink(36.0);
             let area = Rect::from_min_max(whole.min, pos2(whole.max.x, (whole.max.y - CONTROLS).max(whole.min.y)));
             let mut bottom = area.max.y;
             let mut shown_at = None;

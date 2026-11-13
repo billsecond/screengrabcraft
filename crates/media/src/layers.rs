@@ -221,6 +221,22 @@ pub enum TextStyle {
     StingerShutter,
     /// Blinds turning shut and open: a transition.
     StingerBlinds,
+    /// A flash and a slanted panel with a title on it (BREAKING NEWS): a news transition.
+    StingerNewsFlash,
+    /// A panel with a headline and a line under it, between two parts: a news bumper.
+    StingerHeadline,
+    /// The top half swept from one side, the bottom from the other: a news transition.
+    StingerSplit,
+    /// Four corners closing on the middle and opening: a transition.
+    StingerWedge,
+    /// A card with a chapter and its title, between two parts: a training transition.
+    StingerChapter,
+    /// A disc from a corner with the number of the next step: a training transition.
+    StingerStep,
+    /// A bar filling like progress, then the whole picture: a training transition.
+    StingerProgress,
+    /// A tick in a disc that grows over the picture (done): a training transition.
+    StingerCheck,
 }
 
 impl TextStyle {
@@ -382,6 +398,14 @@ pub fn style_name(s: TextStyle) -> &'static str {
         TextStyle::StingerClock => "Transition: clock wipe",
         TextStyle::StingerShutter => "Transition: shutter",
         TextStyle::StingerBlinds => "Transition: blinds",
+        TextStyle::StingerNewsFlash => "Transition: breaking flash",
+        TextStyle::StingerHeadline => "Transition: headline bumper",
+        TextStyle::StingerSplit => "Transition: split sweep",
+        TextStyle::StingerWedge => "Transition: four corners",
+        TextStyle::StingerChapter => "Transition: chapter card",
+        TextStyle::StingerStep => "Transition: next step",
+        TextStyle::StingerProgress => "Transition: progress bar",
+        TextStyle::StingerCheck => "Transition: done",
     }
 }
 
@@ -399,6 +423,10 @@ pub fn transition_name(k: TransitionKind) -> &'static str {
 /// A group of the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// Transitions with the look of the news.
+    NewsTransitions,
+    /// Transitions for lessons and walk-throughs: chapters, steps, progress.
+    TrainingTransitions,
     /// Broadcast graphics: news lower thirds, a live bug, a ticker, tags and cards.
     News,
     Titles,
@@ -408,7 +436,8 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [Group::LowerThirds, Group::News, Group::Titles, Group::Overlays, Group::Transitions];
+    pub const ALL: [Group; 7] =
+        [Group::LowerThirds, Group::News, Group::Titles, Group::Overlays, Group::NewsTransitions, Group::TrainingTransitions, Group::Transitions];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -416,7 +445,9 @@ impl Group {
             Group::Titles => "Titles",
             Group::LowerThirds => "Lower Thirds",
             Group::Overlays => "Callouts and Overlays",
-            Group::Transitions => "Transitions",
+            Group::NewsTransitions => "News Transitions",
+            Group::TrainingTransitions => "Training Transitions",
+            Group::Transitions => "More Transitions",
         }
     }
 }
@@ -506,15 +537,23 @@ pub fn library() -> Vec<Template> {
         t("highlight", "Highlight", Overlays, at(TextStyle::Highlight, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
         t("circle", "Circle", Overlays, at(TextStyle::Circle, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
         t("spotlight", "Spotlight", Overlays, at(TextStyle::Spotlight, "", "", "#000000", p(0.5, 0.5, 0.35), 3_000_000)),
-        t("stinger-diagonal", "Diagonal sweep", Transitions, s(TextStyle::StingerDiagonal, "", "", blue, 1_200_000)),
-        t("stinger-chevron", "Chevron", Transitions, s(TextStyle::StingerChevron, "", "", red, 1_200_000)),
+        t("stinger-news-flash", "Breaking flash", NewsTransitions, s(TextStyle::StingerNewsFlash, "BREAKING NEWS", "", red, 1_800_000)),
+        t("stinger-headline", "Headline bumper", NewsTransitions, s(TextStyle::StingerHeadline, "Coming up", "The story so far", blue, 2_600_000)),
+        t("stinger-split", "Split sweep", NewsTransitions, s(TextStyle::StingerSplit, "", "", blue, 1_200_000)),
+        t("stinger-diagonal", "Diagonal sweep", NewsTransitions, s(TextStyle::StingerDiagonal, "", "", blue, 1_200_000)),
+        t("stinger-chevron", "Chevron", NewsTransitions, s(TextStyle::StingerChevron, "", "", red, 1_200_000)),
+        t("stinger-panel", "Two panels", NewsTransitions, s(TextStyle::StingerPanel, "", "", amber, 1_200_000)),
+        t("stinger-chapter", "Chapter card", TrainingTransitions, s(TextStyle::StingerChapter, "Getting started", "Chapter 1", teal, 2_800_000)),
+        t("stinger-step", "Next step", TrainingTransitions, s(TextStyle::StingerStep, "2", "", amber, 2_000_000)),
+        t("stinger-progress", "Progress bar", TrainingTransitions, s(TextStyle::StingerProgress, "", "", teal, 1_500_000)),
+        t("stinger-check", "Done", TrainingTransitions, s(TextStyle::StingerCheck, "", "", "#22a55b", 1_900_000)),
+        t("stinger-wedge", "Four corners", Transitions, s(TextStyle::StingerWedge, "", "", blue, 1_200_000)),
         t("stinger-clock", "Clock wipe", Transitions, s(TextStyle::StingerClock, "", "", teal, 1_200_000)),
         t("stinger-shutter", "Shutter", Transitions, s(TextStyle::StingerShutter, "", "", amber, 1_200_000)),
         t("stinger-blinds", "Blinds", Transitions, s(TextStyle::StingerBlinds, "", "", blue, 1_200_000)),
         t("stinger-iris", "Iris", Transitions, s(TextStyle::StingerIris, "", "", amber, 1_200_000)),
         t("stinger-bars", "Bars", Transitions, s(TextStyle::StingerBars, "", "", blue, 1_200_000)),
         t("stinger-slices", "Slices", Transitions, s(TextStyle::StingerSlices, "", "", red, 1_200_000)),
-        t("stinger-panel", "Two panels", Transitions, s(TextStyle::StingerPanel, "", "", amber, 1_200_000)),
         t("fade-in", "Fade in from black", Transitions, transition(TransitionKind::FadeIn, 1_000_000)),
         t("fade-out", "Fade out to black", Transitions, transition(TransitionKind::FadeOut, 1_000_000)),
         t("dip-black", "Dip to black", Transitions, transition(TransitionKind::DipBlack, 1_000_000)),

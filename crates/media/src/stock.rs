@@ -375,6 +375,43 @@ impl Build {
         self.shapes("piece", items, json!({"p": p}));
     }
 
+    /// Words shown only while a stinger covers the picture: on from `a`, off by `z`.
+    #[allow(clippy::too_many_arguments)]
+    fn shown(&mut self, name: &str, words: &str, size: f32, wt: Wt, colour: Rgb, x: f32, y: f32, track: f32, a: f32, z: f32) {
+        if words.trim().is_empty() {
+            return;
+        }
+        let o = keys(&[
+            (0.0, vec![0.0], E::Lin),
+            (a, vec![0.0], E::Out),
+            (a + 6.0, vec![100.0], E::Lin),
+            (z - 5.0, vec![100.0], E::In),
+            (z, vec![0.0], E::Lin),
+        ]);
+        let p = keys(&[(a, vec![x, y + size * 0.25], E::Out), (a + 9.0, vec![x, y], E::Lin)]);
+        let face = if wt == Wt::Reg { "Sans" } else { "Sans-Bold" };
+        let mut doc = json!({"s": size, "f": face, "t": words, "j": 2, "fc": colour, "lh": size * 1.2, "tr": track});
+        if wt == Wt::Black
+            && let Some(d) = doc.as_object_mut()
+        {
+            d.insert("sw".into(), json!(size * 0.03));
+            d.insert("sc".into(), json!(colour));
+        }
+        self.push(json!({"ty": 5, "nm": name, "ks": {"p": p, "o": o}, "t": {"d": {"k": [{"s": doc, "t": 0}]}}}));
+    }
+
+    /// Full-screen pieces crossing the picture, staying on it for `hold` either side of its middle.
+    fn crossing_held(&mut self, items: Vec<Value>, from: P, to: P, start: f32, end: f32, hold: f32) {
+        let mid = self.total / 2.0;
+        let p = keys(&[
+            (start, from.to_vec(), E::Out),
+            (mid - hold, vec![0.0, 0.0], E::Lin),
+            (mid + hold, vec![0.0, 0.0], E::In),
+            (end, to.to_vec(), E::Lin),
+        ]);
+        self.shapes("piece", items, json!({"p": p}));
+    }
+
     fn done(self) -> Option<Animation> {
         Animation::from_value(
             json!({"v": "5.7.4", "nm": "ScreenGrabCraft", "fr": FPS, "ip": 0, "op": self.total, "w": W, "h": H, "layers": self.layers}),
@@ -404,19 +441,38 @@ pub fn is_stinger(style: TextStyle) -> bool {
     use TextStyle::*;
     matches!(
         style,
-        StingerBars | StingerIris | StingerSlices | StingerPanel | StingerDiagonal | StingerChevron | StingerClock | StingerShutter | StingerBlinds
+        StingerBars
+            | StingerIris
+            | StingerSlices
+            | StingerPanel
+            | StingerDiagonal
+            | StingerChevron
+            | StingerClock
+            | StingerShutter
+            | StingerBlinds
+            | StingerNewsFlash
+            | StingerHeadline
+            | StingerSplit
+            | StingerWedge
+            | StingerChapter
+            | StingerStep
+            | StingerProgress
+            | StingerCheck
     )
 }
 
 /// Whether a style has words to change.
 pub fn has_words(style: TextStyle) -> bool {
-    !is_stinger(style) && !matches!(style, TextStyle::Highlight | TextStyle::Spotlight | TextStyle::Circle)
+    use TextStyle::*;
+    // A few stingers carry words while they cover the picture.
+    matches!(style, StingerNewsFlash | StingerHeadline | StingerChapter | StingerStep)
+        || (!is_stinger(style) && !matches!(style, Highlight | Spotlight | Circle))
 }
 
 /// Whether it has a second line.
 pub fn has_subtitle(style: TextStyle) -> bool {
     use TextStyle::*;
-    has_words(style) && !matches!(style, Title | TitleBox | Banner | Callout | Note | Leader | Keys)
+    has_words(style) && !matches!(style, Title | TitleBox | Banner | Callout | Note | Leader | Keys | StingerNewsFlash | StingerStep)
 }
 
 /// The corners of a plate `r` whose right end is cut on a slant (`lean` wider at the top).
@@ -879,6 +935,187 @@ pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len
             }
             r(0.0, 0.0, W, H)
         }
+        TextStyle::StingerNewsFlash | TextStyle::StingerHeadline => {
+            // A slanted panel crosses and stays a while, its words on it: a headline, or two lines.
+            let (mid, hold) = (b.total / 2.0, b.total * if style == TextStyle::StingerHeadline { 0.22 } else { 0.14 });
+            let (a0, z0) = (mid - hold - 2.0, mid + hold + 2.0);
+            let lean = 420.0;
+            let slab = |x0: f32, x1: f32| poly(&[[x0 + lean, 0.0], [x1 + lean, 0.0], [x1, H], [x0, H]]);
+            let (x0, x1) = (-lean - 60.0, W + 60.0);
+            let far = W + lean + 520.0;
+            if style == TextStyle::StingerNewsFlash {
+                let head = if title.is_empty() { "BREAKING NEWS".to_string() } else { title.to_uppercase() };
+                let tw = width(&head, 128.0, Wt::Black, 60.0).min(1700.0);
+                b.shown("title", &head, 128.0, Wt::Black, WHITE, W / 2.0, 584.0, 60.0, a0, z0);
+                for y in [430.0, 640.0] {
+                    let o = keys(&[
+                        (0.0, vec![0.0], E::Lin),
+                        (a0, vec![0.0], E::Lin),
+                        (a0 + 4.0, vec![100.0], E::Lin),
+                        (z0 - 4.0, vec![100.0], E::Lin),
+                        (z0, vec![0.0], E::Lin),
+                    ]);
+                    let s = keys(&[(a0, vec![0.0, 8.0], E::Out), (a0 + 12.0, vec![tw, 8.0], E::Lin)]);
+                    b.shapes(
+                        "rule",
+                        vec![json!({"ty": "rc", "p": fixed(&[W / 2.0, y]), "s": s, "r": fixed(&[4.0])}), fl(WHITE, 0.95)],
+                        json!({"o": o}),
+                    );
+                }
+                // The flash as it arrives.
+                let flash = keys(&[(0.0, vec![0.0], E::Lin), (a0 - 5.0, vec![0.0], E::Lin), (a0, vec![70.0], E::Out), (a0 + 9.0, vec![0.0], E::Lin)]);
+                b.shapes("flash", vec![rc(r(0.0, 0.0, W, H), 0.0), fl(WHITE, 1.0)], json!({"o": flash}));
+            } else {
+                b.shown("subtitle", &sub.to_uppercase(), 40.0, Wt::Bold, tint(a, 0.75), W / 2.0, 470.0, 160.0, a0 + 4.0, z0);
+                b.shown("title", &title, 116.0, Wt::Black, WHITE, W / 2.0, 610.0, 0.0, a0, z0);
+                let tw = width(&title, 116.0, Wt::Black, 0.0).clamp(200.0, 1600.0);
+                let o = keys(&[
+                    (0.0, vec![0.0], E::Lin),
+                    (a0, vec![0.0], E::Lin),
+                    (a0 + 4.0, vec![100.0], E::Lin),
+                    (z0 - 4.0, vec![100.0], E::Lin),
+                    (z0, vec![0.0], E::Lin),
+                ]);
+                let s = keys(&[(a0 + 2.0, vec![0.0, 8.0], E::Out), (a0 + 16.0, vec![tw, 8.0], E::Lin)]);
+                b.shapes(
+                    "rule",
+                    vec![json!({"ty": "rc", "p": fixed(&[W / 2.0, 660.0]), "s": s, "r": fixed(&[4.0])}), fl(WHITE, 0.95)],
+                    json!({"o": o}),
+                );
+            }
+            let items = vec![
+                gr(vec![slab(x1 + 34.0, x1 + 62.0), fl(WHITE, 0.95)]),
+                gr(vec![slab(x1 + 92.0, x1 + 150.0), fl(tint(a, 0.4), 1.0)]),
+                gr(vec![slab(x1 + 180.0, x1 + 300.0), gv(0.0, H, DARK2, DARK, 1.0)]),
+                gr(vec![slab(x0 - 62.0, x0 - 34.0), fl(WHITE, 0.95)]),
+                gr(vec![slab(x0 - 150.0, x0 - 92.0), fl(shade(a, 0.6), 1.0)]),
+                gr(vec![slab(x0, x1), gv(0.0, H, tint(a, 0.16), shade(a, 0.66), 1.0)]),
+            ];
+            b.crossing_held(items, [-far, 0.0], [far, 0.0], 0.0, b.total, hold);
+            r(0.0, 0.0, W, H)
+        }
+        TextStyle::StingerSplit => {
+            // The top half comes from the left and the bottom from the right, a bright lip on each.
+            let half = H / 2.0;
+            let colour = |y: f32| gv(y, y + half, tint(a, 0.16), shade(a, 0.7), 1.0);
+            let top = vec![
+                gr(vec![rc(r(W, 0.0, 26.0, half + 1.0), 0.0), fl(WHITE, 0.95)]),
+                gr(vec![rc(r(-40.0, 0.0, W + 40.0, half + 1.0), 0.0), colour(0.0)]),
+            ];
+            let bottom = vec![
+                gr(vec![rc(r(-26.0, half, 26.0, half), 0.0), fl(WHITE, 0.95)]),
+                gr(vec![rc(r(0.0, half, W + 40.0, half), 0.0), gv(half, H, shade(a, 0.7), tint(a, 0.1), 1.0)]),
+            ];
+            b.shapes("seam", vec![rc(r(0.0, half - 4.0, W, 8.0), 0.0), fl(WHITE, 0.9), json!({"ty": "tr", "p": fixed(&[0.0, 0.0]), "a": fixed(&[0.0, 0.0]), "s": fixed(&[100.0, 100.0]), "r": fixed(&[0.0]), "o": keys(&[(0.0, vec![0.0], E::Lin), (b.total * 0.42, vec![0.0], E::Lin), (b.total * 0.5, vec![100.0], E::Lin), (b.total * 0.58, vec![0.0], E::Lin)])})], json!({}));
+            b.crossing(top, [-(W + 80.0), 0.0], [W + 80.0, 0.0], 0.0, b.total);
+            b.crossing(bottom, [W + 80.0, 0.0], [-(W + 80.0), 0.0], 0.0, b.total);
+            r(0.0, 0.0, W, H)
+        }
+        TextStyle::StingerWedge => {
+            // Four corners close on the middle and open again.
+            let (cx, cy) = (W / 2.0, H / 2.0);
+            let far = 1.25;
+            for (k, (tri, off)) in [
+                ([[-2.0, -2.0], [W + 2.0, -2.0], [cx, cy + 2.0]], [0.0, -H * far]),
+                ([[W + 2.0, -2.0], [W + 2.0, H + 2.0], [cx - 2.0, cy]], [W * far, 0.0]),
+                ([[W + 2.0, H + 2.0], [-2.0, H + 2.0], [cx, cy - 2.0]], [0.0, H * far]),
+                ([[-2.0, H + 2.0], [-2.0, -2.0], [cx + 2.0, cy]], [-W * far, 0.0]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let fill = if k % 2 == 0 { gv(0.0, H, tint(a, 0.16), shade(a, 0.74), 1.0) } else { gv(0.0, H, shade(a, 0.86), shade(a, 0.56), 1.0) };
+                b.crossing(vec![poly(&tri), fill], off, off, k as f32 * b.total * 0.02, b.total - (3 - k) as f32 * b.total * 0.02);
+            }
+            r(0.0, 0.0, W, H)
+        }
+        TextStyle::StingerChapter => {
+            // A card rises over the picture with the chapter and its title, and goes on up.
+            let (mid, hold) = (b.total / 2.0, b.total * 0.24);
+            let (a0, z0) = (mid - hold - 2.0, mid + hold + 2.0);
+            let tw = width(&title, 104.0, Wt::Black, 0.0).clamp(200.0, 1600.0);
+            b.shown("subtitle", &sub.to_uppercase(), 38.0, Wt::Bold, tint(a, 0.35), W / 2.0, 446.0, 220.0, a0 + 2.0, z0);
+            b.shown("title", &title, 104.0, Wt::Black, WHITE, W / 2.0, 600.0, 0.0, a0 + 5.0, z0);
+            let o = keys(&[
+                (0.0, vec![0.0], E::Lin),
+                (a0, vec![0.0], E::Lin),
+                (a0 + 4.0, vec![100.0], E::Lin),
+                (z0 - 4.0, vec![100.0], E::Lin),
+                (z0, vec![0.0], E::Lin),
+            ]);
+            let s = keys(&[(a0 + 4.0, vec![0.0, 8.0], E::Out), (a0 + 20.0, vec![tw.min(520.0), 8.0], E::Lin)]);
+            b.shapes("rule", vec![json!({"ty": "rc", "p": fixed(&[W / 2.0, 490.0]), "s": s, "r": fixed(&[4.0])}), fl(a, 1.0)], json!({"o": o}));
+            let card = vec![
+                gr(vec![rc(r(0.0, -14.0, W, 14.0), 0.0), fl(a, 1.0)]),
+                gr(vec![rc(r(0.0, H, W, 14.0), 0.0), fl(a, 1.0)]),
+                gr(vec![rc(r(0.0, -2.0, W, H + 4.0), 0.0), gv(0.0, H, DARK2, DARK, 1.0)]),
+            ];
+            b.crossing_held(card, [0.0, H + 40.0], [0.0, -H - 40.0], 0.0, b.total, hold);
+            r(0.0, 0.0, W, H)
+        }
+        TextStyle::StingerStep | TextStyle::StingerCheck => {
+            // A disc grows over the picture (from a corner with the number of the step; from the
+            // middle with a tick), then a hole grows in the colour, uncovering it.
+            let step = style == TextStyle::StingerStep;
+            let (mid, hold) = (b.total / 2.0, b.total * 0.16);
+            let (from, out) = if step { ([0.0, H], [W, 0.0]) } else { ([W / 2.0, H / 2.0], [W / 2.0, H / 2.0]) };
+            let full = 4500.0;
+            let disc = |centre: P, size: Value, paint: Value| vec![json!({"ty": "el", "p": fixed(&centre), "s": size}), paint];
+            let hex = format!("#{:02x}{:02x}{:02x}", accent[0], accent[1], accent[2]);
+            if step {
+                let num: String = if title.is_empty() { "1".to_string() } else { title.chars().take(3).collect() };
+                b.shown("label", "STEP", 44.0, Wt::Bold, WHITE, W / 2.0, 360.0, 400.0, mid - hold, mid + hold);
+                b.shown("title", &num, 330.0, Wt::Black, WHITE, W / 2.0, 690.0, 0.0, mid - hold + 2.0, mid + hold);
+            } else {
+                // The tick draws itself, in a ring, and goes as the picture comes back.
+                let tick = [[W / 2.0 - 96.0, H / 2.0 + 6.0], [W / 2.0 - 26.0, H / 2.0 + 74.0], [W / 2.0 + 104.0, H / 2.0 - 70.0]];
+                let o = keys(&[(0.0, vec![100.0], E::Lin), (mid + hold - 4.0, vec![100.0], E::Lin), (mid + hold + 2.0, vec![0.0], E::Lin)]);
+                let draw = json!({"ty": "tm", "s": fixed(&[0.0]), "e": keys(&[(b.total * 0.12, vec![0.0], E::Out), (b.total * 0.30, vec![100.0], E::Lin)]), "o": fixed(&[0.0])});
+                b.shapes("tick", vec![json!({"ty": "sh", "ks": {"a": 0, "k": outline(&tick, false)}}), draw, st(WHITE, 1.0, 34.0)], json!({"o": o}));
+            }
+            let grow = if step {
+                keys(&[(0.0, vec![0.0, 0.0], E::In), (mid - hold, vec![full, full], E::Lin)])
+            } else {
+                keys(&[
+                    (0.0, vec![0.0, 0.0], E::Back),
+                    (b.total * 0.14, vec![330.0, 330.0], E::Lin),
+                    (b.total * 0.30, vec![330.0, 330.0], E::In),
+                    (mid - hold, vec![full, full], E::Lin),
+                ])
+            };
+            let open = keys(&[(mid + hold, vec![0.0, 0.0], E::Out), (b.total, vec![full, full], E::Lin)]);
+            let first = mid + hold;
+            let n = b.layers.len();
+            b.layers.push(json!({"ty": 4, "nm": "cover", "ind": n + 1, "ip": 0, "op": first, "ks": {}, "shapes": disc(from, grow, gv(0.0, H, tint(a, 0.14), shade(a, 0.72), 1.0))}));
+            b.layers.push(json!({"ty": 4, "nm": "hole", "ind": n + 2, "td": 1, "ip": first, "op": b.total, "ks": {}, "shapes": disc(out, open, fl(WHITE, 1.0))}));
+            b.layers.push(json!({"ty": 1, "nm": "colour", "ind": n + 3, "tt": 2, "ip": first, "op": b.total, "ks": {}, "sw": W, "sh": H, "sc": hex}));
+            r(0.0, 0.0, W, H)
+        }
+        TextStyle::StingerProgress => {
+            // A bar fills from the left like progress, opens over the whole picture, shuts to a
+            // bar again and runs out to the right.
+            let t = b.total;
+            let (thin, cy) = (16.0, H / 2.0);
+            let p = keys(&[
+                (0.0, vec![0.0, cy], E::Out),
+                (t * 0.30, vec![W / 2.0, cy], E::Lin),
+                (t * 0.70, vec![W / 2.0, cy], E::In),
+                (t, vec![W, cy], E::Lin),
+            ]);
+            let s = keys(&[
+                (0.0, vec![0.0, thin], E::Out),
+                (t * 0.30, vec![W + 4.0, thin], E::Out),
+                (t * 0.44, vec![W + 4.0, H + 4.0], E::Lin),
+                (t * 0.56, vec![W + 4.0, H + 4.0], E::In),
+                (t * 0.70, vec![W + 4.0, thin], E::In),
+                (t, vec![0.0, thin], E::Lin),
+            ]);
+            let track =
+                keys(&[(0.0, vec![0.0], E::Lin), (t * 0.04, vec![100.0], E::Lin), (t * 0.30, vec![100.0], E::Lin), (t * 0.36, vec![0.0], E::Lin)]);
+            b.shapes("bar", vec![json!({"ty": "rc", "p": p, "s": s, "r": fixed(&[0.0])}), gv(0.0, H, tint(a, 0.16), shade(a, 0.72), 1.0)], json!({}));
+            b.shapes("track", vec![rc(r(0.0, cy - thin / 2.0, W, thin), 0.0), fl(BLACK, 0.45)], json!({"o": track}));
+            r(0.0, 0.0, W, H)
+        }
         TextStyle::StingerIris => {
             // A disc grows to cover the picture, a bright ring at its edge; then a hole grows in
             // the colour, uncovering it.
@@ -935,7 +1172,7 @@ pub fn card(
 }
 
 #[cfg(test)]
-const ALL: [TextStyle; 32] = {
+const ALL: [TextStyle; 40] = {
     use TextStyle::*;
     [
         NewsBreaking,
@@ -970,6 +1207,14 @@ const ALL: [TextStyle; 32] = {
         StingerBars,
         StingerSlices,
         StingerIris,
+        StingerNewsFlash,
+        StingerHeadline,
+        StingerSplit,
+        StingerWedge,
+        StingerChapter,
+        StingerStep,
+        StingerProgress,
+        StingerCheck,
     ]
 };
 
@@ -978,6 +1223,9 @@ fn sample(style: TextStyle) -> (&'static str, &'static str) {
     match style {
         TextStyle::Keys => ("Ctrl + Shift + S", ""),
         TextStyle::Step => ("2", "Choose where it goes"),
+        TextStyle::StingerStep => ("3", ""),
+        TextStyle::StingerNewsFlash => ("Breaking news", ""),
+        TextStyle::StingerChapter | TextStyle::StingerHeadline => ("Getting started", "Chapter 1"),
         _ => ("City Council Approves Budget", "Vote passes 7 to 2 after a long night"),
     }
 }
@@ -1162,6 +1410,19 @@ mod shots {
                 (StingerIris, "", "", amber, 2.2),
                 (StingerBars, "", "", blue, 1.9),
                 (StingerPanel, "", "", red, 1.9),
+            ],
+        );
+        sheet(
+            "stock-stingers-2",
+            &[
+                (StingerNewsFlash, "Breaking news", "", red, 3.0),
+                (StingerHeadline, "Coming up", "The story so far", blue, 3.0),
+                (StingerSplit, "", "", blue, 1.7),
+                (StingerWedge, "", "", teal, 1.8),
+                (StingerChapter, "Getting started", "Chapter 1", teal, 3.0),
+                (StingerStep, "2", "", amber, 3.0),
+                (StingerProgress, "", "", teal, 1.5),
+                (StingerCheck, "", "", [0x22, 0xa5, 0x5b], 1.6),
             ],
         );
     }

@@ -455,7 +455,7 @@ fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
         return camera(s, p);
     }
     let (x, y) = (number(p, "x")?.unwrap_or(0.5), number(p, "y")?.unwrap_or(0.5));
-    s.timeline.camera.at = Some([x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)]);
+    s.timeline.camera.at = Some([x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
     if let Some(size) = number(p, "size")? {
         s.timeline.camera.size = size.clamp(0.1, 0.5);
     }
@@ -522,7 +522,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.cameraAt",
         label: "Move Camera",
-        params: r#"{"x": 0..1, "y": 0..1, "size"?: 0.1..0.5}: its middle on the picture; {"corner": …} puts it back in a corner"#,
+        params: r#"{"x": -0.5..1.5, "y": -0.5..1.5, "size"?: 0.1..0.5}: its middle, as a share of the picture (past 0 or 1 it is off it); {"corner": …} puts it back in a corner"#,
         run: camera_at,
     },
 ];
