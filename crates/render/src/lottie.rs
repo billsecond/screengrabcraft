@@ -324,8 +324,30 @@ fn paint_of(item: &Value, frame: f32, alpha: f32) -> Paint<'static> {
     };
     let n = g.get("p").and_then(f).unwrap_or(0.0).clamp(0.0, 32.0) as usize;
     let flat = prop(g.get("k"), frame, &[]);
-    let colours: Vec<(f32, tiny_skia::Color)> =
-        (0..n).filter_map(|k| flat.get(k * 4..k * 4 + 4)).map(|s| (s[0].clamp(0.0, 1.0), colour(&s[1..], alpha))).collect();
+    // Its colours along it, then (after them in the list) how see-through it is along it.
+    let rgb: Vec<(f32, [f32; 3])> = (0..n).filter_map(|k| flat.get(k * 4..k * 4 + 4)).map(|s| (s[0].clamp(0.0, 1.0), [s[1], s[2], s[3]])).collect();
+    let fades: Vec<(f32, [f32; 3])> =
+        flat.get(n * 4..).unwrap_or_default().as_chunks::<2>().0.iter().take(16).map(|p| (p[0].clamp(0.0, 1.0), [p[1].clamp(0.0, 1.0); 3])).collect();
+    // A value along a list of stops, at a place.
+    let at = |stops: &[(f32, [f32; 3])], x: f32| -> [f32; 3] {
+        let after = stops.iter().position(|s| s.0 >= x).unwrap_or(stops.len());
+        match (after.checked_sub(1).and_then(|i| stops.get(i)), stops.get(after)) {
+            (Some(a), Some(b)) => {
+                let p = ((x - a.0) / (b.0 - a.0).max(1.0e-5)).clamp(0.0, 1.0);
+                [a.1[0] + (b.1[0] - a.1[0]) * p, a.1[1] + (b.1[1] - a.1[1]) * p, a.1[2] + (b.1[2] - a.1[2]) * p]
+            }
+            (Some(a), None) | (None, Some(a)) => a.1,
+            (None, None) => [0.0; 3],
+        }
+    };
+    let mut places: Vec<f32> = rgb.iter().chain(fades.iter()).map(|s| s.0).collect();
+    places.sort_by(f32::total_cmp);
+    places.dedup_by(|a, b| (*a - *b).abs() < 1.0e-4);
+    let colours: Vec<(f32, tiny_skia::Color)> = if rgb.is_empty() {
+        Vec::new()
+    } else {
+        places.iter().map(|x| (*x, colour(&at(&rgb, *x), alpha * if fades.is_empty() { 1.0 } else { at(&fades, *x)[0] }))).collect()
+    };
     let stops: Vec<GradientStop> = colours.iter().map(|(at, c)| GradientStop::new(*at, *c)).collect();
     let (s, e) = (two(item.get("s"), frame, (0.0, 0.0)), two(item.get("e"), frame, (100.0, 0.0)));
     let (a, b) = (Point::from_xy(s.0, s.1), Point::from_xy(e.0, e.1));
@@ -457,12 +479,26 @@ impl Animation {
             let masks = items(l.get("masksProperties").unwrap_or(&Value::Null), 16);
             let matte = num("tt").filter(|t| *t >= 1.0).and_then(|t| idx.checked_sub(1).and_then(|j| list.get(j)).map(|src| (t, src)));
             if masks.is_empty() && matte.is_none() {
-                self.layer(pix, l, frame, world, o, depth);
+                self.layer(pix, l, frame, world, o, depth, None);
+                continue;
+            }
+            // Cut by a matte that is plain shapes: drawn straight on, through the shapes as a mask
+            // (no picture of its own to make and put on).
+            let shape_matte = matte.filter(|(_, src)| masks.is_empty() && src.get("ty").and_then(f) == Some(4.0) && num("ty") != Some(0.0));
+            if let Some((kind, src)) = shape_matte
+                && let Some(mut mask) = Mask::new(pix.width(), pix.height())
+            {
+                let (sw, _) = self.world(list, src, frame);
+                self.mask_shapes(&mut mask, src.get("shapes").unwrap_or(&Value::Null), frame, sw.post_concat(base), 0);
+                if kind >= 2.0 {
+                    mask.invert();
+                }
+                self.layer(pix, l, frame, world, o, depth, Some(&mask));
                 continue;
             }
             // Drawn apart, cut by its masks and its matte, then put on.
             let Some(mut own) = Pixmap::new(pix.width(), pix.height()) else { continue };
-            self.layer(&mut own, l, frame, world, 1.0, depth);
+            self.layer(&mut own, l, frame, world, 1.0, depth, None);
             let cut: Vec<&Value> = masks.iter().filter(|m| m.get("mode").and_then(Value::as_str) != Some("n")).collect();
             if !cut.is_empty()
                 && let Some(mut mask) = Mask::new(pix.width(), pix.height())
@@ -481,7 +517,7 @@ impl Animation {
                 && let Some(mut shape) = Pixmap::new(pix.width(), pix.height())
             {
                 let (sw, _) = self.world(list, src, frame);
-                self.layer(&mut shape, src, frame, sw.post_concat(base), 1.0, depth);
+                self.layer(&mut shape, src, frame, sw.post_concat(base), 1.0, depth, None);
                 let mut mask = Mask::from_pixmap(shape.as_ref(), MaskType::Alpha);
                 if kind >= 2.0 {
                     mask.invert();
@@ -492,9 +528,10 @@ impl Animation {
         }
     }
 
-    fn layer(&self, pix: &mut Pixmap, l: &Value, frame: f32, world: Transform, alpha: f32, depth: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn layer(&self, pix: &mut Pixmap, l: &Value, frame: f32, world: Transform, alpha: f32, depth: usize, clip: Option<&Mask>) {
         match l.get("ty").and_then(f).map(|t| t as i32) {
-            Some(4) => self.group(pix, l.get("shapes").unwrap_or(&Value::Null), frame, world, alpha, 0),
+            Some(4) => self.group(pix, l.get("shapes").unwrap_or(&Value::Null), frame, world, alpha, 0, clip),
             Some(1) => {
                 let (w, h) = (l.get("sw").and_then(f).unwrap_or(0.0), l.get("sh").and_then(f).unwrap_or(0.0));
                 let hex = l.get("sc").and_then(Value::as_str).unwrap_or("#000000").trim_start_matches('#');
@@ -502,7 +539,7 @@ impl Animation {
                 let mut paint = Paint { anti_alias: true, ..Paint::default() };
                 paint.set_color(colour(&[c(0), c(1), c(2)], alpha));
                 if let Some(r) = tiny_skia::Rect::from_xywh(0.0, 0.0, w.max(0.01), h.max(0.01)) {
-                    pix.fill_rect(r, &paint, world, None);
+                    pix.fill_rect(r, &paint, world, clip);
                 }
             }
             Some(0) if depth < MAX_DEPTH => {
@@ -514,14 +551,14 @@ impl Animation {
                     self.layers(pix, layers, frame - start, world, alpha, depth + 1);
                 }
             }
-            Some(5) => self.text(pix, l, world, alpha),
+            Some(5) => self.text(pix, l, world, alpha, clip),
             _ => {}
         }
     }
 
     /// A text layer, in this program's own fonts: its origin is the start of its first line's
     /// baseline (its middle, or its end, as it's justified).
-    fn text(&self, pix: &mut Pixmap, l: &Value, world: Transform, alpha: f32) {
+    fn text(&self, pix: &mut Pixmap, l: &Value, world: Transform, alpha: f32, clip: Option<&Mask>) {
         let Some(doc) = l.pointer("/t/d/k/0/s") else { return };
         let words = doc.get("t").and_then(Value::as_str).unwrap_or_default().replace('\r', "\n");
         let size = doc.get("s").and_then(f).unwrap_or(36.0).clamp(1.0, 2000.0);
@@ -536,8 +573,18 @@ impl Animation {
         let lead = doc.get("lh").and_then(f).filter(|v| *v > 0.0).map_or(lay.line_height, |lh| lh / k);
         lay.line_height = lead;
         let just = doc.get("j").and_then(f).unwrap_or(0.0) as i32;
+        // Tracking: its letters set apart, in thousandths of its size.
+        let apart = doc.get("tr").and_then(f).unwrap_or(0.0).clamp(-200.0, 2000.0) / 1000.0 * 64.0;
         let mut pb = PathBuilder::new();
         for (n, line) in lay.lines.iter().enumerate() {
+            let mut line = line.clone();
+            if apart != 0.0 {
+                for (i, g) in line.glyphs.iter_mut().enumerate() {
+                    g.1 += apart * i as f32;
+                }
+                line.width = (line.width + apart * line.glyphs.len().saturating_sub(1) as f32).max(0.0);
+            }
+            let line = &line;
             let one_line = text::Layout { lines: vec![line.clone()], width: line.width, ..lay.clone() };
             let dx = match just {
                 1 => -line.width,
@@ -550,14 +597,39 @@ impl Animation {
             }
         }
         let Some(path) = pb.finish() else { return };
+        let fill = doc.get("fc").map(list).unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
+        let place = Transform::from_scale(k, k).post_concat(world);
         let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        paint.set_color(colour(&doc.get("fc").map(list).unwrap_or_else(|| vec![1.0, 1.0, 1.0]), alpha));
-        pix.fill_path(&path, &paint, FillRule::Winding, Transform::from_scale(k, k).post_concat(world), None);
+        // An outline (in the fill's colour it makes the letters heavier), under the fill.
+        let edge = doc.get("sw").and_then(f).unwrap_or(0.0).clamp(0.0, 200.0);
+        if edge > 0.0 {
+            paint.set_color(colour(&doc.get("sc").map(list).unwrap_or_else(|| fill.clone()), alpha));
+            let stroke = Stroke { width: edge / k, line_join: LineJoin::Round, ..Stroke::default() };
+            pix.stroke_path(&path, &paint, &stroke, place, clip);
+        }
+        paint.set_color(colour(&fill, alpha));
+        pix.fill_path(&path, &paint, FillRule::Winding, place, clip);
+    }
+
+    /// Fills a mask with a shape layer's paths (whatever their fills): the shape a matte cuts.
+    fn mask_shapes(&self, mask: &mut Mask, list: &Value, frame: f32, base: Transform, depth: usize) {
+        let all = items(list, MAX_ITEMS);
+        let ty = |i: &Value| i.get("ty").and_then(Value::as_str).unwrap_or_default().to_string();
+        let (own, _) = xform(all.iter().find(|i| ty(i) == "tr"), frame);
+        let world = own.post_concat(base);
+        for item in all {
+            if ty(item) == "gr" && depth < MAX_DEPTH {
+                self.mask_shapes(mask, item.get("it").unwrap_or(&Value::Null), frame, world, depth + 1);
+            } else if let Some(p) = shape_path(item, frame) {
+                mask.fill_path(&p, FillRule::Winding, true, world);
+            }
+        }
     }
 
     /// A shape layer's items, or a group's: its nested groups, then its own paths with each of
     /// its fills and strokes, from the bottom of the list up.
-    fn group(&self, pix: &mut Pixmap, list: &Value, frame: f32, base: Transform, alpha: f32, depth: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn group(&self, pix: &mut Pixmap, list: &Value, frame: f32, base: Transform, alpha: f32, depth: usize, clip: Option<&Mask>) {
         let all = items(list, MAX_ITEMS);
         let ty = |i: &Value| i.get("ty").and_then(Value::as_str).unwrap_or_default().to_string();
         let shown = |i: &&Value| !i.get("hd").and_then(Value::as_bool).unwrap_or(false);
@@ -576,12 +648,12 @@ impl Animation {
         }
         for item in all.iter().rev().filter(shown) {
             match ty(item).as_str() {
-                "gr" if depth < MAX_DEPTH => self.group(pix, item.get("it").unwrap_or(&Value::Null), frame, world, alpha, depth + 1),
+                "gr" if depth < MAX_DEPTH => self.group(pix, item.get("it").unwrap_or(&Value::Null), frame, world, alpha, depth + 1, clip),
                 "fl" | "gf" => {
                     let rule = if item.get("r").and_then(f) == Some(2.0) { FillRule::EvenOdd } else { FillRule::Winding };
                     let paint = paint_of(item, frame, alpha);
                     for p in &paths {
-                        pix.fill_path(p, &paint, rule, world, None);
+                        pix.fill_path(p, &paint, rule, world, clip);
                     }
                 }
                 "st" | "gs" => {
@@ -602,7 +674,7 @@ impl Animation {
                     let stroke = Stroke { width, line_cap: cap, line_join: join, ..Stroke::default() };
                     let paint = paint_of(item, frame, alpha);
                     for p in &paths {
-                        pix.stroke_path(p, &paint, &stroke, world, None);
+                        pix.stroke_path(p, &paint, &stroke, world, clip);
                     }
                 }
                 _ => {}

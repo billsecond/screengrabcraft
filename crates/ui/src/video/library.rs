@@ -84,7 +84,15 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
     if let What::Text { style, title, subtitle, color } = &t.item.what
         && screengrabcraft_media::stock::is_stock(*style)
     {
-        return screengrabcraft_media::stock::card(*style, title, subtitle, layers::color(color, [0x0b, 0x5f, 0xff]), t.item.len, &pic);
+        return screengrabcraft_media::stock::card(
+            *style,
+            title,
+            subtitle,
+            layers::color(color, [0x0b, 0x5f, 0xff]),
+            t.item.len,
+            t.item.place.w,
+            &pic,
+        );
     }
     // Words drawn larger than on a video, so they can be read on a card.
     let mut item = t.item.clone();
@@ -258,29 +266,39 @@ impl VideoView {
         let t = Tokens::get(ctx);
         ui.label(RichText::new("Drag one onto the timeline, or + to add it at the playhead.").size(12.0).color(t.muted));
         let lib = layers::library();
+        ui.add_space(6.0);
+        // The cards keep the whole width of the panel under their heading.
+        ui.spacing_mut().indent = 0.0;
+        // A section for each kind, opened and closed by its heading (the first is open).
         for g in Group::ALL {
-            ui.add_space(10.0);
-            ui.label(RichText::new(g.label()).strong().color(t.text));
-            ui.add_space(4.0);
             let cards: Vec<&layers::Template> = lib.iter().filter(|x| x.group == g).collect();
-            for row in cards.chunks(2) {
-                ui.horizontal(|ui| {
-                    for tpl in row {
-                        let key = format!("template-{}", tpl.key);
-                        if !self.thumbs.contains_key(&key)
-                            && let Some(pic) = template_thumbnail(tpl)
-                        {
-                            self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
-                        }
-                        let tex = self.thumbs.get(&key).cloned();
-                        let added = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, "", None);
-                        if added {
-                            let at = self.playhead;
-                            self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
-                        }
+            egui::CollapsingHeader::new(RichText::new(g.label()).size(14.0).strong().color(t.text))
+                .id_salt(("library-section", g.label()))
+                .default_open(g == Group::LowerThirds)
+                .show(ui, |ui| {
+                    ui.add_space(4.0);
+                    for row in cards.chunks(2) {
+                        ui.horizontal(|ui| {
+                            for tpl in row {
+                                let key = format!("template-{}", tpl.key);
+                                // A card's picture is drawn the first time its section is open.
+                                if !self.thumbs.contains_key(&key)
+                                    && let Some(pic) = template_thumbnail(tpl)
+                                {
+                                    self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
+                                }
+                                let tex = self.thumbs.get(&key).cloned();
+                                let added = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, "", None);
+                                if added {
+                                    let at = self.playhead;
+                                    self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
+                                }
+                            }
+                        });
                     }
+                    ui.add_space(6.0);
                 });
-            }
+            ui.add_space(2.0);
         }
     }
 

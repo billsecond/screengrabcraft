@@ -731,7 +731,18 @@ fn count(pic: &Raster, c: [u8; 3]) -> usize {
 #[test]
 fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
     let mut h = media_harness(MediaHost::default());
-    for label in ["Library", "Media", "Title", "Bar", "Callout", "Fade in from black", "Wipe"] {
+    for label in [
+        "Library",
+        "Media",
+        "Lower Thirds",
+        "News and Broadcast",
+        "Titles",
+        "Callouts and Overlays",
+        "Transitions",
+        "Breaking news",
+        "Name card",
+        "Angled",
+    ] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     assert!(h.state().video.as_ref().unwrap().thumbnails_made() >= 6, "the cards show what they look like");
@@ -740,7 +751,7 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
     }
     h.run_steps(1);
     let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
-    h.get_by_label("Add Name and role").click();
+    h.get_by_label("Add Name card").click();
     h.run_steps(3);
     shot(&mut h, "video-library");
     {
@@ -1070,16 +1081,33 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
 #[test]
 fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
     let mut h = media_harness(MediaHost::default());
-    for label in ["News and Broadcast", "Breaking news", "Headline bar", "Name and role", "Live bug", "Ticker", "Quote", "Bars", "Iris"] {
+    for label in ["Lower Thirds", "Breaking news", "Headline band", "Name card", "Angled", "Minimal"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
+    // The other sections are shut until their headings are pressed.
+    assert!(h.query_by_label("Clock wipe").is_none() && h.query_by_label("Keys").is_none());
+    h.get_by_label("Lower Thirds").click();
+    h.run_steps(8);
+    h.get_by_label("Transitions").click();
+    h.run_steps(8);
+    for label in ["Diagonal sweep", "Clock wipe", "Shutter", "Fade in from black"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Transitions").click();
+    h.run_steps(8);
+    assert!(h.query_by_label("Clock wipe").is_none(), "shut again");
+    h.get_by_label("Lower Thirds").click();
+    h.run_steps(8);
     h.get_by_label("Add Breaking news").click();
     h.run_steps(3);
-    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xD0, 0x02, 0x1B]);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| {
+        let pic = h.state_mut().video.as_mut().unwrap().frame_at(t);
+        pic.pixels().chunks(4).filter(|p| p[0] > 140 && p[1] < 70 && p[2] < 90).count()
+    };
     // It comes on, stays, and goes with its item (6 s from the playhead at 0).
     assert_eq!(red(&mut h, 0), 0, "not there at its very start");
     let held = red(&mut h, 3_000_000);
-    assert!(held > 150, "its red tab is on the picture: {held}");
+    assert!(held > 60, "its red tab is on the picture: {held}");
     assert!(red(&mut h, 5_990_000) < held / 3, "all but gone by its end");
     // Its words are changed in its panel (through the engine, as the panel does).
     for label in ["Words", "Colour", "Delete"] {

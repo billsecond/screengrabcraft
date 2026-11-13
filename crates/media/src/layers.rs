@@ -203,18 +203,35 @@ pub enum TextStyle {
     StingerSlices,
     /// Two panels sweeping across: a transition (no words).
     StingerPanel,
+    /// A dot on something, a line from it and a label at the end of the line.
+    Leader,
+    /// A numbered badge with what the step is.
+    Step,
+    /// A keyboard shortcut, as keys (`Ctrl + S`).
+    Keys,
+    /// A ring drawn round a part of the picture (no words).
+    Circle,
+    /// A slanted panel sweeping across, stripes before and after it: a transition.
+    StingerDiagonal,
+    /// An arrow-shaped panel sweeping across: a transition.
+    StingerChevron,
+    /// The colour swept on round the clock, and off: a transition.
+    StingerClock,
+    /// Two halves closing on the middle and opening: a transition.
+    StingerShutter,
+    /// Blinds turning shut and open: a transition.
+    StingerBlinds,
 }
 
 impl TextStyle {
     /// Whether it has words.
     pub fn has_words(self) -> bool {
-        !matches!(self, TextStyle::Highlight | TextStyle::Spotlight) && !crate::stock::is_stinger(self)
+        crate::stock::has_words(self)
     }
 
     /// Whether it has a second line.
     pub fn has_subtitle(self) -> bool {
-        matches!(self, TextStyle::LowerBar | TextStyle::LowerLine | TextStyle::LowerTag)
-            || (crate::stock::is_stock(self) && !crate::stock::is_stinger(self))
+        crate::stock::has_subtitle(self)
     }
 }
 
@@ -335,9 +352,9 @@ pub fn style_name(s: TextStyle) -> &'static str {
     match s {
         TextStyle::Title => "Title",
         TextStyle::TitleBox => "Title on a box",
-        TextStyle::LowerBar => "Lower third: bar",
-        TextStyle::LowerLine => "Lower third: line",
-        TextStyle::LowerTag => "Lower third: tags",
+        TextStyle::LowerBar => "Lower third: angled",
+        TextStyle::LowerLine => "Lower third: minimal",
+        TextStyle::LowerTag => "Lower third: rounded",
         TextStyle::Callout => "Callout",
         TextStyle::Note => "Note",
         TextStyle::Banner => "Banner",
@@ -356,6 +373,15 @@ pub fn style_name(s: TextStyle) -> &'static str {
         TextStyle::StingerIris => "Transition: iris",
         TextStyle::StingerSlices => "Transition: slices",
         TextStyle::StingerPanel => "Transition: panels",
+        TextStyle::Leader => "Label with a line",
+        TextStyle::Step => "Step",
+        TextStyle::Keys => "Keys",
+        TextStyle::Circle => "Circle",
+        TextStyle::StingerDiagonal => "Transition: diagonal sweep",
+        TextStyle::StingerChevron => "Transition: chevron",
+        TextStyle::StingerClock => "Transition: clock wipe",
+        TextStyle::StingerShutter => "Transition: shutter",
+        TextStyle::StingerBlinds => "Transition: blinds",
     }
 }
 
@@ -382,13 +408,13 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 5] = [Group::News, Group::Titles, Group::LowerThirds, Group::Overlays, Group::Transitions];
+    pub const ALL: [Group; 5] = [Group::LowerThirds, Group::News, Group::Titles, Group::Overlays, Group::Transitions];
 
     pub fn label(self) -> &'static str {
         match self {
             Group::News => "News and Broadcast",
             Group::Titles => "Titles",
-            Group::LowerThirds => "Simple Lower Thirds",
+            Group::LowerThirds => "Lower Thirds",
             Group::Overlays => "Callouts and Overlays",
             Group::Transitions => "Transitions",
         }
@@ -429,75 +455,72 @@ fn transition(kind: TransitionKind, len: u64) -> Item {
 /// The library: titles, lower thirds, callouts and overlays, transitions. All drawn in code.
 pub fn library() -> Vec<Template> {
     let p = |x: f32, y: f32, w: f32| Placement { x, y, w, opacity: 1.0 };
-    let accent = "#6e5ad6";
-    // The broadcast graphics bring their own way of coming and going.
-    let s = |style, title, sub, colour, len| text(style, title, sub, colour, p(0.5, 0.5, 1.0), len, AnimKind::None);
     let t = |key, name, group, item| Template { key, name, group, item };
+    // The graphics bring their own way of coming and going. Where one is put is where a point
+    // of it goes (see `crate::stock`): the middle for most.
+    let s = |style, title, sub, colour, len| text(style, title, sub, colour, p(0.5, 0.5, 1.0), len, AnimKind::None);
+    let at = |style, title, sub, colour, place: Placement, len| text(style, title, sub, colour, place, len, AnimKind::None);
+    let (red, blue, amber, teal) = ("#d0021b", "#0b5fff", "#f5a524", "#22c1a4");
+    use Group::*;
     vec![
         t(
             "news-breaking",
             "Breaking news",
-            Group::News,
-            s(TextStyle::NewsBreaking, "Headline goes here", "More on this story as it develops", "#d0021b", 6_000_000),
+            LowerThirds,
+            s(TextStyle::NewsBreaking, "Headline goes here", "More on this story as it develops", red, 6_000_000),
         ),
-        t("news-headline", "Headline bar", Group::News, s(TextStyle::NewsHeadline, "Your headline", "A line more about it", "#0b5fff", 6_000_000)),
-        t("news-name", "Name and role", Group::News, s(TextStyle::NewsName, "Alex Morgan", "Senior Correspondent", "#0b5fff", 5_000_000)),
-        t("news-live", "Live bug", Group::News, s(TextStyle::NewsLive, "City Hall", "", "#d0021b", 8_000_000)),
+        t("news-headline", "Headline band", LowerThirds, s(TextStyle::NewsHeadline, "Your headline", "A line more about it", blue, 6_000_000)),
+        t("news-name", "Name card", LowerThirds, s(TextStyle::NewsName, "Alex Morgan", "Senior Correspondent", blue, 5_000_000)),
+        t("lower-bar", "Angled", LowerThirds, at(TextStyle::LowerBar, "Your Name", "What you do", blue, p(0.3, 0.82, 1.0), 5_000_000)),
+        t("lower-line", "Minimal", LowerThirds, at(TextStyle::LowerLine, "Your Name", "What you do", teal, p(0.3, 0.82, 1.0), 5_000_000)),
+        t(
+            "lower-tag",
+            "Rounded, with initials",
+            LowerThirds,
+            at(TextStyle::LowerTag, "Your Name", "What you do", amber, p(0.3, 0.82, 1.0), 5_000_000),
+        ),
+        t("news-live", "Live bug", News, s(TextStyle::NewsLive, "City Hall", "", red, 8_000_000)),
         t(
             "news-ticker",
             "Ticker",
-            Group::News,
-            s(TextStyle::NewsTicker, "Latest", "The first story of the hour     The second story     The third story", "#d0021b", 12_000_000),
+            News,
+            s(TextStyle::NewsTicker, "Latest", "The first story of the hour     The second story     The third story", red, 12_000_000),
         ),
-        t("news-location", "Place and time", Group::News, s(TextStyle::NewsLocation, "Downtown", "Tuesday, 9:41 AM", "#f5a524", 5_000_000)),
+        t("news-location", "Place and time", News, s(TextStyle::NewsLocation, "Downtown", "Tuesday, 9:41 AM", amber, 5_000_000)),
         t(
             "news-quote",
             "Quote",
-            Group::News,
-            s(TextStyle::NewsQuote, "The quotation goes here, in as many words as it takes.", "Who said it", "#22c1a4", 6_000_000),
+            News,
+            s(TextStyle::NewsQuote, "The quotation goes here, in as many words as it takes.", "Who said it", teal, 6_000_000),
         ),
-        t("news-stat", "Big number", Group::News, s(TextStyle::NewsStat, "72%", "of those asked agreed", "#0b5fff", 5_000_000)),
-        t("title-broadcast", "Broadcast title", Group::Titles, s(TextStyle::TitleBroadcast, "Your Title", "A line under it", "#0b5fff", 5_000_000)),
-        t("stinger-bars", "Bars", Group::Transitions, s(TextStyle::StingerBars, "", "", "#0b5fff", 1_200_000)),
-        t("stinger-iris", "Iris", Group::Transitions, s(TextStyle::StingerIris, "", "", "#0b5fff", 1_200_000)),
-        t("stinger-slices", "Slices", Group::Transitions, s(TextStyle::StingerSlices, "", "", "#d0021b", 1_200_000)),
-        t("stinger-panel", "Panels", Group::Transitions, s(TextStyle::StingerPanel, "", "", "#f5a524", 1_200_000)),
-        t("title", "Title", Group::Titles, text(TextStyle::Title, "Your title", "", "#ffffff", p(0.5, 0.45, 1.0), 4_000_000, AnimKind::Pop)),
-        t(
-            "title-box",
-            "Title on a box",
-            Group::Titles,
-            text(TextStyle::TitleBox, "Your title", "", accent, p(0.5, 0.45, 1.0), 4_000_000, AnimKind::Fade),
-        ),
-        t("banner", "Banner", Group::Titles, text(TextStyle::Banner, "Chapter one", "", accent, p(0.5, 0.08, 1.0), 4_000_000, AnimKind::SlideUp)),
-        t(
-            "lower-bar",
-            "Bar",
-            Group::LowerThirds,
-            text(TextStyle::LowerBar, "Your Name", "What you do", accent, p(0.3, 0.82, 1.0), 5_000_000, AnimKind::SlideLeft),
-        ),
-        t(
-            "lower-line",
-            "Line",
-            Group::LowerThirds,
-            text(TextStyle::LowerLine, "Your Name", "What you do", "#22c1a4", p(0.3, 0.82, 1.0), 5_000_000, AnimKind::Fade),
-        ),
-        t(
-            "lower-tag",
-            "Tags",
-            Group::LowerThirds,
-            text(TextStyle::LowerTag, "Your Name", "What you do", "#f5a524", p(0.3, 0.82, 1.0), 5_000_000, AnimKind::SlideLeft),
-        ),
-        t("callout", "Callout", Group::Overlays, text(TextStyle::Callout, "Click here", "", "#ffffff", p(0.62, 0.35, 1.0), 3_000_000, AnimKind::Pop)),
-        t("note", "Note", Group::Overlays, text(TextStyle::Note, "Remember this", "", "#ffd84d", p(0.75, 0.25, 1.0), 3_000_000, AnimKind::Pop)),
-        t("highlight", "Highlight", Group::Overlays, text(TextStyle::Highlight, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000, AnimKind::Fade)),
-        t("spotlight", "Spotlight", Group::Overlays, text(TextStyle::Spotlight, "", "", "#000000", p(0.5, 0.5, 0.35), 3_000_000, AnimKind::Fade)),
-        t("fade-in", "Fade in from black", Group::Transitions, transition(TransitionKind::FadeIn, 1_000_000)),
-        t("fade-out", "Fade out to black", Group::Transitions, transition(TransitionKind::FadeOut, 1_000_000)),
-        t("dip-black", "Dip to black", Group::Transitions, transition(TransitionKind::DipBlack, 1_000_000)),
-        t("dip-white", "Dip to white", Group::Transitions, transition(TransitionKind::DipWhite, 1_000_000)),
-        t("wipe", "Wipe", Group::Transitions, transition(TransitionKind::Wipe, 900_000)),
-        t("flash", "Flash", Group::Transitions, transition(TransitionKind::Flash, 600_000)),
+        t("news-stat", "Big number", News, s(TextStyle::NewsStat, "72%", "of those asked agreed", blue, 5_000_000)),
+        t("title-broadcast", "Title over a line", Titles, s(TextStyle::TitleBroadcast, "Your Title", "A line under it", blue, 5_000_000)),
+        t("title", "Title", Titles, at(TextStyle::Title, "Your title", "", "#ffffff", p(0.5, 0.45, 1.0), 4_000_000)),
+        t("title-box", "Title card", Titles, at(TextStyle::TitleBox, "Your title", "", blue, p(0.5, 0.45, 1.0), 4_000_000)),
+        t("banner", "Banner", Titles, at(TextStyle::Banner, "Chapter one", "", teal, p(0.5, 0.08, 1.0), 4_000_000)),
+        t("callout", "Callout", Overlays, at(TextStyle::Callout, "Click here", "", blue, p(0.62, 0.35, 1.0), 4_000_000)),
+        t("leader", "Label with a line", Overlays, s(TextStyle::Leader, "This is the one", "", blue, 4_000_000)),
+        t("step", "Step", Overlays, s(TextStyle::Step, "1", "What to do first", teal, 4_000_000)),
+        t("keys", "Keys", Overlays, s(TextStyle::Keys, "Ctrl + S", "", blue, 3_000_000)),
+        t("note", "Note", Overlays, at(TextStyle::Note, "Remember this", "", "#ffd84d", p(0.75, 0.25, 1.0), 4_000_000)),
+        t("highlight", "Highlight", Overlays, at(TextStyle::Highlight, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
+        t("circle", "Circle", Overlays, at(TextStyle::Circle, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
+        t("spotlight", "Spotlight", Overlays, at(TextStyle::Spotlight, "", "", "#000000", p(0.5, 0.5, 0.35), 3_000_000)),
+        t("stinger-diagonal", "Diagonal sweep", Transitions, s(TextStyle::StingerDiagonal, "", "", blue, 1_200_000)),
+        t("stinger-chevron", "Chevron", Transitions, s(TextStyle::StingerChevron, "", "", red, 1_200_000)),
+        t("stinger-clock", "Clock wipe", Transitions, s(TextStyle::StingerClock, "", "", teal, 1_200_000)),
+        t("stinger-shutter", "Shutter", Transitions, s(TextStyle::StingerShutter, "", "", amber, 1_200_000)),
+        t("stinger-blinds", "Blinds", Transitions, s(TextStyle::StingerBlinds, "", "", blue, 1_200_000)),
+        t("stinger-iris", "Iris", Transitions, s(TextStyle::StingerIris, "", "", amber, 1_200_000)),
+        t("stinger-bars", "Bars", Transitions, s(TextStyle::StingerBars, "", "", blue, 1_200_000)),
+        t("stinger-slices", "Slices", Transitions, s(TextStyle::StingerSlices, "", "", red, 1_200_000)),
+        t("stinger-panel", "Two panels", Transitions, s(TextStyle::StingerPanel, "", "", amber, 1_200_000)),
+        t("fade-in", "Fade in from black", Transitions, transition(TransitionKind::FadeIn, 1_000_000)),
+        t("fade-out", "Fade out to black", Transitions, transition(TransitionKind::FadeOut, 1_000_000)),
+        t("dip-black", "Dip to black", Transitions, transition(TransitionKind::DipBlack, 1_000_000)),
+        t("dip-white", "Dip to white", Transitions, transition(TransitionKind::DipWhite, 1_000_000)),
+        t("wipe", "Wipe", Transitions, transition(TransitionKind::Wipe, 900_000)),
+        t("flash", "Flash", Transitions, transition(TransitionKind::Flash, 600_000)),
     ]
 }
 
