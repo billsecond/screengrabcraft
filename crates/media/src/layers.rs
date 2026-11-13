@@ -176,17 +176,45 @@ pub enum TextStyle {
     Highlight,
     /// The picture darkened outside an oval (no words).
     Spotlight,
+    // The broadcast graphics (see `crate::stock`): animated, sized to their words.
+    /// A "breaking news" tab over a headline bar and a line under it.
+    NewsBreaking,
+    /// A bar across the bottom with a headline and a line under it.
+    NewsHeadline,
+    /// A name on a coloured bar, a role on a dark one under it.
+    NewsName,
+    /// A "live" bug at the top left, with a place beside it.
+    NewsLive,
+    /// A strip along the bottom with a label and words passing.
+    NewsTicker,
+    /// A place and a time at the top left.
+    NewsLocation,
+    /// A quotation on a card, with who said it.
+    NewsQuote,
+    /// A big number with what it counts.
+    NewsStat,
+    /// A title in the middle over a line, a second line under it.
+    TitleBroadcast,
+    /// Bars crossing the picture: a transition (no words).
+    StingerBars,
+    /// A disc covering the picture, then opening: a transition (no words).
+    StingerIris,
+    /// Slices falling across the picture: a transition (no words).
+    StingerSlices,
+    /// Two panels sweeping across: a transition (no words).
+    StingerPanel,
 }
 
 impl TextStyle {
     /// Whether it has words.
     pub fn has_words(self) -> bool {
-        !matches!(self, TextStyle::Highlight | TextStyle::Spotlight)
+        !matches!(self, TextStyle::Highlight | TextStyle::Spotlight) && !crate::stock::is_stinger(self)
     }
 
     /// Whether it has a second line.
     pub fn has_subtitle(self) -> bool {
         matches!(self, TextStyle::LowerBar | TextStyle::LowerLine | TextStyle::LowerTag)
+            || (crate::stock::is_stock(self) && !crate::stock::is_stinger(self))
     }
 }
 
@@ -315,6 +343,19 @@ pub fn style_name(s: TextStyle) -> &'static str {
         TextStyle::Banner => "Banner",
         TextStyle::Highlight => "Highlight",
         TextStyle::Spotlight => "Spotlight",
+        TextStyle::NewsBreaking => "Breaking news",
+        TextStyle::NewsHeadline => "Headline bar",
+        TextStyle::NewsName => "Name and role",
+        TextStyle::NewsLive => "Live bug",
+        TextStyle::NewsTicker => "Ticker",
+        TextStyle::NewsLocation => "Place and time",
+        TextStyle::NewsQuote => "Quote",
+        TextStyle::NewsStat => "Big number",
+        TextStyle::TitleBroadcast => "Broadcast title",
+        TextStyle::StingerBars => "Transition: bars",
+        TextStyle::StingerIris => "Transition: iris",
+        TextStyle::StingerSlices => "Transition: slices",
+        TextStyle::StingerPanel => "Transition: panels",
     }
 }
 
@@ -332,6 +373,8 @@ pub fn transition_name(k: TransitionKind) -> &'static str {
 /// A group of the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// Broadcast graphics: news lower thirds, a live bug, a ticker, tags and cards.
+    News,
     Titles,
     LowerThirds,
     Overlays,
@@ -339,12 +382,13 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 4] = [Group::Titles, Group::LowerThirds, Group::Overlays, Group::Transitions];
+    pub const ALL: [Group; 5] = [Group::News, Group::Titles, Group::LowerThirds, Group::Overlays, Group::Transitions];
 
     pub fn label(self) -> &'static str {
         match self {
+            Group::News => "News and Broadcast",
             Group::Titles => "Titles",
-            Group::LowerThirds => "Lower Thirds",
+            Group::LowerThirds => "Simple Lower Thirds",
             Group::Overlays => "Callouts and Overlays",
             Group::Transitions => "Transitions",
         }
@@ -386,8 +430,38 @@ fn transition(kind: TransitionKind, len: u64) -> Item {
 pub fn library() -> Vec<Template> {
     let p = |x: f32, y: f32, w: f32| Placement { x, y, w, opacity: 1.0 };
     let accent = "#6e5ad6";
+    // The broadcast graphics bring their own way of coming and going.
+    let s = |style, title, sub, colour, len| text(style, title, sub, colour, p(0.5, 0.5, 1.0), len, AnimKind::None);
     let t = |key, name, group, item| Template { key, name, group, item };
     vec![
+        t(
+            "news-breaking",
+            "Breaking news",
+            Group::News,
+            s(TextStyle::NewsBreaking, "Headline goes here", "More on this story as it develops", "#d0021b", 6_000_000),
+        ),
+        t("news-headline", "Headline bar", Group::News, s(TextStyle::NewsHeadline, "Your headline", "A line more about it", "#0b5fff", 6_000_000)),
+        t("news-name", "Name and role", Group::News, s(TextStyle::NewsName, "Alex Morgan", "Senior Correspondent", "#0b5fff", 5_000_000)),
+        t("news-live", "Live bug", Group::News, s(TextStyle::NewsLive, "City Hall", "", "#d0021b", 8_000_000)),
+        t(
+            "news-ticker",
+            "Ticker",
+            Group::News,
+            s(TextStyle::NewsTicker, "Latest", "The first story of the hour     The second story     The third story", "#d0021b", 12_000_000),
+        ),
+        t("news-location", "Place and time", Group::News, s(TextStyle::NewsLocation, "Downtown", "Tuesday, 9:41 AM", "#f5a524", 5_000_000)),
+        t(
+            "news-quote",
+            "Quote",
+            Group::News,
+            s(TextStyle::NewsQuote, "The quotation goes here, in as many words as it takes.", "Who said it", "#22c1a4", 6_000_000),
+        ),
+        t("news-stat", "Big number", Group::News, s(TextStyle::NewsStat, "72%", "of those asked agreed", "#0b5fff", 5_000_000)),
+        t("title-broadcast", "Broadcast title", Group::Titles, s(TextStyle::TitleBroadcast, "Your Title", "A line under it", "#0b5fff", 5_000_000)),
+        t("stinger-bars", "Bars", Group::Transitions, s(TextStyle::StingerBars, "", "", "#0b5fff", 1_200_000)),
+        t("stinger-iris", "Iris", Group::Transitions, s(TextStyle::StingerIris, "", "", "#0b5fff", 1_200_000)),
+        t("stinger-slices", "Slices", Group::Transitions, s(TextStyle::StingerSlices, "", "", "#d0021b", 1_200_000)),
+        t("stinger-panel", "Panels", Group::Transitions, s(TextStyle::StingerPanel, "", "", "#f5a524", 1_200_000)),
         t("title", "Title", Group::Titles, text(TextStyle::Title, "Your title", "", "#ffffff", p(0.5, 0.45, 1.0), 4_000_000, AnimKind::Pop)),
         t(
             "title-box",

@@ -80,6 +80,12 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
         media: Vec::new(),
         pointer: Default::default(),
     };
+    // A broadcast graphic: shown close up, as it is once it has come on (a transition, part-way).
+    if let What::Text { style, title, subtitle, color } = &t.item.what
+        && screengrabcraft_media::stock::is_stock(*style)
+    {
+        return screengrabcraft_media::stock::card(*style, title, subtitle, layers::color(color, [0x0b, 0x5f, 0xff]), t.item.len, &pic);
+    }
     // Words drawn larger than on a video, so they can be read on a card.
     let mut item = t.item.clone();
     if matches!(item.what, What::Text { .. }) {
@@ -655,7 +661,12 @@ impl VideoView {
                 let grab = video_at(p) - centre;
                 let dist = grab.length().max(4.0);
                 if let Some((layer, item)) = self.item {
-                    let w = self.session.timeline.item(layer, item).map(|i| i.place.w).unwrap_or(0.5);
+                    let place = self.session.timeline.item(layer, item).map(|i| i.place).unwrap_or_default();
+                    let w = place.w;
+                    // Moved by as far as the pointer goes, from where it is (a broadcast graphic's
+                    // place is how far it is from where it was designed, not its middle).
+                    let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+                    let grab = video_at(p) - pos2(place.x * vw, place.y * vh);
                     self.session.begin(if resize { "Resize" } else { "Move" });
                     self.canvas_drag = Some(CanvasDrag::Item { layer, item, grab, resize: resize.then_some((w, dist)) });
                 } else if self.camera_chosen {
@@ -730,6 +741,11 @@ impl VideoView {
     /// Asks the host about captions on the next frame (for tests).
     pub fn poll_now(&mut self) {
         self.next_poll = 0.0;
+    }
+
+    /// Where what's chosen is on the screen, as last shown (for tests).
+    pub fn chosen_on_screen(&self) -> Option<Rect> {
+        self.chosen_rect(self.picture_rect?)
     }
 
     /// Where the camera is on the screen, as last shown (for tests).

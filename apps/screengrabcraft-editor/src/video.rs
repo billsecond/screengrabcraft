@@ -139,6 +139,11 @@ pub fn read_media(path: &Path) -> Result<media_store::Loaded, String> {
             let rec = Recording::open(Box::new(FileSource::open(path).map_err(|e| e.to_string())?)).map_err(|e| e.to_string())?;
             Ok(Loaded::recording(rec))
         }
+        // A Lottie animation (a lower third or a transition made elsewhere).
+        MediaKind::Video if ext == "json" => {
+            let text = String::from_utf8(read(path)?).map_err(|_| "not a Lottie animation (it isn't text)".to_string())?;
+            media_store::LottieClip::loaded(&text)
+        }
         MediaKind::Video => read_video_file(path, &ext),
     }
 }

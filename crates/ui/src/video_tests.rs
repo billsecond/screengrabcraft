@@ -740,7 +740,7 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
     }
     h.run_steps(1);
     let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
-    h.get_by_label("Add Bar").click();
+    h.get_by_label("Add Name and role").click();
     h.run_steps(3);
     shot(&mut h, "video-library");
     {
@@ -839,7 +839,7 @@ fn media_brought_in_goes_in_the_bin_then_onto_a_layer_of_its_kind() {
 #[test]
 fn a_title_dragged_from_the_library_onto_the_timeline_lands_where_it_was_let_go() {
     let mut h = media_harness(MediaHost::default());
-    let card = h.get_by_label("Title").rect().center();
+    let card = h.get_by_label("Breaking news").rect().center();
     // The band above the tracks (just above the first track's Show): a layer of its own.
     let show = h.query_all_by_label("Show").next().unwrap().rect();
     let to = egui::pos2(show.max.x + 500.0, show.min.y - 32.0);
@@ -1063,4 +1063,47 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
     // A recording without a pointer has no such panel.
     let h = harness();
     assert!(h.query_by_label("Show the mouse pointer").is_none());
+}
+
+// ---- the broadcast graphics ----
+
+#[test]
+fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    for label in ["News and Broadcast", "Breaking news", "Headline bar", "Name and role", "Live bug", "Ticker", "Quote", "Bars", "Iris"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Add Breaking news").click();
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xD0, 0x02, 0x1B]);
+    // It comes on, stays, and goes with its item (6 s from the playhead at 0).
+    assert_eq!(red(&mut h, 0), 0, "not there at its very start");
+    let held = red(&mut h, 3_000_000);
+    assert!(held > 150, "its red tab is on the picture: {held}");
+    assert!(red(&mut h, 5_990_000) < held / 3, "all but gone by its end");
+    // Its words are changed in its panel (through the engine, as the panel does).
+    for label in ["Words", "Colour", "Delete"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 3_000_000;
+        let (layer, item) = v.item.unwrap();
+        v.session
+            .execute(
+                "video.setItem",
+                &serde_json::json!({"layer": layer, "item": item, "title": "Storm warning for the coast", "subtitle": "Winds to 70 mph"}),
+            )
+            .unwrap();
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-news");
+    // Dragged on the picture: it moves by as far as it was dragged.
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().expect("it's chosen and on the picture"))
+    };
+    let before = h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    crate::tests::drag(&mut h, on.center(), on.center() + egui::vec2(pic.width() * 0.25, -pic.height() * 0.2));
+    let after = h.state().video.as_ref().unwrap().session.timeline.layers[0].items[0].place;
+    assert!((after.x - before.x - 0.25).abs() < 0.03 && (after.y - before.y + 0.2).abs() < 0.03, "{before:?} → {after:?}");
 }

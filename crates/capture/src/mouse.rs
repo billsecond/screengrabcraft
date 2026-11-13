@@ -276,7 +276,8 @@ pub fn state() -> Option<PointerState> {
     imp::state()
 }
 
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(test)]
+#[cfg(target_os = "windows")]
 mod tests {
     use super::*;
 

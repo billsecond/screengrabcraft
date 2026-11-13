@@ -24,6 +24,7 @@ pub mod mp4;
 pub mod opus;
 pub mod pointer;
 pub mod recording;
+pub mod stock;
 pub mod timeline;
 pub mod yuv;
 

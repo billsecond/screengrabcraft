@@ -38,6 +38,8 @@ impl MediaStore for NoMedia {
 #[derive(Default)]
 pub struct TextCache {
     drawn: HashMap<String, Arc<Pixmap>>,
+    /// The broadcast graphics built already, by what they are.
+    built: HashMap<String, Arc<crate::stock::Graphic>>,
 }
 
 impl TextCache {
@@ -53,6 +55,52 @@ impl TextCache {
         self.drawn.insert(key, p.clone());
         Some(p)
     }
+}
+
+/// A broadcast graphic for an item (built once for its words, colour and length).
+fn graphic(
+    cache: Option<&mut TextCache>,
+    style: TextStyle,
+    title: &str,
+    subtitle: &str,
+    color: &str,
+    len: u64,
+) -> Option<Arc<crate::stock::Graphic>> {
+    let key = format!("{style:?}|{title}|{subtitle}|{color}|{len}");
+    if let Some(g) = cache.as_ref().and_then(|c| c.built.get(&key)) {
+        return Some(g.clone());
+    }
+    let g = Arc::new(crate::stock::build(style, title, subtitle, layers::color(color, [0x0b, 0x5f, 0xff]), len)?);
+    if let Some(c) = cache {
+        if c.built.len() > 48 {
+            c.built.clear();
+        }
+        c.built.insert(key, g.clone());
+    }
+    Some(g)
+}
+
+/// Where a broadcast graphic (designed at 1920 × 1080, taking up `bounds` there) goes on a
+/// `w × h` video: scaled to its width, kept as near the top or the bottom as it was designed,
+/// moved by the item's place (the middle is where it was designed) and grown about its own middle.
+/// A stinger covers the whole picture, whatever its shape.
+fn stock_place(style: TextStyle, bounds: Rect, place: layers::Placement, w: f32, h: f32) -> Transform {
+    use crate::stock::{H, W};
+    if crate::stock::is_stinger(style) {
+        return Transform::from_scale(w / W, h / H);
+    }
+    let (cx, cy) = (bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0);
+    let (k, grow) = (w / W, place.w.clamp(0.2, 3.0));
+    Transform::from_translate(-cx, -cy)
+        .post_scale(grow, grow)
+        .post_translate(cx + (place.x - 0.5) * W, cy + (place.y - 0.5) * H)
+        .post_scale(k, k)
+        .post_translate(0.0, (h - H * k) * (cy / H))
+}
+
+/// A box through a transform (one that doesn't turn it).
+fn moved(r: Rect, t: Transform) -> Rect {
+    Rect::new(r.x * t.sx + t.tx, r.y * t.sy + t.ty, r.w * t.sx, r.h * t.sy)
 }
 
 /// How far an animation has got, eased (slow at its ends).
@@ -121,6 +169,10 @@ pub fn item_rect(item: &Item, timeline: &Timeline, store: &dyn MediaStore, w: f3
                 (p.width(), p.height())
             };
             Some(media_rect(item, pw, ph, w, h))
+        }
+        What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
+            let g = graphic(None, *style, title, subtitle, color, item.len)?;
+            Some(moved(g.bounds, stock_place(*style, g.bounds, item.place, w, h)))
         }
         What::Text { style, title, subtitle, color } => Some(text_item(None, *style, title, subtitle, color, item.place, w, h)),
         What::Transition { .. } => None,
@@ -297,6 +349,9 @@ pub fn text_item(
             });
             r
         }
+        // The broadcast graphics are played, not drawn here (see `draw_layers`): where one is.
+        _ => graphic(None, style, title, subtitle, color, 4_000_000)
+            .map_or(Rect::new(0.0, 0.0, w, h), |g| moved(g.bounds, stock_place(style, g.bounds, place, w, h))),
     }
 }
 
@@ -391,6 +446,19 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                 let Some(pic) = store.picture(*id, at) else { continue };
                 let Some(ready) = pictures.get(*id, &pic) else { continue };
                 picture_at(&mut pix, &ready, media_rect(item, pic.width(), pic.height(), w, h), m);
+            }
+            What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
+                // A broadcast graphic: played, a frame for each moment of its item.
+                let Some(g) = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len) else { continue };
+                let secs = (t - item.at) as f32 / 1e6;
+                let at = stock_place(*style, g.bounds, item.place, w, h);
+                let plain = m.alpha >= 0.999 && item.place.opacity >= 0.999 && m.dx == 0.0 && m.dy == 0.0 && (m.scale - 1.0).abs() < 1.0e-4;
+                if plain {
+                    g.animation.render(&mut pix, secs, at);
+                } else if let Some(mut own) = Pixmap::new(w as u32, h as u32) {
+                    g.animation.render(&mut own, secs, at);
+                    picture_at(&mut pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha });
+                }
             }
             What::Text { style, title, subtitle, color } => {
                 let key = format!("{style:?}|{title}|{subtitle}|{color}|{:?}|{}x{}", item.place, w, h);

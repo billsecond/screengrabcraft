@@ -71,6 +71,48 @@ impl Loaded {
     }
 }
 
+/// A Lottie animation brought into the bin (a lower third, a title, a transition made elsewhere):
+/// drawn a frame at a time, see-through where it draws nothing.
+pub struct LottieClip {
+    animation: screengrabcraft_render::lottie::Animation,
+    width: u32,
+    height: u32,
+    /// The last frame drawn, and which.
+    last: Mutex<Option<(u64, Arc<Raster>)>>,
+}
+
+impl LottieClip {
+    /// From a Lottie file's text: what it is for the bin (a video as long as it runs, no larger
+    /// than 1920 a side).
+    pub fn loaded(json: &str) -> Result<Loaded, String> {
+        let animation = screengrabcraft_render::lottie::Animation::parse(json)?;
+        let k = (1920.0 / animation.width.max(animation.height)).min(1.0);
+        let (width, height) = (((animation.width * k) as u32).max(2), ((animation.height * k) as u32).max(2));
+        let duration = animation.duration_us().max(100_000);
+        let clip = LottieClip { animation, width, height, last: Mutex::new(None) };
+        Ok(Loaded { kind: MediaKind::Video, duration, width, height, content: Content::Clip { frames: Box::new(clip), sound: None } })
+    }
+}
+
+impl Frames for LottieClip {
+    fn frame_at(&self, t: u64) -> Option<Arc<Raster>> {
+        // A frame for each sixtieth of a second, at most.
+        let step = t / 16_667;
+        let mut last = self.last.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, pic)) = last.as_ref()
+            && *at == step
+        {
+            return Some(pic.clone());
+        }
+        let mut pix = tiny_skia::Pixmap::new(self.width, self.height)?;
+        let k = self.width as f32 / self.animation.width.max(1.0);
+        self.animation.render(&mut pix, t as f32 / 1e6, tiny_skia::Transform::from_scale(k, k));
+        let pic = Arc::new(screengrabcraft_render::canvas::from_pixmap(&pix)?);
+        *last = Some((step, pic.clone()));
+        Some(pic)
+    }
+}
+
 /// A file being read for the media bin (on a thread of the host's): what came of it, once it has.
 pub type MediaJob = Arc<Mutex<Option<Result<Loaded, String>>>>;
 
@@ -235,13 +277,15 @@ pub fn kind_of(name: &str) -> Option<MediaKind> {
         "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" => Some(MediaKind::Picture),
         "mp3" | "wav" | "m4a" | "aac" | "flac" | "ogg" | "oga" => Some(MediaKind::Sound),
         "sgvideo" | "mp4" | "m4v" | "mov" => Some(MediaKind::Video),
+        // A Lottie animation: played as a video with a see-through background.
+        "json" => Some(MediaKind::Video),
         _ => None,
     }
 }
 
 /// The file kinds the media bin takes, for an open dialog.
 pub const EXTENSIONS: &[&str] =
-    &["png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "sgvideo", "mp4", "m4v", "mov"];
+    &["png", "jpg", "jpeg", "gif", "bmp", "webp", "mp3", "wav", "m4a", "aac", "flac", "ogg", "oga", "sgvideo", "mp4", "m4v", "mov", "json"];
 
 /// Sound read from a file's bytes (`ext` its kind): interleaved stereo at 48 kHz, at most
 /// [`MAX_SOUND_MINS`] long, and how long it is (µs).
@@ -403,6 +447,22 @@ mod tests {
         assert_eq!(kind_of("Logo.png"), Some(MediaKind::Picture));
         assert_eq!(kind_of("Capture.sgvideo"), Some(MediaKind::Video));
         assert_eq!(kind_of("notes.txt"), None);
+    }
+
+    #[test]
+    fn a_lottie_file_is_a_see_through_video_in_the_bin() {
+        let json = r#"{"fr": 30, "ip": 0, "op": 45, "w": 400, "h": 200, "layers": [{"ty": 4, "ip": 0, "op": 45, "ks": {},
+            "shapes": [{"ty": "rc", "p": {"k": [100, 100]}, "s": {"k": [100, 100]}, "r": {"k": 0}}, {"ty": "fl", "c": {"k": [0, 0, 1]}, "o": {"k": 100}}]}]}"#;
+        let loaded = LottieClip::loaded(json).unwrap();
+        assert_eq!((loaded.kind, loaded.duration, loaded.width, loaded.height), (MediaKind::Video, 1_500_000, 400, 200));
+        let lib = MediaLibrary::default();
+        lib.insert(7, loaded.content);
+        assert_eq!((lib.state(7), lib.has_sound(7)), (Some(MediaState::Ready), Some(false)));
+        let pic = lib.picture(7, 500_000).unwrap();
+        assert_eq!(pic.pixel(100, 100).map(|p| (p.b, p.a)), Some((255, 255)), "its square");
+        assert_eq!(pic.pixel(300, 100).map(|p| p.a), Some(0), "see-through beside it");
+        assert!(LottieClip::loaded("{}").is_err() && LottieClip::loaded("nonsense").is_err());
+        assert_eq!(kind_of("Lower third.json"), Some(MediaKind::Video));
     }
 
     #[test]

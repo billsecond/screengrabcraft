@@ -381,10 +381,11 @@ impl Services for DesktopServices {
                 rfd::AsyncFileDialog::new()
                     .set_title("Import Media")
                     .set_directory(&start)
-                    .add_filter("Pictures, sound and videos", screengrabcraft_media::media_store::EXTENSIONS)
+                    .add_filter("Pictures, sound, videos and animations", screengrabcraft_media::media_store::EXTENSIONS)
                     .add_filter("Videos", &["mp4", "m4v", "mov", REC])
                     .add_filter("Sound", &["mp3", "wav", "m4a", "aac", "flac", "ogg", "oga"])
                     .add_filter("Pictures", PICTURES)
+                    .add_filter("Animations (Lottie)", &["json"])
                     .add_filter("All files", &["*"])
                     .pick_files(),
             );
