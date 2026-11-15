@@ -1535,3 +1535,25 @@ fn the_video_editor_is_readable_in_the_light_look() {
     }
     shot(&mut h, "video-editor-light");
 }
+
+#[test]
+fn the_right_button_on_nothing_lets_go_of_the_clip_chosen_and_splits_every_track() {
+    let mut h = harness();
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // A clip chosen first, on the first track.
+    crate::tests::click_at(&mut h, egui::pos2(lane.min.x + 60.0, top + 20.0));
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, 0)));
+    // Then the right button on the band above the rows, where there is nothing.
+    let p = egui::pos2(lane.min.x + (lane.width() - 24.0) / 2.0, top - 10.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().selected, None);
+    h.get_by_label_contains("Split Here").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.session.timeline.tracks.iter().all(|t| t.clips.len() == 2), "every track is split: {:?}", v.session.timeline.tracks);
+}

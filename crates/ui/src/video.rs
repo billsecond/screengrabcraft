@@ -257,6 +257,19 @@ pub struct VideoView {
     menu_us: Option<u64>,
 }
 
+/// A mark at each end of what's chosen on the timeline: its ends are there to be dragged.
+fn grips(painter: &egui::Painter, r: Rect) {
+    if r.width() < 24.0 {
+        return;
+    }
+    let tall = (r.height() * 0.45).clamp(8.0, 18.0);
+    for x in [r.min.x + 4.5, r.max.x - 4.5] {
+        let mark = Rect::from_center_size(pos2(x, r.center().y), vec2(3.0, tall));
+        painter.rect_filled(mark, 1.5, Color32::from_white_alpha(230));
+        painter.rect_stroke(mark, 1.5, Stroke::new(0.5, Color32::from_black_alpha(90)), StrokeKind::Outside);
+    }
+}
+
 /// A sound's volume in its header: a slider, and what it is set to beside it.
 fn volume_slider(ui: &mut Ui, rect: Rect, v: &mut f32) -> egui::Response {
     let t = Tokens::get(ui.ctx());
@@ -1488,6 +1501,8 @@ impl VideoView {
             let stage = Rect::from_min_max(whole.min, pos2(whole.max.x, bar.min.y));
             let on_stage = ui.interact(stage, ui.id().with("full-stage"), Sense::click());
             if on_stage.double_clicked() {
+                // Its first click played or paused: as it was before, then back.
+                toggle(self);
                 self.set_full_screen(false, now);
                 return;
             }
@@ -1852,7 +1867,7 @@ impl VideoView {
         // The captions' row, under the tracks, when there's sound to have words in.
         let caption_row = self.hears_anything();
         let rows = nl + tracks.len().max(1) + usize::from(caption_row);
-        let height = RULER_H + NEW_LAYER_H + rows as f32 * ROW_H + 10.0;
+        let height = RULER_H + NEW_LAYER_H + rows as f32 * ROW_H + 16.0;
         egui::Panel::bottom("video_timeline")
             .exact_size(height)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(0, 4)))
@@ -1941,6 +1956,7 @@ impl VideoView {
                         );
                         if self.item == Some((layer.id, item.id)) {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
+                            grips(&painter, r);
                         }
                     }
                 }
@@ -2002,6 +2018,7 @@ impl VideoView {
                         }
                         if self.selected == Some((i, c)) {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
+                            grips(&painter, r);
                         }
                     }
                 }
@@ -2374,6 +2391,10 @@ impl VideoView {
                         self.camera_chosen = false;
                     } else if on_clip.is_some() {
                         self.selected = on_clip;
+                        self.item = None;
+                    } else {
+                        // On nothing: its menu is about that moment, for every track.
+                        self.selected = None;
                         self.item = None;
                     }
                     self.menu_us = Some(us_of(p.x).min(self.length()));
