@@ -190,6 +190,9 @@ pub struct Editor {
     /// While annotations are dragged off the picture and it grows to hold them: the picture as
     /// it was before, in the grown one (what it is cut back to if the growth is not needed).
     pub(crate) grown: Option<Rect>,
+    /// How wide the tool bar must be for its buttons to have their names under them (as last
+    /// measured): the video editor's bar goes by the same, so the two are alike.
+    pub(crate) named_bar_width: f32,
     /// Nothing has been opened or drawn yet, and the ways to start are offered on the canvas.
     pub welcome: bool,
     /// The window is over the whole screen, for the video's preview.
@@ -278,6 +281,7 @@ impl Editor {
             saving: None,
             saving_project: false,
             grown: None,
+            named_bar_width: NAMED_BAR_WIDTH,
             welcome: false,
             window_full: false,
             saving_transcript: None,
@@ -1784,6 +1788,7 @@ impl Editor {
                     .collect();
                 let named_width = cells.iter().sum::<f32>() + (tools.len() - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
                 let mut picked = None;
+                self.named_bar_width = (left.right() - bar.left()) + BAR_SPACE + named_width + BAR_SPACE + (bar.right() - right.left());
                 if !self.settings.hide_tool_names && left.right() + BAR_SPACE + named_width + BAR_SPACE <= right.left() {
                     let mut x = (bar.center().x - named_width / 2.0).min(right.left() - BAR_SPACE - named_width).max(left.right() + BAR_SPACE);
                     for (b, cell) in tools.iter().zip(&cells) {
@@ -2030,8 +2035,10 @@ const BAR_GROUP_GAP: f32 = 14.0;
 /// The least room between the tools in the middle and the buttons at either side.
 const BAR_SPACE: f32 = 16.0;
 /// The size of a tool's name under its icon, and the room the names take under the bar.
-const NAME_TEXT: f32 = 10.5;
-const NAME_ROOM: f32 = 14.0;
+const NAME_TEXT: f32 = icons::NAME_TEXT;
+const NAME_ROOM: f32 = icons::NAME_ROOM;
+/// How wide a window the named tool bar needs, until one has been measured.
+pub(crate) const NAMED_BAR_WIDTH: f32 = 1470.0;
 
 /// A tool's button on the tool bar: what it picks, how it is drawn and named, whether it is the
 /// tool in hand, and whether it leads a group (a gap before it).

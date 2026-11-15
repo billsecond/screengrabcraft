@@ -1359,3 +1359,145 @@ fn help_lists_the_video_editors_keys() {
     h.run_steps(2);
     assert!(h.state().dialog.is_none());
 }
+
+#[test]
+fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() {
+    let wide = |width: f32| {
+        let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+        ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+        let mut h = Harness::builder().with_size(egui::vec2(width, 900.0)).build_ui_state(
+            |ui, ed: &mut Editor| {
+                let ctx = ui.ctx().clone();
+                ed.logic(&ctx);
+                ed.ui(ui);
+            },
+            ed,
+        );
+        h.run_steps(3);
+        h
+    };
+    let side = crate::editor::BAR_BUTTON;
+    // Wide enough for the picture editor's names: each button has its own under it.
+    let mut h = wide(1600.0);
+    for label in ["Library", "Open (Ctrl+O)", "Split", "Delete"] {
+        // (The first so named: the library's panel has a Library tab of its own.)
+        let r = h.query_all_by_label(label).next().unwrap().rect();
+        assert!((r.height() - (side + 14.0)).abs() < 0.5, "{label}: {r:?}");
+    }
+    shot(&mut h, "video-tool-bar-named");
+    // They still do what they did.
+    h.get_by_label("Split").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), None, "nothing to split at the very start");
+    h.query_all_by_label("Library").next().unwrap().click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().library_open);
+    // Turned off in View, or in a narrower window: the bar is as tall as its buttons.
+    h.state_mut().settings.hide_tool_names = true;
+    h.run_steps(2);
+    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+    let h = wide(1280.0);
+    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+}
+
+#[test]
+fn a_zoomed_timeline_has_a_bar_to_scroll_by_and_the_ruler_says_the_time_under_the_pointer() {
+    let mut h = harness();
+    assert!(h.query_by_label("Scroll the Timeline").is_none(), "all of it fits: nothing to scroll");
+    for _ in 0..5 {
+        h.get_by_label("Zoom the Timeline In (Ctrl++)").click();
+        h.run_steps(3);
+    }
+    let bar = h.get_by_label("Scroll the Timeline").rect();
+    assert_eq!(h.state().video.as_ref().unwrap().scrolled(), 0.0);
+    crate::tests::drag(&mut h, egui::pos2(bar.min.x + 20.0, bar.center().y), egui::pos2(bar.min.x + 220.0, bar.center().y));
+    let along = h.state().video.as_ref().unwrap().scrolled();
+    assert!(along > 100.0, "{along}");
+    // A click further along its track goes there.
+    crate::tests::click_at(&mut h, egui::pos2(bar.max.x - 10.0, bar.center().y));
+    assert!(h.state().video.as_ref().unwrap().scrolled() > along);
+    // Fitted again, there's nothing to scroll and nothing scrolled.
+    h.get_by_label("Fit the Whole Video on the Timeline (Ctrl+0)").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Scroll the Timeline").is_none());
+    assert_eq!(h.state().video.as_ref().unwrap().scrolled(), 0.0);
+    // The pointer over the ruler: the picture shows its time there (looked at, not asserted).
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    h.hover_at(egui::pos2(lane.min.x + lane.width() * 0.6, lane.min.y + 10.0));
+    h.run_steps(2);
+    shot(&mut h, "video-ruler-time");
+}
+
+#[test]
+fn an_item_dragged_along_the_timeline_catches_on_the_playhead_and_alt_lets_it_past() {
+    let mut h = media_harness(MediaHost::default());
+    let (layer, item) = {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title"), None, 0);
+        // The playhead well along, where nothing else ends.
+        v.playhead = 2_300_000;
+        v.pps = 0.0;
+        let chosen = v.item.unwrap();
+        ed.video = Some(v);
+        chosen
+    };
+    h.run_steps(3);
+    let at = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at;
+    let rect = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().item_on_timeline(layer, item).unwrap();
+    let pps = h.state().video.as_ref().unwrap().pps;
+    // Dragged so its start is a few points short of the playhead: it's caught there, exactly.
+    let r = rect(&h);
+    let nearly = 2_300_000.0 / 1e6 * pps - 4.0;
+    crate::tests::drag(&mut h, r.center(), r.center() + egui::vec2(nearly, 0.0));
+    assert_eq!(at(&h), 2_300_000, "its start is on the playhead");
+    // Back where it was, then the same with Alt held: it stays where it was put.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(at(&h), 0);
+    let r = rect(&h);
+    let (from, to) = (r.center(), r.center() + egui::vec2(nearly, 0.0));
+    let alt = egui::Modifiers::ALT;
+    h.hover_at(from);
+    h.run_steps(1);
+    h.event(egui::Event::ModifiersChanged(alt));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: alt });
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: alt });
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(3);
+    let free = at(&h);
+    assert!(free != 2_300_000 && free.abs_diff(2_300_000) < 200_000, "near it, not on it: {free}");
+}
+
+#[test]
+fn an_item_dragged_near_the_middle_of_the_picture_is_caught_there() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    // Let go a few points off the middle, both ways: its middle is on the picture's (to a pixel
+    // of this small video, which is two points here).
+    crate::tests::drag(&mut h, on.center(), pic.center() + egui::vec2(5.5, -5.5));
+    let now = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((now.center().x - pic.center().x).abs() < 2.0 && (now.center().y - pic.center().y).abs() < 2.0, "{now:?} in {pic:?}");
+    // Well away from the middle and the edges, it stays where it was put.
+    crate::tests::drag(&mut h, now.center(), pic.center() + egui::vec2(60.0, 40.0));
+    let away = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((away.center().x - pic.center().x - 60.0).abs() < 6.0 && (away.center().y - pic.center().y - 40.0).abs() < 6.0, "{away:?}");
+}

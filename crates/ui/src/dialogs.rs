@@ -278,6 +278,7 @@ fn video_shortcuts(ui: &mut Ui) {
             ("Click the ruler", "Move the playhead there"),
             ("Drag a clip", "Slide it along its track; drag one of its ends to trim it"),
             ("Drag across the tracks", "Choose a stretch of the video"),
+            ("Alt while dragging", "Nothing catches on the playhead or on other clips' ends"),
             ("Right-click the timeline", "Split there, move the playhead there, delete, zoom"),
             ("Drag from the Library", "Put a title, an overlay, a transition or your own media on the timeline"),
             ("Double-click a Library card", "Add it at the playhead"),

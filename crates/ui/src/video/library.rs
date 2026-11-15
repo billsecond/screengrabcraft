@@ -25,6 +25,8 @@ use crate::widgets;
 pub const LIBRARY_W: f32 = 300.0;
 /// A card's thumbnail.
 const THUMB: Vec2 = vec2(126.0, 71.0);
+/// How near (points) the picture's middle and edges catch what's dragged on it.
+const CATCH: f32 = 6.0;
 /// How near a corner the pointer must be to resize what's chosen on the picture.
 const HANDLE: f32 = 10.0;
 
@@ -740,6 +742,21 @@ impl VideoView {
         {
             let v = video_at(p);
             let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+            // Moved near the picture's middle or one of its edges, it's caught there (its middle
+            // on the middle, its edge on the edge), and a line shows where. Alt held, nothing
+            // catches. How far to go to be caught, across and down, in the video's own pixels.
+            let free = ctx.input(|i| i.modifiers.alt);
+            let catch = |s: &VideoView| -> (Option<(f32, f32)>, Option<(f32, f32)>) {
+                let Some(r) = s.chosen_rect(pic).filter(|_| !free) else { return (None, None) };
+                let nearest =
+                    |ways: [(f32, f32); 3]| ways.into_iter().filter(|(d, _)| d.abs() <= CATCH).min_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
+                let x =
+                    nearest([(pic.center().x - r.center().x, pic.center().x), (pic.min.x - r.min.x, pic.min.x), (pic.max.x - r.max.x, pic.max.x)]);
+                let y =
+                    nearest([(pic.center().y - r.center().y, pic.center().y), (pic.min.y - r.min.y, pic.min.y), (pic.max.y - r.max.y, pic.max.y)]);
+                (x, y)
+            };
+            let mut lines = (None, None);
             match d {
                 CanvasDrag::Item { layer, item, grab, resize } => {
                     let params = match resize {
@@ -750,6 +767,15 @@ impl VideoView {
                         None => json!({"layer": layer, "item": item, "x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh}),
                     };
                     let _ = self.session.drag("video.setItem", &params);
+                    if resize.is_none() {
+                        let (x, y) = catch(self);
+                        if x.is_some() || y.is_some() {
+                            let (dx, dy) = (x.map_or(0.0, |c| c.0) / f, y.map_or(0.0, |c| c.0) / f);
+                            let params = json!({"layer": layer, "item": item, "x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh});
+                            let _ = self.session.drag("video.setItem", &params);
+                            lines = (x.map(|c| c.1), y.map(|c| c.1));
+                        }
+                    }
                 }
                 CanvasDrag::Camera { grab, resize } => {
                     let centre = self.camera_place().map(|(x, y, w, h)| pos2(x + w / 2.0, y + h / 2.0)).unwrap_or(v);
@@ -758,7 +784,23 @@ impl VideoView {
                         None => json!({"x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh}),
                     };
                     let _ = self.session.drag("video.cameraAt", &params);
+                    if resize.is_none() {
+                        let (x, y) = catch(self);
+                        if x.is_some() || y.is_some() {
+                            let (dx, dy) = (x.map_or(0.0, |c| c.0) / f, y.map_or(0.0, |c| c.0) / f);
+                            let params = json!({"x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh});
+                            let _ = self.session.drag("video.cameraAt", &params);
+                            lines = (x.map(|c| c.1), y.map(|c| c.1));
+                        }
+                    }
                 }
+            }
+            let guide = Stroke::new(1.0, Color32::from_rgb(0xFF, 0xD5, 0x4F));
+            if let Some(x) = lines.0 {
+                ui.painter().line_segment([pos2(x, pic.min.y), pos2(x, pic.max.y)], guide);
+            }
+            if let Some(y) = lines.1 {
+                ui.painter().line_segment([pos2(pic.min.x, y), pos2(pic.max.x, y)], guide);
             }
         }
         if resp.drag_stopped() && self.canvas_drag.take().is_some() {
@@ -795,6 +837,11 @@ impl VideoView {
         let x_of = |us: u64| lane.min.x + (us as f64 / 1e6 * f64::from(self.pps)) as f32 - self.scroll;
         let top = rows_top + k as f32 * super::ROW_H;
         Some(Rect::from_min_max(pos2(x_of(it.at), top + 3.0), pos2(x_of(it.end()), top + super::ROW_H - 7.0)))
+    }
+
+    /// How far along the timeline is scrolled, in points (for tests).
+    pub fn scrolled(&self) -> f32 {
+        self.scroll
     }
 
     /// Asks the host about captions on the next frame (for tests).

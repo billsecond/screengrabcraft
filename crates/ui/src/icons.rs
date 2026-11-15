@@ -544,6 +544,55 @@ pub fn labeled_button(ui: &mut egui::Ui, icon: Icon, label: &str, tip: &str, on:
     if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
 }
 
+/// The room a name takes under a bar's button, and the size of its letters.
+pub const NAME_ROOM: f32 = 14.0;
+pub const NAME_TEXT: f32 = 10.5;
+
+/// A bar's button with its name under it, as one button: the icon `side` points square, the name
+/// below. `on` draws it as selected. Screen readers (and tests) know it as `known_as`.
+#[allow(clippy::too_many_arguments)]
+pub fn named_button(ui: &mut egui::Ui, icon: Icon, name: &str, known_as: &str, tip: &str, on: bool, enabled: bool, side: f32) -> egui::Response {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let font = FontId::proportional(NAME_TEXT);
+    let wide = ui.painter().layout_no_wrap(name.to_string(), font.clone(), t.text).size().x + 8.0;
+    let (rect, resp) =
+        ui.allocate_exact_size(vec2(wide.max(side), side + NAME_ROOM), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let button = Rect::from_min_size(pos2(rect.center().x - side / 2.0, rect.min.y), vec2(side, side));
+    let bg = if on {
+        t.selected
+    } else if resp.hovered() && enabled {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(button, 5.0, bg);
+    }
+    if on {
+        ui.painter().rect_stroke(button, 5.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+    }
+    let color = if !enabled {
+        t.muted.gamma_multiply(0.5)
+    } else if on {
+        t.accent
+    } else {
+        t.text
+    };
+    paint(ui.painter(), button.shrink(side * 0.2), icon, color);
+    let words = if !enabled {
+        t.muted.gamma_multiply(0.6)
+    } else if on {
+        t.accent
+    } else if resp.hovered() {
+        t.text
+    } else {
+        t.muted
+    };
+    ui.painter().text(pos2(rect.center().x, rect.max.y - NAME_ROOM / 2.0), Align2::CENTER_CENTER, name, font, words);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, on, known_as));
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
+}
+
 /// [`button`], `side` points square (the icon grows with it).
 pub fn button_sized(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool, side: f32) -> egui::Response {
     let t = crate::theme::Tokens::get(ui.ctx());

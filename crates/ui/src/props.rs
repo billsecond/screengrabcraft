@@ -294,7 +294,7 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     };
     ui.heading(title);
     if sel.is_empty() {
-        ui.label(egui::RichText::new("For the next one you draw").size(12.0).color(t.muted));
+        ui.label(egui::RichText::new(how_to(kind)).size(12.0).color(t.muted));
     }
     ui.add_space(8.0);
     if kind != Kind::Image {
@@ -384,6 +384,25 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
         )
         .color(t.muted),
     );
+}
+
+/// How the tool for `kind` is used, in a line under its name while nothing is selected.
+pub(crate) fn how_to(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Arrow => "Drag on the picture, from where it starts to what it points at. Shift keeps it straight.",
+        Kind::Line => "Drag on the picture to draw one. Shift keeps it straight.",
+        Kind::Rect | Kind::Ellipse => "Drag on the picture to draw one. Shift makes it a square or a circle.",
+        Kind::Text => "Click the picture where the words go, or drag out a box, then type.",
+        Kind::Callout => "Click what it's about, or drag out a box, then type. Its tail can be dragged.",
+        Kind::Step => "Click the picture: each click puts the next number there.",
+        Kind::Stamp => "Click the picture to put one there, or drag for its size.",
+        Kind::Pen => "Draw on the picture with the button held down.",
+        Kind::Highlight => "Drag over what should stand out.",
+        Kind::Blur | Kind::Pixelate => "Drag a box over what shouldn't be read.",
+        Kind::Spotlight => "Drag a box round what matters: the rest is dimmed.",
+        Kind::Magnify => "Click what to enlarge, or drag a box round it.",
+        _ => "For the next one you draw",
+    }
 }
 
 /// A slider with its name above it (the slider has its number box).

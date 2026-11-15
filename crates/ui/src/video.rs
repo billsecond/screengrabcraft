@@ -71,6 +71,8 @@ const FULL_BAR: f32 = 64.0;
 const FULL_HIDE: f64 = 2.5;
 /// How much larger than itself a small video is shown, at most.
 const PREVIEW_ZOOM: f32 = 2.0;
+/// How near (points) an edge on the timeline catches what's dragged past it.
+const SNAP: f32 = 7.0;
 /// How wide the panel at the right is, whatever it shows.
 pub(crate) const SIDE_W: f32 = 264.0;
 /// Sound waves are kept as peaks per 10 ms.
@@ -1120,9 +1122,11 @@ impl VideoView {
         });
     }
 
-    /// The tool bar, as tall as the picture editor's and built of the same buttons: the library
-    /// and files at the left, then undo, then what cuts the video; what makes something of it at
-    /// the right. (Playing is under the picture.)
+    /// The tool bar, the picture editor's: as tall, built of the same buttons, and like it with a
+    /// name under each button when the window is wide enough for that one's names (else Split
+    /// and Delete are named beside their icons). The library and files at the left, then undo,
+    /// then what cuts the video; what makes something of it at the right. (Playing is under the
+    /// picture.)
     fn tool_bar(&mut self, ed: &mut Editor, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -1131,32 +1135,45 @@ impl VideoView {
             .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
             .show(ui, |ui| {
+                let named = !ed.settings.hide_tool_names && ui.available_width() >= ed.named_bar_width;
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
                     let divider = |ui: &mut Ui| {
                         ui.add_space(4.0);
-                        ui.separator();
+                        let (line, _) = ui.allocate_exact_size(vec2(1.0, side), Sense::hover());
+                        ui.painter().vline(line.center().x, line.top() + side * 0.15..=line.top() + side * 0.85, Stroke::new(1.0, t.border));
                         ui.add_space(4.0);
                     };
+                    // One of the bar's buttons: named under its icon, or (the few better said
+                    // than drawn) beside it, or the icon alone.
+                    let button = |ui: &mut Ui, icon: Icon, name: &str, known_as: &str, tip: &str, on: bool, enabled: bool, said: bool| {
+                        if named {
+                            icons::named_button(ui, icon, name, known_as, tip, on, enabled, side)
+                        } else if said {
+                            icons::labeled_button(ui, icon, known_as, tip, on, enabled, side)
+                        } else {
+                            icons::button_sized(ui, icon, known_as, on, enabled, side)
+                        }
+                    };
                     let tip = "Titles, lower thirds, overlays, transitions and your own media, to drag onto the timeline";
-                    if icons::labeled_button(ui, Icon::Library, "Library", tip, self.library_open, true, side).clicked() {
+                    if button(ui, Icon::Library, "Library", "Library", tip, self.library_open, true, true).clicked() {
                         self.library_open = !self.library_open;
                     }
-                    if icons::button_sized(ui, Icon::Open, "Open (Ctrl+O)", false, true, side).clicked() {
+                    if button(ui, Icon::Open, "Open", "Open (Ctrl+O)", "Open (Ctrl+O)", false, true, false).clicked() {
                         ed.services.request_open();
                     }
                     divider(ui);
                     let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                    if icons::button_sized(ui, Icon::Undo, &undo_tip, false, self.session.can_undo(), side).clicked() {
+                    if button(ui, Icon::Undo, "Undo", &undo_tip, &undo_tip, false, self.session.can_undo(), false).clicked() {
                         self.run(ed, &ctx, "edit.undo", json!({}));
                     }
                     let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                    if icons::button_sized(ui, Icon::Redo, &redo_tip, false, self.session.can_redo(), side).clicked() {
+                    if button(ui, Icon::Redo, "Redo", &redo_tip, &redo_tip, false, self.session.can_redo(), false).clicked() {
                         self.run(ed, &ctx, "edit.redo", json!({}));
                     }
                     divider(ui);
                     let tip = "Split at the playhead (S): the selected clip's track, or all of them";
-                    if icons::labeled_button(ui, Icon::Split, "Split", tip, false, self.length() > 0, side).clicked() {
+                    if button(ui, Icon::Split, "Split", "Split", tip, false, self.length() > 0, true).clicked() {
                         self.split(ed, &ctx);
                     }
                     let tip = if self.item.is_some() {
@@ -1168,7 +1185,7 @@ impl VideoView {
                     };
                     let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
                     let label = if self.range.is_some() { "Cut" } else { "Delete" };
-                    if icons::labeled_button(ui, Icon::Delete, label, tip, false, any, side).clicked() {
+                    if button(ui, Icon::Delete, label, label, tip, false, any, true).clicked() {
                         self.delete(ed, &ctx);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1990,6 +2007,22 @@ impl VideoView {
                         Stroke::NONE,
                     ));
                 }
+                // Over the ruler, the time under the pointer, and a faint line down from it: where a
+                // click would put the playhead. While it's being moved, its own time.
+                let scrubbing = matches!(self.drag, Some(Drag::Scrub));
+                let over_ruler = resp.hover_pos().filter(|p| ruler.contains(*p) && self.drag.is_none() && self.item_drag.is_none());
+                if let Some(x) = over_ruler.map(|p| p.x).or(scrubbing.then_some(px)) {
+                    let us = us_of(x).min(self.length());
+                    if !scrubbing {
+                        painter.line_segment([pos2(x, ruler.max.y), pos2(x, full.max.y)], Stroke::new(1.0, t.muted.gamma_multiply(0.5)));
+                    }
+                    let words = painter.layout_no_wrap(clock(us), egui::FontId::monospace(11.0), Color32::WHITE);
+                    let size = words.size() + vec2(10.0, 4.0);
+                    let left = (x - size.x / 2.0).clamp(lane.min.x + 2.0, (lane.max.x - size.x - 2.0).max(lane.min.x + 2.0));
+                    let tag = Rect::from_min_size(pos2(left, ruler.min.y + 2.0), size);
+                    painter.rect_filled(tag, 4.0, if scrubbing { Color32::from_rgb(0xE5, 0x39, 0x35) } else { Color32::from_black_alpha(210) });
+                    painter.galley(tag.min + vec2(5.0, 2.0), words, Color32::WHITE);
+                }
                 // The headers, over the left of the rows.
                 painter.rect_filled(Rect::from_min_max(full.min, pos2(lane.min.x, full.max.y)), 0.0, t.panel);
                 painter.line_segment([pos2(lane.min.x, full.min.y), pos2(lane.min.x, full.max.y)], Stroke::new(1.0, t.border));
@@ -2063,7 +2096,73 @@ impl VideoView {
                     if on_edge {
                         ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                     }
+                    // What's under the pointer says what it is and how long (after a moment).
+                    if self.drag.is_none() && self.item_drag.is_none() && p.y >= ruler.max.y {
+                        let about = match layer_at(p.y) {
+                            Some(l) => layer_item_at(l, p.x)
+                                .and_then(|(id, _)| layers.iter().find(|x| x.id == l).and_then(|x| x.items.iter().find(|i| i.id == id)))
+                                .map(|it| (it.label(&media), it.at, it.end())),
+                            None => row_at(p.y).and_then(|track| {
+                                let (c, _) = clip_at(track, p.x)?;
+                                let tr = tracks.get(track)?;
+                                let clip = tr.clips.get(c)?;
+                                Some((tr.kind.label().to_string(), clip.at, clip.end()))
+                            }),
+                        };
+                        if let Some((name, from, to)) = about {
+                            let tip = format!(
+                                "{name}: {} to {} ({} long)\nDrag it to slide it, or one of its ends to trim it.",
+                                clock(from),
+                                clock(to),
+                                clock(to.saturating_sub(from))
+                            );
+                            resp.clone().on_hover_text_at_pointer(tip);
+                        }
+                    }
                 }
+                // Edges catch what's dragged along the timeline when it comes within a few points
+                // of them: the playhead, the video's ends, the ends of every clip and item but
+                // the one dragged. Alt held, nothing catches.
+                let (head, whole) = (self.playhead, self.length());
+                let no_catch = ctx.input(|i| i.modifiers.alt);
+                let reach = (f64::from(SNAP) / f64::from(pps.max(0.01)) * 1e6) as u64;
+                let edges = |but_clip: Option<(usize, usize)>, but_item: Option<(u32, u32)>| -> Vec<u64> {
+                    let mut e = vec![0, head, whole];
+                    for (ti, tr) in tracks.iter().enumerate() {
+                        for (ci, c) in tr.clips.iter().enumerate() {
+                            if but_clip != Some((ti, ci)) {
+                                e.push(c.at);
+                                e.push(c.end());
+                            }
+                        }
+                    }
+                    for l in &layers {
+                        for it in &l.items {
+                            if but_item != Some((l.id, it.id)) {
+                                e.push(it.at);
+                                e.push(it.end());
+                            }
+                        }
+                    }
+                    e
+                };
+                let nearest = |us: u64, edges: &[u64]| -> Option<u64> {
+                    if no_catch {
+                        return None;
+                    }
+                    edges.iter().copied().filter(|e| e.abs_diff(us) <= reach).min_by_key(|e| e.abs_diff(us))
+                };
+                // Something `len` long put at `at`: where it goes when its start or its end is
+                // caught (the nearer), and the edge that caught it.
+                let caught_at = |at: u64, len: u64, edges: &[u64]| -> (u64, Option<u64>) {
+                    match (nearest(at, edges), nearest(at.saturating_add(len), edges)) {
+                        (Some(a), Some(b)) if a.abs_diff(at) <= b.abs_diff(at.saturating_add(len)) => (a, Some(a)),
+                        (_, Some(b)) => (b.saturating_sub(len), Some(b)),
+                        (Some(a), None) => (a, Some(a)),
+                        (None, None) => (at, None),
+                    }
+                };
+                let mut caught: Option<u64> = None;
                 // Something from the library let go of here: on the layer under it (one of its
                 // kind, where it fits), else on a layer of its own.
                 if let Some(what) = resp.dnd_release_payload::<LibDrop>()
@@ -2102,6 +2201,8 @@ impl VideoView {
                     match d {
                         ItemDrag::Trim { layer, item, start } => {
                             if let Some(it) = self.session.timeline.item(layer, item).cloned() {
+                                caught = nearest(us, &edges(None, Some((layer, item))));
+                                let us = caught.unwrap_or(us);
                                 let (a, b) = if start { (us, it.end()) } else { (it.at, us) };
                                 let _ = self.session.drag("video.trimItem", &json!({"layer": layer, "item": item, "start": a, "end": b}));
                             }
@@ -2110,7 +2211,10 @@ impl VideoView {
                             // Onto the layer under the pointer when it's of the item's kind.
                             let kind = self.session.timeline.layer(layer).map(|l| l.kind);
                             let to = layer_at(p.y).filter(|id| self.session.timeline.layer(*id).map(|l| l.kind) == kind).unwrap_or(layer);
-                            let params = json!({"layer": layer, "item": item, "toLayer": to, "at": us.saturating_sub(grab)});
+                            let len = self.session.timeline.item(layer, item).map_or(0, |it| it.end().saturating_sub(it.at));
+                            let (at, edge) = caught_at(us.saturating_sub(grab), len, &edges(None, Some((layer, item))));
+                            caught = edge;
+                            let params = json!({"layer": layer, "item": item, "toLayer": to, "at": at});
                             if let Ok(v) = self.session.drag("video.moveItem", &params) {
                                 let now_on = v.get("layer").and_then(Value::as_u64).map_or(layer, |l| l as u32);
                                 self.item_drag = Some(ItemDrag::Move { layer: now_on, item, grab, from });
@@ -2186,10 +2290,14 @@ impl VideoView {
                         }
                         Drag::Trim { track, clip, start } => {
                             let id = if start { "video.trimStart" } else { "video.trimEnd" };
-                            let _ = self.session.drag(id, &json!({"track": track, "clip": clip, "to": us}));
+                            caught = nearest(us, &edges(Some((track, clip)), None));
+                            let _ = self.session.drag(id, &json!({"track": track, "clip": clip, "to": caught.unwrap_or(us)}));
                         }
                         Drag::Move { track, clip, grab } => {
-                            let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": us.saturating_sub(grab)}));
+                            let len = tracks.get(track).and_then(|tr| tr.clips.get(clip)).map_or(0, |c| c.len);
+                            let (to, edge) = caught_at(us.saturating_sub(grab), len, &edges(Some((track, clip)), None));
+                            caught = edge;
+                            let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": to}));
                         }
                     }
                     // Near the edges, the timeline scrolls along.
@@ -2204,6 +2312,13 @@ impl VideoView {
                         self.session.commit();
                     }
                     self.drag = None;
+                }
+                // The edge that caught what's being dragged, shown down the timeline.
+                if let Some(edge) = caught {
+                    let x = x_of(edge);
+                    if x >= lane.min.x && x <= lane.max.x {
+                        painter.line_segment([pos2(x, ruler.max.y), pos2(x, full.max.y)], Stroke::new(1.5, Color32::from_rgb(0xFF, 0xD5, 0x4F)));
+                    }
                 }
                 if resp.clicked()
                     && let Some(p) = resp.interact_pointer_pos()
@@ -2295,6 +2410,34 @@ impl VideoView {
                 // The playhead stays in view while playing.
                 if self.playing.is_some() && (px > lane.max.x - 40.0 || px < lane.min.x) {
                     self.scroll = ((self.playhead as f64 / 1e6 * f64::from(self.pps)) as f32 - 60.0).max(0.0);
+                }
+                // A bar along the bottom to scroll by, when the video is longer than the timeline
+                // shows: as long as the share in view. (A little room is left past the end.)
+                let content = (self.length() as f64 / 1e6 * f64::from(self.pps)) as f32 + 24.0;
+                let all = content + lane.width() * 0.25;
+                let furthest = if content > lane.width() + 1.0 { all - lane.width() } else { 0.0 };
+                if furthest > 1.0 {
+                    let track = Rect::from_min_max(pos2(lane.min.x + 4.0, full.max.y - 7.0), pos2(lane.max.x - 4.0, full.max.y - 1.0));
+                    let bar = ui.interact(track.expand2(vec2(0.0, 3.0)), ui.id().with("timeline-scroll"), Sense::click_and_drag());
+                    bar.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Scroll the Timeline"));
+                    let share = (lane.width() / all).clamp(0.05, 1.0);
+                    let thumb_w = (track.width() * share).max(28.0);
+                    let run = (track.width() - thumb_w).max(1.0);
+                    if bar.dragged() {
+                        self.scroll += bar.drag_delta().x / run * furthest;
+                    } else if bar.clicked()
+                        && let Some(p) = bar.interact_pointer_pos()
+                    {
+                        self.scroll = ((p.x - track.min.x - thumb_w / 2.0) / run).clamp(0.0, 1.0) * furthest;
+                    }
+                    self.scroll = self.scroll.clamp(0.0, furthest);
+                    let x = track.min.x + self.scroll / furthest * run;
+                    let thumb = Rect::from_min_size(pos2(x, track.min.y), vec2(thumb_w, track.height()));
+                    painter.rect_filled(track, 3.0, t.window);
+                    painter.rect_filled(thumb, 3.0, if bar.hovered() || bar.dragged() { t.muted } else { t.control_border });
+                } else if self.item_drag.is_none() && self.drag.is_none() {
+                    // All of it fits: nothing to scroll to.
+                    self.scroll = self.scroll.min(furthest);
                 }
                 self.fix_selection();
             });
