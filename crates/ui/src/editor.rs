@@ -190,6 +190,8 @@ pub struct Editor {
     /// While annotations are dragged off the picture and it grows to hold them: the picture as
     /// it was before, in the grown one (what it is cut back to if the growth is not needed).
     pub(crate) grown: Option<Rect>,
+    /// Nothing has been opened or drawn yet, and the ways to start are offered on the canvas.
+    pub welcome: bool,
     /// The window is over the whole screen, for the video's preview.
     pub(crate) window_full: bool,
     /// Export Transcript's save dialog is open, for this kind of file.
@@ -276,6 +278,7 @@ impl Editor {
             saving: None,
             saving_project: false,
             grown: None,
+            welcome: false,
             window_full: false,
             saving_transcript: None,
             transcripts: Default::default(),
@@ -341,6 +344,7 @@ impl Editor {
         self.video = None;
         self.video_path = None;
         self.video_epoch += 1;
+        self.welcome = false;
         self.session.replace(doc);
         self.name = name;
         self.project_path = project;
@@ -372,11 +376,104 @@ impl Editor {
     /// window closed (once everything was saved) while the program stays ready out of sight.
     pub fn start_over(&mut self) {
         self.blank_document();
+        self.welcome = true;
         self.dialog = None;
         self.pending = None;
         self.save_problem = None;
         self.quit_requested = false;
         self.close_confirmed = false;
+    }
+
+    /// Offers the ways to start, on the canvas, while the picture is the empty one the window
+    /// started with (the host says so when it was started with nothing to open).
+    pub fn offer_welcome(&mut self) {
+        self.welcome = self.video.is_none() && self.picture_path.is_none() && self.project_path.is_none() && !self.session.can_undo();
+    }
+
+    /// The ways to start, in the middle of the canvas, until something is opened or drawn (or it
+    /// is put away): a capture, a recording, a file, the clipboard.
+    fn welcome_card(&mut self, ctx: &egui::Context) {
+        if !self.welcome {
+            return;
+        }
+        // Anything done to the picture, and it's a picture being worked on.
+        if self.session.can_undo() || !self.session.doc.objects.is_empty() || self.editing.is_some() {
+            self.welcome = false;
+            return;
+        }
+        if self.dialog.is_some() || self.opening_video.is_some() {
+            return;
+        }
+        let t = Tokens::get(ctx);
+        let canvas = self.view.canvas;
+        if canvas.width() < 380.0 || canvas.height() < 300.0 {
+            return;
+        }
+        let can_capture = self.services.can_capture();
+        let mut chosen = None;
+        egui::Area::new(egui::Id::new("welcome-card")).order(egui::Order::Middle).pivot(egui::Align2::CENTER_CENTER).fixed_pos(canvas.center()).show(
+            ctx,
+            |ui| {
+                egui::Frame::NONE
+                    .fill(t.panel)
+                    .stroke(egui::Stroke::new(1.0, t.border))
+                    .corner_radius(crate::widgets::WINDOW_RADIUS)
+                    .shadow(egui::Shadow {
+                        offset: [0, 6],
+                        blur: 24,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(if t.dark { 110 } else { 40 }),
+                    })
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| {
+                        ui.set_width(340.0);
+                        ui.label(egui::RichText::new("Nothing open yet").font(crate::widgets::strong_font(ctx, 18.0)).color(t.text));
+                        ui.add_space(2.0);
+                        let how = if can_capture {
+                            "Start with one of these, or drop a picture or a video on the window."
+                        } else {
+                            "Open a picture, paste one, or drop one on the window."
+                        };
+                        ui.label(egui::RichText::new(how).size(12.5).color(t.muted));
+                        ui.add_space(12.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        let mut rows = Vec::new();
+                        if can_capture {
+                            rows.push((Icon::Capture, "Capture an Area", "Ctrl+Shift+N", Welcome::Capture));
+                            rows.push((Icon::Record, "Record a Video", "", Welcome::Record));
+                        }
+                        rows.push((Icon::Open, "Open a Picture or a Video…", "Ctrl+O", Welcome::Open));
+                        rows.push((Icon::Copy, "Paste from the Clipboard", "Ctrl+V", Welcome::Paste));
+                        for (icon, label, key, what) in rows {
+                            if welcome_row(ui, icon, label, key).clicked() {
+                                chosen = Some(what);
+                            }
+                        }
+                        ui.add_space(8.0);
+                        let link =
+                            ui.add(egui::Button::new(egui::RichText::new("Or draw on this blank picture").size(12.5).color(t.accent)).frame(false));
+                        if link.on_hover_text("Puts this away: the white picture behind it is yours to draw on").clicked() {
+                            chosen = Some(Welcome::Blank);
+                        }
+                    });
+            },
+        );
+        match chosen {
+            Some(Welcome::Capture) => {
+                if let Err(e) = self.services.new_capture(CaptureMode::Region) {
+                    self.error(ctx, e);
+                }
+            }
+            Some(Welcome::Record) => {
+                if let Err(e) = self.services.new_capture(CaptureMode::Production) {
+                    self.error(ctx, e);
+                }
+            }
+            Some(Welcome::Open) => self.services.request_open(),
+            Some(Welcome::Paste) => self.paste(ctx, true),
+            Some(Welcome::Blank) => self.welcome = false,
+            None => {}
+        }
     }
 
     /// Opens a picture or project from its bytes, once the document open now is saved.
@@ -1115,6 +1212,7 @@ impl Editor {
         }
         crate::props::panel(self, ui);
         crate::canvas::show(self, ui);
+        self.welcome_card(&ctx);
         crate::dialogs::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
@@ -1513,6 +1611,15 @@ impl Editor {
                     if ui.checkbox(&mut self.settings.show_tray, "Recent Captures").changed() {
                         self.services.save_settings(&self.settings);
                     }
+                    let mut names = !self.settings.hide_tool_names;
+                    if ui
+                        .checkbox(&mut names, "Tool Names")
+                        .on_hover_text("Each tool's name under its icon, when the window has room for them")
+                        .changed()
+                    {
+                        self.settings.hide_tool_names = !names;
+                        self.services.save_settings(&self.settings);
+                    }
                     ui.menu_button("Theme", |ui| {
                         for (label, th) in [
                             ("Follow the system", screengrabcraft_model::Theme::System),
@@ -1575,36 +1682,38 @@ impl Editor {
             .show_separator_line(true)
             .show(ui, |ui| {
                 let side = BAR_BUTTON;
+                // The buttons at the two sides, for their names under them when the bar has room.
+                let sides: std::cell::RefCell<Vec<(egui::Rect, &'static str)>> = std::cell::RefCell::new(Vec::new());
                 let bar = egui::Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), side));
                 let row = |layout: egui::Layout| egui::UiBuilder::new().max_rect(bar).layout(layout);
                 // At the left: the files and undo.
                 let left = ui
                     .scope_builder(row(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
                         ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
-                        if bar_button(ui, side, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
+                        if named_button(ui, &sides, side, Icon::Capture, "New capture (Ctrl+Shift+N)", false, true).clicked()
                             && let Err(e) = self.services.new_capture(CaptureMode::Region)
                         {
                             self.error(&ctx, e);
                         }
-                        if bar_button(ui, side, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
                             self.services.request_open();
                         }
-                        if bar_button(ui, side, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::Save, "Save (Ctrl+S)", false, true).clicked() {
                             self.save(&ctx);
                         }
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(4.0);
                         let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                        if bar_button(ui, side, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
+                        if named_button(ui, &sides, side, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
                             self.run(&ctx, "edit.undo", json!({}));
                         }
                         let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                        if bar_button(ui, side, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
+                        if named_button(ui, &sides, side, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
                             self.run(&ctx, "edit.redo", json!({}));
                         }
                         let any = !self.session.selected().is_empty();
-                        if bar_button(ui, side, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
+                        if named_button(ui, &sides, side, Icon::Delete, "Delete the selection (Del)", false, any).clicked() {
                             self.run(&ctx, "edit.delete", json!({}));
                         }
                     })
@@ -1614,69 +1723,143 @@ impl Editor {
                 let right = ui
                     .scope_builder(row(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
                         ui.spacing_mut().item_spacing = vec2(BAR_GAP, 0.0);
-                        if bar_button(ui, side, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::Fit, "Zoom to fit (Ctrl+0)", false, true).clicked() {
                             self.view.fit_pending = true;
                         }
-                        if bar_button(ui, side, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::ZoomIn, "Zoom in (Ctrl++)", false, true).clicked() {
                             self.view.zoom_by(1.25, None);
                         }
                         let pct = format!("{:.0}%", self.view.zoom * 100.0);
-                        if ui.add(egui::Button::new(pct).frame(false).min_size(vec2(52.0, side))).on_hover_text("Actual size (Ctrl+1)").clicked() {
+                        let actual = ui.add(egui::Button::new(pct).frame(false).min_size(vec2(52.0, side))).on_hover_text("Actual size (Ctrl+1)");
+                        sides.borrow_mut().push((actual.rect, "Zoom"));
+                        if actual.clicked() {
                             self.view.set_zoom(1.0, None);
                         }
-                        if bar_button(ui, side, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::ZoomOut, "Zoom out (Ctrl+-)", false, true).clicked() {
                             self.view.zoom_by(0.8, None);
                         }
                         ui.add_space(4.0);
                         ui.separator();
                         ui.add_space(4.0);
-                        if bar_button(ui, side, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
+                        if named_button(ui, &sides, side, Icon::Copy, "Copy the picture (Ctrl+C)", false, true).clicked() {
                             self.copy(&ctx);
                         }
                     })
                     .response
                     .rect;
                 // The tools: in the middle (as near it as the two sides leave room for) when they
-                // fit there, else on a row of their own below, never smaller.
-                let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
-                let middle = if left.right() + BAR_SPACE + width + BAR_SPACE <= right.left() {
-                    let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
-                    egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side))
-                } else {
-                    // Too narrow even for a row of its own, the row goes on to another.
-                    let w = width.min(bar.width());
-                    let x = (bar.center().x - w / 2.0).max(bar.left());
-                    let rows = (width / bar.width().max(side)).ceil().clamp(1.0, 4.0);
-                    egui::Rect::from_min_size(egui::pos2(x, bar.bottom() + 2.0 * BAR_GAP), vec2(w, rows * side + (rows - 1.0) * BAR_GAP))
-                };
-                let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
-                ui.scope_builder(egui::UiBuilder::new().max_rect(middle).layout(layout), |ui| {
-                    ui.spacing_mut().item_spacing = vec2(BAR_GAP, BAR_GAP);
-                    if bar_button(ui, side, Icon::Favorites, "Favorites", self.tool == Tool::Favorites, true).clicked() {
-                        self.set_tool(Tool::Favorites);
+                // fit there, else on a row of their own below, never smaller. With room to spare
+                // each has its name under it.
+                let mut tools: Vec<BarTool> = vec![BarTool {
+                    tool: Tool::Favorites,
+                    icon: Icon::Favorites,
+                    tip: "Favorites".to_string(),
+                    name: "Favorites",
+                    on: self.tool == Tool::Favorites,
+                    leads: false,
+                }];
+                for group in Tool::BAR_GROUPS {
+                    for (k, &tool) in group.iter().enumerate() {
+                        let Some((icon, label, key)) = tool.info() else { continue };
+                        tools.push(if tool.is_shape() {
+                            // The Shape button draws whichever of the two was picked last.
+                            BarTool {
+                                tool: self.shape_tool(),
+                                icon: Icon::Shape,
+                                tip: "Shape (R, O)".to_string(),
+                                name: "Shape",
+                                on: self.tool.is_shape(),
+                                leads: k == 0,
+                            }
+                        } else {
+                            let name = if label == "Step number" { "Step" } else { label };
+                            BarTool { tool, icon, tip: format!("{label} ({})", key.name()), name, on: self.tool == tool, leads: k == 0 }
+                        });
                     }
-                    for group in Tool::BAR_GROUPS {
-                        // A gap, with a faint line in it, between groups.
-                        let (gap, _) = ui.allocate_exact_size(vec2(BAR_GROUP_GAP - BAR_GAP, side), egui::Sense::hover());
-                        let t = Tokens::get(ui.ctx());
-                        ui.painter().line_segment(
-                            [egui::pos2(gap.center().x, gap.top() + side * 0.2), egui::pos2(gap.center().x, gap.bottom() - side * 0.2)],
-                            egui::Stroke::new(1.0, t.border),
-                        );
-                        for &tool in group {
-                            let Some((icon, label, key)) = tool.info() else { continue };
-                            let (icon, tip, on) = if tool.is_shape() {
-                                // The Shape button draws whichever of the two was picked last.
-                                (Icon::Shape, "Shape (R, O)".to_string(), self.tool.is_shape())
-                            } else {
-                                (icon, format!("{label} ({})", key.name()), self.tool == tool)
-                            };
-                            if bar_button(ui, side, icon, &tip, on, true).clicked() {
-                                self.set_tool(if tool.is_shape() { self.shape_tool() } else { tool });
+                }
+                let name_font = egui::FontId::proportional(NAME_TEXT);
+                let cells: Vec<f32> = tools
+                    .iter()
+                    .map(|b| (ui.painter().layout_no_wrap(b.name.to_string(), name_font.clone(), t.text).size().x + 8.0).max(side))
+                    .collect();
+                let named_width = cells.iter().sum::<f32>() + (tools.len() - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
+                let mut picked = None;
+                if !self.settings.hide_tool_names && left.right() + BAR_SPACE + named_width + BAR_SPACE <= right.left() {
+                    let mut x = (bar.center().x - named_width / 2.0).min(right.left() - BAR_SPACE - named_width).max(left.right() + BAR_SPACE);
+                    for (b, cell) in tools.iter().zip(&cells) {
+                        if b.leads {
+                            // A gap, with a faint line in it, between groups.
+                            let gx = x - BAR_GAP + BAR_GROUP_GAP / 2.0;
+                            ui.painter().line_segment(
+                                [egui::pos2(gx, bar.top() + side * 0.2), egui::pos2(gx, bar.bottom() - side * 0.2)],
+                                egui::Stroke::new(1.0, t.border),
+                            );
+                            x += BAR_GROUP_GAP;
+                        }
+                        let button = egui::Rect::from_min_size(egui::pos2(x + (cell - side) / 2.0, bar.top()), vec2(side, side));
+                        let layout = egui::Layout::left_to_right(egui::Align::Center);
+                        let pressed = ui
+                            .scope_builder(egui::UiBuilder::new().max_rect(button).layout(layout), |ui| {
+                                bar_button(ui, side, b.icon, &b.tip, b.on, true)
+                            })
+                            .inner
+                            .clicked();
+                        // Its name under it, which picks it too.
+                        let under = egui::Rect::from_min_size(egui::pos2(x, bar.bottom()), vec2(*cell, NAME_ROOM));
+                        let on_name = ui.interact(under, ui.id().with(("tool-name", b.name)), egui::Sense::click());
+                        let colour = if b.on {
+                            t.accent
+                        } else if on_name.hovered() {
+                            t.text
+                        } else {
+                            t.muted
+                        };
+                        ui.painter().text(under.center(), egui::Align2::CENTER_CENTER, b.name, name_font.clone(), colour);
+                        if pressed || on_name.clicked() {
+                            picked = Some(b.tool);
+                        }
+                        x += cell + BAR_GAP;
+                    }
+                    // The sides' buttons are named as well.
+                    for (r, name) in sides.borrow().iter() {
+                        let at = egui::pos2(r.center().x, bar.bottom() + NAME_ROOM / 2.0);
+                        ui.painter().text(at, egui::Align2::CENTER_CENTER, *name, name_font.clone(), t.muted);
+                    }
+                    // The bar is that much taller.
+                    ui.allocate_rect(egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, bar.bottom() + NAME_ROOM)), egui::Sense::hover());
+                } else {
+                    let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
+                    let middle = if left.right() + BAR_SPACE + width + BAR_SPACE <= right.left() {
+                        let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
+                        egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side))
+                    } else {
+                        // Too narrow even for a row of its own, the row goes on to another.
+                        let w = width.min(bar.width());
+                        let x = (bar.center().x - w / 2.0).max(bar.left());
+                        let rows = (width / bar.width().max(side)).ceil().clamp(1.0, 4.0);
+                        egui::Rect::from_min_size(egui::pos2(x, bar.bottom() + 2.0 * BAR_GAP), vec2(w, rows * side + (rows - 1.0) * BAR_GAP))
+                    };
+                    let layout = egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(middle).layout(layout), |ui| {
+                        ui.spacing_mut().item_spacing = vec2(BAR_GAP, BAR_GAP);
+                        for b in &tools {
+                            if b.leads {
+                                // A gap, with a faint line in it, between groups.
+                                let (gap, _) = ui.allocate_exact_size(vec2(BAR_GROUP_GAP - BAR_GAP, side), egui::Sense::hover());
+                                ui.painter().line_segment(
+                                    [egui::pos2(gap.center().x, gap.top() + side * 0.2), egui::pos2(gap.center().x, gap.bottom() - side * 0.2)],
+                                    egui::Stroke::new(1.0, t.border),
+                                );
+                            }
+                            if bar_button(ui, side, b.icon, &b.tip, b.on, true).clicked() {
+                                picked = Some(b.tool);
                             }
                         }
-                    }
-                });
+                    });
+                }
+                if let Some(tool) = picked {
+                    self.set_tool(tool);
+                }
             });
     }
 
@@ -1846,6 +2029,75 @@ const BAR_GAP: f32 = 2.0;
 const BAR_GROUP_GAP: f32 = 14.0;
 /// The least room between the tools in the middle and the buttons at either side.
 const BAR_SPACE: f32 = 16.0;
+/// The size of a tool's name under its icon, and the room the names take under the bar.
+const NAME_TEXT: f32 = 10.5;
+const NAME_ROOM: f32 = 14.0;
+
+/// A tool's button on the tool bar: what it picks, how it is drawn and named, whether it is the
+/// tool in hand, and whether it leads a group (a gap before it).
+struct BarTool {
+    tool: Tool,
+    icon: Icon,
+    tip: String,
+    name: &'static str,
+    on: bool,
+    leads: bool,
+}
+
+/// A button at one of the bar's sides: [`bar_button`], remembered with its name.
+fn named_button(
+    ui: &mut Ui,
+    sides: &std::cell::RefCell<Vec<(egui::Rect, &'static str)>>,
+    side: f32,
+    icon: Icon,
+    tip: &str,
+    on: bool,
+    enabled: bool,
+) -> egui::Response {
+    let resp = bar_button(ui, side, icon, tip, on, enabled);
+    let name = match icon {
+        Icon::Capture => "Capture",
+        Icon::Open => "Open",
+        Icon::Save => "Save",
+        Icon::Undo => "Undo",
+        Icon::Redo => "Redo",
+        Icon::Delete => "Delete",
+        Icon::Copy => "Copy",
+        Icon::ZoomOut => "Out",
+        Icon::ZoomIn => "In",
+        Icon::Fit => "Fit",
+        _ => "",
+    };
+    sides.borrow_mut().push((resp.rect, name));
+    resp
+}
+
+/// What the welcome card offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Welcome {
+    Capture,
+    Record,
+    Open,
+    Paste,
+    Blank,
+}
+
+/// One of the welcome card's ways to start: its icon, its name, its key at the right.
+fn welcome_row(ui: &mut Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), egui::Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let fill = if resp.hovered() { t.hover } else { t.control };
+    ui.painter().rect_filled(rect, 8.0, fill);
+    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, if resp.hovered() { t.accent } else { t.control_border }), egui::StrokeKind::Inside);
+    icons::paint(ui.painter(), egui::Rect::from_center_size(egui::pos2(rect.min.x + 24.0, rect.center().y), vec2(20.0, 20.0)), icon, t.accent);
+    ui.painter().text(egui::pos2(rect.min.x + 46.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(14.0), t.text);
+    if !key.is_empty() {
+        ui.painter().text(egui::pos2(rect.max.x - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, key, egui::FontId::proportional(12.0), t.muted);
+    }
+    resp
+}
+
 /// The tools on the tool bar: Favorites and every other tool.
 const TOOLS_ON_BAR: usize = 1 + Tool::BAR.len();
 

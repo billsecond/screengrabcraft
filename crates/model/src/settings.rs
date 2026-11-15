@@ -837,6 +837,8 @@ pub struct EditorSettings {
     pub favorites: Vec<QuickStyle>,
     /// The tool properties folded away under the quick styles (the Properties button).
     pub hide_properties: bool,
+    /// The tools' names left off the tool bar (they are under the icons when there is room).
+    pub hide_tool_names: bool,
 }
 
 /// The Fill tool's settings.

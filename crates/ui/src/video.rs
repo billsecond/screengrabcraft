@@ -1107,6 +1107,10 @@ impl VideoView {
                     }
                 });
                 ui.menu_button("Help", |ui| {
+                    if ui.button("Keyboard Shortcuts").clicked() {
+                        ed.dialog = Some(crate::dialogs::Dialog::VideoShortcuts);
+                        ui.close();
+                    }
                     if ui.button(format!("About {}", screengrabcraft_model::EDITOR_NAME)).clicked() {
                         ed.dialog = Some(crate::dialogs::Dialog::About);
                         ui.close();

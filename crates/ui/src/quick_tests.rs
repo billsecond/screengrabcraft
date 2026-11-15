@@ -384,3 +384,27 @@ fn text_overlays_come_outlined_shadowed_on_boxes_and_as_titles() {
     let last = h.state().session.doc.objects.last().cloned().unwrap();
     assert_eq!((last.shape.text(), last.style.font_size), (Some("Big"), screengrabcraft_model::quick::TITLE_SIZE));
 }
+
+#[test]
+fn with_room_to_spare_each_tool_has_its_name_under_it_and_the_name_picks_it() {
+    let mut h = sized(1600.0);
+    let named_top = h.state().view.canvas.min.y;
+    // Under the Blur button, its name: a click there picks the tool as the button does.
+    let blur = h.get_by_label("Blur (B)").rect();
+    crate::tests::click_at(&mut h, egui::pos2(blur.center().x, blur.max.y + 7.0));
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Blur));
+    shot(&mut h, "tool-bar-named");
+    // Turned off (View, Tool Names), the bar is as it was, and the picture has the room.
+    h.state_mut().settings.hide_tool_names = true;
+    h.run_steps(3);
+    let plain_top = h.state().view.canvas.min.y;
+    assert!((named_top - plain_top - 14.0).abs() < 0.5, "{named_top} and {plain_top}");
+    // A window with no room for them keeps the icons alone, at full size.
+    let narrow = sized(1280.0);
+    assert!(
+        (narrow.state().view.canvas.min.y - plain_top).abs() < 0.5 || narrow.state().view.canvas.min.y > named_top,
+        "the tools on a row of their own"
+    );
+    let arrow = narrow.get_by_label("Arrow (A)").rect();
+    assert!((arrow.width() - crate::editor::BAR_BUTTON).abs() < 0.5);
+}

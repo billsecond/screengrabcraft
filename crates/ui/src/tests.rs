@@ -2313,3 +2313,70 @@ fn with_a_video_open_the_picture_before_it_opens_from_the_strip() {
     assert_eq!(ed.picture_path.as_deref(), Some("captures/Capture 001.png"));
     assert!(ed.video_path.is_none(), "the picture is the one open now");
 }
+
+/// A host with a capture service: what it was asked for.
+struct CaptureHost(std::sync::Arc<std::sync::Mutex<Vec<screengrabcraft_model::CaptureMode>>>);
+
+impl crate::services::Services for CaptureHost {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_capture(&self) -> bool {
+        true
+    }
+
+    fn new_capture(&self, mode: screengrabcraft_model::CaptureMode) -> Result<(), String> {
+        self.0.lock().unwrap().push(mode);
+        Ok(())
+    }
+}
+
+#[test]
+fn an_editor_started_with_nothing_offers_the_ways_to_start_until_it_is_put_away() {
+    use screengrabcraft_model::CaptureMode;
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut ed = Editor::new(Box::new(CaptureHost(asked.clone())), EditorSettings::default());
+    ed.offer_welcome();
+    let mut h = harness(ed);
+    h.run_steps(3);
+    for label in ["Capture an Area", "Record a Video", "Open a Picture or a Video…", "Paste from the Clipboard"] {
+        h.get_by_label(label);
+    }
+    crate::quick_tests::shot(&mut h, "welcome");
+    h.get_by_label("Capture an Area").click();
+    h.run_steps(2);
+    h.get_by_label("Record a Video").click();
+    h.run_steps(2);
+    assert_eq!(*asked.lock().unwrap(), vec![CaptureMode::Region, CaptureMode::Production]);
+    // Put away, the blank picture is there to draw on, and it stays away.
+    h.get_by_label("Or draw on this blank picture").click();
+    h.run_steps(3);
+    assert!(!h.state().welcome && h.query_by_label("Capture an Area").is_none());
+}
+
+#[test]
+fn the_welcome_goes_when_something_is_opened_or_drawn_and_offers_only_what_the_host_can_do() {
+    // A host with no capture service (a browser): files and the clipboard only.
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.offer_welcome();
+    let mut h = harness(ed);
+    h.run_steps(3);
+    assert!(h.query_by_label("Capture an Area").is_none() && h.query_by_label("Record a Video").is_none());
+    h.get_by_label("Paste from the Clipboard");
+    // A picture opened: it's gone.
+    h.state_mut().open_picture(Raster::filled(300, 200, Color::WHITE).unwrap(), None);
+    h.run_steps(3);
+    assert!(!h.state().welcome && h.query_by_label("Paste from the Clipboard").is_none());
+    // Started over (the window closed and kept ready), it is offered again; drawn on, it goes.
+    h.state_mut().start_over();
+    h.run_steps(3);
+    h.get_by_label("Paste from the Clipboard");
+    filled_rect(h.state_mut(), 20.0, 20.0, 40.0, 30.0);
+    h.run_steps(3);
+    assert!(!h.state().welcome && h.query_by_label("Paste from the Clipboard").is_none());
+    // An editor that wasn't told to never shows it (one opened with a capture).
+    let mut h = harness(editor());
+    h.run_steps(3);
+    assert!(h.query_by_label("Paste from the Clipboard").is_none());
+}

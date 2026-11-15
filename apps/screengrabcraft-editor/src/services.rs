@@ -338,6 +338,10 @@ impl Services for DesktopServices {
         }
     }
 
+    fn can_capture(&self) -> bool {
+        true
+    }
+
     fn new_capture(&self, mode: CaptureMode) -> Result<(), String> {
         // The service takes this window out of the picture first, as for any capture.
         launch::ask_service(&["--capture".to_string(), mode.arg().to_string()])

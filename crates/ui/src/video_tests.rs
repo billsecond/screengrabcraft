@@ -1344,3 +1344,18 @@ fn a_track_is_hidden_and_shown_by_the_switch_in_its_header() {
     h.run_steps(2);
     assert_eq!(muted(&h), Some(false));
 }
+
+#[test]
+fn help_lists_the_video_editors_keys() {
+    let mut h = harness();
+    h.get_by_label("Help").click();
+    h.run_steps(2);
+    h.get_by_label("Keyboard Shortcuts").click();
+    h.run_steps(10);
+    h.get_by_label("Play or pause");
+    h.get_by_label_contains("Split at the playhead");
+    shot(&mut h, "video-shortcuts");
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().dialog.is_none());
+}
