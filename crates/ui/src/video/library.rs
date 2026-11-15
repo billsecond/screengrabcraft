@@ -233,6 +233,15 @@ impl VideoView {
         }
     }
 
+    /// Puts plain words on the video at the playhead, on a layer of their own: they're chosen,
+    /// and their box in the panel at the right takes the keys.
+    pub fn add_text(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let before = self.item;
+        let at = self.playhead;
+        self.drop_on_timeline(ed, ctx, &LibDrop::Template("title"), None, at);
+        self.type_words = self.item != before;
+    }
+
     // ---- the panel at the left ----
 
     pub(super) fn library_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
@@ -503,6 +512,15 @@ impl VideoView {
                         super::section(ui, "Text", &mut first);
                         let mut w = title.clone();
                         let r = ui.add(egui::TextEdit::multiline(&mut w).desired_rows(2).desired_width(f32::INFINITY).hint_text("What it says"));
+                        if self.type_words {
+                            // Just added: typing replaces the words it came with.
+                            self.type_words = false;
+                            r.request_focus();
+                            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), r.id).unwrap_or_default();
+                            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(w.chars().count()));
+                            state.cursor.set_char_range(Some(all));
+                            state.store(ui.ctx(), r.id);
+                        }
                         self.text_change(r, || json!({"title": w.clone()}), &set);
                         if style.has_subtitle() {
                             let mut s2 = subtitle.clone();

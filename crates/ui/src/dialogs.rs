@@ -265,6 +265,7 @@ fn video_shortcuts(ui: &mut Ui) {
             ("Home / End", "Go to the start or the end"),
             ("F11 or F", "The preview over the whole screen (Esc comes back)"),
             ("S", "Split at the playhead: the selected clip's track, or every track"),
+            ("T", "Put words on the video at the playhead, then type them"),
             ("Delete", "Delete what's selected, or cut the chosen stretch out of every track"),
             ("Ctrl+X", "Cut the chosen stretch"),
             ("Esc", "Let go of what's chosen"),

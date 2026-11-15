@@ -255,6 +255,9 @@ pub struct VideoView {
     zoom_ask: Option<f32>,
     /// Where on the timeline the right button was pressed (µs): what its menu is about.
     menu_us: Option<u64>,
+    /// Words were just put on the video with Add Text: their box in the panel takes the keys, its
+    /// words chosen, so typing replaces them.
+    pub(crate) type_words: bool,
 }
 
 /// A mark at each end of what's chosen on the timeline: its ends are there to be dragged.
@@ -488,6 +491,7 @@ impl VideoView {
             lib_search: String::new(),
             zoom_ask: None,
             menu_us: None,
+            type_words: false,
         }
     }
 
@@ -958,6 +962,9 @@ impl VideoView {
         if plain(Key::S) {
             self.split(ed, ctx);
         }
+        if plain(Key::T) {
+            self.add_text(ed, ctx);
+        }
         if plain(Key::Delete) || plain(Key::Backspace) {
             self.delete(ed, ctx);
         }
@@ -1075,6 +1082,10 @@ impl VideoView {
                     ui.separator();
                     if ui.add(egui::Button::new("Split at the Playhead").shortcut_text("S")).clicked() {
                         self.split(ed, &ctx);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Add Text at the Playhead").shortcut_text("T")).clicked() {
+                        self.add_text(ed, &ctx);
                         ui.close();
                     }
                     let what = if self.item.is_some() {
@@ -1220,6 +1231,11 @@ impl VideoView {
                     let label = if self.range.is_some() { "Cut" } else { "Delete" };
                     if button(ui, Icon::Delete, label, label, tip, false, any, true).clicked() {
                         self.delete(ed, &ctx);
+                    }
+                    divider(ui);
+                    let tip = "Put words on the video at the playhead (T), then type them. The Library has titles and more";
+                    if button(ui, Icon::Text, "Text", "Add Text", tip, false, true, true).clicked() {
+                        self.add_text(ed, &ctx);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -1373,6 +1389,7 @@ impl VideoView {
                             ("Click", "the ruler to move the playhead; a clip or an item to select it."),
                             ("Drag", "a clip's end to trim it, the clip itself to slide it, or across the tracks to choose a stretch."),
                             ("S", "splits at the playhead."),
+                            ("T", "puts words on the video at the playhead."),
                             ("Delete", "takes out what's selected, or the chosen stretch from every track."),
                             ("Right-click", "the timeline for more."),
                         ],

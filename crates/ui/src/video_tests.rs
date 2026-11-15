@@ -1349,6 +1349,43 @@ fn a_chosen_clip_is_named_in_the_panel_with_what_is_done_to_it() {
 }
 
 #[test]
+fn add_text_puts_words_at_the_playhead_ready_to_be_typed_over() {
+    let mut h = harness();
+    let half = length(&h) / 2;
+    h.state_mut().video.as_mut().unwrap().playhead = half;
+    h.run_steps(2);
+    h.get_by_label("Add Text").click();
+    h.run_steps(4);
+    let v = h.state().video.as_ref().unwrap();
+    let (layer, id) = v.item.expect("the words are chosen");
+    let item = v.session.timeline.item(layer, id).cloned().unwrap();
+    assert!(item.at.abs_diff(half) < 100_000, "at the playhead: {}", item.at);
+    assert!(matches!(&item.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Your title"));
+    // Typing replaces the words it came with: their box has the keys, its words chosen.
+    h.event(egui::Event::Text("Step one".into()));
+    h.run_steps(4);
+    let v = h.state().video.as_ref().unwrap();
+    let item = v.session.timeline.item(layer, id).cloned().unwrap();
+    assert!(matches!(&item.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Step one"), "{:?}", item.what);
+    shot(&mut h, "video-add-text");
+    // T does the same once nothing is being typed (Esc leaves the box), and is one undo step.
+    let items = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.layers.iter().map(|l| l.items.len()).sum::<usize>();
+    h.key_press(egui::Key::T);
+    h.run_steps(3);
+    assert_eq!(items(&h), 1, "typed into the box, not taken as the key");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press(egui::Key::T);
+    h.run_steps(4);
+    assert_eq!(items(&h), 2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(items(&h), 1);
+}
+
+#[test]
 fn the_library_is_searched_by_name_whatever_the_section() {
     let mut h = harness();
     h.state_mut().video.as_mut().unwrap().lib_search = "chapter".into();
