@@ -190,6 +190,8 @@ pub struct Editor {
     /// While annotations are dragged off the picture and it grows to hold them: the picture as
     /// it was before, in the grown one (what it is cut back to if the growth is not needed).
     pub(crate) grown: Option<Rect>,
+    /// The window is over the whole screen, for the video's preview.
+    pub(crate) window_full: bool,
     /// Export Transcript's save dialog is open, for this kind of file.
     pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
     /// Export Video's Change… save dialog is open.
@@ -274,6 +276,7 @@ impl Editor {
             saving: None,
             saving_project: false,
             grown: None,
+            window_full: false,
             saving_transcript: None,
             transcripts: Default::default(),
             saving_video: false,
@@ -1089,6 +1092,13 @@ impl Editor {
     /// The window's contents.
     pub fn ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // The window is over the whole screen while a video's preview is, and no longer: whatever
+        // ends the preview (Esc, the video closed, another capture opened) gives the window back.
+        let full = self.video.as_ref().is_some_and(|v| v.full_screen);
+        if self.window_full != full {
+            self.window_full = full;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(full));
+        }
         if self.video.is_some() {
             crate::video::show(self, ui);
             crate::dialogs::show(self, &ctx);

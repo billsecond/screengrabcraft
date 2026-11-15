@@ -67,6 +67,10 @@ pub enum Icon {
     Microphone,
     /// The computer's sound.
     Speaker,
+    /// A preview over the whole screen: corners pointing outwards.
+    FullScreen,
+    /// Back from the whole screen: corners pointing inwards.
+    ExitFullScreen,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -412,6 +416,16 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             fill_poly(vec![at(3.0, 7.5), at(6.5, 7.5), at(10.5, 4.0), at(10.5, 16.0), at(6.5, 12.5), at(3.0, 12.5)], color);
             poly(vec![at(13.0, 7.0), at(14.2, 8.5), at(14.6, 10.0), at(14.2, 11.5), at(13.0, 13.0)], false);
             poly(vec![at(15.0, 4.5), at(17.0, 7.0), at(17.6, 10.0), at(17.0, 13.0), at(15.0, 15.5)], false);
+        }
+        Icon::FullScreen => {
+            for (x, y, dx, dy) in [(3.5, 3.5, 1.0, 1.0), (16.5, 3.5, -1.0, 1.0), (3.5, 16.5, 1.0, -1.0), (16.5, 16.5, -1.0, -1.0)] {
+                poly(vec![at(x + dx * 4.5, y), at(x, y), at(x, y + dy * 4.5)], false);
+            }
+        }
+        Icon::ExitFullScreen => {
+            for (x, y, dx, dy) in [(8.0, 8.0, -1.0, -1.0), (12.0, 8.0, 1.0, -1.0), (8.0, 12.0, -1.0, 1.0), (12.0, 12.0, 1.0, 1.0)] {
+                poly(vec![at(x + dx * 4.5, y), at(x, y), at(x, y + dy * 4.5)], false);
+            }
         }
     }
 }

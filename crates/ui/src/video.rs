@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use egui::{Color32, Key, KeyboardShortcut, Modifiers, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use egui::{Color32, Key, KeyboardShortcut, Modifiers, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_engine::VideoSession;
 use screengrabcraft_media::captions::{self, Captions, Cue, Speaker};
 use screengrabcraft_media::compose::{self, Composer};
@@ -65,6 +65,10 @@ const PREVIEW_MAX: (u32, u32) = (1920, 1080);
 /// The play button under the video, and the room kept under the picture for it.
 const PLAY: f32 = 44.0;
 const CONTROLS: f32 = PLAY + 20.0;
+/// The whole-screen preview's bar of controls: how tall, and how long it stays once the pointer is
+/// still while the video plays (seconds).
+const FULL_BAR: f32 = 64.0;
+const FULL_HIDE: f64 = 2.5;
 /// Sound waves are kept as peaks per 10 ms.
 const WAVE_STEP: u64 = 480;
 /// How often the host is asked whether captions being made have come (seconds).
@@ -232,6 +236,12 @@ pub struct VideoView {
     /// The host's time of the captions file last seen, and when to ask again.
     captions_seen: u64,
     next_poll: f64,
+    /// The preview over the whole screen, with nothing but its controls.
+    pub full_screen: bool,
+    /// Where the pointer last was there, and when it last moved: the controls go away while the
+    /// video plays and the pointer is still.
+    full_pointer: Option<Pos2>,
+    full_moved: f64,
 }
 
 fn kind_colour(kind: StreamKind) -> Color32 {
@@ -360,6 +370,9 @@ impl VideoView {
             media_coming: Default::default(),
             captions_seen: 0,
             next_poll: 0.0,
+            full_screen: false,
+            full_pointer: None,
+            full_moved: 0.0,
         }
     }
 
@@ -775,6 +788,32 @@ impl VideoView {
         let cmd = |k: Key| KeyboardShortcut::new(Modifiers::COMMAND, k);
         let pressed = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
         let plain = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        if plain(Key::F11) || plain(Key::F) {
+            self.set_full_screen(!self.full_screen, now);
+        }
+        // Over the whole screen it's a player: its keys play and seek, and Esc comes back.
+        if self.full_screen {
+            if plain(Key::Escape) {
+                self.set_full_screen(false, now);
+            }
+            if plain(Key::Space) {
+                if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
+            }
+            let frame = 1_000_000 / self.fps();
+            if plain(Key::ArrowLeft) {
+                self.seek(ed, self.playhead.saturating_sub(frame), now);
+            }
+            if plain(Key::ArrowRight) {
+                self.seek(ed, self.playhead + frame, now);
+            }
+            if plain(Key::Home) {
+                self.seek(ed, 0, now);
+            }
+            if plain(Key::End) {
+                self.seek(ed, self.length(), now);
+            }
+            return;
+        }
         if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)) || pressed(cmd(Key::Y)) {
             self.run(ed, ctx, "edit.redo", json!({}));
         } else if pressed(cmd(Key::Z)) {
@@ -953,6 +992,11 @@ impl VideoView {
                     }
                     if ui.button("Fit the Timeline").clicked() {
                         self.pps = 0.0;
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Full Screen Preview").shortcut_text("F11")).clicked() {
+                        let now = ui.ctx().input(|i| i.time);
+                        self.set_full_screen(true, now);
                         ui.close();
                     }
                     if self.captions.is_some() {
@@ -1238,18 +1282,139 @@ impl VideoView {
     }
 
     /// The picture at the playhead, fitted to the space.
-    fn preview(&mut self, ed: &Editor, ui: &mut Ui) {
-        let t = Tokens::get(ui.ctx());
+    /// The picture at the playhead, as a texture: made again when the playhead or the edits move.
+    fn refresh_frame(&mut self, ctx: &egui::Context) {
         let key = (self.playhead, self.session.revision());
         if self.shown != Some(key) {
             let pic = self.composer.frame(&self.session.timeline, self.playhead);
             let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
             match &mut self.texture {
                 Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
-                None => self.texture = Some(ui.ctx().load_texture("video-frame", img, egui::TextureOptions::LINEAR)),
+                None => self.texture = Some(ctx.load_texture("video-frame", img, egui::TextureOptions::LINEAR)),
             }
             self.shown = Some(key);
         }
+    }
+
+    /// Puts the preview over the whole screen, or brings it back. (The window itself follows:
+    /// `Editor::ui`.) Nothing is being dragged or chosen on the picture there.
+    pub fn set_full_screen(&mut self, full: bool, now: f64) {
+        if full && self.export.is_some() {
+            return;
+        }
+        self.full_screen = full;
+        self.full_moved = now;
+        self.canvas_drag = None;
+        if full {
+            self.picture_rect = None;
+        }
+    }
+
+    /// The preview over the whole screen: the picture as large as it goes, on black, and along
+    /// the bottom a bar to play, seek and come back, which goes away while the video plays and
+    /// the pointer is still. A click on the picture plays or pauses; a double click comes back.
+    fn full_preview(&mut self, ed: &Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        self.refresh_frame(&ctx);
+        let now = ctx.input(|i| i.time);
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::BLACK)).show(ui, |ui| {
+            // The whole window, whatever room the panel was given.
+            let whole = ctx.viewport_rect();
+            ui.set_clip_rect(whole);
+            ui.painter().rect_filled(whole, 0.0, Color32::BLACK);
+            if let Some(tex) = &self.texture {
+                let size = tex.size_vec2();
+                let f = (whole.width() / size.x).min(whole.height() / size.y).max(0.01);
+                let r = Rect::from_center_size(whole.center(), size * f);
+                ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            let playing = self.playing.is_some();
+            let length = self.length();
+            let toggle = |v: &mut VideoView| {
+                if v.playing.is_some() {
+                    v.pause();
+                } else if length > 0 {
+                    v.play(ed, now);
+                }
+            };
+            let bar = Rect::from_min_max(pos2(whole.min.x, (whole.max.y - FULL_BAR).max(whole.min.y)), whole.max);
+            // The picture itself: a click plays or pauses, a double click comes back.
+            let stage = Rect::from_min_max(whole.min, pos2(whole.max.x, bar.min.y));
+            let on_stage = ui.interact(stage, ui.id().with("full-stage"), Sense::click());
+            if on_stage.double_clicked() {
+                self.set_full_screen(false, now);
+                return;
+            }
+            if on_stage.clicked() {
+                toggle(self);
+            }
+            let pointer = ctx.input(|i| i.pointer.latest_pos());
+            if pointer != self.full_pointer {
+                self.full_pointer = pointer;
+                self.full_moved = now;
+            }
+            let on_bar = pointer.is_some_and(|p| bar.contains(p));
+            let since = now - self.full_moved;
+            if playing && !on_bar && since >= FULL_HIDE {
+                // Nothing but the picture: the pointer goes too.
+                ctx.set_cursor_icon(egui::CursorIcon::None);
+                return;
+            }
+            if playing {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64((FULL_HIDE - since).clamp(0.05, FULL_HIDE)));
+            }
+            let painter = ui.painter().clone();
+            painter.rect_filled(bar, 0.0, Color32::from_black_alpha(200));
+            let mid = bar.center().y;
+            // Play or pause.
+            let play = Rect::from_center_size(pos2(bar.min.x + 20.0 + PLAY / 2.0, mid), vec2(PLAY, PLAY));
+            let tip = if playing { "Pause (Space)" } else { "Play (Space)" };
+            let resp = ui.interact(play, ui.id().with("full-play"), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, length > 0, tip));
+            painter.circle_filled(play.center(), PLAY / 2.0, if resp.hovered() { t.accent.gamma_multiply(1.15) } else { t.accent });
+            icons::paint(&painter, play.shrink(PLAY * 0.27), if playing { Icon::Pause } else { Icon::Play }, Color32::WHITE);
+            if resp.on_hover_text(tip).clicked() {
+                toggle(self);
+            }
+            // Back from the whole screen, at the other end.
+            let exit = Rect::from_center_size(pos2(bar.max.x - 20.0 - 18.0, mid), vec2(36.0, 36.0));
+            let resp = ui.interact(exit, ui.id().with("full-exit"), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Exit Full Screen (Esc)"));
+            if resp.hovered() {
+                painter.rect_filled(exit, 6.0, Color32::from_white_alpha(36));
+            }
+            icons::paint(&painter, exit.shrink(8.0), Icon::ExitFullScreen, Color32::WHITE);
+            if resp.on_hover_text("Exit Full Screen (Esc)").clicked() {
+                self.set_full_screen(false, now);
+                return;
+            }
+            // The time, and between it and the way back the whole video to seek along.
+            let clock_text = format!("{} / {}", clock(self.playhead), clock(length));
+            let words =
+                painter.text(pos2(play.max.x + 14.0, mid), egui::Align2::LEFT_CENTER, clock_text, egui::FontId::monospace(14.0), Color32::WHITE);
+            let track = Rect::from_min_max(pos2(words.max.x + 18.0, mid - 3.0), pos2(exit.min.x - 18.0, mid + 3.0));
+            if track.width() >= 40.0 && length > 0 {
+                let resp = ui.interact(track.expand2(vec2(0.0, 12.0)), ui.id().with("full-seek"), Sense::click_and_drag());
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Slider, true, "Seek"));
+                if (resp.dragged() || resp.clicked() || resp.drag_started())
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let at = ((p.x - track.min.x) / track.width()).clamp(0.0, 1.0);
+                    self.seek(ed, (f64::from(at) * length as f64) as u64, now);
+                }
+                let done = (self.playhead as f64 / length as f64).clamp(0.0, 1.0) as f32;
+                let x = track.min.x + track.width() * done;
+                painter.rect_filled(track, 3.0, Color32::from_white_alpha(70));
+                painter.rect_filled(Rect::from_min_max(track.min, pos2(x, track.max.y)), 3.0, t.accent);
+                painter.circle_filled(pos2(x, mid), if resp.hovered() || resp.dragged() { 8.0 } else { 6.0 }, Color32::WHITE);
+            }
+        });
+    }
+
+    fn preview(&mut self, ed: &Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        self.refresh_frame(ui.ctx());
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
             // The picture, and under it the play button with the time.
             // Room left round the picture: things can be moved off its edges, and found there.
@@ -1293,6 +1458,19 @@ impl VideoView {
                 } else {
                     self.play(ed, now);
                 }
+            }
+            // At the picture's right end (clear of the time), the way to the whole screen.
+            let right = shown_at.map_or(area.max.x, |r| r.max.x).max(button.max.x + 190.0).min(whole.max.x + 30.0);
+            let full = Rect::from_center_size(pos2(right - 15.0, button.center().y), vec2(30.0, 30.0));
+            let tip = "Full Screen (F11)";
+            let resp = ui.interact(full, ui.id().with("full-screen"), egui::Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+            if resp.hovered() {
+                ui.painter().rect_filled(full, 6.0, t.hover);
+            }
+            icons::paint(ui.painter(), full.shrink(6.0), Icon::FullScreen, if resp.hovered() { t.text } else { t.muted });
+            if resp.on_hover_text("Show the video over the whole screen (F11, or F). Esc comes back.").clicked() {
+                self.set_full_screen(true, now);
             }
         });
     }
@@ -1896,6 +2074,16 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     v.keys(ed, &ctx);
     v.tick(ed, &ctx);
+    if v.full_screen {
+        // Nothing but the picture and its controls.
+        v.full_preview(ed, ui);
+        if ed.video_epoch == epoch && ed.video.is_none() {
+            ed.video = Some(v);
+        } else {
+            v.save_now(ed, &ctx);
+        }
+        return;
+    }
     v.menu_bar(ed, ui);
     v.tool_bar(ed, ui);
     v.status_bar(ui, ed.transcripts.status());

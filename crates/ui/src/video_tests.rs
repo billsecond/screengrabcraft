@@ -38,9 +38,14 @@ fn recording() -> Vec<u8> {
 }
 
 fn harness() -> Harness<'static, Editor> {
+    harness_stepping(0.25)
+}
+
+/// [`harness`], each of its steps so long (seconds): a double click needs them short.
+fn harness_stepping(dt: f32) -> Harness<'static, Editor> {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
     ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
-    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(dt).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
             ed.logic(&ctx);
@@ -1168,4 +1173,66 @@ fn an_item_is_dragged_off_the_picture_and_taken_hold_of_again_out_there() {
     v.session.execute("video.cameraAt", &serde_json::json!({"x": 1.0, "y": 0.5})).unwrap();
     assert_eq!(v.session.timeline.camera.at, Some([1.0, 0.5]));
     let _ = v.frame_at(2_000_000);
+}
+
+#[test]
+fn the_preview_goes_over_the_whole_screen_and_comes_back() {
+    let mut h = harness();
+    let full = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().full_screen;
+    // The button at the picture's right end.
+    h.get_by_label("Full Screen (F11)").click();
+    h.run_steps(3);
+    assert!(full(&h));
+    assert!(h.state().window_full, "the window follows");
+    // Nothing but the picture and its controls.
+    for gone in ["Export Video", "Split", "Top left"] {
+        assert!(h.query_by_label(gone).is_none(), "{gone} is still there");
+    }
+    // It plays there, and the bar seeks along the whole video.
+    h.get_by_label("Play (Space)").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().is_playing());
+    h.get_by_label("Pause (Space)").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().is_playing());
+    let seek = h.get_by_label("Seek").rect();
+    crate::tests::click_at(&mut h, egui::pos2(seek.min.x + seek.width() * 0.5, seek.center().y));
+    let (at, length) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.playhead, v.session.timeline.length())
+    };
+    assert!(at.abs_diff(length / 2) < length / 20, "half way along: {at} of {length}");
+    shot(&mut h, "video-full-screen");
+    // It is a player there: the keys that edit do nothing.
+    let rev = h.state().video.as_ref().unwrap().session.revision();
+    h.key_press(egui::Key::S);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.revision(), rev);
+    // Esc comes back, to everything as it was.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(!full(&h) && !h.state().window_full);
+    assert!(h.query_by_label("Export Video").is_some());
+    // F11 goes there too, and the way back is on the bar.
+    h.key_press(egui::Key::F11);
+    h.run_steps(3);
+    assert!(full(&h));
+    h.get_by_label("Exit Full Screen (Esc)").click();
+    h.run_steps(3);
+    assert!(!full(&h) && !h.state().window_full);
+    // A double click on the picture comes back as well.
+    let mut h = harness_stepping(0.02);
+    h.key_press(egui::Key::F);
+    h.run_steps(3);
+    assert!(full(&h));
+    let middle = egui::pos2(640.0, 300.0);
+    h.hover_at(middle);
+    h.run_steps(1);
+    for _ in 0..2 {
+        h.drag_at(middle);
+        h.drop_at(middle);
+    }
+    h.run_steps(3);
+    assert!(!full(&h));
 }
