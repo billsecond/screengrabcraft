@@ -19,11 +19,14 @@ beside them for scripts and agents.
 > **Status: early alpha (0.1).** Capturing, the editor and the packaging are in place and tested;
 > see [ROADMAP.md](ROADMAP.md) for what's next and what has only been checked by the build machines.
 
-| | |
-|---|---|
-| ![The editor: a picture with numbered steps, a box, a blurred area, an arrow and a selected callout, and the callout's properties](docs/images/editor.png) | ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) |
+![The editor: a capture of a shop's dashboard marked up with numbered steps, a box round one number, a highlighted total, a blurred column of addresses, an arrow and a selected callout, with the callout's quick styles and properties at the right](docs/images/editor.png)
 
-![Annotations drawn by ScreenGrabCraft: steps, a rectangle and an ellipse, a highlight, a blur and a pixelated area, a magnifier, stamps, a callout and arrows](docs/images/annotations.png)
+| Capture | Edit a video |
+|---|---|
+| ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) | ![The video editor: a recording with a name put on it and the camera in its corner, the library of titles at the left, and a timeline with the screen, the computer's sound, the microphone, the camera and the captions](docs/images/video-editor.png) |
+
+The program in these pictures is made up, and so are its customers: every picture here is drawn
+by ScreenGrabCraft's own code (`cargo run -p screengrabcraft-ui --example shots`).
 
 ## Capturing
 
@@ -80,6 +83,8 @@ and opens in the editor, where you cut and edit it, then Export Video makes the 
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
 sources are in Settings › Recording.
 
+![The Recorder: the screen, the camera with its picture, the microphone and the computer's sound with their levels, each switched on, and the red Record button](docs/images/recorder.png)
+
 ## Editing a video
 
 A Video Production recording opens in the editor as a timeline with a row for each track:
@@ -90,6 +95,9 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 - Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
   clip's ends to trim it, or the clip to slide it along its track.
 - **S** splits at the playhead: the selected clip's track, or every track.
+- **Text** (T) puts words on the video at the playhead, ready to type over. The **Library** at
+  the left has titles, lower thirds, callouts and transitions to drag onto the timeline, and a
+  bin for your own pictures, videos and sound.
 - Each sound track has **Mute** and a volume slider; the camera's corner, size and shape
   (square, rounded, circle) are on the right.
 - Undo and redo everything. The edits are saved into the recording file a moment after each
@@ -109,9 +117,12 @@ A Video Production recording opens in the editor as a timeline with a row for ea
 
 Annotations stay editable (move them, resize them, restyle them) until you flatten or export:
 
+![Annotations drawn by ScreenGrabCraft: steps, a rectangle and an ellipse, a highlight, a blur and a pixelated area, a magnifier, stamps, a callout and arrows](docs/images/annotations.png)
+
 - The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
   **Fill** and **Move** in the middle, then every other tool, each with its own full-size button
-  (a narrow window gives the tools a row of their own). Every tool keeps its key.
+  and its name under it (a narrow window gives the tools a row of their own; View › Tool Names
+  turns the names off). Every tool keeps its key.
 - **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
