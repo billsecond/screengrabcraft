@@ -2380,3 +2380,23 @@ fn the_welcome_goes_when_something_is_opened_or_drawn_and_offers_only_what_the_h
     h.run_steps(3);
     assert!(h.query_by_label("Paste from the Clipboard").is_none());
 }
+
+#[test]
+fn the_welcome_and_the_named_tool_bar_are_readable_in_the_light_look() {
+    let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let settings = EditorSettings { theme: screengrabcraft_model::Theme::Light, ..EditorSettings::default() };
+    let mut ed = Editor::new(Box::new(CaptureHost(asked)), settings);
+    ed.offer_welcome();
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(4);
+    assert!(!crate::theme::Tokens::get(&h.ctx).dark, "the light look is the one drawn");
+    h.get_by_label("Capture an Area");
+    crate::quick_tests::shot(&mut h, "welcome-light");
+}

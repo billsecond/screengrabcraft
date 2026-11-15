@@ -1501,3 +1501,37 @@ fn an_item_dragged_near_the_middle_of_the_picture_is_caught_there() {
     let away = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
     assert!((away.center().x - pic.center().x - 60.0).abs() < 6.0 && (away.center().y - pic.center().y - 40.0).abs() < 6.0, "{away:?}");
 }
+
+#[test]
+fn the_video_editor_is_readable_in_the_light_look() {
+    let settings = EditorSettings { theme: screengrabcraft_model::Theme::Light, ..EditorSettings::default() };
+    let mut ed = Editor::new(Box::new(MediaHost::default()), settings);
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    // A track switched off, to see its switch.
+    h.run_steps(3);
+    h.query_all_by_label("Show").nth(2).unwrap().click();
+    h.run_steps(3);
+    assert!(!crate::theme::Tokens::get(&h.ctx).dark, "the light look is the one drawn");
+    for label in ["Text", "Look", "Position", "Animation", "Entrance", "Exit"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "video-editor-light");
+}

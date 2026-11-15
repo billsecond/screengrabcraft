@@ -319,32 +319,36 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     if first.is_some() {
         ui.add_space(14.0);
         ui.separator();
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Arrange").strong());
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         let ctx = ui.ctx().clone();
-        // Two to a row, each as wide as the other.
-        let half = ((ui.available_width() - 6.0) / 2.0).floor();
-        let even = |ui: &mut Ui, label: &str, tip: &str| ui.add(egui::Button::new(label).min_size(vec2(half, 28.0))).on_hover_text(tip).clicked();
-        egui::Grid::new("arrange").num_columns(2).spacing([6.0, 6.0]).show(ui, |ui| {
-            if even(ui, "Bring to Front", "In front of every other annotation") {
+        // What's done with the selection, in two rows of even buttons (kept low: the panel of a
+        // callout is already as tall as a small window).
+        let wide = ui.available_width();
+        let even = |ui: &mut Ui, n: f32, label: &str, tip: &str| {
+            let w = ((wide - (n - 1.0) * 6.0) / n).floor();
+            ui.add(egui::Button::new(label).min_size(vec2(w, 26.0))).on_hover_text(tip).clicked()
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if even(ui, 2.0, "Bring to Front", "In front of every other annotation") {
                 ed.run(&ctx, "object.order", serde_json::json!({"to": "front"}));
             }
-            if even(ui, "Send to Back", "Behind every other annotation") {
+            if even(ui, 2.0, "Send to Back", "Behind every other annotation") {
                 ed.run(&ctx, "object.order", serde_json::json!({"to": "back"}));
             }
-            ui.end_row();
-            if even(ui, "Duplicate", "Another one like it, beside it (Ctrl+D)") {
+        });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if even(ui, 3.0, "Duplicate", "Another one like it, beside it (Ctrl+D)") {
                 ed.run(&ctx, "edit.duplicate", serde_json::json!({}));
             }
-            if even(ui, "Delete", "Take it off the picture (Del)") {
+            if even(ui, 3.0, "Delete", "Take it off the picture (Del)") {
                 ed.run(&ctx, "edit.delete", serde_json::json!({}));
             }
-            ui.end_row();
-            if even(ui, "Flatten", "Draw the selected annotations into the picture for good (Ctrl+Shift+F)") {
+            if even(ui, 3.0, "Flatten", "Draw the selected annotations into the picture for good (Ctrl+Shift+F)") {
                 ed.flatten(&ctx, false);
             }
-            ui.end_row();
         });
     }
 }

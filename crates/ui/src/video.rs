@@ -257,6 +257,26 @@ pub struct VideoView {
     menu_us: Option<u64>,
 }
 
+/// A sound's volume in its header: a slider, and what it is set to beside it.
+fn volume_slider(ui: &mut Ui, rect: Rect, v: &mut f32) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    ui.painter().text(
+        pos2(rect.max.x - 2.0, rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        format!("{:.0}%", *v),
+        egui::FontId::proportional(11.0),
+        t.muted,
+    );
+    let slider = Rect::from_min_max(rect.min, pos2(rect.max.x - 36.0, rect.max.y));
+    let was = *v;
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = slider.width().max(40.0);
+        ui.put(slider, egui::Slider::new(v, 0.0..=200.0).show_value(false))
+    })
+    .inner
+    .on_hover_text(format!("Volume {was:.0}% (100% is as it was recorded)"))
+}
+
 /// What a header's switch turns on and off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Switch {
@@ -1669,7 +1689,7 @@ impl VideoView {
         }
         let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0, 20.0));
         let mut v = track.volume * 100.0;
-        let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
+        let r = volume_slider(ui, vol, &mut v);
         if r.drag_started() {
             self.session.begin("Volume");
             self.volume_drag = true;
@@ -1722,7 +1742,7 @@ impl VideoView {
         }
         let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0, 20.0));
         let mut v = layer.volume * 100.0;
-        let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
+        let r = volume_slider(ui, vol, &mut v);
         if r.drag_started() {
             self.session.begin("Volume");
             self.volume_drag = true;
