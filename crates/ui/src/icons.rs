@@ -71,6 +71,25 @@ pub enum Icon {
     FullScreen,
     /// Back from the whole screen: corners pointing inwards.
     ExitFullScreen,
+    /// A video's start and end: a bar the arrow runs up against.
+    ToStart,
+    ToEnd,
+    /// One frame back, one on.
+    FrameBack,
+    FrameForward,
+    /// Split: a cut between two pieces.
+    Split,
+    /// The library: a grid of things to pick from.
+    Library,
+    /// Seen, and not: an eye, and an eye struck through.
+    Eye,
+    EyeOff,
+    /// Sound turned off: the speaker with a cross.
+    SpeakerOff,
+    /// More of something: a plus.
+    Plus,
+    /// The keyboard (its shortcuts).
+    Keyboard,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -427,6 +446,56 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 poly(vec![at(x + dx * 4.5, y), at(x, y), at(x, y + dy * 4.5)], false);
             }
         }
+        Icon::ToStart => {
+            p.rect_filled(rect_at(4.0, 4.0, 6.2, 16.0), 0.6 * u, color);
+            fill_poly(vec![at(16.0, 4.0), at(7.5, 10.0), at(16.0, 16.0)], color);
+        }
+        Icon::ToEnd => {
+            p.rect_filled(rect_at(13.8, 4.0, 16.0, 16.0), 0.6 * u, color);
+            fill_poly(vec![at(4.0, 4.0), at(12.5, 10.0), at(4.0, 16.0)], color);
+        }
+        Icon::FrameBack => {
+            fill_poly(vec![at(11.5, 5.0), at(4.5, 10.0), at(11.5, 15.0)], color);
+            p.rect_filled(rect_at(13.2, 5.0, 15.2, 15.0), 0.6 * u, color);
+        }
+        Icon::FrameForward => {
+            fill_poly(vec![at(8.5, 5.0), at(15.5, 10.0), at(8.5, 15.0)], color);
+            p.rect_filled(rect_at(4.8, 5.0, 6.8, 15.0), 0.6 * u, color);
+        }
+        Icon::Split => {
+            p.rect_stroke(rect_at(2.5, 6.0, 7.5, 14.0), 1.2 * u, stroke, StrokeKind::Middle);
+            p.rect_stroke(rect_at(12.5, 6.0, 17.5, 14.0), 1.2 * u, stroke, StrokeKind::Middle);
+            line(at(10.0, 2.5), at(10.0, 17.5));
+        }
+        Icon::Library => {
+            for (x, y) in [(3.0, 3.0), (11.5, 3.0), (3.0, 11.5), (11.5, 11.5)] {
+                p.rect_stroke(rect_at(x, y, x + 5.5, y + 5.5), 1.2 * u, stroke, StrokeKind::Middle);
+            }
+        }
+        Icon::Eye | Icon::EyeOff => {
+            let lid = vec![at(2.0, 10.0), at(5.0, 6.6), at(10.0, 5.2), at(15.0, 6.6), at(18.0, 10.0), at(15.0, 13.4), at(10.0, 14.8), at(5.0, 13.4)];
+            poly(lid, true);
+            p.circle_filled(at(10.0, 10.0), 2.4 * u, color);
+            if icon == Icon::EyeOff {
+                line(at(4.0, 16.5), at(16.0, 3.5));
+            }
+        }
+        Icon::SpeakerOff => {
+            fill_poly(vec![at(3.0, 7.5), at(6.5, 7.5), at(10.5, 4.0), at(10.5, 16.0), at(6.5, 12.5), at(3.0, 12.5)], color);
+            line(at(13.0, 7.5), at(17.5, 12.5));
+            line(at(17.5, 7.5), at(13.0, 12.5));
+        }
+        Icon::Plus => {
+            line(at(10.0, 4.5), at(10.0, 15.5));
+            line(at(4.5, 10.0), at(15.5, 10.0));
+        }
+        Icon::Keyboard => {
+            p.rect_stroke(rect_at(2.0, 5.0, 18.0, 15.0), 1.5 * u, stroke, StrokeKind::Middle);
+            for x in [5.0, 8.3, 11.6, 15.0] {
+                p.circle_filled(at(x, 8.3), 0.8 * u, color);
+            }
+            line(at(6.0, 12.0), at(14.0, 12.0));
+        }
     }
 }
 
@@ -438,6 +507,41 @@ fn contrast(c: Color32) -> Color32 {
 /// A square icon button with a tooltip; `on` draws it as selected.
 pub fn button(ui: &mut egui::Ui, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {
     button_sized(ui, icon, tip, on, enabled, 30.0)
+}
+
+/// An icon with its name beside it, as one button `height` tall: for the few things on a bar that
+/// are better said than drawn. `on` draws it as selected. Screen readers (and tests) know it by
+/// its name; the tip says more.
+pub fn labeled_button(ui: &mut egui::Ui, icon: Icon, label: &str, tip: &str, on: bool, enabled: bool, height: f32) -> egui::Response {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let color = if !enabled {
+        t.muted.gamma_multiply(0.5)
+    } else if on {
+        t.accent
+    } else {
+        t.text
+    };
+    let galley = ui.painter().layout_no_wrap(label.to_string(), FontId::proportional(13.5), color);
+    let side = (height * 0.5).clamp(14.0, 20.0);
+    let size = vec2(9.0 + side + 7.0 + galley.size().x + 11.0, height);
+    let (rect, resp) = ui.allocate_exact_size(size, if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let bg = if on {
+        t.selected
+    } else if resp.hovered() && enabled {
+        t.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    if bg != Color32::TRANSPARENT {
+        ui.painter().rect_filled(rect, 5.0, bg);
+    }
+    if on {
+        ui.painter().rect_stroke(rect, 5.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+    }
+    paint(ui.painter(), Rect::from_center_size(pos2(rect.min.x + 9.0 + side / 2.0, rect.center().y), vec2(side, side)), icon, color);
+    ui.painter().galley(pos2(rect.min.x + 9.0 + side + 7.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, on, label));
+    if tip.is_empty() { resp } else { resp.on_hover_text(tip) }
 }
 
 /// [`button`], `side` points square (the icon grows with it).

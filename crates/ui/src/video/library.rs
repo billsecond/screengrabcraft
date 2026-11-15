@@ -267,6 +267,37 @@ impl VideoView {
         ui.label(RichText::new("Drag one onto the timeline, or + to add it at the playhead.").size(12.0).color(t.muted));
         let lib = layers::library();
         ui.add_space(6.0);
+        // Looked for by name: everything that matches, whatever its section.
+        ui.add(egui::TextEdit::singleline(&mut self.lib_search).hint_text("Search the library").desired_width(f32::INFINITY));
+        ui.add_space(6.0);
+        let wanted = self.lib_search.trim().to_lowercase();
+        if !wanted.is_empty() {
+            let found: Vec<&layers::Template> =
+                lib.iter().filter(|x| x.name.to_lowercase().contains(&wanted) || x.group.label().to_lowercase().contains(&wanted)).collect();
+            if found.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new(format!("Nothing in the library is called \u{201c}{}\u{201d}.", self.lib_search.trim())).color(t.muted));
+            }
+            for row in found.chunks(2) {
+                ui.horizontal(|ui| {
+                    for tpl in row {
+                        let key = format!("template-{}", tpl.key);
+                        if !self.thumbs.contains_key(&key)
+                            && let Some(pic) = template_thumbnail(tpl)
+                        {
+                            self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
+                        }
+                        let tex = self.thumbs.get(&key).cloned();
+                        let added = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, tpl.group.label(), None);
+                        if added {
+                            let at = self.playhead;
+                            self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
+                        }
+                    }
+                });
+            }
+            return;
+        }
         // A section for each kind, opened and closed by its heading (the first is open).
         for g in Group::ALL {
             let cards: Vec<&layers::Template> = lib.iter().filter(|x| x.group == g).collect();
@@ -442,7 +473,7 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let media = self.session.timeline.media.clone();
         egui::Panel::right("video_item")
-            .exact_size(260.0)
+            .exact_size(super::SIDE_W)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
@@ -462,47 +493,54 @@ impl VideoView {
                             let _ = s.session.execute("video.setItem", &p);
                         }
                     };
-                    if let What::Text { style, title, subtitle, color } = &item.what {
-                        if style.has_words() {
-                            ui.label(RichText::new("Words").color(t.muted));
-                            let mut w = title.clone();
-                            let r = ui.add(egui::TextEdit::multiline(&mut w).desired_rows(2).desired_width(f32::INFINITY));
-                            self.text_change(r, || json!({"title": w.clone()}), &set);
-                            if style.has_subtitle() {
-                                let mut s2 = subtitle.clone();
-                                let r = ui.add(egui::TextEdit::singleline(&mut s2).desired_width(f32::INFINITY).hint_text("Second line"));
-                                self.text_change(r, || json!({"subtitle": s2.clone()}), &set);
-                            }
-                            ui.add_space(8.0);
-                        }
-                        if !matches!(style, layers::TextStyle::Spotlight) {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new("Colour").color(t.muted));
-                                let [r, g, b] = layers::color(color, [0x6e, 0x5a, 0xd6]);
-                                let mut c = Color32::from_rgb(r, g, b);
-                                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
-                                    set(self, json!({"color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())}), false);
-                                }
-                            });
-                            ui.add_space(8.0);
+                    let mut first = true;
+                    let on_picture = !matches!(item.what, What::Transition { .. }) && item.layer_kind(&media) == layers::LayerKind::Picture;
+                    if let What::Text { style, title, subtitle, .. } = &item.what
+                        && style.has_words()
+                    {
+                        super::section(ui, "Text", &mut first);
+                        let mut w = title.clone();
+                        let r = ui.add(egui::TextEdit::multiline(&mut w).desired_rows(2).desired_width(f32::INFINITY).hint_text("What it says"));
+                        self.text_change(r, || json!({"title": w.clone()}), &set);
+                        if style.has_subtitle() {
+                            let mut s2 = subtitle.clone();
+                            let r = ui.add(egui::TextEdit::singleline(&mut s2).desired_width(f32::INFINITY).hint_text("Second line"));
+                            self.text_change(r, || json!({"subtitle": s2.clone()}), &set);
                         }
                     }
-                    if !matches!(item.what, What::Transition { .. }) && item.layer_kind(&media) == layers::LayerKind::Picture {
-                        let size_label = if matches!(item.what, What::Text { .. }) { "Size" } else { "Width (share of the video's)" };
+                    let coloured = matches!(&item.what, What::Text { style, .. } if !matches!(style, layers::TextStyle::Spotlight));
+                    if coloured || on_picture {
+                        super::section(ui, "Look", &mut first);
+                    }
+                    if let What::Text { color, .. } = &item.what
+                        && coloured
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Colour").size(12.0).color(t.muted));
+                            let [r, g, b] = layers::color(color, [0x6e, 0x5a, 0xd6]);
+                            let mut c = Color32::from_rgb(r, g, b);
+                            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                                set(self, json!({"color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())}), false);
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    if on_picture {
+                        let size_label = if matches!(item.what, What::Text { .. }) { "Size" } else { "Width, as a share of the video's" };
                         let (lo, hi) = if matches!(item.what, What::Text { .. }) { (0.3, 2.5) } else { (0.05, 1.0) };
                         self.slider(ui, size_label, item.place.w, lo, hi, "w", &set);
+                        self.slider(ui, "Opacity", item.place.opacity, 0.1, 1.0, "opacity", &set);
+                        super::section(ui, "Position", &mut first);
                         self.slider(ui, "Across", item.place.x, -0.5, 1.5, "x", &set);
                         self.slider(ui, "Down", item.place.y, -0.5, 1.5, "y", &set);
-                        self.slider(ui, "Seen through it", 1.0 - item.place.opacity, 0.0, 0.9, "see", &set);
+                        ui.add_space(2.0);
                         ui.label(
-                            RichText::new("Drag it on the picture to move it (off its edges too); drag a corner to resize it.")
-                                .size(11.5)
-                                .color(t.muted),
+                            RichText::new("Or drag it on the picture: past the edges too. Drag a corner to resize it.").size(12.0).color(t.muted),
                         );
-                        ui.add_space(10.0);
-                        for (label, key, anim) in [("Comes in", "intro", item.intro), ("Goes out", "outro", item.outro)] {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(label).color(t.muted));
+                        super::section(ui, "Animation", &mut first);
+                        egui::Grid::new("item-animation").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+                            for (label, key, anim) in [("Entrance", "intro", item.intro), ("Exit", "outro", item.outro)] {
+                                ui.label(RichText::new(label).size(12.0).color(t.muted));
                                 egui::ComboBox::from_id_salt(("anim", key)).width(150.0).selected_text(anim.kind.label()).show_ui(ui, |ui| {
                                     for k in AnimKind::ALL {
                                         if ui.selectable_label(anim.kind == k, k.label()).clicked() {
@@ -510,10 +548,11 @@ impl VideoView {
                                         }
                                     }
                                 });
-                            });
-                        }
+                                ui.end_row();
+                            }
+                        });
                     }
-                    ui.add_space(14.0);
+                    ui.add_space(16.0);
                     if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                         self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
                         self.item = None;
@@ -539,11 +578,9 @@ impl VideoView {
     /// A number of the item's placement, as a percentage slider (a drag is one undo step).
     #[allow(clippy::too_many_arguments)]
     fn slider(&mut self, ui: &mut Ui, label: &str, value: f32, lo: f32, hi: f32, key: &str, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
-        let t = Tokens::get(ui.ctx());
-        ui.label(RichText::new(label).color(t.muted));
         let mut v = value * 100.0;
-        let r = ui.add(egui::Slider::new(&mut v, lo * 100.0..=hi * 100.0).suffix("%"));
-        let p = |v: f32| if key == "see" { json!({"opacity": 1.0 - v / 100.0}) } else { json!({ key: v / 100.0 }) };
+        let r = super::named_slider(ui, label, &mut v, lo * 100.0..=hi * 100.0, "%");
+        let p = |v: f32| json!({ key: v / 100.0 });
         if r.drag_started() {
             self.session.begin("Change");
         }

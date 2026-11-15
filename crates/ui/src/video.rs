@@ -69,6 +69,10 @@ const CONTROLS: f32 = PLAY + 20.0;
 /// still while the video plays (seconds).
 const FULL_BAR: f32 = 64.0;
 const FULL_HIDE: f64 = 2.5;
+/// How much larger than itself a small video is shown, at most.
+const PREVIEW_ZOOM: f32 = 2.0;
+/// How wide the panel at the right is, whatever it shows.
+pub(crate) const SIDE_W: f32 = 264.0;
 /// Sound waves are kept as peaks per 10 ms.
 const WAVE_STEP: u64 = 480;
 /// How often the host is asked whether captions being made have come (seconds).
@@ -242,6 +246,79 @@ pub struct VideoView {
     /// video plays and the pointer is still.
     full_pointer: Option<Pos2>,
     full_moved: f64,
+    /// The timeline asked to zoom by so much (a button, a key, a menu): done when it's next drawn,
+    /// around the playhead.
+    /// What the library is searched for (its cards with these words in their names).
+    pub lib_search: String,
+    zoom_ask: Option<f32>,
+    /// Where on the timeline the right button was pressed (µs): what its menu is about.
+    menu_us: Option<u64>,
+}
+
+/// What a header's switch turns on and off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Switch {
+    /// A picture: seen in the video, or hidden.
+    Picture,
+    /// A sound: heard in the video, or muted.
+    Sound,
+    /// The captions, on the picture here.
+    Captions,
+}
+
+/// The switch in a track's or a layer's header: an eye for a picture (seen in the video, or
+/// hidden), a speaker for a sound (heard, or muted). True when it was pressed. Screen readers (and
+/// tests) know it as the check box Show.
+fn track_switch(ui: &mut Ui, salt: (&str, usize), rect: Rect, what: Switch, shown: bool) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let resp = ui.interact(rect, ui.id().with(("track-switch", salt)), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, shown, "Show"));
+    let (icon, tip) = match (what, shown) {
+        (Switch::Picture, true) => (Icon::Eye, "Seen in the video. Click to hide it."),
+        (Switch::Picture, false) => (Icon::EyeOff, "Hidden: not in the video. Click to show it."),
+        (Switch::Sound, true) => (Icon::Speaker, "Heard in the video. Click to mute it."),
+        (Switch::Sound, false) => (Icon::SpeakerOff, "Muted: not heard in the video. Click to hear it."),
+        (Switch::Captions, true) => {
+            (Icon::Eye, "The captions are on the picture here. Click to take them off. (Export Video asks whether they go in the video.)")
+        }
+        (Switch::Captions, false) => (Icon::EyeOff, "The captions are not on the picture. Click to show them."),
+    };
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.hover);
+    }
+    let colour = if !shown {
+        t.danger
+    } else if resp.hovered() {
+        t.text
+    } else {
+        t.muted
+    };
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center(), vec2(17.0, 17.0)), icon, colour);
+    resp.on_hover_text(tip).clicked()
+}
+
+/// A heading for a group of settings in the panel at the right: a line above it (unless it is the
+/// panel's first), then its name, as the picture editor's panel has them.
+pub(crate) fn section(ui: &mut Ui, name: &str, first: &mut bool) {
+    if !*first {
+        ui.add_space(10.0);
+        ui.separator();
+        ui.add_space(4.0);
+    }
+    *first = false;
+    ui.label(RichText::new(name).strong());
+    ui.add_space(4.0);
+}
+
+/// A slider with its name small above it, as wide as the panel leaves beside its number box.
+pub(crate) fn named_slider(ui: &mut Ui, name: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, suffix: &str) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new(name).size(12.0).color(t.muted));
+    ui.scope(|ui| {
+        ui.spacing_mut().slider_width = (ui.available_width() - 76.0).max(80.0);
+        ui.add(egui::Slider::new(value, range).fixed_decimals(0).suffix(suffix))
+    })
+    .inner
 }
 
 fn kind_colour(kind: StreamKind) -> Color32 {
@@ -373,6 +450,9 @@ impl VideoView {
             full_screen: false,
             full_pointer: None,
             full_moved: 0.0,
+            lib_search: String::new(),
+            zoom_ask: None,
+            menu_us: None,
         }
     }
 
@@ -825,6 +905,15 @@ impl VideoView {
         if pressed(cmd(Key::E)) {
             self.open_export(ed, ctx);
         }
+        if pressed(cmd(Key::Plus)) || pressed(cmd(Key::Equals)) {
+            self.zoom_ask = Some(1.25);
+        }
+        if pressed(cmd(Key::Minus)) {
+            self.zoom_ask = Some(0.8);
+        }
+        if pressed(cmd(Key::Num0)) {
+            self.pps = 0.0;
+        }
         if pressed(cmd(Key::X)) && self.range.is_some() {
             self.delete(ed, ctx);
         }
@@ -990,7 +1079,16 @@ impl VideoView {
                     if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
                         ed.services.save_settings(&ed.settings);
                     }
-                    if ui.button("Fit the Timeline").clicked() {
+                    ui.separator();
+                    if ui.add(egui::Button::new("Zoom the Timeline In").shortcut_text("Ctrl++")).clicked() {
+                        self.zoom_ask = Some(1.25);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Zoom the Timeline Out").shortcut_text("Ctrl+-")).clicked() {
+                        self.zoom_ask = Some(0.8);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Fit the Timeline").shortcut_text("Ctrl+0")).clicked() {
                         self.pps = 0.0;
                         ui.close();
                     }
@@ -1018,38 +1116,43 @@ impl VideoView {
         });
     }
 
+    /// The tool bar, as tall as the picture editor's and built of the same buttons: the library
+    /// and files at the left, then undo, then what cuts the video; what makes something of it at
+    /// the right. (Playing is under the picture.)
     fn tool_bar(&mut self, ed: &mut Editor, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
-        let now = ctx.input(|i| i.time);
+        let side = crate::editor::BAR_BUTTON;
         egui::Panel::top("video_tools")
-            .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 5)))
+            .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_separator_line(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-                    let lib = ui
-                        .add(egui::Button::new(RichText::new("Library").size(13.5)).selected(self.library_open).min_size(vec2(70.0, 28.0)))
-                        .on_hover_text("Titles, lower thirds, overlays, transitions and your own media, to drag onto the timeline");
-                    if lib.clicked() {
+                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                    let divider = |ui: &mut Ui| {
+                        ui.add_space(4.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    };
+                    let tip = "Titles, lower thirds, overlays, transitions and your own media, to drag onto the timeline";
+                    if icons::labeled_button(ui, Icon::Library, "Library", tip, self.library_open, true, side).clicked() {
                         self.library_open = !self.library_open;
                     }
-                    ui.add_space(4.0);
-                    if icons::button(ui, Icon::Open, "Open (Ctrl+O)", false, true).clicked() {
+                    if icons::button_sized(ui, Icon::Open, "Open (Ctrl+O)", false, true, side).clicked() {
                         ed.services.request_open();
                     }
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    let (icon, tip) = if self.playing.is_some() { (Icon::Pause, "Pause (Space)") } else { (Icon::Play, "Play (Space)") };
-                    if icons::button(ui, icon, tip, false, self.length() > 0).clicked() {
-                        if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
+                    divider(ui);
+                    let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
+                    if icons::button_sized(ui, Icon::Undo, &undo_tip, false, self.session.can_undo(), side).clicked() {
+                        self.run(ed, &ctx, "edit.undo", json!({}));
                     }
-                    ui.label(RichText::new(format!("{} / {}", clock(self.playhead), clock(self.length()))).monospace().size(14.0).color(t.text));
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-                    if widgets::button(ui, "Split").on_hover_text("Split at the playhead (S): the selected clip's track, or all of them").clicked() {
+                    let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
+                    if icons::button_sized(ui, Icon::Redo, &redo_tip, false, self.session.can_redo(), side).clicked() {
+                        self.run(ed, &ctx, "edit.redo", json!({}));
+                    }
+                    divider(ui);
+                    let tip = "Split at the playhead (S): the selected clip's track, or all of them";
+                    if icons::labeled_button(ui, Icon::Split, "Split", tip, false, self.length() > 0, side).clicked() {
                         self.split(ed, &ctx);
                     }
                     let tip = if self.item.is_some() {
@@ -1060,22 +1163,9 @@ impl VideoView {
                         "Delete the selected clip, leaving a gap (Del)"
                     };
                     let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
-                    if ui
-                        .add_enabled_ui(any, |ui| widgets::button(ui, if self.range.is_some() { "Cut" } else { "Delete" }))
-                        .inner
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
+                    let label = if self.range.is_some() { "Cut" } else { "Delete" };
+                    if icons::labeled_button(ui, Icon::Delete, label, tip, false, any, side).clicked() {
                         self.delete(ed, &ctx);
-                    }
-                    ui.add_space(6.0);
-                    let undo_tip = format!("Undo {} (Ctrl+Z)", self.session.undo_label().unwrap_or(""));
-                    if icons::button(ui, Icon::Undo, &undo_tip, false, self.session.can_undo()).clicked() {
-                        self.run(ed, &ctx, "edit.undo", json!({}));
-                    }
-                    let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
-                    if icons::button(ui, Icon::Redo, &redo_tip, false, self.session.can_redo()).clicked() {
-                        self.run(ed, &ctx, "edit.redo", json!({}));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -1140,26 +1230,45 @@ impl VideoView {
             });
     }
 
-    /// The camera's place in the picture.
+    /// The panel at the right while nothing on the timeline is chosen: the camera and the pointer
+    /// (when the recording has them), and how the timeline is worked. Always there, so the picture
+    /// doesn't jump about as things are chosen.
     fn camera_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
         let camera = self.session.timeline.find(StreamKind::Camera);
         let pointer = !self.rec.pointer.is_empty();
-        if camera.is_none() && !pointer {
-            return;
-        }
         let t = Tokens::get(ui.ctx());
         egui::Panel::right("video_camera")
-            .exact_size(236.0)
+            .exact_size(SIDE_W)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.label(RichText::new("Video").size(16.0).color(t.text));
+                    ui.label(RichText::new("Click a clip or an item on the timeline to change it.").size(12.0).color(t.muted));
+                    ui.add_space(10.0);
+                    let mut first = true;
                     if let Some(track) = camera {
+                        section(ui, "Camera", &mut first);
                         self.camera_section(ed, ui, track);
-                        ui.add_space(18.0);
                     }
                     if pointer {
+                        section(ui, "Pointer", &mut first);
                         self.pointer_section(ed, ui);
+                    }
+                    section(ui, "Editing", &mut first);
+                    for (keys, what) in [
+                        ("Click", "the ruler to move the playhead; a clip or an item to select it."),
+                        ("Drag", "a clip's end to trim it, the clip itself to slide it, or across the tracks to choose a stretch."),
+                        ("S", "splits at the playhead."),
+                        ("Delete", "takes out what's selected, or the chosen stretch from every track."),
+                        ("Right-click", "the timeline for more."),
+                    ] {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(RichText::new(keys).size(12.0).strong().color(t.text));
+                            ui.label(RichText::new(what).size(12.0).color(t.muted));
+                        });
+                        ui.add_space(2.0);
                     }
                 });
             });
@@ -1167,11 +1276,8 @@ impl VideoView {
 
     /// The mouse pointer on the video: shown or not, how large, how smooth, its clicks ringed.
     fn pointer_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
-        let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
         let look = self.session.timeline.pointer;
-        ui.label(RichText::new("Pointer").size(16.0).color(t.text));
-        ui.add_space(6.0);
         let mut show = look.show;
         if ui.checkbox(&mut show, "Show the mouse pointer").on_hover_text("The pointer as it was while recording").changed() {
             self.run(ed, &ctx, "video.pointer", json!({"show": show}));
@@ -1188,9 +1294,8 @@ impl VideoView {
                 ),
             ] {
                 ui.add_space(6.0);
-                ui.label(RichText::new(label).color(t.muted));
                 let mut v = value;
-                let r = ui.add(egui::Slider::new(&mut v, range).suffix("%")).on_hover_text(tip);
+                let r = named_slider(ui, label, &mut v, range, "%").on_hover_text(tip);
                 if r.drag_started() {
                     self.session.begin("Pointer");
                 }
@@ -1218,70 +1323,69 @@ impl VideoView {
         });
     }
 
+    /// The camera's place in the picture: its corner, its shape, its size.
     fn camera_section(&mut self, ed: &mut Editor, ui: &mut Ui, track: usize) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
         let cam = self.session.timeline.camera;
-        {
+        let small = |s: &str| RichText::new(s).size(12.0).color(t.muted);
+        ui.label(small("Corner"));
+        let half = ((ui.available_width() - 6.0) / 2.0).floor();
+        egui::Grid::new("camera_corners").spacing([6.0, 6.0]).show(ui, |ui| {
+            for (i, (corner, label)) in [
+                (Corner::TopLeft, "Top left"),
+                (Corner::TopRight, "Top right"),
+                (Corner::BottomLeft, "Bottom left"),
+                (Corner::BottomRight, "Bottom right"),
+            ]
+            .into_iter()
+            .enumerate()
             {
-                ui.label(RichText::new("Camera").size(16.0).color(t.text));
-                ui.add_space(8.0);
-                ui.label(RichText::new("Corner").color(t.muted));
-                egui::Grid::new("camera_corners").spacing([6.0, 6.0]).show(ui, |ui| {
-                    for (i, (corner, label)) in [
-                        (Corner::TopLeft, "Top left"),
-                        (Corner::TopRight, "Top right"),
-                        (Corner::BottomLeft, "Bottom left"),
-                        (Corner::BottomRight, "Bottom right"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
-                        if ui.add(egui::Button::new(label).selected(cam.corner == corner).min_size(vec2(96.0, 28.0))).clicked() {
-                            self.run(ed, &ctx, "video.camera", json!({"corner": corner}));
-                        }
-                        if i % 2 == 1 {
-                            ui.end_row();
-                        }
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(RichText::new("Shape").color(t.muted));
-                ui.horizontal(|ui| {
-                    for (shape, label) in [(CameraShape::Rectangle, "Square"), (CameraShape::Rounded, "Rounded"), (CameraShape::Circle, "Circle")] {
-                        if ui.add(egui::Button::new(label).selected(cam.shape == shape)).clicked() {
-                            self.run(ed, &ctx, "video.camera", json!({"shape": shape}));
-                        }
-                    }
-                });
-                ui.add_space(8.0);
-                ui.label(RichText::new("Size (share of the width)").color(t.muted));
-                let mut size = cam.size * 100.0;
-                let r = ui.add(egui::Slider::new(&mut size, 10.0..=50.0).suffix("%")).on_hover_text("Its width, as a share of the video's");
-                if r.drag_started() {
-                    self.session.begin("Camera");
+                if ui.add(egui::Button::new(label).selected(cam.corner == corner).min_size(vec2(half, 28.0))).clicked() {
+                    self.run(ed, &ctx, "video.camera", json!({"corner": corner}));
                 }
-                if r.changed() {
-                    let p = json!({"size": size / 100.0});
-                    if r.dragged() {
-                        let _ = self.session.drag("video.camera", &p);
-                    } else {
-                        self.run(ed, &ctx, "video.camera", p)
-                    }
-                }
-                if r.drag_stopped() {
-                    self.session.commit();
-                }
-                ui.add_space(12.0);
-                let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
-                if hidden {
-                    ui.label(RichText::new("The camera's clips were all deleted.").color(t.muted));
+                if i % 2 == 1 {
+                    ui.end_row();
                 }
             }
+        });
+        ui.add_space(8.0);
+        ui.label(small("Shape"));
+        let third = ((ui.available_width() - 12.0) / 3.0).floor();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for (shape, label) in [(CameraShape::Rectangle, "Square"), (CameraShape::Rounded, "Rounded"), (CameraShape::Circle, "Circle")] {
+                if ui.add(egui::Button::new(label).selected(cam.shape == shape).min_size(vec2(third, 28.0))).clicked() {
+                    self.run(ed, &ctx, "video.camera", json!({"shape": shape}));
+                }
+            }
+        });
+        ui.add_space(8.0);
+        let mut size = cam.size * 100.0;
+        let r = named_slider(ui, "Size", &mut size, 10.0..=50.0, "%").on_hover_text("Its width, as a share of the video's");
+        if r.drag_started() {
+            self.session.begin("Camera");
+        }
+        if r.changed() {
+            let p = json!({"size": size / 100.0});
+            if r.dragged() {
+                let _ = self.session.drag("video.camera", &p);
+            } else {
+                self.run(ed, &ctx, "video.camera", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+        ui.add_space(4.0);
+        ui.label(small("Or drag the camera on the picture to put it anywhere."));
+        let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
+        if hidden {
+            ui.add_space(4.0);
+            ui.label(RichText::new("The camera's clips were all deleted.").color(t.muted));
         }
     }
 
-    /// The picture at the playhead, fitted to the space.
     /// The picture at the playhead, as a texture: made again when the playhead or the edits move.
     fn refresh_frame(&mut self, ctx: &egui::Context) {
         let key = (self.playhead, self.session.revision());
@@ -1416,7 +1520,7 @@ impl VideoView {
         let t = Tokens::get(ui.ctx());
         self.refresh_frame(ui.ctx());
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
-            // The picture, and under it the play button with the time.
+            // The picture, and under it what plays it.
             // Room left round the picture: things can be moved off its edges, and found there.
             let whole = ui.max_rect().shrink(36.0);
             let area = Rect::from_min_max(whole.min, pos2(whole.max.x, (whole.max.y - CONTROLS).max(whole.min.y)));
@@ -1424,7 +1528,8 @@ impl VideoView {
             let mut shown_at = None;
             if let Some(tex) = &self.texture {
                 let size = tex.size_vec2();
-                let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, 1.0);
+                // A small video is shown larger than it is: easier to see, and to work on.
+                let f = (area.width() / size.x).min(area.height() / size.y).clamp(0.01, PREVIEW_ZOOM);
                 let r = Rect::from_center_size(area.center(), size * f);
                 ui.painter().image(tex.id(), r, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 ui.painter().rect_stroke(r, 0.0, Stroke::new(1.0, t.border), StrokeKind::Outside);
@@ -1438,30 +1543,66 @@ impl VideoView {
             }
             let now = ui.ctx().input(|i| i.time);
             let playing = self.playing.is_some();
-            let button = Rect::from_center_size(pos2(area.center().x, bottom + 10.0 + PLAY / 2.0), vec2(PLAY, PLAY));
+            let length = self.length();
+            let (cx, mid) = (area.center().x, bottom + 10.0 + PLAY / 2.0);
+            let button = Rect::from_center_size(pos2(cx, mid), vec2(PLAY, PLAY));
             let tip = if playing { "Pause (Space)" } else { "Play (Space)" };
             let resp = ui.interact(button, ui.id().with("play-under-video"), egui::Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, self.length() > 0, tip));
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, length > 0, tip));
             let fill = if resp.hovered() { t.accent.gamma_multiply(1.15) } else { t.accent };
             ui.painter().circle_filled(button.center(), PLAY / 2.0, fill);
             icons::paint(ui.painter(), button.shrink(PLAY * 0.27), if playing { Icon::Pause } else { Icon::Play }, Color32::WHITE);
-            ui.painter().text(
-                pos2(button.max.x + 14.0, button.center().y),
-                egui::Align2::LEFT_CENTER,
-                format!("{} / {}", clock(self.playhead), clock(self.length())),
-                egui::FontId::monospace(14.0),
-                t.text,
-            );
-            if resp.on_hover_text(tip).clicked() && self.length() > 0 {
+            if resp.on_hover_text(tip).clicked() && length > 0 {
                 if playing {
                     self.pause();
                 } else {
                     self.play(ed, now);
                 }
             }
+            // Either side of it: a frame back and a frame on, the start and the end.
+            let frame = 1_000_000 / self.fps();
+            let near = PLAY / 2.0 + 24.0;
+            let far = near + 34.0;
+            let mut go = None;
+            for (dx, icon, tip, to) in [
+                (-far, Icon::ToStart, "Go to the Start (Home)", 0),
+                (-near, Icon::FrameBack, "Back One Frame (Left Arrow)", self.playhead.saturating_sub(frame)),
+                (near, Icon::FrameForward, "Forward One Frame (Right Arrow)", (self.playhead + frame).min(length)),
+                (far, Icon::ToEnd, "Go to the End (End)", length),
+            ] {
+                let r = Rect::from_center_size(pos2(cx + dx, mid), vec2(30.0, 30.0));
+                let can = length > 0 && to != self.playhead;
+                let resp = ui.interact(r, ui.id().with(("transport", tip)), if can { Sense::click() } else { Sense::hover() });
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, can, tip));
+                if resp.hovered() && can {
+                    ui.painter().rect_filled(r, 6.0, t.hover);
+                }
+                let colour = if !can {
+                    t.muted.gamma_multiply(0.45)
+                } else if resp.hovered() {
+                    t.text
+                } else {
+                    t.muted
+                };
+                icons::paint(ui.painter(), r.shrink(7.0), icon, colour);
+                if resp.on_hover_text(tip).clicked() {
+                    go = Some(to);
+                }
+            }
+            if let Some(to) = go {
+                self.seek(ed, to, now);
+            }
+            // The time, after them.
+            let words = ui.painter().text(
+                pos2(cx + far + 15.0 + 14.0, mid),
+                egui::Align2::LEFT_CENTER,
+                format!("{} / {}", clock(self.playhead), clock(length)),
+                egui::FontId::monospace(14.0),
+                t.text,
+            );
             // At the picture's right end (clear of the time), the way to the whole screen.
-            let right = shown_at.map_or(area.max.x, |r| r.max.x).max(button.max.x + 190.0).min(whole.max.x + 30.0);
-            let full = Rect::from_center_size(pos2(right - 15.0, button.center().y), vec2(30.0, 30.0));
+            let right = shown_at.map_or(area.max.x, |r| r.max.x).max(words.max.x + 50.0).min(whole.max.x + 30.0);
+            let full = Rect::from_center_size(pos2(right - 15.0, mid), vec2(30.0, 30.0));
             let tip = "Full Screen (F11)";
             let resp = ui.interact(full, ui.id().with("full-screen"), egui::Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
@@ -1481,23 +1622,31 @@ impl VideoView {
         let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, kind_colour(track.kind));
         let painter = ui.painter_at(row);
-        painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), t.text);
+        // What it is, drawn and said: faint while it's hidden or muted.
+        let icon = match track.kind {
+            StreamKind::Screen => Icon::Screen,
+            StreamKind::Camera => Icon::Camera,
+            StreamKind::SystemSound => Icon::Speaker,
+            StreamKind::Microphone => Icon::Microphone,
+        };
+        let (mark, words) = if track.muted { (t.muted.gamma_multiply(0.7), t.muted) } else { (kind_colour(track.kind), t.text) };
+        icons::paint(&painter, Rect::from_min_size(row.min + vec2(12.0, 5.0), vec2(15.0, 15.0)), icon, mark);
+        painter.text(row.min + vec2(34.0, 4.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), words);
         // Every track can be shown or hidden: a hidden picture isn't in the video, a hidden
         // sound isn't heard.
-        let show = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(58.0, 20.0));
-        let mut shown = !track.muted;
-        let tip = if track.kind.is_video() { "Seen in the video (untick to hide it)" } else { "Heard in the video (untick to mute it)" };
-        if ui.put(show, egui::Checkbox::new(&mut shown, "Show")).on_hover_text(tip).changed() {
-            self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": !shown}));
+        let shown = !track.muted;
+        let switch = Rect::from_min_size(row.min + vec2(9.0, 22.0), vec2(26.0, 20.0));
+        if track_switch(ui, ("track", i), switch, if track.kind.is_video() { Switch::Picture } else { Switch::Sound }, shown) {
+            self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": shown}));
         }
         if track.kind.is_video() {
             let device = self.rec.stream(track.stream).map(|s| s.name.clone()).unwrap_or_default();
             if !device.is_empty() && device != name {
-                painter.text(row.min + vec2(74.0, 27.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
+                painter.text(row.min + vec2(42.0, 25.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
             }
             return;
         }
-        let vol = Rect::from_min_size(row.min + vec2(72.0, 24.0), vec2(row.width() - 80.0, 20.0));
+        let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0, 20.0));
         let mut v = track.volume * 100.0;
         let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
         if r.drag_started() {
@@ -1529,7 +1678,8 @@ impl VideoView {
         };
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, colour);
         let painter = ui.painter_at(row);
-        painter.text(row.min + vec2(14.0, 6.0), egui::Align2::LEFT_TOP, &layer.name, egui::FontId::proportional(13.0), t.text);
+        let words = if layer.hidden { t.muted } else { t.text };
+        painter.text(row.min + vec2(14.0, 4.0), egui::Align2::LEFT_TOP, &layer.name, egui::FontId::proportional(13.0), words);
         let del = Rect::from_min_size(pos2(row.max.x - 26.0, row.min.y + 3.0), vec2(22.0, 18.0));
         let r = ui.put(del, egui::Button::new(RichText::new("×").size(14.0)).frame(false));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Delete {}", layer.name)));
@@ -1540,16 +1690,16 @@ impl VideoView {
             self.run(ed, &ctx, "video.deleteLayer", json!({"layer": layer.id}));
             return;
         }
-        let show = Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(58.0, 20.0));
-        let mut shown = !layer.hidden;
-        let tip = if layer.kind == LayerKind::Sound { "Heard in the video (untick to mute it)" } else { "Seen in the video (untick to hide it)" };
-        if ui.put(show, egui::Checkbox::new(&mut shown, "Show")).on_hover_text(tip).changed() {
-            self.run(ed, &ctx, "video.layer", json!({"layer": layer.id, "hidden": !shown}));
+        let shown = !layer.hidden;
+        let switch = Rect::from_min_size(row.min + vec2(9.0, 22.0), vec2(26.0, 20.0));
+        if track_switch(ui, ("layer", layer.id as usize), switch, if layer.kind == LayerKind::Sound { Switch::Sound } else { Switch::Picture }, shown)
+        {
+            self.run(ed, &ctx, "video.layer", json!({"layer": layer.id, "hidden": shown}));
         }
         if layer.kind != LayerKind::Sound {
             return;
         }
-        let vol = Rect::from_min_size(row.min + vec2(72.0, 24.0), vec2(row.width() - 80.0, 20.0));
+        let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0, 20.0));
         let mut v = layer.volume * 100.0;
         let r = ui.put(vol, egui::Slider::new(&mut v, 0.0..=200.0).show_value(false)).on_hover_text(format!("Volume {v:.0}%"));
         if r.drag_started() {
@@ -1628,14 +1778,13 @@ impl VideoView {
             ui.put(bar, egui::ProgressBar::new(p.unwrap_or(0.0)).text(words).fill(t.accent).animate(p.is_none())).on_hover_text(what);
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         } else if self.captions.is_some() || !self.media_cues.is_empty() {
-            let c = self.session.timeline.captions;
-            let mut show = c.show;
-            let r = ui.put(Rect::from_min_size(row.min + vec2(10.0, 24.0), vec2(60.0, 20.0)), egui::Checkbox::new(&mut show, "Show"));
-            if r.on_hover_text("The captions on the picture here (Export Video asks whether they go in the video)").changed() {
-                self.run(ed, &ctx, "video.captions", json!({"show": show}));
+            let show = self.session.timeline.captions.show;
+            let switch = Rect::from_min_size(row.min + vec2(9.0, 22.0), vec2(26.0, 20.0));
+            if track_switch(ui, ("captions", 0), switch, Switch::Captions, show) {
+                self.run(ed, &ctx, "video.captions", json!({"show": !show}));
             }
             if self.can_transcribe() {
-                let b = ui.put(Rect::from_min_size(row.min + vec2(76.0, 23.0), vec2(80.0, 21.0)), egui::Button::new("Again"));
+                let b = ui.put(Rect::from_min_size(row.min + vec2(44.0, 22.0), vec2(72.0, 21.0)), egui::Button::new("Again"));
                 b.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Transcribe Again"));
                 if b.on_hover_text("Transcribe again: what's said in the video, the sound and videos you added included").clicked() {
                     self.transcribe(ed, &ctx, true);
@@ -1670,6 +1819,17 @@ impl VideoView {
                 let full = ui.max_rect();
                 let lane = Rect::from_min_max(pos2(full.min.x + HEADER_W, full.min.y), full.max);
                 let length = self.length().max(1_000_000);
+                // Zoom asked for (a button, a key, a menu): around the playhead when it's in view,
+                // else around the middle.
+                if let Some(f) = self.zoom_ask.take()
+                    && self.pps > 0.0
+                {
+                    let px = lane.min.x + (self.playhead as f64 / 1e6 * f64::from(self.pps)) as f32 - self.scroll;
+                    let at = if px >= lane.min.x && px <= lane.max.x { px } else { lane.center().x };
+                    let secs = f64::from((at - lane.min.x + self.scroll).max(0.0)) / f64::from(self.pps);
+                    self.pps = (self.pps * f).clamp(2.0, 800.0);
+                    self.scroll = ((secs * f64::from(self.pps)) as f32 - (at - lane.min.x)).max(0.0);
+                }
                 if self.pps <= 0.0 {
                     self.pps = ((lane.width() - 24.0) / (length as f32 / 1e6)).clamp(2.0, 400.0);
                     self.scroll = 0.0;
@@ -1836,6 +1996,23 @@ impl VideoView {
                     egui::FontId::proportional(11.0),
                     t.muted,
                 );
+                // In the corner above them: the timeline's zoom.
+                let corner = Rect::from_min_max(pos2(full.min.x + 10.0, full.min.y), pos2(lane.min.x - 4.0, full.min.y + RULER_H));
+                ui.scope_builder(egui::UiBuilder::new().max_rect(corner).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                    if icons::button_sized(ui, Icon::ZoomOut, "Zoom the Timeline Out (Ctrl+-)", false, pps > 2.0, 24.0).clicked() {
+                        self.zoom_ask = Some(0.8);
+                    }
+                    if icons::button_sized(ui, Icon::ZoomIn, "Zoom the Timeline In (Ctrl++)", false, pps < 800.0, 24.0).clicked() {
+                        self.zoom_ask = Some(1.25);
+                    }
+                    if icons::button_sized(ui, Icon::Fit, "Fit the Whole Video on the Timeline (Ctrl+0)", false, true, 24.0).clicked() {
+                        self.pps = 0.0;
+                    }
+                });
+                if self.zoom_ask.is_some() {
+                    ctx.request_repaint();
+                }
                 for (k, layer) in layers.iter().enumerate() {
                     let row = any_row(k);
                     self.layer_header(ed, ui, Rect::from_min_max(row.min, pos2(lane.min.x - 1.0, row.max.y)), layer);
@@ -2046,6 +2223,59 @@ impl VideoView {
                         }
                     }
                 }
+                // The right button: what's under it is chosen, and a menu is about it and that moment.
+                if resp.secondary_clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                {
+                    let on_item = layer_at(p.y).and_then(|l| layer_item_at(l, p.x).map(|(i, _)| (l, i)));
+                    let on_clip = row_at(p.y).and_then(|track| clip_at(track, p.x).map(|(c, _)| (track, c))).filter(|_| p.y >= ruler.max.y);
+                    if on_item.is_some() {
+                        self.item = on_item;
+                        self.selected = None;
+                        self.camera_chosen = false;
+                    } else if on_clip.is_some() {
+                        self.selected = on_clip;
+                        self.item = None;
+                    }
+                    self.menu_us = Some(us_of(p.x).min(self.length()));
+                }
+                resp.context_menu(|ui| {
+                    let at = self.menu_us.unwrap_or(self.playhead);
+                    if ui.button(format!("Split Here ({})", clock(at))).clicked() {
+                        self.seek(ed, at, now);
+                        self.split(ed, &ctx);
+                        ui.close();
+                    }
+                    if ui.button("Move the Playhead Here").clicked() {
+                        self.seek(ed, at, now);
+                        ui.close();
+                    }
+                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
+                    let label = if self.item.is_some() {
+                        "Delete the Item"
+                    } else if self.range.is_some() {
+                        "Cut the Chosen Stretch"
+                    } else {
+                        "Delete the Clip"
+                    };
+                    if ui.add_enabled(any, egui::Button::new(label).shortcut_text("Del")).clicked() {
+                        self.delete(ed, &ctx);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
+                        self.zoom_ask = Some(1.25);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
+                        self.zoom_ask = Some(0.8);
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Fit the Whole Video").shortcut_text("Ctrl+0")).clicked() {
+                        self.pps = 0.0;
+                        ui.close();
+                    }
+                });
                 // The wheel scrolls; with Ctrl it zooms around the pointer.
                 if resp.hovered() {
                     let (dy, dx, zoom) = ctx.input(|i| (i.smooth_scroll_delta.y, i.smooth_scroll_delta.x, i.modifiers.command));

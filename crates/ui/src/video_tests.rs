@@ -772,7 +772,7 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
         assert_ne!(before.pixels(), after.pixels(), "it's on the picture");
     }
     // Its panel: its words, how it comes and goes, and a way to delete it.
-    for label in ["Words", "Comes in", "Goes out", "Delete"] {
+    for label in ["Text", "Entrance", "Exit", "Delete"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -1117,7 +1117,7 @@ fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
     assert!(held > 60, "its red tab is on the picture: {held}");
     assert!(red(&mut h, 5_990_000) < held / 3, "all but gone by its end");
     // Its words are changed in its panel (through the engine, as the panel does).
-    for label in ["Words", "Colour", "Delete"] {
+    for label in ["Text", "Colour", "Delete"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -1235,4 +1235,112 @@ fn the_preview_goes_over_the_whole_screen_and_comes_back() {
     }
     h.run_steps(3);
     assert!(!full(&h));
+}
+
+#[test]
+fn the_buttons_beside_play_step_a_frame_and_go_to_the_ends() {
+    let mut h = harness();
+    let at = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().playhead;
+    let length = h.state().video.as_ref().unwrap().session.timeline.length();
+    // Ten frames a second: a frame is a tenth of one.
+    h.get_by_label("Forward One Frame (Right Arrow)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), 100_000);
+    h.get_by_label("Go to the End (End)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), length);
+    h.get_by_label("Back One Frame (Left Arrow)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), length - 100_000);
+    h.get_by_label("Go to the Start (Home)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), 0);
+    // Playing is under the picture, once: not on the tool bar as well.
+    assert_eq!(h.query_all_by_label("Play (Space)").count(), 1);
+}
+
+#[test]
+fn the_timeline_zooms_by_its_buttons_around_the_playhead_and_fits_again() {
+    let mut h = harness();
+    let pps = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().pps;
+    let fitted = pps(&h);
+    h.get_by_label("Zoom the Timeline In (Ctrl++)").click();
+    h.run_steps(3);
+    assert!((pps(&h) - fitted * 1.25).abs() < 0.01, "{} from {fitted}", pps(&h));
+    h.get_by_label("Zoom the Timeline Out (Ctrl+-)").click();
+    h.run_steps(3);
+    h.get_by_label("Zoom the Timeline Out (Ctrl+-)").click();
+    h.run_steps(3);
+    assert!(pps(&h) < fitted);
+    h.get_by_label("Fit the Whole Video on the Timeline (Ctrl+0)").click();
+    h.run_steps(3);
+    assert!((pps(&h) - fitted).abs() < 0.01);
+    // The keys do the same.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    h.run_steps(3);
+    assert!(pps(&h) > fitted);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+    h.run_steps(3);
+    assert!((pps(&h) - fitted).abs() < 0.01);
+}
+
+#[test]
+fn the_right_button_on_the_timeline_chooses_what_is_under_it_and_offers_what_can_be_done() {
+    let mut h = harness();
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // On the first track's clip, half way along.
+    let p = egui::pos2(lane.min.x + (lane.width() - 24.0) / 2.0, top + 20.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, 0)), "the clip under it is chosen");
+    h.get_by_label("Move the Playhead Here");
+    h.get_by_label_contains("Delete the Clip");
+    // Split Here: the playhead goes there, and the clip is two.
+    let split = h.get_by_label_contains("Split Here");
+    split.click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.playhead.abs_diff(v.session.timeline.length() / 2) < 200_000, "{}", v.playhead);
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(2));
+    assert_eq!(v.session.undo_label(), Some("Split"));
+}
+
+#[test]
+fn the_library_is_searched_by_name_whatever_the_section() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().lib_search = "chapter".into();
+    h.run_steps(3);
+    assert!(h.query_by_label("Chapter card").is_some(), "found though its section is shut");
+    assert!(h.query_by_label("Breaking news").is_none());
+    // A section's name finds all of it.
+    h.state_mut().video.as_mut().unwrap().lib_search = "training".into();
+    h.run_steps(3);
+    for label in ["Chapter card", "Next step", "Progress bar", "Done"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    shot(&mut h, "video-library-search");
+    h.state_mut().video.as_mut().unwrap().lib_search = "zebra".into();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Nothing in the library").is_some());
+    // Cleared, the sections are back.
+    h.state_mut().video.as_mut().unwrap().lib_search.clear();
+    h.run_steps(3);
+    assert!(h.query_by_label("Lower Thirds").is_some() && h.query_by_label("Breaking news").is_some());
+}
+
+#[test]
+fn a_track_is_hidden_and_shown_by_the_switch_in_its_header() {
+    let mut h = harness();
+    let muted = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks.first().map(|t| t.muted);
+    assert_eq!(muted(&h), Some(false));
+    h.query_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(muted(&h), Some(true));
+    h.query_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(muted(&h), Some(false));
 }
