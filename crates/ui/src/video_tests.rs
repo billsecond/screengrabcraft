@@ -1310,6 +1310,45 @@ fn the_right_button_on_the_timeline_chooses_what_is_under_it_and_offers_what_can
 }
 
 #[test]
+fn a_chosen_clip_is_named_in_the_panel_with_what_is_done_to_it() {
+    let mut h = harness();
+    assert!(h.query_by_label("Video").is_some(), "nothing chosen: the video's own panel");
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(3);
+    assert!(h.query_by_label("Screen clip").is_some());
+    assert!(h.query_by_label_contains("Starts at 0:00.0").is_some());
+    // The playhead is at its very start: nothing to split there.
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Split at Playhead")).is_disabled());
+    let half = length(&h) / 2;
+    h.state_mut().video.as_mut().unwrap().playhead = half;
+    h.run_steps(3);
+    shot(&mut h, "video-clip-panel");
+    h.get_by_label("Split at Playhead").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(2));
+    assert_eq!(v.session.timeline.tracks.get(1).map(|t| t.clips.len()), Some(1), "its own track only");
+    // Delete Clip takes the chosen one out.
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 1));
+    h.run_steps(3);
+    h.get_by_label("Delete Clip").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(1));
+    assert!(v.selected.is_none());
+    assert!(h.query_by_label("Video").is_some(), "back to the video's own panel");
+    // A stretch chosen across the tracks: said, and let go of.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 1_500_000));
+    h.run_steps(3);
+    assert!(h.query_by_label("Chosen stretch").is_some());
+    assert!(h.query_by_label_contains("0:01.0 long").is_some());
+    shot(&mut h, "video-stretch-panel");
+    h.get_by_label("Let Go").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().range.is_none());
+}
+
+#[test]
 fn the_library_is_searched_by_name_whatever_the_section() {
     let mut h = harness();
     h.state_mut().video.as_mut().unwrap().lib_search = "chapter".into();
@@ -1377,8 +1416,9 @@ fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() 
         h
     };
     let side = crate::editor::BAR_BUTTON;
-    // Wide enough for the picture editor's names: each button has its own under it.
-    let mut h = wide(1600.0);
+    // Wide enough for the picture editor's names (the window the editor opens in is): each
+    // button has its own under it.
+    let mut h = wide(1320.0);
     for label in ["Library", "Open (Ctrl+O)", "Split", "Delete"] {
         // (The first so named: the library's panel has a Library tab of its own.)
         let r = h.query_all_by_label(label).next().unwrap().rect();
@@ -1392,11 +1432,12 @@ fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() 
     h.query_all_by_label("Library").next().unwrap().click();
     h.run_steps(2);
     assert!(!h.state().video.as_ref().unwrap().library_open);
-    // Turned off in View, or in a narrower window: the bar is as tall as its buttons.
+    // Turned off in View, or in a window too narrow for the picture editor's: the bar is as tall
+    // as its buttons.
     h.state_mut().settings.hide_tool_names = true;
     h.run_steps(2);
     assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
-    let h = wide(1280.0);
+    let h = wide(800.0);
     assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
 }
 

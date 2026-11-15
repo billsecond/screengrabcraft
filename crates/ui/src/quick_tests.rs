@@ -399,12 +399,54 @@ fn with_room_to_spare_each_tool_has_its_name_under_it_and_the_name_picks_it() {
     h.run_steps(3);
     let plain_top = h.state().view.canvas.min.y;
     assert!((named_top - plain_top - 14.0).abs() < 0.5, "{named_top} and {plain_top}");
-    // A window with no room for them keeps the icons alone, at full size.
-    let narrow = sized(1280.0);
-    assert!(
-        (narrow.state().view.canvas.min.y - plain_top).abs() < 0.5 || narrow.state().view.canvas.min.y > named_top,
-        "the tools on a row of their own"
-    );
+    // A window with no room for all of it in one row (the one the editor opens in) has the tools
+    // on a row of their own under the sides, their names still under them.
+    let mut usual = sized(1320.0);
+    let (arrow, open) = (usual.get_by_label("Arrow (A)").rect(), usual.get_by_label("Open (Ctrl+O)").rect());
+    assert!((arrow.width() - crate::editor::BAR_BUTTON).abs() < 0.5);
+    assert!(arrow.min.y > open.max.y, "under the sides: {arrow:?} {open:?}");
+    assert!(usual.state().view.canvas.min.y >= arrow.max.y + 13.5, "room for the names under them");
+    let blur = usual.get_by_label("Blur (B)").rect();
+    crate::tests::click_at(&mut usual, egui::pos2(blur.center().x, blur.max.y + 7.0));
+    assert_eq!(usual.state().tool, Tool::Draw(Kind::Blur));
+    shot(&mut usual, "tool-bar-named-two-rows");
+    // Too narrow even for that, the icons alone, at full size.
+    let narrow = sized(800.0);
     let arrow = narrow.get_by_label("Arrow (A)").rect();
     assert!((arrow.width() - crate::editor::BAR_BUTTON).abs() < 0.5);
+}
+
+#[test]
+fn how_words_look_is_set_with_buttons_and_sizes_are_whole_numbers() {
+    let ed = editor();
+    let mut h = ready(ed, Tool::Draw(Kind::Text));
+    // They're under the looks, further down the panel than a small window shows.
+    h.get_by_label("Italic").scroll_to_me();
+    h.run_steps(3);
+    let before = h.state().tool_style(Kind::Text);
+    click(&mut h, "Bold");
+    click(&mut h, "Italic");
+    click(&mut h, "Against the right");
+    let s = h.state().tool_style(Kind::Text);
+    assert_eq!((s.bold, s.italic), (!before.bold, !before.italic));
+    assert_eq!(s.align, screengrabcraft_model::TextAlign::Right);
+    // Pressed again, as it was.
+    click(&mut h, "Bold");
+    assert_eq!(h.state().tool_style(Kind::Text).bold, before.bold);
+    // The buttons are in one row, each big enough to hit.
+    let (b, right) = (h.get_by_label("Bold").rect(), h.get_by_label("Against the right").rect());
+    assert!((b.center().y - right.center().y).abs() < 0.5 && b.height() >= 27.5 && right.width() >= 27.5, "{b:?} {right:?}");
+    // A size is said without a decimal nobody set.
+    assert!(h.query_by_label_contains(".0 px").is_none(), "no \"22.0 px\"");
+    shot(&mut h, "text-style-buttons");
+}
+
+#[test]
+fn nothing_selected_the_panel_says_how_things_are_moved() {
+    let ed = editor();
+    let mut h = ready(ed, Tool::Select);
+    for said in ["Click", "Drag", "Double-click", "Arrows", "Right-click"] {
+        assert!(h.query_by_label(said).is_some(), "{said}");
+    }
+    shot(&mut h, "move-tips");
 }

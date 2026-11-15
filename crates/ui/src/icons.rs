@@ -90,6 +90,10 @@ pub enum Icon {
     Plus,
     /// The keyboard (its shortcuts).
     Keyboard,
+    /// Lines of words against the left, about the middle, against the right.
+    AlignLeft,
+    AlignCentre,
+    AlignRight,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -495,6 +499,18 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 p.circle_filled(at(x, 8.3), 0.8 * u, color);
             }
             line(at(6.0, 12.0), at(14.0, 12.0));
+        }
+        Icon::AlignLeft | Icon::AlignCentre | Icon::AlignRight => {
+            // Four lines, long and short by turns.
+            for (i, long) in [14.0_f32, 8.0, 12.0, 6.0].into_iter().enumerate() {
+                let y = 5.0 + 3.4 * i as f32;
+                let x0 = match icon {
+                    Icon::AlignLeft => 3.0,
+                    Icon::AlignRight => 17.0 - long,
+                    _ => 10.0 - long / 2.0,
+                };
+                line(at(x0, y), at(x0 + long, y));
+            }
         }
     }
 }

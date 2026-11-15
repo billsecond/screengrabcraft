@@ -22,7 +22,7 @@ ScreenGrabCraft takes pictures of your screen, so here is exactly what it does w
   file name, never its content. The settings remember the last area captured, for Repeat Last
   Capture.
 - **Video recordings:** the microphone, the camera and the computer's sound are used only while
-  a video recording you started is running, and only the ones you chose (Settings › Video). The
+  a video recording you started is running, and only the ones you chose (Settings › Recording). The
   camera's light is on for exactly that long. A Record Video recording is made into an MP4 in
   your captures folder and its working file in your temporary folder is deleted; a Video
   Production recording (`.sgvideo`, every track as recorded, with your edits added to its end) is

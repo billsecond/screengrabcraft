@@ -319,7 +319,7 @@ pub trait Services {
     }
 
     /// Whether recordings, and what's put on their timelines, are transcribed by themselves
-    /// (Settings, Video).
+    /// (Settings, Recording).
     fn auto_captions(&self) -> bool {
         false
     }

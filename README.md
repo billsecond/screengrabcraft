@@ -78,7 +78,7 @@ computer's sound. With the screen off the camera's picture is the video. Press t
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
 and opens in the editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
-sources are in Settings › Video.
+sources are in Settings › Recording.
 
 ## Editing a video
 

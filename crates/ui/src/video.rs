@@ -1291,16 +1291,73 @@ impl VideoView {
         let camera = self.session.timeline.find(StreamKind::Camera);
         let pointer = !self.rec.pointer.is_empty();
         let t = Tokens::get(ui.ctx());
+        // The clip chosen on a track: what it is, where it starts and ends.
+        let clip = self.selected.and_then(|(ti, ci)| {
+            let track = self.session.timeline.tracks.get(ti)?;
+            let c = track.clips.get(ci)?;
+            let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+            Some((name, c.at, c.len, c.end()))
+        });
+        let stretch = self.range;
+        let ctx = ui.ctx().clone();
         egui::Panel::right("video_camera")
             .exact_size(SIDE_W)
             .resizable(false)
             .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(14)))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    ui.label(RichText::new("Video").size(16.0).color(t.text));
-                    ui.label(RichText::new("Click a clip or an item on the timeline to change it.").size(12.0).color(t.muted));
-                    ui.add_space(10.0);
+                    let note = |ui: &mut Ui, text: String| ui.label(RichText::new(text).size(12.0).color(t.muted));
+                    let wide = ui.available_width();
+                    let half = |ui: &mut Ui, enabled: bool, label: &str| {
+                        ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(((wide - 6.0) / 2.0).floor(), 28.0)))
+                    };
                     let mut first = true;
+                    if let Some((name, at, len, end)) = clip {
+                        // What's chosen, said, with what's most often done to it.
+                        ui.label(RichText::new(format!("{name} clip")).size(16.0).color(t.text));
+                        note(ui, format!("Starts at {}, {} long.", clock(at), clock(len)));
+                        ui.add_space(8.0);
+                        let on_it = self.playhead > at && self.playhead < end;
+                        let (mut split, mut delete) = (false, false);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            split = half(ui, on_it, "Split at Playhead")
+                                .on_hover_text("Cut it in two where the playhead is (S)")
+                                .on_disabled_hover_text("The playhead isn't on this clip: click the ruler above it first")
+                                .clicked();
+                            delete = half(ui, true, "Delete Clip").on_hover_text("Take it out, leaving a gap (Del)").clicked();
+                        });
+                        ui.add_space(6.0);
+                        note(ui, "Drag its ends on the timeline to trim it, or the clip itself to slide it.".to_string());
+                        if split {
+                            self.split(ed, &ctx);
+                        }
+                        if delete {
+                            self.delete(ed, &ctx);
+                        }
+                        first = false;
+                    } else if let Some((a, b)) = stretch {
+                        ui.label(RichText::new("Chosen stretch").size(16.0).color(t.text));
+                        note(ui, format!("From {} to {}, {} long, on every track.", clock(a), clock(b), clock(b.saturating_sub(a))));
+                        ui.add_space(8.0);
+                        let (mut cut, mut let_go) = (false, false);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            cut = half(ui, true, "Cut It Out").on_hover_text("Take it out of every track (Del)").clicked();
+                            let_go = half(ui, true, "Let Go").on_hover_text("Choose nothing (Esc)").clicked();
+                        });
+                        if cut {
+                            self.delete(ed, &ctx);
+                        }
+                        if let_go {
+                            self.range = None;
+                        }
+                        first = false;
+                    } else {
+                        ui.label(RichText::new("Video").size(16.0).color(t.text));
+                        note(ui, "Click a clip or an item on the timeline to change it.".to_string());
+                        ui.add_space(10.0);
+                    }
                     if let Some(track) = camera {
                         section(ui, "Camera", &mut first);
                         self.camera_section(ed, ui, track);
@@ -1310,20 +1367,16 @@ impl VideoView {
                         self.pointer_section(ed, ui);
                     }
                     section(ui, "Editing", &mut first);
-                    for (keys, what) in [
-                        ("Click", "the ruler to move the playhead; a clip or an item to select it."),
-                        ("Drag", "a clip's end to trim it, the clip itself to slide it, or across the tracks to choose a stretch."),
-                        ("S", "splits at the playhead."),
-                        ("Delete", "takes out what's selected, or the chosen stretch from every track."),
-                        ("Right-click", "the timeline for more."),
-                    ] {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing.x = 4.0;
-                            ui.label(RichText::new(keys).size(12.0).strong().color(t.text));
-                            ui.label(RichText::new(what).size(12.0).color(t.muted));
-                        });
-                        ui.add_space(2.0);
-                    }
+                    crate::widgets::tips(
+                        ui,
+                        &[
+                            ("Click", "the ruler to move the playhead; a clip or an item to select it."),
+                            ("Drag", "a clip's end to trim it, the clip itself to slide it, or across the tracks to choose a stretch."),
+                            ("S", "splits at the playhead."),
+                            ("Delete", "takes out what's selected, or the chosen stretch from every track."),
+                            ("Right-click", "the timeline for more."),
+                        ],
+                    );
                 });
             });
     }

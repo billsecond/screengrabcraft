@@ -190,8 +190,9 @@ pub struct Editor {
     /// While annotations are dragged off the picture and it grows to hold them: the picture as
     /// it was before, in the grown one (what it is cut back to if the growth is not needed).
     pub(crate) grown: Option<Rect>,
-    /// How wide the tool bar must be for its buttons to have their names under them (as last
-    /// measured): the video editor's bar goes by the same, so the two are alike.
+    /// How wide the tool bar must be for its tools to have their names under them, on a row of
+    /// their own if need be (as last measured): the video editor's bar goes by the same, so the
+    /// two are alike.
     pub(crate) named_bar_width: f32,
     /// Nothing has been opened or drawn yet, and the ways to start are offered on the canvas.
     pub welcome: bool,
@@ -1788,20 +1789,26 @@ impl Editor {
                     .collect();
                 let named_width = cells.iter().sum::<f32>() + (tools.len() - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
                 let mut picked = None;
-                self.named_bar_width = (left.right() - bar.left()) + BAR_SPACE + named_width + BAR_SPACE + (bar.right() - right.left());
-                if !self.settings.hide_tool_names && left.right() + BAR_SPACE + named_width + BAR_SPACE <= right.left() {
-                    let mut x = (bar.center().x - named_width / 2.0).min(right.left() - BAR_SPACE - named_width).max(left.right() + BAR_SPACE);
+                self.named_bar_width = named_width;
+                // In a row with the sides when all of it fits; in a window too narrow for that (the
+                // one the editor opens in is), on a row of their own under the sides, still named.
+                let one_row = left.right() + BAR_SPACE + named_width + BAR_SPACE <= right.left();
+                if !self.settings.hide_tool_names && (one_row || named_width <= bar.width()) {
+                    let top = if one_row { bar.top() } else { bar.bottom() + NAME_ROOM + 2.0 * BAR_GAP };
+                    let mut x = if one_row {
+                        (bar.center().x - named_width / 2.0).min(right.left() - BAR_SPACE - named_width).max(left.right() + BAR_SPACE)
+                    } else {
+                        (bar.center().x - named_width / 2.0).max(bar.left())
+                    };
                     for (b, cell) in tools.iter().zip(&cells) {
                         if b.leads {
                             // A gap, with a faint line in it, between groups.
                             let gx = x - BAR_GAP + BAR_GROUP_GAP / 2.0;
-                            ui.painter().line_segment(
-                                [egui::pos2(gx, bar.top() + side * 0.2), egui::pos2(gx, bar.bottom() - side * 0.2)],
-                                egui::Stroke::new(1.0, t.border),
-                            );
+                            ui.painter()
+                                .line_segment([egui::pos2(gx, top + side * 0.2), egui::pos2(gx, top + side * 0.8)], egui::Stroke::new(1.0, t.border));
                             x += BAR_GROUP_GAP;
                         }
-                        let button = egui::Rect::from_min_size(egui::pos2(x + (cell - side) / 2.0, bar.top()), vec2(side, side));
+                        let button = egui::Rect::from_min_size(egui::pos2(x + (cell - side) / 2.0, top), vec2(side, side));
                         let layout = egui::Layout::left_to_right(egui::Align::Center);
                         let pressed = ui
                             .scope_builder(egui::UiBuilder::new().max_rect(button).layout(layout), |ui| {
@@ -1810,7 +1817,7 @@ impl Editor {
                             .inner
                             .clicked();
                         // Its name under it, which picks it too.
-                        let under = egui::Rect::from_min_size(egui::pos2(x, bar.bottom()), vec2(*cell, NAME_ROOM));
+                        let under = egui::Rect::from_min_size(egui::pos2(x, top + side), vec2(*cell, NAME_ROOM));
                         let on_name = ui.interact(under, ui.id().with(("tool-name", b.name)), egui::Sense::click());
                         let colour = if b.on {
                             t.accent
@@ -1831,7 +1838,7 @@ impl Editor {
                         ui.painter().text(at, egui::Align2::CENTER_CENTER, *name, name_font.clone(), t.muted);
                     }
                     // The bar is that much taller.
-                    ui.allocate_rect(egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, bar.bottom() + NAME_ROOM)), egui::Sense::hover());
+                    ui.allocate_rect(egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, top + side + NAME_ROOM)), egui::Sense::hover());
                 } else {
                     let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
                     let middle = if left.right() + BAR_SPACE + width + BAR_SPACE <= right.left() {
@@ -2038,7 +2045,7 @@ const BAR_SPACE: f32 = 16.0;
 const NAME_TEXT: f32 = icons::NAME_TEXT;
 const NAME_ROOM: f32 = icons::NAME_ROOM;
 /// How wide a window the named tool bar needs, until one has been measured.
-pub(crate) const NAMED_BAR_WIDTH: f32 = 1470.0;
+pub(crate) const NAMED_BAR_WIDTH: f32 = 880.0;
 
 /// A tool's button on the tool bar: what it picks, how it is drawn and named, whether it is the
 /// tool in hand, and whether it leads a group (a gap before it).

@@ -577,7 +577,7 @@ pub fn recorder_ui(
         .frame(Frame::NONE.fill(t.footer).inner_margin(Margin::symmetric(widgets::PADDING + 4, 14)))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                // (Transcribing after the recording is a setting: Settings, Video.)
+                // (Transcribing after the recording is a setting: Settings, Recording.)
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = widgets::GAP + 2.0;
                     // The default first and Cancel last, or the other way round on a Mac.

@@ -34,7 +34,7 @@ pub struct Home {
     status: Option<service::Status>,
     message: Option<(String, bool)>,
     delay: u32,
-    /// The microphones and cameras, once the Video page has looked.
+    /// The microphones and cameras, once the Recording page has looked.
     devices: Option<Devices>,
 }
 
@@ -153,7 +153,7 @@ fn nav(ui: &mut Ui, tab: &mut Tab) {
             for (page, label) in [
                 (Tab::Capture, "Capture"),
                 (Tab::After, "After a capture"),
-                (Tab::Video, "Video"),
+                (Tab::Video, "Recording"),
                 (Tab::Shortcuts, "Shortcuts"),
                 (Tab::General, "General"),
                 (Tab::About, "About"),
@@ -198,38 +198,7 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     }
     ui.heading("Capture");
     ui.add_space(8.0);
-    let modes = [
-        (CaptureMode::Region, Icon::Region, "Drag out an area, or click a window"),
-        (CaptureMode::Adjust, Icon::Crop, "Drag out an area, then adjust it before it's taken"),
-        (CaptureMode::Window, Icon::Window, "Click a window"),
-        (CaptureMode::Screen, Icon::Screen, "The screen under the pointer"),
-        (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
-        (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
-        (CaptureMode::Gif, Icon::Gif, "Record an area as an animated GIF"),
-        (CaptureMode::Video, Icon::Play, "Record an area as a small MP4"),
-        (CaptureMode::Production, Icon::Edit, "Choose the area, camera, mic and sound, to edit"),
-        (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
-    ];
-    let mut chosen: Option<(CaptureMode, u32)> = None;
-    egui::Grid::new("capture-buttons").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-        for (i, (mode, icon, help)) in modes.iter().enumerate() {
-            let shortcut = svc.keys.label(&svc.settings.hotkeys, *mode).unwrap_or_default();
-            if big_button(ui, *icon, mode.label(), help, &shortcut).clicked() {
-                chosen = Some((*mode, 0));
-            }
-            if i % 2 == 1 {
-                ui.end_row();
-            }
-        }
-    });
-    ui.add_space(14.0);
-    ui.horizontal(|ui| {
-        ui.label("After a delay of");
-        ui.add(egui::DragValue::new(&mut home.delay).range(1..=60).suffix(" s"));
-        if widgets::button(ui, "Capture Region").clicked() {
-            chosen = Some((CaptureMode::Region, home.delay));
-        }
-    });
+    let chosen = capture_buttons(ui, &mut home.delay, &|mode| svc.keys.label(&svc.settings.hotkeys, mode).unwrap_or_default());
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(6.0);
@@ -257,16 +226,85 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     }
 }
 
-fn big_button(ui: &mut Ui, icon: Icon, label: &str, help: &str, shortcut: &str) -> egui::Response {
+/// The Capture page's buttons, the pictures apart from the recordings, each with its shortcut
+/// (`shortcut` says it, empty when it has none), and under the pictures the one taken after a
+/// wait of `delay` seconds. What was pressed, and the seconds to wait first.
+fn capture_buttons(ui: &mut Ui, delay: &mut u32, shortcut: &dyn Fn(CaptureMode) -> String) -> Option<(CaptureMode, u32)> {
     let t = Tokens::get(ui.ctx());
-    let size = vec2(262.0, if shortcut.is_empty() { 54.0 } else { 70.0 });
+    let pictures = [
+        (CaptureMode::Region, Icon::Region, "Drag out an area, or click a window"),
+        (CaptureMode::Adjust, Icon::Crop, "Drag out an area, then adjust it"),
+        (CaptureMode::Window, Icon::Window, "Click a window"),
+        (CaptureMode::Screen, Icon::Screen, "The screen under the pointer"),
+        (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
+        (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
+        (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
+    ];
+    let recordings = [
+        (CaptureMode::Production, Icon::Edit, "With the camera and sound, to edit"),
+        (CaptureMode::Video, Icon::Play, "Record an area as a small MP4"),
+        (CaptureMode::Gif, Icon::Gif, "Record an area as an animated GIF"),
+    ];
+    let mut chosen = None;
+    let groups: [(&str, &str, &[(CaptureMode, Icon, &str)]); 2] = [
+        ("Take a picture", "Of an area, a window or the whole screen.", &pictures),
+        ("Record a video", "What happens on the screen, as it happens.", &recordings),
+    ];
+    for (g, (name, about, modes)) in groups.iter().enumerate() {
+        if g > 0 {
+            ui.add_space(16.0);
+        }
+        ui.label(RichText::new(*name).strong());
+        ui.label(RichText::new(*about).size(12.0).color(t.muted));
+        ui.add_space(6.0);
+        egui::Grid::new(("capture-buttons", g)).num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+            for pair in modes.chunks(2) {
+                // The two of a row are as tall as each other: with room for a shortcut if either
+                // has one.
+                let keys: Vec<String> = pair.iter().map(|(mode, ..)| shortcut(*mode)).collect();
+                let tall = keys.iter().any(|k| !k.is_empty());
+                for ((mode, icon, help), key) in pair.iter().zip(&keys) {
+                    if big_button(ui, *icon, mode.label(), help, key, tall).clicked() {
+                        chosen = Some((*mode, 0));
+                    }
+                }
+                ui.end_row();
+            }
+        });
+        if g == 0 {
+            // For a menu or a tip that goes when anything is pressed: time to open it first.
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.label("Or after a wait of");
+                ui.add(egui::DragValue::new(delay).range(1..=60).suffix(" s"));
+                if widgets::button(ui, "Capture After a Wait")
+                    .on_hover_text("Time to open a menu first: the area is chosen when the wait is over")
+                    .clicked()
+                {
+                    chosen = Some((CaptureMode::Region, *delay));
+                }
+            });
+        }
+    }
+    chosen
+}
+
+/// One of the Capture page's buttons: its picture, its name, what it does and its shortcut on a
+/// key cap. `tall` leaves room for the shortcut even when it has none (its row's other one has).
+fn big_button(ui: &mut Ui, icon: Icon, label: &str, help: &str, shortcut: &str, tall: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let size = vec2(262.0, if tall || !shortcut.is_empty() { 70.0 } else { 54.0 });
     let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    // Screen readers (and tests) know it by its name.
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let bg = if resp.hovered() { t.hover } else { t.window };
     ui.painter().rect_filled(rect, 8.0, bg);
     ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, t.border), egui::StrokeKind::Inside);
     icons::paint(ui.painter(), egui::Rect::from_min_size(rect.min + vec2(12.0, (size.y - 28.0) / 2.0), vec2(28.0, 28.0)), icon, t.accent);
-    ui.painter().text(rect.min + vec2(52.0, 9.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(14.5), t.text);
-    ui.painter().text(rect.min + vec2(52.0, 29.0), egui::Align2::LEFT_TOP, help, egui::FontId::proportional(11.5), t.muted);
+    // Its words never run past its edge onto the next one.
+    let words = ui.painter().with_clip_rect(rect.shrink2(vec2(8.0, 0.0)));
+    words.text(rect.min + vec2(52.0, 9.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(14.5), t.text);
+    words.text(rect.min + vec2(52.0, 29.0), egui::Align2::LEFT_TOP, help, egui::FontId::proportional(11.5), t.muted);
     if !shortcut.is_empty() {
         // The shortcut on a line of its own, like a key cap.
         let galley = ui.painter().layout_no_wrap(shortcut.to_string(), egui::FontId::monospace(10.5), t.text);
@@ -487,16 +525,6 @@ fn general_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
             ui.radio_value(&mut s.theme, th, label);
         }
     });
-    ui.add_space(14.0);
-    ui.label(RichText::new("GIF recordings").strong());
-    egui::Grid::new("gif").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
-        ui.label("Frames a second");
-        ui.add(egui::Slider::new(&mut s.gif_frame_rate, 1..=30));
-        ui.end_row();
-        ui.label("Longest recording");
-        ui.add(egui::Slider::new(&mut s.gif_max_secs, 5..=600).suffix(" s"));
-        ui.end_row();
-    });
     if s != svc.settings {
         let theme_changed = s.theme != svc.settings.theme;
         svc.settings = s;
@@ -535,7 +563,7 @@ fn about_tab(svc: &mut Service, ui: &mut Ui) {
     crate::update::about(svc, ui);
 }
 
-/// The microphones and cameras a recording can use (looked up when the Video page is first
+/// The microphones and cameras a recording can use (looked up when the Recording page is first
 /// shown: nothing is turned on).
 pub struct Devices {
     microphones: Vec<String>,
@@ -599,7 +627,7 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let d = home.devices.get_or_insert_with(Devices::find);
     let mut s = svc.settings.clone();
-    ui.heading("Video");
+    ui.heading("Recording");
     ui.add_space(8.0);
     ui.label(RichText::new("Record Video").strong());
     ui.label(RichText::new("A small MP4 of an area, made as soon as you stop.").size(12.0).color(t.muted));
@@ -631,7 +659,7 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
         open_recorder = true;
     }
     ui.add_space(14.0);
-    ui.label(RichText::new("Both").strong());
+    ui.label(RichText::new("Both kinds of video").strong());
     egui::Grid::new("video-both").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
         ui.label("Frames a second");
         ui.add(egui::Slider::new(&mut s.video_frame_rate, 5..=30));
@@ -640,7 +668,19 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
         ui.add(egui::DragValue::new(&mut s.video_max_mins).range(1..=240).suffix(" minutes"));
         ui.end_row();
     });
-    ui.add_space(6.0);
+    ui.add_space(14.0);
+    ui.label(RichText::new("Record GIF").strong());
+    ui.label(RichText::new("A few seconds of something moving, as a picture that plays anywhere. It has no sound.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    egui::Grid::new("gif").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+        ui.label("Frames a second");
+        ui.add(egui::Slider::new(&mut s.gif_frame_rate, 1..=30));
+        ui.end_row();
+        ui.label("Longest recording");
+        ui.add(egui::Slider::new(&mut s.gif_max_secs, 5..=600).suffix(" s"));
+        ui.end_row();
+    });
+    ui.add_space(10.0);
     if widgets::button(ui, "Look for devices again").clicked() {
         home.devices = None;
     }
@@ -700,6 +740,52 @@ mod tests {
         h.run_steps(1);
         assert_eq!(h.state().1, Tab::Shortcuts);
         assert!(h.get_by_label("About").rect().max.x <= 170.0);
+    }
+
+    /// The Capture page's buttons: the pictures first, the recordings under a heading of their
+    /// own, the capture after a wait with the pictures.
+    #[test]
+    fn the_capture_page_keeps_pictures_and_recordings_apart() {
+        for (theme, name) in [(Theme::Dark, "home-capture"), (Theme::Light, "home-capture-light")] {
+            let mut h = Harness::builder().with_size(vec2(590.0, 720.0)).build_ui_state(
+                move |ui, (delay, chosen): &mut (u32, Option<(CaptureMode, u32)>)| {
+                    screengrabcraft_ui::theme::apply(ui.ctx(), theme);
+                    let shortcut = |m: CaptureMode| if m == CaptureMode::Region { "Print Screen".to_string() } else { String::new() };
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        if let Some(c) = capture_buttons(ui, delay, &shortcut) {
+                            *chosen = Some(c);
+                        }
+                    });
+                },
+                (5, None),
+            );
+            h.run_steps(3);
+            let (pictures, recordings) = (h.get_by_label("Take a picture").rect(), h.get_by_label("Record a video").rect());
+            let (region, repeat) = (h.get_by_label(CaptureMode::Region.label()).rect(), h.get_by_label(CaptureMode::Repeat.label()).rect());
+            let (video, gif) = (h.get_by_label(CaptureMode::Production.label()).rect(), h.get_by_label(CaptureMode::Gif.label()).rect());
+            assert!(
+                pictures.max.y <= region.min.y && repeat.max.y < recordings.min.y,
+                "pictures under their heading: {pictures:?} {region:?} {repeat:?}"
+            );
+            assert!(recordings.max.y <= video.min.y && video.min.y <= gif.min.y, "recordings under theirs: {recordings:?} {video:?} {gif:?}");
+            // The two of a row are as tall as each other, though only one has a shortcut.
+            let adjust = h.get_by_label(CaptureMode::Adjust.label()).rect();
+            assert!((region.height() - adjust.height()).abs() < 0.5 && (region.min.y - adjust.min.y).abs() < 0.5, "{region:?} {adjust:?}");
+            // The capture after a wait belongs to the pictures.
+            let wait = h.get_by_label("Capture After a Wait").rect();
+            assert!(wait.min.y > repeat.max.y && wait.max.y < recordings.min.y, "{wait:?}");
+            if let Ok(dir) = std::env::var("SGC_SHOTS")
+                && let Ok(img) = h.render()
+            {
+                let _ = img.save(format!("{dir}/{name}.png"));
+            }
+            h.get_by_label(CaptureMode::Gif.label()).click();
+            h.run_steps(2);
+            assert_eq!(h.state().1, Some((CaptureMode::Gif, 0)));
+            h.get_by_label("Capture After a Wait").click();
+            h.run_steps(2);
+            assert_eq!(h.state().1, Some((CaptureMode::Region, 5)));
+        }
     }
 
     #[test]
