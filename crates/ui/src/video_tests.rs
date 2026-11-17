@@ -1928,3 +1928,114 @@ fn each_editors_recent_strip_lists_its_own_kind() {
     }
     shot(&mut h, "video-editor-recent");
 }
+
+#[test]
+fn the_transcript_pane_says_who_said_what_goes_there_and_names_the_speakers() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let mut h = caption_harness(bytes, CaptionHost::default());
+    assert!(h.query_by_label("Copy the Whole Transcript").is_none(), "closed at first");
+    h.query_all_by_label("Transcript").next().unwrap().click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().transcript_open);
+    // Each line with when it is and who said it: the microphone's You, the computer's Others.
+    h.get_by_label("0:00.2 You: Here's the new login page.");
+    h.get_by_label("0:02.0 Others: It looks good to me.").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 2_000_000, "a line takes the playhead there");
+    shot(&mut h, "video-transcript");
+    // You renamed: the microphone's track has the name, in its header and the transcript.
+    h.get_by_label("Rename You").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("Bill".into()));
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+    assert_eq!(v.session.timeline.tracks[mic].name.as_deref(), Some("Bill"));
+    assert!(v.named_lines().iter().any(|(c, who)| who == "Bill" && c.text.starts_with("Here's")));
+    h.get_by_label("0:00.2 Bill: Here's the new login page.");
+    assert!(h.query_all_by_label("Bill").next().is_some(), "the track's header says it too");
+    // Esc lets a rename go.
+    h.get_by_label("Rename Others").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("Nobody".into()));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    let sound = v.session.timeline.find(StreamKind::SystemSound).unwrap();
+    assert_eq!(v.session.timeline.tracks[sound].name, None);
+    // Closed from its own heading.
+    h.get_by_label("Close the Transcript").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().transcript_open);
+}
+
+#[test]
+fn tracks_move_up_and_down_and_are_renamed_by_a_double_click_on_their_name() {
+    let mut h = harness_stepping(0.02);
+    let kinds = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks.iter().map(|t| t.kind).collect::<Vec<_>>();
+    assert_eq!(kinds(&h), vec![StreamKind::Screen, StreamKind::Microphone, StreamKind::Camera]);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Move Screen Up")).is_disabled(), "the top one goes no higher");
+    h.get_by_label("Move Camera Up").click();
+    h.run_steps(3);
+    assert_eq!(kinds(&h), vec![StreamKind::Screen, StreamKind::Camera, StreamKind::Microphone]);
+    h.get_by_label("Move Screen Down").click();
+    h.run_steps(3);
+    assert_eq!(kinds(&h), vec![StreamKind::Camera, StreamKind::Screen, StreamKind::Microphone]);
+    // Its name double-clicked: typed over, kept with Enter. (A moment first: the click on Move
+    // Down just before would make the two a triple click.)
+    h.run_steps(40);
+    let name = h.get_by_label("Microphone").rect().center();
+    h.hover_at(name);
+    h.run_steps(1);
+    for _ in 0..2 {
+        h.drag_at(name);
+        h.drop_at(name);
+    }
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().renaming.is_some(), "the double click starts renaming");
+    h.event(egui::Event::Text("Narrator".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.tracks[2].name.as_deref(), Some("Narrator"));
+    assert_eq!(v.session.undo_label(), Some("Rename Track"));
+    shot(&mut h, "video-tracks-moved");
+    // Hidden and shown again from the right button's menu, as from its switch.
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 20.0));
+    h.get_by_label("Hide This Track").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].muted);
+}
+
+#[test]
+fn layers_move_in_front_and_behind_and_are_renamed() {
+    let mut h = harness();
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        for (key, at) in [("title", 0), ("lower-bar", 0)] {
+            v.session.execute("video.place", &serde_json::json!({"template": key, "at": at, "layer": "new"})).unwrap();
+        }
+    }
+    h.run_steps(3);
+    let names =
+        |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.layers.iter().map(|l| l.name.clone()).collect::<Vec<_>>();
+    // The later layer is in front, at the top of the rows.
+    assert_eq!(names(&h), vec!["Layer 1", "Layer 2"]);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Move Layer 2 Up")).is_disabled(), "it's in front already");
+    h.get_by_label("Move Layer 1 Up").click();
+    h.run_steps(3);
+    assert_eq!(names(&h), vec!["Layer 2", "Layer 1"], "Layer 1 in front now");
+    // Renamed from the right button's menu.
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.max.x - 30.0, top + 20.0));
+    h.get_by_label("Rename…").click();
+    h.run_steps(2);
+    h.event(egui::Event::Text("Titles".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(names(&h), vec!["Layer 2", "Titles"]);
+}

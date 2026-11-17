@@ -639,6 +639,7 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }],
+                name: None,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),

@@ -53,6 +53,20 @@ pub struct Track {
     #[serde(default = "one")]
     pub volume: f32,
     pub clips: Vec<Clip>,
+    /// The name the owner gave it (its header, and the transcript's speaker for the words heard
+    /// on it); none: what it is (Microphone), and You or Others in the transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// The longest name a track or a layer is given.
+pub const MAX_NAME: usize = 60;
+
+/// A name as it's kept: one line, no control characters, not too long; none if it's empty.
+pub fn clean_name(name: &str) -> Option<String> {
+    let s: String = name.chars().filter(|c| !c.is_control()).take(MAX_NAME).collect();
+    let s = s.trim();
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,7 +165,7 @@ impl Timeline {
             .map(|s| {
                 let len = rec.stream_duration(s.id);
                 let clips = if len >= MIN_CLIP_US { vec![Clip { at: 0, from: 0, len }] } else { Vec::new() };
-                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips }
+                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None }
             })
             .collect();
         Timeline {
@@ -168,14 +182,24 @@ impl Timeline {
     /// it has come back whole, clips are kept inside what was recorded and apart.
     pub fn checked(mut self, rec: &Recording) -> Timeline {
         let fresh = Timeline::new(rec);
+        // In the order they were left in (the owner may have moved them), each once; then any the
+        // recording has that weren't saved.
+        let mut order: Vec<Track> = Vec::new();
+        for t in std::mem::take(&mut self.tracks).into_iter().take(64) {
+            if fresh.tracks.iter().any(|f| f.stream == t.stream) && !order.iter().any(|o| o.stream == t.stream) {
+                order.push(t);
+            }
+        }
+        for f in &fresh.tracks {
+            if !order.iter().any(|o| o.stream == f.stream) {
+                order.push(f.clone());
+            }
+        }
         let mut tracks = Vec::new();
-        for f in fresh.tracks {
-            let found = self.tracks.iter().position(|t| t.stream == f.stream);
-            let mut t = match found {
-                Some(i) => self.tracks.swap_remove(i),
-                None => f.clone(),
-            };
+        for mut t in order {
+            let Some(f) = fresh.tracks.iter().find(|f| f.stream == t.stream) else { continue };
             t.kind = f.kind;
+            t.name = t.name.as_deref().and_then(clean_name);
             t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 2.0) } else { 1.0 };
             let source = rec.stream_duration(t.stream);
             let mut clips: Vec<Clip> = t
@@ -388,6 +412,23 @@ impl Timeline {
         Ok(())
     }
 
+    /// Names a track (an empty name: what it is again).
+    pub fn rename_track(&mut self, track: usize, name: &str) -> Result<(), EditError> {
+        self.track_mut(track)?.name = clean_name(name);
+        Ok(())
+    }
+
+    /// Moves a track to another place among the tracks (the timeline's rows, top first).
+    pub fn move_track(&mut self, track: usize, to: usize) -> Result<(), EditError> {
+        if track >= self.tracks.len() {
+            return Err(EditError::NoTrack(track));
+        }
+        let t = self.tracks.remove(track);
+        let to = to.min(self.tracks.len());
+        self.tracks.insert(to, t);
+        Ok(())
+    }
+
     pub fn set_volume(&mut self, track: usize, volume: f32) -> Result<(), EditError> {
         if !volume.is_finite() {
             return Err(EditError::Invalid("the volume is not a number".to_string()));
@@ -402,7 +443,8 @@ mod tests {
     use super::*;
 
     fn two_tracks() -> Timeline {
-        let full = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }] };
+        let full =
+            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }], name: None };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -434,6 +476,24 @@ mod tests {
         assert_eq!(t.length(), 8_000_000);
         assert!(t.tracks[1].clips.is_empty());
         assert!(t.cut(5, 5).is_err());
+    }
+
+    #[test]
+    fn tracks_are_named_and_moved_and_names_are_kept_clean() {
+        let mut t = two_tracks();
+        t.rename_track(1, "  Bill\u{7}\n ").unwrap();
+        assert_eq!(t.tracks[1].name.as_deref(), Some("Bill"));
+        t.rename_track(1, "   ").unwrap();
+        assert_eq!(t.tracks[1].name, None, "an empty name: what it is again");
+        t.rename_track(0, &"x".repeat(500)).unwrap();
+        assert_eq!(t.tracks[0].name.as_ref().map(|n| n.chars().count()), Some(MAX_NAME));
+        assert!(t.rename_track(7, "a").is_err());
+        // The microphone moved to the top; past the end is the bottom; a missing one is an error.
+        t.move_track(1, 0).unwrap();
+        assert_eq!(t.tracks.iter().map(|t| t.kind).collect::<Vec<_>>(), vec![StreamKind::Microphone, StreamKind::Screen]);
+        t.move_track(0, 99).unwrap();
+        assert_eq!(t.tracks[1].kind, StreamKind::Microphone);
+        assert!(t.move_track(5, 0).is_err());
     }
 
     #[test]
