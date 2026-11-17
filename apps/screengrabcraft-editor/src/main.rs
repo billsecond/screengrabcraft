@@ -370,7 +370,7 @@ impl eframe::App for App {
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{}", version::line("ScreenGrabCraft Editor"));
+        println!("{}", version::line(screengrabcraft_model::EDITOR_NAME));
         return std::process::ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {

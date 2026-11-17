@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=ScreenGrabCraft Editor
+Name=ScreenGrabCraft Image Editor
 GenericName=Screenshot Editor
 Comment=Mark up screenshots and pictures with arrows, callouts, highlights, blur and text
 Exec=screengrabcraft-editor %F

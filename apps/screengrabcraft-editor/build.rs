@@ -12,7 +12,7 @@ fn main() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon("../../assets/app-icon/screengrabcraft-editor.ico")
         .set("ProductName", "ScreenGrabCraft")
-        .set("FileDescription", "ScreenGrabCraft Editor")
+        .set("FileDescription", "ScreenGrabCraft Image Editor")
         .set("CompanyName", "ScreenGrabCraft contributors")
         .set("LegalCopyright", "Copyright (c) the ScreenGrabCraft authors. MIT OR Apache-2.0.")
         .set("OriginalFilename", "screengrabcraft-editor.exe")

@@ -1235,7 +1235,7 @@ impl VideoView {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.library_open, "Library and Media Bin");
-                    if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
+                    if ui.checkbox(&mut ed.settings.show_tray, "Recent Recordings").changed() {
                         ed.services.save_settings(&ed.settings);
                     }
                     ui.separator();
@@ -2985,7 +2985,7 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
                     ui.close();
                 }
                 if ed.services.can_capture()
-                    && ui.button("New Capture").on_hover_text("A picture: it opens in the Editor, beside this window").clicked()
+                    && ui.button("New Capture").on_hover_text("A picture: it opens in the Image Editor, beside this window").clicked()
                 {
                     if let Err(e) = ed.services.new_capture(screengrabcraft_model::CaptureMode::Region) {
                         ed.error(&ctx, e);
@@ -2999,7 +2999,7 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
                 }
             });
             ui.menu_button("View", |ui| {
-                if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
+                if ui.checkbox(&mut ed.settings.show_tray, "Recent Recordings").changed() {
                     ed.services.save_settings(&ed.settings);
                 }
             });
@@ -3070,7 +3070,7 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
                         ui.label(RichText::new("No recording open").font(crate::widgets::strong_font(&ctx, 18.0)).color(t.text));
                         ui.add_space(2.0);
                         ui.label(
-                            RichText::new("Record the screen with your camera and your voice, or open a recording you made. Pictures open in the Editor, beside this window.")
+                            RichText::new("Record the screen with your camera and your voice, or open a recording you made. Pictures open in the Image Editor, beside this window.")
                                 .size(12.5)
                                 .color(t.muted),
                         );

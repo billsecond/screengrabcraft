@@ -1832,11 +1832,22 @@ impl crate::services::Services for TwoWindows {
     fn can_capture(&self) -> bool {
         true
     }
+
+    fn recent(&self) -> Vec<crate::services::RecentItem> {
+        let item = |name: &str| crate::services::RecentItem {
+            path: format!("C:/Captures/{name}"),
+            name: name.to_string(),
+            modified: 1,
+            day: String::new(),
+            time: String::new(),
+        };
+        vec![item("Week.sgvideo"), item("Shot.png"), item("Week.mp4"), item("Notes.sgcraft"), item("Loop.gif")]
+    }
 }
 
 fn two_windows(kind: crate::EditorKind) -> (Harness<'static, Editor>, TwoWindows) {
     let host = TwoWindows::default();
-    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings { show_tray: true, ..EditorSettings::default() });
     ed.kind = kind;
     let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
         |ui, ed: &mut Editor| {
@@ -1890,4 +1901,30 @@ fn the_video_editor_starts_with_its_own_page_opens_recordings_and_hands_pictures
     assert_eq!(*host.0.lock().unwrap(), vec![("C:/Captures/Shot.png".to_string(), false)]);
     let v = h.state().video.as_ref().expect("the video is still open");
     assert_eq!(v.session.revision(), edits);
+}
+
+#[test]
+fn each_editors_recent_strip_lists_its_own_kind() {
+    let has = |h: &Harness<'_, Editor>, name: &str| h.query_all_by_label(name).next().is_some();
+    // The Image Editor: pictures and projects, a GIF too; no recordings, no videos.
+    let (mut h, _) = two_windows(crate::EditorKind::Pictures);
+    h.run_steps(16);
+    assert!(has(&h, "Recent captures") && has(&h, "All captures (3)"));
+    for name in ["Shot.png", "Notes.sgcraft", "Loop.gif"] {
+        assert!(has(&h, name), "{name}");
+    }
+    for name in ["Week.sgvideo", "Week.mp4"] {
+        assert!(!has(&h, name), "{name} isn't the Image Editor's");
+    }
+    // The Video Editor: its recordings and the videos made of them, nothing else.
+    let (mut h, _) = two_windows(crate::EditorKind::Video);
+    h.run_steps(16);
+    assert!(has(&h, "Recent recordings") && has(&h, "All recordings (2)"));
+    for name in ["Week.sgvideo", "Week.mp4"] {
+        assert!(has(&h, name), "{name}");
+    }
+    for name in ["Shot.png", "Notes.sgcraft", "Loop.gif"] {
+        assert!(!has(&h, name), "{name} isn't the Video Editor's");
+    }
+    shot(&mut h, "video-editor-recent");
 }

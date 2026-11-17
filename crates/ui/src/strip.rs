@@ -3,6 +3,9 @@
 //! through older captures (all of them, a thumbnail made only for those in view), and All
 //! captures shows every one bigger, newest first, by day, with a search. A video has a play
 //! mark on its thumbnail.
+//!
+//! Each editor lists its own: the Image Editor its pictures and projects, the Video Editor its
+//! recordings and the videos made of them.
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
@@ -40,6 +43,17 @@ fn is_current(ed: &Editor, path: &str) -> bool {
         Some(v) => v == path,
         None => ed.picture_path.as_deref() == Some(path) || ed.project_path.as_deref() == Some(path),
     }
+}
+
+/// Whether a capture is one this editor lists: a video in the Video Editor, anything else in the
+/// Image Editor.
+pub fn listed_in(kind: crate::editor::EditorKind, path: &str) -> bool {
+    is_video(path) == (kind == crate::editor::EditorKind::Video)
+}
+
+/// The captures this editor lists, newest first as the host gave them.
+fn listed(ed: &Editor) -> Vec<RecentItem> {
+    ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).cloned().collect()
 }
 
 /// Whether a capture is a video (a recording or an MP4).
@@ -147,9 +161,10 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     // under them, and the margins.
     let height = 30.0 + 8.0 + THUMB + SCROLL_ROOM + f32::from(MARGIN.top) + f32::from(MARGIN.bottom);
     egui::Panel::bottom("recent_strip").exact_size(height).frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(MARGIN)).show(ui, |ui| {
-        let items = ed.recent.clone();
+        let items = listed(ed);
+        let video = ed.kind == crate::editor::EditorKind::Video;
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Recent captures").size(12.0).color(t.muted));
+            ui.label(egui::RichText::new(if video { "Recent recordings" } else { "Recent captures" }).size(12.0).color(t.muted));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if icons::button(ui, Icon::Folder, "Show the captures folder", false, true).clicked() {
                     ed.services.open_folder(None);
@@ -159,9 +174,12 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         });
         ui.add_space(4.0);
         if items.is_empty() {
-            ui.label(
-                egui::RichText::new("Captures you take appear here. Press Print Screen, or use the ScreenGrabCraft icon in the tray.").color(t.muted),
-            );
+            let words = if video {
+                "Recordings you make appear here. Use Video Production in the ScreenGrabCraft icon's menu in the tray, or Record a Video."
+            } else {
+                "Captures you take appear here. Press Print Screen, or use the ScreenGrabCraft icon in the tray."
+            };
+            ui.label(egui::RichText::new(words).color(t.muted));
             return;
         }
         // The mouse wheel over the strip goes along it: down for older captures, up for newer.
@@ -208,7 +226,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         });
     });
     // Thumbnails of captures no longer listed are let go.
-    let listed: std::collections::HashSet<&str> = ed.recent.iter().map(|r| r.path.as_str()).collect();
+    let listed: std::collections::HashSet<&str> = ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).map(|r| r.path.as_str()).collect();
     ed.thumbs.retain(|k, _| listed.contains(k.as_str()));
 }
 
@@ -217,7 +235,8 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
 fn all_captures(ed: &mut Editor, ui: &mut Ui, items: &[RecentItem]) {
     let t = Tokens::get(ui.ctx());
     let shown = items.len().min(MAX_SHOWN);
-    let resp = ui.button(format!("All captures ({shown})")).on_hover_text("Every capture in the captures folder, newest first, by day");
+    let (all, what) = if ed.kind == crate::editor::EditorKind::Video { ("All recordings", "recording") } else { ("All captures", "capture") };
+    let resp = ui.button(format!("{all} ({shown})")).on_hover_text(format!("Every {what} in the captures folder, newest first, by day"));
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_width(ALL_WIDTH);
         let search = egui::TextEdit::singleline(&mut ed.capture_search).hint_text("Search by name").desired_width(f32::INFINITY);
@@ -227,7 +246,8 @@ fn all_captures(ed: &mut Editor, ui: &mut Ui, items: &[RecentItem]) {
         let mut matching: Vec<&RecentItem> =
             items.iter().take(MAX_SHOWN).filter(|i| words.iter().all(|w| i.name.to_lowercase().contains(w.as_str()))).collect();
         if matching.is_empty() {
-            ui.label(egui::RichText::new(if items.is_empty() { "No captures yet." } else { "No capture has that name." }).color(t.muted));
+            let none = if items.is_empty() { format!("No {what}s yet.") } else { format!("No {what} has that name.") };
+            ui.label(egui::RichText::new(none).color(t.muted));
             return;
         }
         // Newest first, whatever order they came in.
@@ -319,5 +339,15 @@ mod tests {
         assert!(is_video("b/clip.MP4"));
         assert!(!is_video("c/Capture.png"));
         assert!(!is_video("noext"));
+    }
+
+    #[test]
+    fn each_editor_lists_its_own() {
+        use crate::editor::EditorKind::{Pictures, Video};
+        for (path, video) in [("a/Week.sgvideo", true), ("a/Week.mp4", true), ("a/Shot.png", false), ("a/Shot.sgcraft", false), ("a/Loop.gif", false)]
+        {
+            assert_eq!(listed_in(Video, path), video, "{path}");
+            assert_eq!(listed_in(Pictures, path), !video, "{path}");
+        }
     }
 }

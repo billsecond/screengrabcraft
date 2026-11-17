@@ -350,7 +350,7 @@ impl Hotkeys {
     pub fn clashes(&self) -> Vec<(String, String)> {
         let mut named: Vec<(&str, &Hotkey)> = CaptureMode::ALL.iter().filter_map(|m| self.get(*m).map(|k| (m.label(), k))).collect();
         if let Some(k) = &self.editor {
-            named.push(("Open Editor", k));
+            named.push(("Open the Image Editor", k));
         }
         if let Some(k) = &self.pause {
             named.push(("Pause or Resume Recording", k));

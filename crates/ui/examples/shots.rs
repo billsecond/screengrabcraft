@@ -611,7 +611,7 @@ mod live {
         settings.show_tray = false;
         let (shown, size, title) = match scene {
             "editor" => (Scene::Editor(Box::new(super::picture_editor(&settings)?)), super::EDITOR, screengrabcraft_model::EDITOR_NAME),
-            "video" => (Scene::Editor(Box::new(super::video_editor(&settings, true)?)), super::EDITOR, screengrabcraft_model::EDITOR_NAME),
+            "video" => (Scene::Editor(Box::new(super::video_editor(&settings, true)?)), super::EDITOR, screengrabcraft_model::VIDEO_EDITOR_NAME),
             "overlay" => (Scene::Overlay(Box::new(super::overlay_on_desktop()?)), vec2(1280.0, 800.0), "ScreenGrabCraft"),
             "recorder" => {
                 let mut view = RecorderView::default();

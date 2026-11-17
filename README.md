@@ -1,6 +1,6 @@
 # ScreenGrabCraft
 
-<img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.png" width="96" alt="The ScreenGrabCraft icon: a selection being dragged out, with a cursor at its corner"> <img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.editor.png" width="96" alt="The ScreenGrabCraft Editor icon: a barn owl with a pencil in its beak">
+<img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.png" width="96" alt="The ScreenGrabCraft icon: a selection being dragged out, with a cursor at its corner"> <img src="assets/app-icon/hicolor/128x128/apps/io.github.billsecond.screengrabcraft.editor.png" width="96" alt="The ScreenGrabCraft Image Editor icon: a barn owl with a pencil in its beak">
 
 **An open-source screen capture and annotation suite, written from scratch in Rust.**
 
@@ -11,7 +11,10 @@ it. It is two programs:
 - **ScreenGrabCraft**, the capture service. It lives in the system tray (the menu bar on macOS)
   and runs as a persistent per-user service: it starts when you sign in and is started again if
   it ever stops. It answers global shortcuts and the tray menu.
-- **ScreenGrabCraft Editor**, where captures are marked up. It also runs in a browser.
+- **ScreenGrabCraft Image Editor**, where screenshots and pictures are marked up (it also runs in
+  a browser), and the **Video Editor**, the same program in a window of its own, where recordings
+  are cut and edited. Each one's Recent strip lists its own: pictures in one, recordings in the
+  other.
 
 Both are native, GPU-drawn programs (no Electron, no web view), with a command-line program
 beside them for scripts and agents.
