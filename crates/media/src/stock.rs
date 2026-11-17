@@ -129,6 +129,24 @@ fn line(words: &str, most: usize) -> String {
     s.chars().take(most).collect()
 }
 
+/// Words shortened to fit `max` wide (a word at a time where it can be, else a letter at a time),
+/// an ellipsis saying so.
+fn fit(words: &str, size: f32, wt: Wt, max: f32) -> String {
+    if width(words, size, wt, 0.0) <= max {
+        return words.to_string();
+    }
+    let wide = |s: &str| width(&format!("{s}…"), size, wt, 0.0);
+    let mut cut: Vec<&str> = words.split(' ').take(60).collect();
+    while cut.len() > 1 && wide(&cut.join(" ")) > max {
+        cut.pop();
+    }
+    let mut s: String = cut.join(" ").chars().take(120).collect();
+    while s.chars().count() > 1 && wide(&s) > max {
+        s.pop();
+    }
+    format!("{}…", s.trim_end())
+}
+
 /// Words broken into lines no wider than `max`, at most `lines` of them.
 fn wrap(words: &str, size: f32, wt: Wt, max: f32, lines: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -171,6 +189,12 @@ fn gv(y0: f32, y1: f32, top: Rgb, bottom: Rgb, alpha: f32) -> Value {
 
 fn st(c: Rgb, alpha: f32, width: f32) -> Value {
     json!({"ty": "st", "c": fixed(&c), "o": fixed(&[alpha * 100.0]), "w": fixed(&[width]), "lc": 2, "lj": 2})
+}
+
+/// A stroke shaded from `top` at `y0` to `bottom` at `y1`.
+fn gst(y0: f32, y1: f32, top: Rgb, bottom: Rgb, width: f32) -> Value {
+    let k = [0.0, top[0], top[1], top[2], 1.0, bottom[0], bottom[1], bottom[2]];
+    json!({"ty": "gs", "t": 1, "o": fixed(&[100.0]), "w": fixed(&[width]), "lc": 2, "lj": 2, "s": fixed(&[0.0, y0]), "e": fixed(&[0.0, y1]), "g": {"p": 2, "k": fixed(&k)}})
 }
 
 fn tr() -> Value {
@@ -255,14 +279,19 @@ impl Build {
 
     /// A layer that pops on about a point (a little past its size and back) and shrinks away.
     fn popped(&mut self, name: &str, items: Vec<Value>, about: P, from: f32) {
-        let s = keys(&[
+        let s = self.pop_scale(from);
+        self.shapes(name, items, json!({"a": fixed(&about), "p": fixed(&about), "s": s}));
+    }
+
+    /// The scale of something popping on at `from` and shrinking away at the end.
+    fn pop_scale(&self, from: f32) -> Value {
+        keys(&[
             (0.0, vec![0.0, 0.0], E::Lin),
             (from.max(0.02), vec![0.0, 0.0], E::Back),
             (from + 12.0, vec![100.0, 100.0], E::Lin),
             (self.out(), vec![100.0, 100.0], E::In),
             (self.total, vec![0.0, 0.0], E::Lin),
-        ]);
-        self.shapes(name, items, json!({"a": fixed(&about), "p": fixed(&about), "s": s}));
+        ])
     }
 
     /// A rounded plate that grows on from an edge (or from its middle).
@@ -466,13 +495,37 @@ pub fn has_words(style: TextStyle) -> bool {
     use TextStyle::*;
     // A few stingers carry words while they cover the picture.
     matches!(style, StingerNewsFlash | StingerHeadline | StingerChapter | StingerStep)
-        || (!is_stinger(style) && !matches!(style, Highlight | Spotlight | Circle))
+        || (!is_stinger(style) && !matches!(style, Highlight | Spotlight | Circle | Blur | Click))
 }
 
 /// Whether it has a second line.
 pub fn has_subtitle(style: TextStyle) -> bool {
     use TextStyle::*;
-    has_words(style) && !matches!(style, Title | TitleBox | Banner | Callout | Note | Leader | Keys | StingerNewsFlash | StingerStep)
+    has_words(style)
+        && !matches!(style, Title | TitleBox | Banner | Callout | Note | Leader | Keys | StingerNewsFlash | StingerStep | Arrow | Countdown)
+}
+
+/// How strongly a blur hides what's under it `secs` into an item `len_us` long (0 to 1): coming
+/// on over its first moments, going over its last, as the graphics do.
+pub fn blur_amount(len_us: u64, secs: f32) -> f32 {
+    let total = (len_us.min(3_600_000_000) as f32 / 1e6 * FPS).max(OUT * 2.0 + 2.0);
+    let frame = if secs.is_finite() { secs * FPS } else { 0.0 };
+    let smooth = |p: f32| {
+        let p = p.clamp(0.0, 1.0);
+        p * p * (3.0 - 2.0 * p)
+    };
+    smooth(frame / 10.0).min(smooth((total - frame) / OUT))
+}
+
+/// The number a countdown counts from: the title's, 1 to 9 (3 if it isn't a number).
+fn count_from(title: &str) -> u32 {
+    title.trim().parse::<i64>().map_or(3, |n| n.clamp(1, 9) as u32)
+}
+
+/// The points of a checklist: a line of the title each (blank lines skipped), at most five, each
+/// short enough to fit `max` wide.
+fn points(title: &str, size: f32, max: f32) -> Vec<String> {
+    title.lines().take(200).map(|l| line(l, 120)).filter(|l| !l.is_empty()).take(5).map(|l| fit(&l, size, Wt::Reg, max)).collect()
 }
 
 /// The corners of a plate `r` whose right end is cut on a slant (`lean` wider at the top).
@@ -485,6 +538,8 @@ fn slanted(r: Rect, lean: f32) -> [P; 4] {
 pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len_us: u64, size: f32) -> Option<Graphic> {
     let total = (len_us.min(3_600_000_000) as f32 / 1e6 * FPS).max(OUT * 2.0 + 2.0);
     let a = rgb(accent);
+    // A checklist's lines, before the words are made one line.
+    let listed = title;
     let (title, sub) = (line(title, 160), line(subtitle, 400));
     let has_sub = !sub.is_empty();
     let size = if size.is_finite() { size.clamp(0.05, 1.0) } else { 0.3 };
@@ -827,6 +882,243 @@ pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len
             b.faded("dark", vec![rc(r(-W, -H, W * 3.0, H * 3.0), 0.0), fill], 0.0, 12.0);
             r(cx - radius * 0.6, cy - radius * 0.6, radius * 1.2, radius * 1.2)
         }
+        TextStyle::Arrow => {
+            // The tip is the point the item's place puts on what it points at; the tail is down
+            // to its left. The line draws itself on from the tail and the head pops on as it
+            // arrives; at the end the line runs on into the tip as the head goes.
+            let tip: P = [1190.0, 454.0];
+            let tail: P = [tip[0] - 320.0, tip[1] + 230.0];
+            anchor = (tip[0], tip[1]);
+            let (dx, dy) = (tip[0] - tail[0], tip[1] - tail[1]);
+            let long = (dx * dx + dy * dy).sqrt().max(1.0);
+            let (ux, uy) = (dx / long, dy / long);
+            // `d` back from the tip along the line, `side` across it.
+            let back = |d: f32, side: f32| -> P { [tip[0] - ux * d - uy * side, tip[1] - uy * d + ux * side] };
+            let (head, half, notch, thick) = (86.0, 50.0, 20.0, 24.0);
+            let tri = [tip, back(head, half), back(head - notch, 0.0), back(head, -half)];
+            let shaft = json!({"ty": "sh", "ks": {"a": 0, "k": outline(&[tail, back(head - notch - 6.0, 0.0)], false)}});
+            let draw = json!({
+                "ty": "tm",
+                "s": keys(&[(0.0, vec![0.0], E::Lin), (b.out(), vec![0.0], E::In), (b.total, vec![100.0], E::Lin)]),
+                "e": keys(&[(0.0, vec![0.0], E::Lin), (0.02, vec![0.0], E::Out), (12.0, vec![100.0], E::Lin)]),
+                "o": fixed(&[0.0]),
+            });
+            let (y0, y1) = (tip[1] - 40.0, tail[1] + 20.0);
+            let about = back(head * 0.55, 0.0);
+            let mut bounds = r(tail[0] - 30.0, tip[1] - 30.0, dx + 60.0, dy.abs() + 60.0);
+            if !title.is_empty() {
+                // The words on a small dark pill, the tail tucked under its right end.
+                let said = fit(&title, 34.0, Wt::Bold, 900.0);
+                let pw = width(&said, 34.0, Wt::Bold, 0.0) + 64.0;
+                let pill = r(tail[0] + 30.0 - pw, tail[1] - 33.0, pw, 66.0);
+                b.words("title", &said, 34.0, Wt::Bold, WHITE, pill.x + 32.0, pill.y + 45.0, 0, 0.0, 16.0);
+                b.popped("pill", vec![rc(pill, 33.0), dark(pill, 0.95)], [tail[0], tail[1]], 11.0);
+                b.shadow(pill, 33.0, 13.0);
+                let (x0, y) = (pill.x.min(bounds.x), bounds.y);
+                bounds = r(x0, y, bounds.x + bounds.w - x0, (pill.y + pill.h - y).max(bounds.h));
+            }
+            let accent = |w: f32| gst(y0, y1, tint(a, 0.18), shade(a, 0.8), w);
+            b.popped("head", vec![poly(&tri), gv(y0, y1, tint(a, 0.18), shade(a, 0.8), 1.0)], about, 8.0);
+            b.shapes("line", vec![shaft.clone(), draw.clone(), accent(thick)], json!({}));
+            b.popped("head edge", vec![poly(&tri), fl(WHITE, 1.0), st(WHITE, 1.0, 12.0)], about, 8.0);
+            b.shapes("line edge", vec![shaft.clone(), draw.clone(), st(WHITE, 1.0, thick + 12.0)], json!({}));
+            b.popped("head shade", vec![poly(&tri), st(BLACK, 0.22, 26.0)], about, 8.0);
+            b.shapes("line shade", vec![shaft, draw, st(BLACK, 0.22, thick + 26.0)], json!({}));
+            bounds
+        }
+        TextStyle::Blur => {
+            // Nothing drawn: what's under its box is blurred where the layers are drawn.
+            sized = true;
+            let (cx, cy) = middle;
+            let w = size * W;
+            let h = w * 0.56;
+            r(cx - w / 2.0, cy - h / 2.0, w, h)
+        }
+        TextStyle::Countdown => {
+            // A number a step, each popping on in the middle of a disc, a ring sweeping round
+            // once while it's there.
+            let (cx, cy) = middle;
+            let n = count_from(&title);
+            let seg = b.total / n as f32;
+            let (disc, ring, size) = (340.0, 286.0, 220.0);
+            for k in 0..n {
+                let (from, to) = (k as f32 * seg, (k + 1) as f32 * seg);
+                let last = k + 1 == n;
+                let start = if k == 0 { from + (seg * 0.2).min(4.0) } else { from };
+                let (pop, fade) = ((seg * 0.4).min(9.0), (seg * 0.15).min(4.0));
+                let (s, o) = if last {
+                    (
+                        keys(&[
+                            (start, vec![40.0, 40.0], E::Back),
+                            (start + pop, vec![100.0, 100.0], E::Lin),
+                            (b.out(), vec![100.0, 100.0], E::In),
+                            (b.total, vec![0.0, 0.0], E::Lin),
+                        ]),
+                        keys(&[(start, vec![0.0], E::Out), (start + pop * 0.5, vec![100.0], E::Lin)]),
+                    )
+                } else {
+                    (
+                        keys(&[
+                            (start, vec![40.0, 40.0], E::Back),
+                            (start + pop, vec![100.0, 100.0], E::Lin),
+                            (to - fade, vec![100.0, 100.0], E::In),
+                            (to, vec![115.0, 115.0], E::Lin),
+                        ]),
+                        keys(&[
+                            (start, vec![0.0], E::Out),
+                            (start + pop * 0.5, vec![100.0], E::Lin),
+                            (to - fade, vec![100.0], E::In),
+                            (to, vec![0.0], E::Lin),
+                        ]),
+                    )
+                };
+                let doc = json!({"s": size, "f": "Sans-Black", "t": (n - k).to_string(), "j": 2, "fc": WHITE, "sw": size * 0.03, "sc": WHITE});
+                // About the middle of its figure.
+                let ks = json!({"a": fixed(&[0.0, -size * 0.355]), "p": fixed(&[cx, cy]), "s": s, "o": o});
+                b.push(json!({"ty": 5, "nm": "title", "ip": from, "op": if last { b.total } else { to }, "ks": ks, "t": {"d": {"k": [{"s": doc, "t": 0}]}}}));
+            }
+            let mut sweep = Vec::new();
+            for k in 0..n {
+                let (from, to) = (k as f32 * seg, (k + 1) as f32 * seg);
+                let to = if k + 1 == n { to.min(b.out()).max(from + 1.0) } else { to };
+                sweep.push((from, vec![0.0], E::Lin));
+                sweep.push((to - 0.05, vec![100.0], E::Lin));
+            }
+            let turn = json!({"ty": "tm", "s": fixed(&[0.0]), "e": keys(&sweep), "o": fixed(&[0.0])});
+            let ks = json!({"p": fixed(&[cx, cy]), "r": fixed(&[-90.0]), "s": b.pop_scale(0.0)});
+            b.shapes("sweep", vec![el(0.0, 0.0, ring, ring), turn, st(WHITE, 1.0, 12.0)], ks);
+            let face = gr(vec![el(cx, cy, disc, disc), gv(cy - disc / 2.0, cy + disc / 2.0, tint(a, 0.16), shade(a, 0.72), 1.0)]);
+            b.popped("disc", vec![gr(vec![el(cx, cy, ring, ring), st(WHITE, 0.22, 12.0)]), face], [cx, cy], 0.0);
+            b.popped("edge", vec![el(cx, cy, disc + 16.0, disc + 16.0), st(WHITE, 0.35, 3.0)], [cx, cy], 3.0);
+            b.shadow(r(cx - disc / 2.0, cy - disc / 2.0, disc, disc), disc / 2.0, 4.0);
+            r(cx - disc / 2.0 - 10.0, cy - disc / 2.0 - 10.0, disc + 20.0, disc + 20.0)
+        }
+        TextStyle::EndCard => {
+            // Big words in the middle, a short rule under them, and a button under that.
+            let (size, lh) = (96.0, 96.0 * 1.24);
+            let said = wrap(&title, size, Wt::Black, 1640.0, 2);
+            let n = said.len().max(1) as f32;
+            let tw = said.iter().map(|l| width(l, size, Wt::Black, 0.0)).fold(0.0, f32::max).max(240.0);
+            let label = fit(&sub, 38.0, Wt::Bold, 1100.0);
+            let bw = if has_sub { width(&label, 38.0, Wt::Bold, 0.0) + 150.0 } else { 0.0 };
+            let block = 70.0 + (n - 1.0) * lh + 42.0 + if has_sub { 52.0 + 88.0 } else { 0.0 };
+            let top = (H - block) / 2.0;
+            let base = top + 70.0;
+            let rule = base + (n - 1.0) * lh + 34.0;
+            b.lit("title", &said.join("\n"), size, Wt::Black, WHITE, W / 2.0, base, 2, 2.0);
+            if has_sub {
+                let pill = r(W / 2.0 - bw / 2.0, rule + 60.0, bw, 88.0);
+                let (px, py) = (pill.x + 58.0, pill.y + 44.0);
+                b.words("subtitle", &label, 38.0, Wt::Bold, WHITE, pill.x + 104.0, py + 14.0, 0, 0.0, 18.0);
+                let plus = vec![
+                    gr(vec![rc(r(px - 16.0, py - 4.0, 32.0, 8.0), 4.0), fl(WHITE, 1.0)]),
+                    gr(vec![rc(r(px - 4.0, py - 16.0, 8.0, 32.0), 4.0), fl(WHITE, 1.0)]),
+                    gr(vec![el(px, py, 56.0, 56.0), fl(shade(a, 0.62), 0.55)]),
+                ];
+                b.popped("plus", plus, [px, py], 15.0);
+                b.shine(rc(pill, 44.0), pill, 26.0);
+                b.popped("button", vec![rc(pill, 44.0), glow(pill, a)], [W / 2.0, py], 12.0);
+                b.shadow(pill, 44.0, 14.0);
+            }
+            b.plate(r(W / 2.0 - 110.0, rule, 220.0, 8.0), 4.0, fl(a, 1.0), 6.0, 20.0, Dir::Apart);
+            let wide = tw.max(bw);
+            r(W / 2.0 - wide / 2.0 - 30.0, top - 20.0, wide + 60.0, block + 40.0)
+        }
+        TextStyle::Social => {
+            // A disc with an "@" pops on, a dark plate grows to its right with the handle on it.
+            anchor = lower;
+            let (x, y) = (110.0, 832.0);
+            let (cx, cy) = (x + 58.0, y + 58.0);
+            let handle = fit(&title, 42.0, Wt::Bold, 1200.0);
+            let line2 = fit(&sub, 28.0, Wt::Reg, 1200.0);
+            let w = (width(&handle, 42.0, Wt::Bold, 0.0).max(width(&line2, 28.0, Wt::Reg, 0.0)) + 136.0).clamp(280.0, 1400.0);
+            let plate = r(cx, cy - 46.0, w, 92.0);
+            let tx = cx + 86.0;
+            b.words("at", "@", 64.0, Wt::Black, WHITE, cx, cy + 21.0, 2, 0.0, 6.0);
+            b.words("title", &handle, 42.0, Wt::Bold, WHITE, tx, if has_sub { cy - 2.0 } else { cy + 15.0 }, 0, 0.0, 10.0);
+            b.words("subtitle", &line2, 28.0, Wt::Reg, SOFT, tx, cy + 34.0, 0, 0.0, 14.0);
+            b.popped("ring", vec![el(cx, cy, 124.0, 124.0), st(WHITE, 0.35, 3.0)], [cx, cy], 4.0);
+            b.popped("disc", vec![el(cx, cy, 116.0, 116.0), gv(cy - 58.0, cy + 58.0, tint(a, 0.2), shade(a, 0.72), 1.0)], [cx, cy], 0.0);
+            b.plate(plate, 46.0, dark(plate, 0.95), 4.0, 16.0, Dir::Right);
+            b.shadow(r(cx - 40.0, plate.y, w + 40.0, plate.h), 46.0, 6.0);
+            r(x, y, cx + w - x, 116.0)
+        }
+        TextStyle::Checklist => {
+            // A card at the left: a heading, then a ticked point for each line, one after another.
+            let x = 110.0;
+            let list = points(listed, 36.0, 640.0);
+            let n = list.len();
+            let heading = fit(&sub, 40.0, Wt::Black, 780.0);
+            let widest = list.iter().map(|p| width(p, 36.0, Wt::Reg, 0.0)).fold(0.0, f32::max);
+            let hw = if has_sub { width(&heading, 40.0, Wt::Black, 0.0) + 120.0 } else { 0.0 };
+            let w = (widest + 180.0).max(hw).clamp(520.0, 900.0);
+            let (row, head) = (72.0, if has_sub { 112.0 } else { 30.0 });
+            let h = if n == 0 { if has_sub { 108.0 } else { 100.0 } } else { head + n as f32 * row + 28.0 };
+            let top = (H - h) / 2.0;
+            let card = r(x, top, w, h);
+            if has_sub {
+                b.words("subtitle", &heading, 40.0, Wt::Black, WHITE, x + 54.0, top + 72.0, 0, 0.0, 8.0);
+                if n > 0 {
+                    b.plate(r(x + 54.0, top + 100.0, w - 108.0, 2.0), 1.0, fl(WHITE, 0.14), 8.0, 22.0, Dir::Right);
+                }
+            }
+            for (k, p) in list.iter().enumerate() {
+                let (dx, dy) = (x + 78.0, top + head + row * k as f32 + row / 2.0);
+                let from = 12.0 + 5.0 * k as f32;
+                b.words("point", p, 36.0, Wt::Reg, OFF, x + 126.0, dy + 13.0, 0, 0.0, from + 2.0);
+                b.drawn(&[[dx - 10.0, dy + 1.0], [dx - 3.0, dy + 8.0], [dx + 10.0, dy - 7.0]], vec![st(WHITE, 1.0, 5.0)], from + 4.0, from + 11.0);
+                b.popped("tick", vec![el(dx, dy, 44.0, 44.0), gv(dy - 22.0, dy + 22.0, tint(a, 0.2), shade(a, 0.74), 1.0)], [dx, dy], from);
+            }
+            b.plate(r(x, top + 24.0, 10.0, h - 48.0), 5.0, fl(a, 1.0), 2.0, 14.0, Dir::Down);
+            b.plate(card, 22.0, dark(card, 0.95), 0.0, 14.0, Dir::Right);
+            b.shadow(card, 22.0, 6.0);
+            card
+        }
+        TextStyle::Click => {
+            // A dot on the point and, about every 0.8 s, rings rippling out from it and fading.
+            let (cx, cy) = middle;
+            let period = 24.0;
+            let mut clicks = Vec::new();
+            let mut t = 0.0;
+            while t <= b.out() && clicks.len() < 400 {
+                clicks.push(t);
+                t += period;
+            }
+            let dot = 34.0;
+            // The dot, on top, pressed a little at each click.
+            let mut press = Vec::new();
+            for c in &clicks {
+                press.extend([(*c, vec![dot, dot], E::Out), (c + 3.0, vec![dot * 0.78, dot * 0.78], E::Out), (c + 9.0, vec![dot, dot], E::Lin)]);
+            }
+            let spot = json!({"ty": "el", "p": fixed(&[cx, cy]), "s": keys(&press)});
+            b.popped("dot", vec![spot, fl(a, 1.0), st(WHITE, 1.0, 8.0), st(BLACK, 0.25, 18.0)], [cx, cy], 0.0);
+            // Each click: a flash round the dot, then two rings going out, holding and fading.
+            let rings = [(0.0, 10.0, 100.0, 0.0, a, true), (0.0, 20.0, 170.0, 12.0, a, false), (5.0, 20.0, 230.0, 8.0, tint(a, 0.3), false)];
+            for (delay, last, reach, thick, colour, flash) in rings {
+                let (mut size, mut fade, mut wide) = (Vec::new(), Vec::new(), Vec::new());
+                for c in &clicks {
+                    let (on, off, next) = (c + delay, c + delay + last, c + delay + period - 0.1);
+                    let strong = if flash { 80.0 } else { 100.0 };
+                    size.extend([(on, vec![dot, dot], E::Out), (off, vec![reach, reach], E::Lin), (next, vec![reach, reach], E::Lin)]);
+                    fade.extend([
+                        (on, vec![strong], E::Lin),
+                        (on + last * 0.35, vec![strong * 0.9], E::Lin),
+                        (off, vec![0.0], E::Lin),
+                        (next, vec![0.0], E::Lin),
+                    ]);
+                    wide.extend([(on, vec![thick], E::Out), (off, vec![thick * 0.35], E::Lin), (next, vec![thick * 0.35], E::Lin)]);
+                }
+                let ring = json!({"ty": "el", "p": fixed(&[cx, cy]), "s": keys(&size)});
+                let paint = if flash {
+                    json!({"ty": "fl", "c": fixed(&colour), "o": keys(&fade)})
+                } else {
+                    json!({"ty": "st", "c": fixed(&colour), "o": keys(&fade), "w": keys(&wide), "lc": 2, "lj": 2})
+                };
+                let ks = json!({"o": b.on_off(0.0, 0.5, vec![0.0], vec![100.0])});
+                b.shapes(if flash { "flash" } else { "ring" }, vec![ring, paint], ks);
+            }
+            r(cx - 120.0, cy - 120.0, 240.0, 240.0)
+        }
         // ---- stingers: all of the picture covered half-way through ----
         TextStyle::StingerDiagonal | TextStyle::StingerPanel => {
             let lean = 420.0;
@@ -1156,6 +1448,33 @@ pub fn card(
     let mut pix = screengrabcraft_render::canvas::to_pixmap(backdrop)?;
     let (w, h) = (pix.width() as f32, pix.height() as f32);
     let secs = len_us.min(3_600_000_000) as f32 / 1e6;
+    if style == TextStyle::Blur {
+        // Lines of made-up words, the middle of them blurred, a faint edge round the box.
+        let mut paint = tiny_skia::Paint { anti_alias: true, ..tiny_skia::Paint::default() };
+        paint.set_color_rgba8(255, 255, 255, 215);
+        let widths = [0.11, 0.07, 0.15, 0.09, 0.12, 0.06, 0.1, 0.14, 0.08, 0.13];
+        for (row, y) in [0.24, 0.38, 0.52, 0.66, 0.8].iter().enumerate() {
+            let mut x = 0.06 + 0.03 * (row % 2) as f32;
+            for k in 0..12 {
+                let word = widths.get((row * 3 + k) % widths.len()).copied().unwrap_or(0.1);
+                if x + word > 0.94 {
+                    break;
+                }
+                if let Some(p) = screengrabcraft_render::draw::rounded_rect(Rect::new(x * w, y * h - h * 0.025, word * w, h * 0.05), h * 0.012) {
+                    pix.fill_path(&p, &paint, tiny_skia::FillRule::Winding, Transform::identity(), None);
+                }
+                x += word + 0.025;
+            }
+        }
+        let k = (w * 0.6) / g.bounds.w.max(1.0);
+        let b = Rect::new(w / 2.0 - g.bounds.w * k / 2.0, h / 2.0 - g.bounds.h * k / 2.0, g.bounds.w * k, g.bounds.h * k);
+        crate::layer_draw::blur_box(&mut pix, b, 1.0);
+        if let Some(p) = screengrabcraft_render::draw::rounded_rect(b, 3.0) {
+            paint.set_color_rgba8(255, 255, 255, 110);
+            pix.stroke_path(&p, &paint, &tiny_skia::Stroke { width: 1.5, ..tiny_skia::Stroke::default() }, Transform::identity(), None);
+        }
+        return screengrabcraft_render::canvas::from_pixmap(&pix);
+    }
     if is_stinger(style) {
         g.animation.render(&mut pix, secs * 0.32, Transform::from_scale(w / W, h / H));
     } else if style == TextStyle::Spotlight {
@@ -1172,7 +1491,7 @@ pub fn card(
 }
 
 #[cfg(test)]
-const ALL: [TextStyle; 40] = {
+const ALL: [TextStyle; 47] = {
     use TextStyle::*;
     [
         NewsBreaking,
@@ -1215,12 +1534,25 @@ const ALL: [TextStyle; 40] = {
         StingerStep,
         StingerProgress,
         StingerCheck,
+        Arrow,
+        Blur,
+        Countdown,
+        EndCard,
+        Social,
+        Checklist,
+        Click,
     ]
 };
 
 #[cfg(test)]
 fn sample(style: TextStyle) -> (&'static str, &'static str) {
     match style {
+        TextStyle::Arrow => ("Click here", ""),
+        TextStyle::Countdown => ("3", ""),
+        TextStyle::EndCard => ("Thanks for watching", "Follow for more"),
+        TextStyle::Social => ("@yourname", "Follow along"),
+        TextStyle::Checklist => ("Open the editor\nTrim the start\nAdd a title\nExport the video", "In this video"),
+        TextStyle::Blur | TextStyle::Click => ("", ""),
         TextStyle::Keys => ("Ctrl + Shift + S", ""),
         TextStyle::Step => ("2", "Choose where it goes"),
         TextStyle::StingerStep => ("3", ""),
@@ -1254,7 +1586,11 @@ mod tests {
             let (start, held, end) = (covered(&g, 0.0), covered(&g, 75.0), covered(&g, 149.9));
             assert!(start < 0.01 && end < 0.03, "{style:?}: nothing at its start or its end ({start}, {end})");
             assert!(g.bounds.w > 10.0 && g.bounds.h > 10.0, "{style:?} {:?}", g.bounds);
-            if is_stinger(style) {
+            if style == TextStyle::Blur {
+                // It draws nothing itself: the picture under its box is blurred (see `layer_draw`).
+                assert!(held == 0.0 && g.sized, "the blur draws nothing: {held}");
+                assert!(blur_amount(5_000_000, 0.0) == 0.0 && blur_amount(5_000_000, 2.5) == 1.0 && blur_amount(5_000_000, 5.0) == 0.0);
+            } else if is_stinger(style) {
                 assert!(held > 0.995, "{style:?} covers the picture half-way: {held}");
             } else if style == TextStyle::Spotlight {
                 assert!(held > 0.3 && held < 0.99, "the spotlight darkens all but its middle: {held}");
@@ -1299,6 +1635,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_countdown_counts_from_its_title_and_a_checklist_has_a_point_a_line() {
+        assert_eq!([count_from("3"), count_from(" 5 "), count_from("0"), count_from("42"), count_from("go"), count_from("")], [3, 5, 1, 9, 3, 3]);
+        // A number for each step, each its own words.
+        let g = build(TextStyle::Countdown, "5", "", [11, 95, 255], 5_000_000, 0.3).unwrap();
+        let said: Vec<String> = g.animation.texts().into_iter().map(|(_, w)| w).collect();
+        assert_eq!(said, ["5", "4", "3", "2", "1"]);
+        // Blank lines skipped, five at most, a line too long shortened.
+        let long = "word ".repeat(80);
+        let list = points(&format!("One\n\n  Two  \n{long}\nFour\nFive\nSix"), 36.0, 640.0);
+        assert_eq!(list.len(), 5);
+        assert_eq!((list[0].as_str(), list[1].as_str()), ("One", "Two"));
+        assert!(list[2].ends_with('…') && width(&list[2], 36.0, Wt::Reg, 0.0) <= 640.0, "{}", list[2]);
+        assert!(points("\n \n", 36.0, 640.0).is_empty());
     }
 
     #[test]
@@ -1423,6 +1775,19 @@ mod shots {
                 (StingerStep, "2", "", amber, 3.0),
                 (StingerProgress, "", "", teal, 1.5),
                 (StingerCheck, "", "", [0x22, 0xa5, 0x5b], 1.6),
+            ],
+        );
+        sheet(
+            "stock-new",
+            &[
+                (Arrow, "", "", [0xff, 0x3b, 0x30], 3.0),
+                (Arrow, "Click here", "", blue, 3.0),
+                (Countdown, "3", "", blue, 3.0),
+                (EndCard, "Thanks for watching", "Follow for more", blue, 3.0),
+                (Social, "@yourname", "Follow along", blue, 3.0),
+                (Checklist, "Open the editor\nTrim the start\nAdd a title\nExport the video", "In this video", teal, 3.0),
+                (Click, "", "", amber, 2.65),
+                (Arrow, "Choose where the recording is saved", "", teal, 3.0),
             ],
         );
     }
