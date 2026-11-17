@@ -23,10 +23,12 @@ beside them for scripts and agents.
 
 | Capture | Edit a video |
 |---|---|
-| ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) | ![The video editor: a recording with a name put on it and the camera in its corner, the library of titles at the left, and a timeline with the screen, the computer's sound, the microphone, the camera and the captions](docs/images/video-editor.png) |
+| ![The capture overlay: the frozen screen dimmed around the chosen area, its size, handles and the capture bar with Copy & Edit, Edit, Copy, Save and Cancel](docs/images/overlay.png) | ![The video editor: a recording with a name put on it and the camera in its corner, the library at the left, and a timeline with the screen, the computer's sound, the microphone, the camera and the captions, a stretch chosen with the handles on the ruler](docs/images/video-editor.png) |
 
-The program in these pictures is made up, and so are its customers: every picture here is drawn
-by ScreenGrabCraft's own code (`cargo run -p screengrabcraft-ui --example shots`).
+These are ScreenGrabCraft's own windows, running on Windows, each put on a made-up desktop. The
+program being captured and edited in them is made up, and so are its customers and the person on
+the camera (`cargo run -p screengrabcraft-ui --example shots -- docs/images dark live` opens each
+window for a few seconds and keeps a picture of it, and of nothing else on the screen).
 
 ## Capturing
 
@@ -89,15 +91,27 @@ sources are in Settings › Recording.
 
 A Video Production recording opens in the editor as a timeline with a row for each track:
 
-- **Play** (Space), click or drag on the ruler to move the playhead, arrows step a frame.
-- Drag across empty rows to choose a stretch; **Delete** (or Cut) takes it out of every track,
-  keeping them in step.
+- **Play** (Space), click or drag on the ruler to move the playhead, arrows step a frame. The
+  full-screen button is beside the play buttons (F11 or F; Esc comes back).
+- **Choose a stretch** with the two handles either side of the playhead on the ruler: they ride
+  along with it until you drag one out. With a stretch chosen, Play plays just that: from the
+  playhead when it's in it, else from the stretch's start, stopping at its end. Dragging across
+  empty rows chooses one too, Ctrl+A chooses everything, Esc lets go. **Delete** (or Ctrl+X) takes
+  the stretch out of every track, keeping them in step.
+- **Right-click a track** to split that track alone, take the chosen stretch out of it alone
+  (leaving silence, or no picture, so everything stays in time), choose the clip's stretch,
+  delete the clip, or hide or mute the track. **Right-click the ruler** for every track at once:
+  split them all, cut or remove the chosen stretch, choose from there to the end or the start,
+  add text there, play, zoom.
 - Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
   clip's ends to trim it, or the clip to slide it along its track.
 - **S** splits at the playhead: the selected clip's track, or every track.
 - **Text** (T) puts words on the video at the playhead, ready to type over. The **Library** at
-  the left has titles, lower thirds, callouts and transitions to drag onto the timeline, and a
-  bin for your own pictures, videos and sound.
+  the left has titles, lower thirds, news graphics, callouts, arrows, a countdown, an end card, a
+  checklist, a click and a **blur** that hides what's under it (a password, an address), and
+  transitions, to drag onto the timeline; and a bin for your own pictures, videos and sound. Each
+  card shows the item as it will be on the video, where and as large; hold the pointer on one and
+  it plays, larger.
 - Each sound track has **Mute** and a volume slider; the camera's corner, size and shape
   (square, rounded, circle) are on the right.
 - Undo and redo everything. The edits are saved into the recording file a moment after each

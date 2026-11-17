@@ -2,11 +2,16 @@
 //! playhead fills the middle; below it the timeline has a row for each track (the screen, the
 //! camera, the computer's sound, the microphone), each edited on its own.
 //!
-//! - Click the ruler (or anywhere empty) to move the playhead; drag across empty rows to choose
-//!   a stretch, then Delete (or Cut) takes it out of every track.
+//! - Click the ruler (or anywhere empty) to move the playhead. Either side of the playhead's head
+//!   on the ruler is a handle: drag one out to choose a stretch (or drag across empty rows). With
+//!   a stretch chosen, Play plays just that: from the playhead when it's in it, else from its
+//!   start. Delete (or Cut) takes it out of every track.
 //! - Click a clip to select it: Delete leaves a gap on that track only; drag its ends to trim
 //!   it, or the clip itself to slide it. S splits at the playhead (the selected clip's track, or
 //!   every track).
+//! - The right button: on a track, what can be done to that track there (split it, take the
+//!   chosen stretch out of it alone); on the ruler, to every track (split them all, cut the
+//!   stretch); choosing, playing and zooming on both.
 //! - Each sound track has its own mute and volume; the camera's corner, size and shape are on
 //!   the right.
 //! - Under the tracks, the captions: what you (the microphone) and the others (the computer's
@@ -145,6 +150,8 @@ enum Drag {
     Scrub,
     /// Choosing a stretch, from here.
     Range(u64),
+    /// One of the chosen stretch's handles on the ruler; the other end stays here.
+    Handle(u64),
     Trim {
         track: usize,
         clip: usize,
@@ -162,8 +169,22 @@ struct Playing {
     /// When it started (egui's clock) and from where.
     since: f64,
     from: u64,
+    /// It started in the chosen stretch: it stops at its end.
+    in_range: bool,
     sound: Option<Box<dyn SoundOut>>,
 }
+
+/// Where on the timeline the right button was pressed: what its menu is about.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Spot {
+    /// The ruler (or the band, the captions): every track.
+    All,
+    Track(usize),
+    Layer(u32),
+}
+
+/// The handles of the chosen stretch on the ruler: how wide each is.
+const HANDLE_W: f32 = 11.0;
 
 pub struct VideoView {
     pub rec: Arc<Recording>,
@@ -209,6 +230,11 @@ pub struct VideoView {
     pub lib_tab: LibTab,
     /// The library's thumbnails, by template or media.
     thumbs: std::collections::HashMap<String, egui::TextureHandle>,
+    /// The template whose card the pointer is on, and since when: its preview plays from then.
+    lib_hover: Option<(&'static str, f64)>,
+    /// That preview's picture, and the graphics built for it.
+    preview_tex: Option<egui::TextureHandle>,
+    preview_texts: screengrabcraft_media::layer_draw::TextCache,
     /// Something being moved or resized on the picture.
     canvas_drag: Option<library::CanvasDrag>,
     /// A layer item being moved or trimmed on the timeline.
@@ -253,8 +279,8 @@ pub struct VideoView {
     /// What the library is searched for (its cards with these words in their names).
     pub lib_search: String,
     zoom_ask: Option<f32>,
-    /// Where on the timeline the right button was pressed (µs): what its menu is about.
-    menu_us: Option<u64>,
+    /// Where on the timeline the right button was pressed (µs), and on what: its menu is about them.
+    menu: Option<(u64, Spot)>,
     /// Words were just put on the video with Add Text: their box in the panel takes the keys, its
     /// words chosen, so typing replaces them.
     pub(crate) type_words: bool,
@@ -467,6 +493,9 @@ impl VideoView {
             library_open: true,
             lib_tab: LibTab::default(),
             thumbs: Default::default(),
+            lib_hover: None,
+            preview_tex: None,
+            preview_texts: Default::default(),
             canvas_drag: None,
             item_drag: None,
             picture_rect: None,
@@ -490,7 +519,7 @@ impl VideoView {
             full_moved: 0.0,
             lib_search: String::new(),
             zoom_ask: None,
-            menu_us: None,
+            menu: None,
             type_words: false,
         }
     }
@@ -801,12 +830,26 @@ impl VideoView {
         }
     }
 
+    /// Plays: with a stretch chosen, just that (from the playhead when it's in it, else from the
+    /// stretch's start, to its end); else from the playhead to the end (from the start once it's
+    /// there).
     pub fn play(&mut self, ed: &Editor, now: f64) {
+        if let Some((a, b)) = self.range
+            && !(a..b).contains(&self.playhead)
+        {
+            self.playhead = a;
+        }
         if self.playhead >= self.length() {
             self.playhead = 0;
         }
+        self.start_playing(ed, now);
+    }
+
+    /// Plays from the playhead as it is.
+    fn start_playing(&mut self, ed: &Editor, now: f64) {
         let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead);
-        self.playing = Some(Playing { since: now, from: self.playhead, sound });
+        let in_range = self.range.is_some_and(|(a, b)| (a..b).contains(&self.playhead));
+        self.playing = Some(Playing { since: now, from: self.playhead, in_range, sound });
     }
 
     pub fn pause(&mut self) {
@@ -816,7 +859,53 @@ impl VideoView {
     fn seek(&mut self, ed: &Editor, us: u64, now: f64) {
         self.playhead = us.min(self.length());
         if self.playing.is_some() {
-            self.play(ed, now);
+            self.start_playing(ed, now);
+        }
+    }
+
+    /// Chooses the stretch between two moments (either way round), or nothing if they're one.
+    pub fn choose_stretch(&mut self, a: u64, b: u64) {
+        let len = self.length();
+        let (a, b) = (a.min(b).min(len), a.max(b).min(len));
+        self.range = (b > a).then_some((a, b));
+    }
+
+    /// Takes the chosen stretch out of every track, closing the gap.
+    pub fn cut_stretch(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        if let Some((a, b)) = self.range.take() {
+            self.pause();
+            self.run(ed, ctx, "video.cut", json!({"from": a, "to": b}));
+            self.playhead = a.min(self.length());
+        }
+    }
+
+    /// Takes the chosen stretch out of one track (or every track), leaving a gap: nothing moves.
+    /// The stretch stays chosen.
+    pub fn remove_stretch(&mut self, ed: &mut Editor, ctx: &egui::Context, track: Option<usize>) {
+        let Some((a, b)) = self.range else { return };
+        let p = match track {
+            Some(t) => json!({"from": a, "to": b, "track": t}),
+            None => json!({"from": a, "to": b}),
+        };
+        self.run(ed, ctx, "video.lift", p);
+    }
+
+    /// Splits one track (or every track) at a moment, the playhead going there.
+    fn split_at(&mut self, ed: &mut Editor, ctx: &egui::Context, at: u64, track: Option<usize>, now: f64) {
+        self.seek(ed, at, now);
+        let p = match track {
+            Some(t) => json!({"at": at, "track": t}),
+            None => json!({"at": at}),
+        };
+        self.run(ed, ctx, "video.split", p);
+    }
+
+    /// Whether a track (or any track) has a clip playing at a moment, to split there.
+    fn splittable(&self, at: u64, track: Option<usize>) -> bool {
+        let tl = &self.session.timeline;
+        match track {
+            Some(t) => tl.clip_at(t, at).is_some(),
+            None => (0..tl.tracks.len()).any(|t| tl.clip_at(t, at).is_some()),
         }
     }
 
@@ -832,9 +921,8 @@ impl VideoView {
 
     /// Delete: the chosen stretch out of every track, else the selected clip.
     pub fn delete(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if let Some((a, b)) = self.range.take() {
-            self.run(ed, ctx, "video.cut", json!({"from": a, "to": b}));
-            self.playhead = a.min(self.length());
+        if self.range.is_some() {
+            self.cut_stretch(ed, ctx);
         } else if let Some((layer, item)) = self.item.take() {
             self.run(ed, ctx, "video.deleteItem", json!({"layer": layer, "item": item}));
         } else if let Some((t, c)) = self.selected.take() {
@@ -878,8 +966,13 @@ impl VideoView {
         }
         if let Some(p) = &self.playing {
             let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from + ((now - p.since).max(0.0) * 1e6) as u64);
-            if at >= self.length() {
-                self.playhead = self.length();
+            // Started in the chosen stretch: it stops at its end (as it is now).
+            let end = match self.range {
+                Some((_, b)) if p.in_range => b.min(self.length()),
+                _ => self.length(),
+            };
+            if at >= end {
+                self.playhead = end;
                 self.playing = None;
             } else {
                 self.playhead = at;
@@ -953,8 +1046,11 @@ impl VideoView {
         if pressed(cmd(Key::Num0)) {
             self.pps = 0.0;
         }
-        if pressed(cmd(Key::X)) && self.range.is_some() {
-            self.delete(ed, ctx);
+        if pressed(cmd(Key::X)) {
+            self.cut_stretch(ed, ctx);
+        }
+        if pressed(cmd(Key::A)) {
+            self.choose_stretch(0, self.length());
         }
         if plain(Key::Space) {
             if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
@@ -1100,9 +1196,26 @@ impl VideoView {
                         self.delete(ed, &ctx);
                         ui.close();
                     }
+                    ui.separator();
+                    if ui
+                        .add(egui::Button::new("Select All").shortcut_text("Ctrl+A"))
+                        .on_hover_text("Choose the whole video: Play plays it all, Cut takes it all")
+                        .clicked()
+                    {
+                        self.choose_stretch(0, self.length());
+                        ui.close();
+                    }
+                    if ui.add_enabled(self.range.is_some(), egui::Button::new("Clear the Selection").shortcut_text("Esc")).clicked() {
+                        self.range = None;
+                        ui.close();
+                    }
                 });
                 ui.menu_button("Play", |ui| {
-                    let label = if self.playing.is_some() { "Pause" } else { "Play" };
+                    let label = match (self.playing.is_some(), self.range.is_some()) {
+                        (true, _) => "Pause",
+                        (false, true) => "Play the Selection",
+                        (false, false) => "Play",
+                    };
                     if ui.add(egui::Button::new(label).shortcut_text("Space")).clicked() {
                         if self.playing.is_some() {
                             self.pause()
@@ -1167,10 +1280,10 @@ impl VideoView {
     }
 
     /// The tool bar, the picture editor's: as tall, built of the same buttons, and like it with a
-    /// name under each button when the window is wide enough for that one's names (else Split
-    /// and Delete are named beside their icons). The library and files at the left, then undo,
-    /// then what cuts the video; what makes something of it at the right. (Playing is under the
-    /// picture.)
+    /// name under each button when the window is wide enough for that one's names. The library
+    /// and files at the left, then undo, then words; what makes something of the video at the
+    /// right. (Playing is under the picture; splitting and cutting are on the timeline's right
+    /// button, the Edit menu and the keys.)
     fn tool_bar(&mut self, ed: &mut Editor, ui: &mut Ui) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -1214,23 +1327,6 @@ impl VideoView {
                     let redo_tip = format!("Redo {} (Ctrl+Y)", self.session.redo_label().unwrap_or(""));
                     if button(ui, Icon::Redo, "Redo", &redo_tip, &redo_tip, false, self.session.can_redo(), false).clicked() {
                         self.run(ed, &ctx, "edit.redo", json!({}));
-                    }
-                    divider(ui);
-                    let tip = "Split at the playhead (S): the selected clip's track, or all of them";
-                    if button(ui, Icon::Split, "Split", "Split", tip, false, self.length() > 0, true).clicked() {
-                        self.split(ed, &ctx);
-                    }
-                    let tip = if self.item.is_some() {
-                        "Take the chosen item off its layer (Del)"
-                    } else if self.range.is_some() {
-                        "Take the chosen stretch out of every track (Del)"
-                    } else {
-                        "Delete the selected clip, leaving a gap (Del)"
-                    };
-                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
-                    let label = if self.range.is_some() { "Cut" } else { "Delete" };
-                    if button(ui, Icon::Delete, label, label, tip, false, any, true).clicked() {
-                        self.delete(ed, &ctx);
                     }
                     divider(ui);
                     let tip = "Put words on the video at the playhead (T), then type them. The Library has titles and more";
@@ -1387,11 +1483,12 @@ impl VideoView {
                         ui,
                         &[
                             ("Click", "the ruler to move the playhead; a clip or an item to select it."),
-                            ("Drag", "a clip's end to trim it, the clip itself to slide it, or across the tracks to choose a stretch."),
+                            ("Drag", "a clip's end to trim it, the clip itself to slide it."),
+                            ("Handles", "either side of the playhead on the ruler: drag one out to choose a stretch. Play then plays just that."),
                             ("S", "splits at the playhead."),
                             ("T", "puts words on the video at the playhead."),
                             ("Delete", "takes out what's selected, or the chosen stretch from every track."),
-                            ("Right-click", "the timeline for more."),
+                            ("Right-click", "a track to split or cut it alone; the ruler for every track."),
                         ],
                     );
                 });
@@ -1718,17 +1815,8 @@ impl VideoView {
             if let Some(to) = go {
                 self.seek(ed, to, now);
             }
-            // The time, after them.
-            let words = ui.painter().text(
-                pos2(cx + far + 15.0 + 14.0, mid),
-                egui::Align2::LEFT_CENTER,
-                format!("{} / {}", clock(self.playhead), clock(length)),
-                egui::FontId::monospace(14.0),
-                t.text,
-            );
-            // At the picture's right end (clear of the time), the way to the whole screen.
-            let right = shown_at.map_or(area.max.x, |r| r.max.x).max(words.max.x + 50.0).min(whole.max.x + 30.0);
-            let full = Rect::from_center_size(pos2(right - 15.0, mid), vec2(30.0, 30.0));
+            // Beside them, the way to the whole screen.
+            let full = Rect::from_center_size(pos2(cx + far + 40.0, mid), vec2(30.0, 30.0));
             let tip = "Full Screen (F11)";
             let resp = ui.interact(full, ui.id().with("full-screen"), egui::Sense::click());
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
@@ -1739,6 +1827,14 @@ impl VideoView {
             if resp.on_hover_text("Show the video over the whole screen (F11, or F). Esc comes back.").clicked() {
                 self.set_full_screen(true, now);
             }
+            // The time, after them all.
+            ui.painter().text(
+                pos2(full.max.x + 16.0, mid),
+                egui::Align2::LEFT_CENTER,
+                format!("{} / {}", clock(self.playhead), clock(length)),
+                egui::FontId::monospace(14.0),
+                t.text,
+            );
         });
     }
 
@@ -1921,6 +2017,209 @@ impl VideoView {
             if b.on_hover_text("Write down what's said in the video, on this computer, in the background").clicked() {
                 self.transcribe(ed, &ctx, false);
             }
+        }
+    }
+
+    /// The timeline's right-button menu at a moment: about one track there, one layer there, or
+    /// (on the ruler) every track.
+    fn timeline_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, at: u64, spot: Spot, now: f64) {
+        let t = Tokens::get(ctx);
+        let chosen = self.range.is_some();
+        let heading = |ui: &mut Ui, words: String| {
+            ui.label(RichText::new(words).size(11.5).color(t.muted));
+        };
+        let first_choose = "Choose a stretch first: drag a handle beside the playhead on the ruler";
+        match spot {
+            Spot::Track(i) => {
+                let Some(track) = self.session.timeline.tracks.get(i).cloned() else {
+                    ui.close();
+                    return;
+                };
+                let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+                heading(ui, format!("{name} at {}", clock(at)));
+                if ui
+                    .add_enabled(self.splittable(at, Some(i)), egui::Button::new("Split This Track Here"))
+                    .on_hover_text("Only this track: the others play on in one piece")
+                    .clicked()
+                {
+                    self.split_at(ed, ctx, at, Some(i), now);
+                    ui.close();
+                }
+                if ui.add_enabled(self.splittable(at, None), egui::Button::new("Split Every Track Here").shortcut_text("S")).clicked() {
+                    self.split_at(ed, ctx, at, None, now);
+                    ui.close();
+                }
+                ui.separator();
+                if let Some((_, c)) = self.selected.filter(|(tr, _)| *tr == i)
+                    && let Some(clip) = track.clips.get(c).copied()
+                {
+                    if ui
+                        .button("Select This Clip's Stretch")
+                        .on_hover_text("Choose the time it takes: Play plays it, Cut takes it out of every track")
+                        .clicked()
+                    {
+                        self.choose_stretch(clip.at, clip.end());
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Delete the Clip, Leaving a Gap").shortcut_text("Del")).clicked() {
+                        self.selected = None;
+                        self.run(ed, ctx, "video.deleteClip", json!({"track": i, "clip": c}));
+                        ui.close();
+                    }
+                }
+                let gap = if track.kind.is_video() { "no picture" } else { "silence" };
+                if ui
+                    .add_enabled(chosen, egui::Button::new("Remove the Selection from This Track"))
+                    .on_hover_text(format!("Leaves {gap} there; the other tracks play on, still in time"))
+                    .on_disabled_hover_text(first_choose)
+                    .clicked()
+                {
+                    self.remove_stretch(ed, ctx, Some(i));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(chosen, egui::Button::new("Cut the Selection from Every Track").shortcut_text("Ctrl+X"))
+                    .on_hover_text("Takes the stretch out of the whole video and closes the gap")
+                    .on_disabled_hover_text(first_choose)
+                    .clicked()
+                {
+                    self.cut_stretch(ed, ctx);
+                    ui.close();
+                }
+                ui.separator();
+                self.choosing_items(ui, at);
+                ui.separator();
+                let (off, on) = if track.kind.is_video() { ("Hide This Track", "Show This Track") } else { ("Mute This Track", "Unmute This Track") };
+                if ui.button(if track.muted { on } else { off }).clicked() {
+                    self.run(ed, ctx, "video.mute", json!({"track": i, "muted": !track.muted}));
+                    ui.close();
+                }
+                self.playing_items(ed, ui, at, now);
+            }
+            Spot::Layer(id) => {
+                let Some(layer) = self.session.timeline.layer(id).cloned() else {
+                    ui.close();
+                    return;
+                };
+                heading(ui, format!("{} at {}", layer.name, clock(at)));
+                if let Some((_, item)) = self.item.filter(|(l, _)| *l == id)
+                    && let Some(it) = layer.items.iter().find(|x| x.id == item)
+                {
+                    if ui.button("Select the Item's Stretch").clicked() {
+                        self.choose_stretch(it.at, it.end());
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Delete the Item").shortcut_text("Del")).clicked() {
+                        self.item = None;
+                        self.run(ed, ctx, "video.deleteItem", json!({"layer": id, "item": item}));
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if ui.add(egui::Button::new("Add Text Here").shortcut_text("T")).clicked() {
+                    self.seek(ed, at, now);
+                    self.add_text(ed, ctx);
+                    ui.close();
+                }
+                if ui.button(if layer.hidden { "Show This Layer" } else { "Hide This Layer" }).clicked() {
+                    self.run(ed, ctx, "video.layer", json!({"layer": id, "hidden": !layer.hidden}));
+                    ui.close();
+                }
+                if ui.button("Delete This Layer").on_hover_text("And everything on it").clicked() {
+                    if self.item.is_some_and(|(l, _)| l == id) {
+                        self.item = None;
+                    }
+                    self.run(ed, ctx, "video.deleteLayer", json!({"layer": id}));
+                    ui.close();
+                }
+                ui.separator();
+                self.choosing_items(ui, at);
+                self.playing_items(ed, ui, at, now);
+            }
+            Spot::All => {
+                heading(ui, format!("Every track at {}", clock(at)));
+                if ui.add_enabled(self.splittable(at, None), egui::Button::new("Split Every Track Here").shortcut_text("S")).clicked() {
+                    self.split_at(ed, ctx, at, None, now);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(chosen, egui::Button::new("Cut the Selection").shortcut_text("Ctrl+X"))
+                    .on_hover_text("Takes the stretch out of every track and closes the gap")
+                    .on_disabled_hover_text(first_choose)
+                    .clicked()
+                {
+                    self.cut_stretch(ed, ctx);
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(chosen, egui::Button::new("Remove the Selection, Leaving a Gap"))
+                    .on_hover_text("Silence and no picture there; nothing after it moves")
+                    .on_disabled_hover_text(first_choose)
+                    .clicked()
+                {
+                    self.remove_stretch(ed, ctx, None);
+                    ui.close();
+                }
+                ui.separator();
+                self.choosing_items(ui, at);
+                ui.separator();
+                if ui.add(egui::Button::new("Add Text Here").shortcut_text("T")).clicked() {
+                    self.seek(ed, at, now);
+                    self.add_text(ed, ctx);
+                    ui.close();
+                }
+                self.playing_items(ed, ui, at, now);
+                ui.separator();
+                if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
+                    self.zoom_ask = Some(1.25);
+                    ui.close();
+                }
+                if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
+                    self.zoom_ask = Some(0.8);
+                    ui.close();
+                }
+                if ui.add(egui::Button::new("Fit the Whole Video").shortcut_text("Ctrl+0")).clicked() {
+                    self.pps = 0.0;
+                    ui.close();
+                }
+            }
+        }
+    }
+
+    /// The menu's ways of choosing a stretch from a moment.
+    fn choosing_items(&mut self, ui: &mut Ui, at: u64) {
+        let len = self.length();
+        if ui.add_enabled(at < len, egui::Button::new("Select from Here to the End")).clicked() {
+            self.choose_stretch(at, len);
+            ui.close();
+        }
+        if ui.add_enabled(at > 0, egui::Button::new("Select from the Start to Here")).clicked() {
+            self.choose_stretch(0, at);
+            ui.close();
+        }
+        if ui.add(egui::Button::new("Select All").shortcut_text("Ctrl+A")).clicked() {
+            self.choose_stretch(0, len);
+            ui.close();
+        }
+        if ui.add_enabled(self.range.is_some(), egui::Button::new("Clear the Selection").shortcut_text("Esc")).clicked() {
+            self.range = None;
+            ui.close();
+        }
+    }
+
+    /// The menu's ways of playing from a moment.
+    fn playing_items(&mut self, ed: &mut Editor, ui: &mut Ui, at: u64, now: f64) {
+        let label = if self.range.is_some() { "Play the Selection" } else { "Play from Here" };
+        if ui.add(egui::Button::new(label).shortcut_text("Space")).clicked() {
+            if self.range.is_none() {
+                self.playhead = at.min(self.length());
+            }
+            self.play(ed, now);
+            ui.close();
+        }
+        if ui.button("Move the Playhead Here").clicked() {
+            self.seek(ed, at, now);
+            ui.close();
         }
     }
 
@@ -2114,10 +2413,51 @@ impl VideoView {
                         Stroke::NONE,
                     ));
                 }
+                // The chosen stretch's handles on the ruler: at its ends, or either side of the
+                // playhead's head while nothing is chosen (they ride along with it). Dragging one
+                // out chooses a stretch.
+                let (in_x, out_x) = match self.range {
+                    Some((a, b)) => (x_of(a), x_of(b)),
+                    None => (px - 7.0, px + 7.0),
+                };
+                let in_tab = Rect::from_min_max(pos2(in_x - HANDLE_W, ruler.min.y + 5.0), pos2(in_x, ruler.max.y));
+                let out_tab = Rect::from_min_max(pos2(out_x, ruler.min.y + 5.0), pos2(out_x + HANDLE_W, ruler.max.y));
+                // Which handle a point is on: Some(true) for the start's.
+                let on_tab = |p: Pos2| -> Option<bool> {
+                    if !lane.contains(p) {
+                        None
+                    } else if in_tab.expand(3.0).contains(p) {
+                        Some(true)
+                    } else if out_tab.expand(3.0).contains(p) {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                };
+                let hover_tab = resp.hover_pos().and_then(on_tab);
+                if let Some((a, b)) = self.range {
+                    let band = Rect::from_min_max(pos2(x_of(a), ruler.min.y + 5.0), pos2(x_of(b), ruler.max.y)).intersect(lane);
+                    if band.width() > 0.0 {
+                        painter.rect_filled(band, 0.0, t.accent.gamma_multiply(0.45));
+                    }
+                }
+                let handling = matches!(self.drag, Some(Drag::Handle(_)));
+                for (tab, start) in [(in_tab, true), (out_tab, false)] {
+                    if tab.max.x < lane.min.x || tab.min.x > lane.max.x {
+                        continue;
+                    }
+                    let hot = hover_tab == Some(start) || handling;
+                    let corners =
+                        if start { egui::CornerRadius { nw: 4, sw: 4, ne: 0, se: 0 } } else { egui::CornerRadius { nw: 0, sw: 0, ne: 4, se: 4 } };
+                    painter.rect_filled(tab, corners, if hot { t.accent.gamma_multiply(1.25) } else { t.accent });
+                    let x = tab.center().x;
+                    painter.line_segment([pos2(x, tab.min.y + 5.0), pos2(x, tab.max.y - 5.0)], Stroke::new(1.0, Color32::WHITE));
+                }
                 // Over the ruler, the time under the pointer, and a faint line down from it: where a
-                // click would put the playhead. While it's being moved, its own time.
-                let scrubbing = matches!(self.drag, Some(Drag::Scrub));
-                let over_ruler = resp.hover_pos().filter(|p| ruler.contains(*p) && self.drag.is_none() && self.item_drag.is_none());
+                // click would put the playhead. While it (or a handle) is being moved, its own time.
+                let scrubbing = matches!(self.drag, Some(Drag::Scrub | Drag::Handle(_)));
+                let over_ruler =
+                    resp.hover_pos().filter(|p| ruler.contains(*p) && hover_tab.is_none() && self.drag.is_none() && self.item_drag.is_none());
                 if let Some(x) = over_ruler.map(|p| p.x).or(scrubbing.then_some(px)) {
                     let us = us_of(x).min(self.length());
                     if !scrubbing {
@@ -2200,8 +2540,16 @@ impl VideoView {
                         Some(l) => matches!(layer_item_at(l, p.x), Some((_, Some(_)))),
                         None => row_at(p.y).is_some_and(|track| matches!(clip_at(track, p.x), Some((_, Some(_))))),
                     };
-                    if on_edge {
+                    if on_edge || hover_tab.is_some() {
                         ctx.set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                    }
+                    if hover_tab.is_some() && self.drag.is_none() {
+                        let tip = if self.range.is_some() {
+                            "Drag to change the chosen stretch. Play plays just it; the right button cuts it"
+                        } else {
+                            "Drag out to choose a stretch of the video: Play then plays just that, and the right button cuts it"
+                        };
+                        resp.clone().on_hover_text_at_pointer(tip);
                     }
                     // What's under the pointer says what it is and how long (after a moment).
                     if self.drag.is_none() && self.item_drag.is_none() && p.y >= ruler.max.y {
@@ -2364,7 +2712,29 @@ impl VideoView {
                 {
                     self.item_drag = None;
                     self.drag = Some(if p.y < ruler.max.y {
-                        Drag::Scrub
+                        match on_tab(p) {
+                            // A handle: the stretch's other end stays (the playhead, if none).
+                            Some(start) => {
+                                self.pause();
+                                Drag::Handle(match self.range {
+                                    Some((a, b)) => {
+                                        if start {
+                                            b
+                                        } else {
+                                            a
+                                        }
+                                    }
+                                    None => self.playhead,
+                                })
+                            }
+                            None => {
+                                // Moving the playhead from outside the chosen stretch lets it go.
+                                if self.range.is_some_and(|(a, b)| !(a..=b).contains(&us_of(p.x))) {
+                                    self.range = None;
+                                }
+                                Drag::Scrub
+                            }
+                        }
                     } else if let Some(track) = row_at(p.y) {
                         match clip_at(track, p.x) {
                             Some((clip, Some(start))) => {
@@ -2390,6 +2760,15 @@ impl VideoView {
                     let us = us_of(p.x);
                     match d {
                         Drag::Scrub => self.seek(ed, us, now),
+                        Drag::Handle(fixed) => {
+                            // Caught by edges as anything dragged is (not by the playhead: it
+                            // follows the handle, so the picture shows where the stretch ends).
+                            let others: Vec<u64> = edges(None, None).into_iter().filter(|e| *e != head).collect();
+                            caught = nearest(us, &others);
+                            let to = caught.unwrap_or(us).min(self.length());
+                            self.choose_stretch(fixed, to);
+                            self.playhead = to;
+                        }
                         Drag::Range(from) => {
                             let to = us.min(self.length());
                             self.range = (from.abs_diff(to) > 0).then_some((from.min(to), from.max(to)));
@@ -2431,7 +2810,13 @@ impl VideoView {
                     && let Some(p) = resp.interact_pointer_pos()
                 {
                     let on_item = layer_at(p.y).and_then(|l| layer_item_at(l, p.x).map(|(i, _)| (l, i)));
+                    let on_ruler = p.y < ruler.max.y;
+                    let in_stretch = self.range.is_some_and(|(a, b)| (a..=b).contains(&us_of(p.x)));
                     match row_at(p.y).and_then(|track| clip_at(track, p.x).map(|(c, _)| (track, c))) {
+                        // A handle clicked, not dragged: nothing.
+                        _ if on_ruler && on_tab(p).is_some() => {}
+                        // In the chosen stretch: the playhead goes there, and Play starts there.
+                        _ if on_ruler && in_stretch => self.seek(ed, us_of(p.x), now),
                         _ if on_item.is_some() => {
                             self.item = on_item;
                             self.selected = None;
@@ -2467,44 +2852,22 @@ impl VideoView {
                         self.selected = None;
                         self.item = None;
                     }
-                    self.menu_us = Some(us_of(p.x).min(self.length()));
+                    // On the ruler (or the band, the captions) it's about every track; on a row,
+                    // about that one.
+                    let spot = if p.y < ruler.max.y || in_band(p.y) {
+                        Spot::All
+                    } else if let Some(l) = layer_at(p.y) {
+                        Spot::Layer(l)
+                    } else if let Some(track) = row_at(p.y) {
+                        Spot::Track(track)
+                    } else {
+                        Spot::All
+                    };
+                    self.menu = Some((us_of(p.x).min(self.length()), spot));
                 }
                 resp.context_menu(|ui| {
-                    let at = self.menu_us.unwrap_or(self.playhead);
-                    if ui.button(format!("Split Here ({})", clock(at))).clicked() {
-                        self.seek(ed, at, now);
-                        self.split(ed, &ctx);
-                        ui.close();
-                    }
-                    if ui.button("Move the Playhead Here").clicked() {
-                        self.seek(ed, at, now);
-                        ui.close();
-                    }
-                    let any = self.item.is_some() || self.range.is_some() || self.selected.is_some();
-                    let label = if self.item.is_some() {
-                        "Delete the Item"
-                    } else if self.range.is_some() {
-                        "Cut the Chosen Stretch"
-                    } else {
-                        "Delete the Clip"
-                    };
-                    if ui.add_enabled(any, egui::Button::new(label).shortcut_text("Del")).clicked() {
-                        self.delete(ed, &ctx);
-                        ui.close();
-                    }
-                    ui.separator();
-                    if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
-                        self.zoom_ask = Some(1.25);
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new("Zoom Out").shortcut_text("Ctrl+-")).clicked() {
-                        self.zoom_ask = Some(0.8);
-                        ui.close();
-                    }
-                    if ui.add(egui::Button::new("Fit the Whole Video").shortcut_text("Ctrl+0")).clicked() {
-                        self.pps = 0.0;
-                        ui.close();
-                    }
+                    let (at, spot) = self.menu.unwrap_or((self.playhead, Spot::All));
+                    self.timeline_menu(ed, ui, &ctx, at, spot, now);
                 });
                 // The wheel scrolls; with Ctrl it zooms around the pointer.
                 if resp.hovered() {

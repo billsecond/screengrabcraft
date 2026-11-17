@@ -268,6 +268,42 @@ impl Timeline {
         Ok(())
     }
 
+    /// Takes `from..to` out of one track (or every track) and leaves the gap: silence, or no
+    /// picture, there; nothing after it moves, so the other tracks stay in time with it.
+    pub fn lift(&mut self, from: u64, to: u64, track: Option<usize>) -> Result<(), EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch to remove is empty".to_string()));
+        }
+        let which: Vec<usize> = match track {
+            Some(i) => {
+                self.track(i)?;
+                vec![i]
+            }
+            None => (0..self.tracks.len()).collect(),
+        };
+        for i in which {
+            let t = self.track_mut(i)?;
+            let mut out = Vec::with_capacity(t.clips.len() + 1);
+            for c in &t.clips {
+                if c.end() <= from || c.at >= to {
+                    out.push(*c);
+                    continue;
+                }
+                // The part before the stretch, and the part after it, where it was.
+                if c.at < from {
+                    out.push(Clip { at: c.at, from: c.from, len: from - c.at });
+                }
+                if c.end() > to {
+                    let skip = to - c.at;
+                    out.push(Clip { at: to, from: c.from.saturating_add(skip), len: c.len - skip });
+                }
+            }
+            out.retain(|c| c.len >= MIN_CLIP_US);
+            t.clips = out;
+        }
+        Ok(())
+    }
+
     /// Splits the clips playing at `at` in two: on one track, or on all of them.
     pub fn split(&mut self, at: u64, track: Option<usize>) -> Result<usize, EditError> {
         let which: Vec<usize> = match track {
@@ -398,6 +434,27 @@ mod tests {
         assert_eq!(t.length(), 8_000_000);
         assert!(t.tracks[1].clips.is_empty());
         assert!(t.cut(5, 5).is_err());
+    }
+
+    #[test]
+    fn lifting_a_stretch_leaves_a_gap_and_moves_nothing() {
+        let mut t = two_tracks();
+        // From the microphone only: the screen plays on, and the sound after it is still in time.
+        t.lift(2_000_000, 5_000_000, Some(1)).unwrap();
+        assert_eq!(t.tracks[1].clips, vec![Clip { at: 0, from: 0, len: 2_000_000 }, Clip { at: 5_000_000, from: 5_000_000, len: 5_000_000 }]);
+        assert_eq!(t.source_time(1, 3_000_000), None);
+        assert_eq!(t.source_time(1, 6_000_000), Some(6_000_000));
+        assert_eq!(t.tracks[0].clips, vec![Clip { at: 0, from: 0, len: 10_000_000 }]);
+        assert_eq!(t.length(), 10_000_000);
+        // From every track, off the end, over the gap already there: nothing left after 8 s.
+        t.lift(8_000_000, u64::MAX, None).unwrap();
+        assert_eq!(t.length(), 8_000_000);
+        assert_eq!(t.source_time(0, 7_000_000), Some(7_000_000));
+        // A whole clip inside the stretch goes; an empty stretch and a missing track are errors.
+        t.lift(0, 2_000_000, Some(1)).unwrap();
+        assert_eq!(t.tracks[1].clips.first().map(|c| c.at), Some(5_000_000));
+        assert!(t.lift(5, 5, None).is_err());
+        assert!(t.lift(0, 5, Some(9)).is_err());
     }
 
     #[test]
