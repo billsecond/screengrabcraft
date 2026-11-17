@@ -39,8 +39,9 @@ raw-window-handle = "0.6"
 winreg = "0.56"
 # The update check goes through the proxy Windows is set to use, if any.
 ureq = { workspace = true, features = ["win-system-proxy"] }
-# Windows' window animations turned off, and windows cloaked (cloak.rs), through a safe binding.
-winsafe = { version = "0.0.29", features = ["dwm"] }
+# Windows' window animations turned off, and windows cloaked (cloak.rs), through a safe binding;
+# `shell`: the video editor's taskbar button of its own (`cloak::own_taskbar_button`).
+winsafe = { version = "0.0.29", features = ["dwm", "shell"] }
 # Shows a file selected in its folder with Windows' own call (SHOpenFolderAndSelectItems): Explorer's
 # /select switch misses the file at times.
 opener = { version = "0.9", default-features = false, features = ["reveal"] }

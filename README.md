@@ -57,7 +57,13 @@ or PDF, with a file name pattern of your own). The default is yours to change in
 settings. Turn the capture bar on to stop first, adjust the area, and pick Copy & Edit, Edit, Copy
 or Save, for every capture; or use **Capture Region, Adjust First** (tray menu, or a shortcut of your own)
 for just the captures you want to fine-tune. An open editor is hidden while you capture, which you can turn
-off too.
+off too (the video editor never is: it stays as you left it).
+
+**While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
+or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes
+on; on Windows the screen frozen to choose the area, and what's said once it's kept, stay out of
+the video. The picture is saved and copied as usual, and opens in the editor once the recording
+stops, so nothing comes up over the screen being recorded.
 
 On Windows the editor is kept ready in the background (Settings, After a capture): it starts a
 little after the capture service, and closing its window hides it, so a capture opens in it at
@@ -81,7 +87,7 @@ own. Turn each input on or off: the screen,
 the camera, the microphone (with a level meter once you turn it on or press Test) and the
 computer's sound. With the screen off the camera's picture is the video. Press the red **Record**;
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
-and opens in the editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
+and opens in the video editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
 sources are in Settings › Recording.
 
@@ -89,7 +95,11 @@ sources are in Settings › Recording.
 
 ## Editing a video
 
-A Video Production recording opens in the editor as a timeline with a row for each track:
+Recordings open in the **video editor**: a window of its own beside the picture editor, with its
+own taskbar button and the same look (the tray menu, the Start menu and Settings open it too).
+Pictures you take while you edit a video open in the picture editor, so the video stays as it
+is; a picture opened in the video editor goes to the picture editor, and a recording opened in
+the picture editor to the video editor. Its timeline has a row for each track:
 
 - **Play** (Space), click or drag on the ruler to move the playhead, arrows step a frame. The
   full-screen button is beside the play buttons (F11 or F; Esc comes back).

@@ -77,6 +77,44 @@ pub fn save_editor_settings(s: &EditorSettings) {
     }
 }
 
+/// The editor's settings as the two editors' windows share them (the picture editor and the video
+/// editor, each a copy of the program): each writes only what it changed since it last read or
+/// wrote them, over what the file says now, so that neither puts back the other's old choices.
+pub struct SharedEditorSettings {
+    /// This window's settings as they were when it last read or wrote them.
+    base: std::sync::Mutex<EditorSettings>,
+}
+
+impl SharedEditorSettings {
+    /// The settings as saved, and the keeper of what this window changes in them.
+    pub fn load() -> (EditorSettings, SharedEditorSettings) {
+        let s = load_editor_settings();
+        (s.clone(), SharedEditorSettings { base: std::sync::Mutex::new(s) })
+    }
+
+    /// Writes what `ours` changed (since it was last read or written) over the file as it is now.
+    pub fn save(&self, ours: &EditorSettings) {
+        let mut base = self.base.lock().unwrap_or_else(|e| e.into_inner());
+        save_editor_settings(&merged(&base, ours, &load_editor_settings()));
+        *base = ours.clone();
+    }
+}
+
+/// `now` (the file as it is), with each setting that `ours` changed from `base` taken from `ours`.
+fn merged(base: &EditorSettings, ours: &EditorSettings, now: &EditorSettings) -> EditorSettings {
+    let (Ok(b), Ok(o), Ok(mut n)) = (serde_json::to_value(base), serde_json::to_value(ours), serde_json::to_value(now)) else {
+        return ours.clone();
+    };
+    if let (Some(b), Some(o), Some(n)) = (b.as_object(), o.as_object(), n.as_object_mut()) {
+        for (key, value) in o {
+            if b.get(key) != Some(value) {
+                n.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    serde_json::from_value(n).unwrap_or_else(|_| ours.clone())
+}
+
 /// When the settings file was last changed (the editor reloads the captures folder from it).
 pub fn settings_modified() -> Option<std::time::SystemTime> {
     let path = paths::settings_dir()?.join(SETTINGS);
@@ -86,6 +124,24 @@ pub fn settings_modified() -> Option<std::time::SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_editor_window_writes_only_what_it_changed() {
+        use screengrabcraft_model::Theme;
+        // Both windows read the same settings.
+        let base = EditorSettings { show_tray: true, hide_tool_names: false, theme: Theme::Dark, ..EditorSettings::default() };
+        // The picture editor turned the tool names off and wrote that; the video editor, which
+        // read before, then hides Recent Captures.
+        let now = EditorSettings { hide_tool_names: true, ..base.clone() };
+        let ours = EditorSettings { show_tray: false, ..base.clone() };
+        let m = merged(&base, &ours, &now);
+        assert!(!m.show_tray, "its own change is written");
+        assert!(m.hide_tool_names, "the other window's change stays");
+        assert_eq!(m.theme, Theme::Dark);
+        // Nothing changed: the file stays as it is.
+        let m = merged(&base, &base, &now);
+        assert!(m.hide_tool_names && m.show_tray);
+    }
 
     #[test]
     fn two_writes_at_once_beside_each_other_keep_to_their_own_files() {

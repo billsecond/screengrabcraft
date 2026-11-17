@@ -128,6 +128,27 @@ pub enum Pending {
     Quit,
 }
 
+/// The two editors: one window for pictures (captures, projects), one for recordings. The same
+/// program and the same look; each opens its own kind of file and hands the other kind to the
+/// other window, so a capture never takes the place of the video being edited, nor a recording
+/// that of the picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EditorKind {
+    #[default]
+    Pictures,
+    Video,
+}
+
+impl EditorKind {
+    /// Its name, as the window's title and About say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            EditorKind::Pictures => screengrabcraft_model::EDITOR_NAME,
+            EditorKind::Video => screengrabcraft_model::VIDEO_EDITOR_NAME,
+        }
+    }
+}
+
 pub struct Editor {
     pub session: Session,
     pub settings: EditorSettings,
@@ -165,6 +186,9 @@ pub struct Editor {
     pub playback: Option<crate::playback::Playback>,
     /// A video recording, when one is open (the window shows the video editor instead).
     pub video: Option<crate::video::VideoView>,
+    /// Which editor this window is: the picture editor, or the video editor (a window of its own
+    /// for recordings, the same program). Each hands the other kind of file to the other.
+    pub kind: EditorKind,
     /// The file of the video open, if one is (the strip marks it, not the picture open before it).
     pub(crate) video_path: Option<String>,
     /// Counts what was opened, so the video editor knows when it has been replaced.
@@ -268,6 +292,7 @@ impl Editor {
             drag: None,
             playback: None,
             video: None,
+            kind: EditorKind::Pictures,
             video_path: None,
             video_epoch: 0,
             editing: None,
@@ -481,13 +506,30 @@ impl Editor {
         }
     }
 
-    /// Opens a picture or project from its bytes, once the document open now is saved.
+    /// Opens a picture or project from its bytes, once the document open now is saved. A file of
+    /// the other editor's kind with a path goes to that editor's window instead, where there is
+    /// one, and nothing here changes.
     pub fn open_file(&mut self, ctx: &egui::Context, file: OpenedFile) {
+        if self.hand_over(ctx, &file) {
+            return;
+        }
         if self.ready_to_leave() {
             self.open_now(ctx, file);
         } else {
             self.pending = Some(Pending::Open(file));
         }
+    }
+
+    /// A file for the other editor, handed to its window: true when it took it.
+    fn hand_over(&mut self, ctx: &egui::Context, file: &OpenedFile) -> bool {
+        let Some(path) = file.path.as_deref() else { return false };
+        let recording = screengrabcraft_media::recording::sniff(&file.bytes) || (file.bytes.is_empty() && is_recording_path(path));
+        if recording == (self.kind == EditorKind::Video) || !self.services.open_in_other_editor(path, recording) {
+            return false;
+        }
+        let other = if recording { EditorKind::Video } else { EditorKind::Pictures };
+        self.toast(ctx, format!("{} opened in the {}", file_name(path), other.name().trim_start_matches("ScreenGrabCraft ")));
+        true
     }
 
     /// Offers to play the document's file, if it's an animated GIF.
@@ -1184,9 +1226,10 @@ impl Editor {
         }
         // The dot while changes are still to be written.
         let unsaved = self.session.dirty || self.saver.writing();
-        let title = match &self.video {
-            Some(v) => format!("{}{} — {}", if v.session.dirty { "• " } else { "" }, v.name, screengrabcraft_model::EDITOR_NAME),
-            None => format!("{}{} — {}", if unsaved { "• " } else { "" }, self.name, screengrabcraft_model::EDITOR_NAME),
+        let title = match (&self.video, self.kind) {
+            (Some(v), _) => format!("{}{} — {}", if v.session.dirty { "• " } else { "" }, v.name, self.kind.name()),
+            (None, EditorKind::Video) => self.kind.name().to_string(),
+            (None, EditorKind::Pictures) => format!("{}{} — {}", if unsaved { "• " } else { "" }, self.name, self.kind.name()),
         };
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
@@ -1203,6 +1246,14 @@ impl Editor {
         }
         if self.video.is_some() {
             crate::video::show(self, ui);
+            crate::dialogs::show(self, &ctx);
+            self.opening_window(&ctx);
+            self.paint_toast(&ctx);
+            return;
+        }
+        // The video editor with nothing open: its own start, never a picture to draw on.
+        if self.kind == EditorKind::Video {
+            crate::video::start_page(self, ui);
             crate::dialogs::show(self, &ctx);
             self.opening_window(&ctx);
             self.paint_toast(&ctx);
@@ -2097,7 +2148,7 @@ enum Welcome {
 }
 
 /// One of the welcome card's ways to start: its icon, its name, its key at the right.
-fn welcome_row(ui: &mut Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
+pub(crate) fn welcome_row(ui: &mut Ui, icon: Icon, label: &str, key: &str) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), egui::Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));

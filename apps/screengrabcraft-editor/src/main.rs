@@ -1,9 +1,14 @@
 //! ScreenGrabCraft Editor: annotate, mark up and share screenshots.
 //!
-//! Usage: `screengrabcraft-editor [--version] [pictures or .sgcraft projects…]`
+//! Usage: `screengrabcraft-editor [--video] [--version] [pictures, .sgcraft projects or recordings…]`
 //!
 //! One editor window at a time: started again (a capture handed over by the capture service, a
 //! file opened from the file manager), it hands the files to the window already open and exits.
+//!
+//! With `--video` it is the video editor: the same program, a window of its own for recordings
+//! beside the picture editor's (its own name, place on the screen, log and taskbar button). Each
+//! hands the other kind of file to the other, so a capture never takes the place of the video
+//! being edited. The video editor never steps aside for a capture.
 //!
 //! The capture service also has the window step aside before a capture ([`Aside`]): on Windows
 //! it is cloaked, there but not seen, at once and without Windows' animations; elsewhere hidden.
@@ -23,11 +28,15 @@ mod video;
 use std::time::Duration;
 
 use screengrabcraft_desktop::{cloak, instance, launch, logging, paths, store, version};
-use screengrabcraft_ui::Editor;
+use screengrabcraft_ui::{Editor, EditorKind};
 
 const APP_ID: &str = "io.github.billsecond.screengrabcraft.editor";
 /// The window's place, size and state, in the settings folder (written by eframe).
 const WINDOW_FILE: &str = "editor-window.ron";
+/// The video editor's: its own window, its own place.
+const VIDEO_WINDOW_FILE: &str = "video-editor-window.ron";
+/// The video editor's taskbar button, apart from the picture editor's (Windows).
+const VIDEO_APP_ID: &str = "io.github.billsecond.screengrabcraft.video";
 static ICON: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/io.github.billsecond.screengrabcraft.editor.png");
 
 /// How often a thread looks for the capture service, to wake a window out of sight (hidden for a
@@ -93,6 +102,8 @@ fn taskbar_button(_frame: &eframe::Frame, _shown: bool) {}
 struct App {
     editor: Editor,
     guard: instance::Guard,
+    /// The editor's settings, shared with the other editor's window.
+    settings_file: std::sync::Arc<store::SharedEditorSettings>,
     aside: Aside,
     /// The window is cloaked, having stepped aside.
     cloaked: bool,
@@ -212,7 +223,7 @@ impl App {
 
     /// The window was closed (and nothing is left unsaved): out of sight, with an empty picture.
     fn go_out_of_sight(&mut self, ctx: &egui::Context) {
-        store::save_editor_settings(&self.editor.settings);
+        self.settings_file.save(&self.editor.settings);
         self.editor.start_over();
         self.aside = Aside::default();
         self.standby = true;
@@ -345,7 +356,7 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
-        store::save_editor_settings(&self.editor.settings);
+        self.settings_file.save(&self.editor.settings);
         self.guard.close();
     }
 
@@ -363,22 +374,25 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("usage: screengrabcraft-editor [--version] [pictures or .sgcraft projects...]");
+        println!("usage: screengrabcraft-editor [--video] [--version] [pictures, .sgcraft projects or recordings...]");
         return std::process::ExitCode::SUCCESS;
     }
     let started = std::time::Instant::now();
     logging::init();
     let standby = args.iter().any(|a| a == launch::EDITOR_STANDBY);
+    // The video editor: a window of its own for recordings.
+    let video = args.iter().any(|a| a == launch::VIDEO);
+    let (instance_name, kind) = if video { (launch::VIDEO_INSTANCE, EditorKind::Video) } else { ("editor", EditorKind::Pictures) };
     // A recording from the capture service whose captions it is making.
     let coming = args.iter().any(|a| a == launch::CAPTIONS_COMING);
     // Kept ready by the service: one running already is enough (and isn't to be shown).
-    if standby && instance::running("editor") {
+    if standby && instance::running(instance_name) {
         return std::process::ExitCode::SUCCESS;
     }
     // Paths as the file manager gave them, made whole before they are handed to another copy.
     let files: Vec<String> =
         args.iter().filter(|a| !a.starts_with("--")).map(|a| std::fs::canonicalize(a).map(|p| simplify(&p)).unwrap_or_else(|_| a.clone())).collect();
-    let guard = match instance::start("editor", &files) {
+    let guard = match instance::start(instance_name, &files) {
         instance::Start::First(g) => g,
         instance::Start::Handed => return std::process::ExitCode::SUCCESS,
         instance::Start::Unreachable(e) => {
@@ -387,30 +401,34 @@ fn main() -> std::process::ExitCode {
         }
     };
     // The copy that stays: its log is the one kept.
-    logging::to_file("editor");
-    log::info!("{}", version::line("ScreenGrabCraft Editor"));
+    logging::to_file(if video { "video-editor" } else { "editor" });
+    log::info!("{}", version::line(kind.name()));
+    if video {
+        // Before any window is made: its taskbar button is its own, not the picture editor's.
+        cloak::own_taskbar_button(VIDEO_APP_ID);
+    }
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(screengrabcraft_model::EDITOR_NAME)
+        .with_title(kind.name())
         .with_app_id(APP_ID)
         .with_inner_size([1320.0, 860.0])
         .with_min_inner_size([760.0, 480.0])
         .with_drag_and_drop(true)
         .with_visible(!standby);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON) {
-        viewport = viewport.with_icon(icon);
+        viewport = viewport.with_icon(if video { video_icon(icon) } else { icon });
     }
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
     // The window opens where it was left: the same place (and so the same monitor), the same
     // size, maximized or not. eframe keeps that (and nothing else, see `persist_egui_memory`) in
     // the settings folder, and brings a window whose monitor is gone back onto one that's there.
     match paths::ensure_settings_dir().filter(|_| !paths::no_prefs()) {
-        Some(dir) => options.persistence_path = Some(dir.join(WINDOW_FILE)),
+        Some(dir) => options.persistence_path = Some(dir.join(if video { VIDEO_WINDOW_FILE } else { WINDOW_FILE })),
         None => options.persist_window = false,
     }
     screengrabcraft_desktop::graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
     log::info!("start: graphics chosen after {} ms", started.elapsed().as_millis());
     let result = eframe::run_native(
-        screengrabcraft_model::EDITOR_NAME,
+        kind.name(),
         options,
         Box::new(move |cc| {
             log::info!("start: window and graphics ready after {} ms", started.elapsed().as_millis());
@@ -419,8 +437,10 @@ fn main() -> std::process::ExitCode {
             // won't animate it opening, closing or stepping aside.
             cloak::calm_windows();
             let ctx = cc.egui_ctx.clone();
-            let settings = store::load_editor_settings();
-            let mut editor = Editor::new(Box::new(services::DesktopServices::new(ctx.clone())), settings);
+            let (settings, settings_file) = store::SharedEditorSettings::load();
+            let settings_file = std::sync::Arc::new(settings_file);
+            let mut editor = Editor::new(Box::new(services::DesktopServices::new(ctx.clone(), video, settings_file.clone())), settings);
+            editor.kind = kind;
             let wake = ctx.clone();
             guard.set_waker(Box::new(move || wake.request_repaint()));
             watch_the_service(ctx.clone());
@@ -441,6 +461,7 @@ fn main() -> std::process::ExitCode {
             Ok(Box::new(App {
                 editor,
                 guard,
+                settings_file,
                 aside: Aside::default(),
                 cloaked: false,
                 reveal: false,
@@ -485,6 +506,48 @@ fn watch_the_service(ctx: egui::Context) {
     }
 }
 
+/// The editor's icon with a play mark at its bottom right: the video editor's, told apart from the
+/// picture editor's in the taskbar and when switching windows (drawn here, over the editor's own).
+fn video_icon(mut icon: egui::IconData) -> egui::IconData {
+    let w = icon.width.max(1);
+    let (cx, cy, r) = (w as f32 * 0.74, icon.height as f32 * 0.74, w as f32 * 0.25);
+    let (ax, ay, bx, by, tx, ty) = (cx - r * 0.3, cy - r * 0.42, cx - r * 0.3, cy + r * 0.42, cx + r * 0.46, cy);
+    let side = |x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32| (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1);
+    let in_triangle = |x: f32, y: f32| {
+        let d = [side(ax, ay, bx, by, x, y), side(bx, by, tx, ty, x, y), side(tx, ty, ax, ay, x, y)];
+        !(d.iter().any(|v| *v < 0.0) && d.iter().any(|v| *v > 0.0))
+    };
+    for (i, px) in icon.rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x0, y0) = ((i as u32 % w) as f32, (i as u32 / w) as f32);
+        // Four by four samples in each pixel: the edges smooth.
+        let (mut disc, mut light) = (0u32, 0u32);
+        for k in 0..16 {
+            let (x, y) = (x0 + ((k % 4) as f32 + 0.5) / 4.0, y0 + ((k / 4) as f32 + 0.5) / 4.0);
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            if d <= r {
+                disc += 1;
+                // A white rim, and a white triangle on red.
+                if d > r * 0.86 || in_triangle(x, y) {
+                    light += 1;
+                }
+            }
+        }
+        if disc == 0 {
+            continue;
+        }
+        let cover = disc as f32 / 16.0;
+        let white = light as f32 / disc as f32;
+        let colour = [229.0 + 26.0 * white, 57.0 + 198.0 * white, 53.0 + 202.0 * white];
+        for (c, v) in px.iter_mut().zip(colour) {
+            *c = (f32::from(*c) * (1.0 - cover) + v * cover).round() as u8;
+        }
+        if let Some(a) = px.get_mut(3) {
+            *a = (*a).max((cover * 255.0).round() as u8);
+        }
+    }
+    icon
+}
+
 /// A canonical path without Windows' `\\?\` prefix.
 fn simplify(p: &std::path::Path) -> String {
     let s = p.to_string_lossy().to_string();
@@ -494,6 +557,25 @@ fn simplify(p: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_video_editors_icon_is_the_editors_with_a_play_mark() {
+        let editor = eframe::icon_data::from_png_bytes(ICON).unwrap();
+        let video = video_icon(editor.clone());
+        assert_eq!((video.width, video.height, video.rgba.len()), (editor.width, editor.height, editor.rgba.len()));
+        let at = |icon: &egui::IconData, x: f32, y: f32| {
+            let i = ((y * icon.height as f32) as usize * icon.width as usize + (x * icon.width as f32) as usize) * 4;
+            icon.rgba[i..i + 4].to_vec()
+        };
+        // The top left is the editor's own; the mark's red is at the bottom right, its white
+        // triangle in the middle of it.
+        assert_eq!(at(&video, 0.2, 0.2), at(&editor, 0.2, 0.2));
+        assert_eq!(at(&video, 0.74, 0.88)[..3], [229, 57, 53]);
+        assert_eq!(at(&video, 0.75, 0.74)[..3], [255, 255, 255]);
+        // Any size, and none: no panic.
+        let _ = video_icon(egui::IconData { rgba: vec![0; 4 * 3 * 5], width: 3, height: 5 });
+        let _ = video_icon(egui::IconData { rgba: Vec::new(), width: 0, height: 0 });
+    }
 
     #[test]
     fn a_window_squeezed_to_a_sliver_gets_its_usual_size_back() {

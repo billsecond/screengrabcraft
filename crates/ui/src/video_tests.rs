@@ -1817,3 +1817,77 @@ fn every_library_card_is_drawn_and_shows_its_own_item() {
         sheet.save(format!("{dir}/video-library-cards.png")).unwrap();
     }
 }
+
+/// A host with both editors' windows, as the desktop's: files of the other kind are handed to
+/// the other window (and noted here).
+#[derive(Clone, Default)]
+struct TwoWindows(std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>);
+
+impl crate::services::Services for TwoWindows {
+    fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
+        self.0.lock().unwrap().push((path.to_string(), video));
+        true
+    }
+
+    fn can_capture(&self) -> bool {
+        true
+    }
+}
+
+fn two_windows(kind: crate::EditorKind) -> (Harness<'static, Editor>, TwoWindows) {
+    let host = TwoWindows::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.kind = kind;
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    (h, host)
+}
+
+#[test]
+fn the_picture_editor_hands_a_recording_to_the_video_editor_and_keeps_its_picture() {
+    let (mut h, host) = two_windows(crate::EditorKind::Pictures);
+    let before = h.state().session.doc.base.pixels().to_vec();
+    let ctx = h.ctx.clone();
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Week.sgvideo".into(), path: Some("C:/Captures/Week.sgvideo".into()), bytes: recording() });
+    h.run_steps(2);
+    assert_eq!(*host.0.lock().unwrap(), vec![("C:/Captures/Week.sgvideo".to_string(), true)]);
+    assert!(h.state().video.is_none(), "the recording isn't opened here");
+    assert_eq!(h.state().session.doc.base.pixels(), &before[..], "the picture stays");
+    // Without a file to hand over (a paste, a browser), it opens here, as it always did.
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Week.sgvideo".into(), path: None, bytes: recording() });
+    h.run_steps(2);
+    assert!(h.state().video.is_some());
+}
+
+#[test]
+fn the_video_editor_starts_with_its_own_page_opens_recordings_and_hands_pictures_over() {
+    let (mut h, host) = two_windows(crate::EditorKind::Video);
+    // Nothing open: its own start, not a picture to draw on.
+    for label in ["No recording open", "Record a Video", "Open a Recording…", "Open (Ctrl+O)", "New Recording"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    assert!(h.query_by_label("Arrow").is_none() && h.query_by_label("Capture an Area").is_none(), "no picture tools");
+    shot(&mut h, "video-editor-start");
+    // A recording opens in it.
+    let ctx = h.ctx.clone();
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Week.sgvideo".into(), path: None, bytes: recording() });
+    h.run_steps(3);
+    assert!(h.state().video.is_some());
+    let edits = h.state().video.as_ref().unwrap().session.revision();
+    // A picture goes to the picture editor, and the video being edited stays.
+    let png =
+        screengrabcraft_render::codec::encode(&Raster::filled(40, 30, Color::rgb(200, 30, 30)).unwrap(), screengrabcraft_model::ImageFormat::Png, 90)
+            .unwrap();
+    h.state_mut().open_file(&ctx, OpenedFile { name: "Shot.png".into(), path: Some("C:/Captures/Shot.png".into()), bytes: png });
+    h.run_steps(2);
+    assert_eq!(*host.0.lock().unwrap(), vec![("C:/Captures/Shot.png".to_string(), false)]);
+    let v = h.state().video.as_ref().expect("the video is still open");
+    assert_eq!(v.session.revision(), edits);
+}

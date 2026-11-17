@@ -248,6 +248,13 @@
           <Shortcut Id="EditorStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Editor"
               Description="Mark up screenshots and pictures" WorkingDirectory="INSTALLFOLDER"
               Advertise="yes" Icon="ScreenGrabCraftEditorIcon.ico" IconIndex="0" />
+          <!-- The video editor: the editor started with its video switch, a window (and a taskbar
+               button) of its own. -->
+          <Shortcut Id="VideoEditorStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Video Editor"
+              Description="Edit Video Production recordings" WorkingDirectory="INSTALLFOLDER" Arguments="--video"
+              Advertise="yes" Icon="ScreenGrabCraftEditorIcon.ico" IconIndex="0">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.billsecond.screengrabcraft.video" />
+          </Shortcut>
         </File>
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft-editor.exe" Value="[#EditorExe]" Type="string" />
       </Component>

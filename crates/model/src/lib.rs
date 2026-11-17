@@ -28,6 +28,8 @@ pub use settings::{
 pub const APP_NAME: &str = "ScreenGrabCraft";
 /// The editor's name, as people see it.
 pub const EDITOR_NAME: &str = "ScreenGrabCraft Editor";
+/// The video editor's name (the same program, a window of its own for recordings).
+pub const VIDEO_EDITOR_NAME: &str = "ScreenGrabCraft Video Editor";
 /// The project file's extension: a picture with its annotations still editable.
 pub const PROJECT_EXT: &str = "sgcraft";
 /// The version, from the workspace's `Cargo.toml`.

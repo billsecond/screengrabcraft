@@ -206,6 +206,9 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         if widgets::button(ui, "Open the Editor").clicked() {
             let _ = launch::open_editor(&[]);
         }
+        if widgets::button(ui, "Open the Video Editor").on_hover_text("Recordings open in it, in a window of its own").clicked() {
+            let _ = launch::open_video_editor(&[]);
+        }
         if widgets::button(ui, "Open the captures folder").clicked() {
             let d = paths::captures_dir(&svc.settings);
             let _ = std::fs::create_dir_all(&d);

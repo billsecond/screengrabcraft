@@ -48,10 +48,14 @@ pub struct DesktopServices {
     saved_rx: Receiver<Saved>,
     /// Remove Background's model, looked for once.
     model: OnceLock<Result<Arc<dyn Matting>, String>>,
+    /// This window is the video editor (else the picture editor).
+    video: bool,
+    /// The editor's settings, shared with the other editor's window.
+    settings_file: Arc<store::SharedEditorSettings>,
 }
 
 impl DesktopServices {
-    pub fn new(ctx: egui::Context) -> DesktopServices {
+    pub fn new(ctx: egui::Context, video: bool, settings_file: Arc<store::SharedEditorSettings>) -> DesktopServices {
         let (tx, rx) = channel();
         let thumbs: Thumbs = Arc::new(Mutex::new(HashMap::new()));
         let (thumb_tx, thumb_rx) = channel::<(String, u64)>();
@@ -91,7 +95,7 @@ impl DesktopServices {
                 None
             }
         };
-        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, save_tx, saved_rx, model: OnceLock::new() }
+        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, save_tx, saved_rx, model: OnceLock::new(), video, settings_file }
     }
 }
 
@@ -172,19 +176,25 @@ impl Services for DesktopServices {
     }
 
     fn request_open(&self) {
-        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let (tx, ctx, video) = (self.tx.clone(), self.ctx.clone(), self.video);
         let start = paths::captures_dir(&store::load_settings());
         let _ = std::thread::Builder::new().name("open-dialog".into()).spawn(move || {
-            let picked = pollster::block_on(
+            // The video editor's own kind first; either opens the other's (handed to its window).
+            let dialog = if video {
+                rfd::AsyncFileDialog::new()
+                    .set_title("Open a Recording")
+                    .set_directory(&start)
+                    .add_filter("Video recording", &[REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+            } else {
                 rfd::AsyncFileDialog::new()
                     .set_title("Open")
                     .set_directory(&start)
                     .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
                     .add_filter("ScreenGrabCraft project", &[PROJECT_EXT])
                     .add_filter("Video recording", &[REC])
-                    .add_filter("All files", &["*"])
-                    .pick_file(),
-            );
+            };
+            let picked = pollster::block_on(dialog.add_filter("All files", &["*"]).pick_file());
             let answer = match picked {
                 Some(f) => {
                     let path = f.path().to_path_buf();
@@ -348,7 +358,19 @@ impl Services for DesktopServices {
     }
 
     fn save_settings(&self, settings: &EditorSettings) {
-        store::save_editor_settings(settings);
+        self.settings_file.save(settings);
+    }
+
+    fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
+        let args = [path.to_string()];
+        let opened = if video { launch::open_video_editor(&args) } else { launch::open_editor(&args) };
+        match opened {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("handing {path} to the other editor: {e}");
+                false
+            }
+        }
     }
 
     fn now(&self) -> Stamp {

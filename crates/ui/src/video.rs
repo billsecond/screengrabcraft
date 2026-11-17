@@ -1270,7 +1270,7 @@ impl VideoView {
                         ed.dialog = Some(crate::dialogs::Dialog::VideoShortcuts);
                         ui.close();
                     }
-                    if ui.button(format!("About {}", screengrabcraft_model::EDITOR_NAME)).clicked() {
+                    if ui.button(format!("About {}", ed.kind.name())).clicked() {
                         ed.dialog = Some(crate::dialogs::Dialog::About);
                         ui.close();
                     }
@@ -2954,6 +2954,158 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     } else {
         v.save_now(ed, &ctx);
     }
+}
+
+/// The video editor with no recording open: its menus, its bar (the picture editor's and the
+/// video editor's look), and in the middle the ways to start, a recording to make or to open,
+/// and the latest recordings to open again.
+pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    if ed.dialog.is_none()
+        && !ctx.egui_wants_keyboard_input()
+        && ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O)))
+    {
+        ed.services.request_open();
+    }
+    let record = |ed: &mut Editor, ctx: &egui::Context| {
+        if let Err(e) = ed.services.new_capture(screengrabcraft_model::CaptureMode::Production) {
+            ed.error(ctx, e);
+        }
+    };
+    egui::Panel::top("video_start_menu").frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 3))).show(ui, |ui| {
+        egui::MenuBar::new().config(crate::widgets::menu_config()).ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                if ui.add(egui::Button::new("Open a Recording…").shortcut_text("Ctrl+O")).clicked() {
+                    ed.services.request_open();
+                    ui.close();
+                }
+                if ed.services.can_capture() && ui.button("New Recording…").on_hover_text("Opens the Recorder").clicked() {
+                    record(ed, &ctx);
+                    ui.close();
+                }
+                if ed.services.can_capture()
+                    && ui.button("New Capture").on_hover_text("A picture: it opens in the Editor, beside this window").clicked()
+                {
+                    if let Err(e) = ed.services.new_capture(screengrabcraft_model::CaptureMode::Region) {
+                        ed.error(&ctx, e);
+                    }
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("Close Window").clicked() {
+                    ed.quit_requested = true;
+                    ui.close();
+                }
+            });
+            ui.menu_button("View", |ui| {
+                if ui.checkbox(&mut ed.settings.show_tray, "Recent Captures").changed() {
+                    ed.services.save_settings(&ed.settings);
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("Keyboard Shortcuts").clicked() {
+                    ed.dialog = Some(crate::dialogs::Dialog::VideoShortcuts);
+                    ui.close();
+                }
+                if ui.button(format!("About {}", ed.kind.name())).clicked() {
+                    ed.dialog = Some(crate::dialogs::Dialog::About);
+                    ui.close();
+                }
+            });
+        });
+    });
+    let side = crate::editor::BAR_BUTTON;
+    egui::Panel::top("video_start_tools")
+        .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(8, 4)))
+        .show_separator_line(true)
+        .show(ui, |ui| {
+            let named = !ed.settings.hide_tool_names;
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                let button = |ui: &mut Ui, icon: Icon, name: &str, known_as: &str, enabled: bool| {
+                    if named {
+                        icons::named_button(ui, icon, name, known_as, known_as, false, enabled, side)
+                    } else {
+                        icons::button_sized(ui, icon, known_as, false, enabled, side)
+                    }
+                };
+                if button(ui, Icon::Open, "Open", "Open (Ctrl+O)", true).clicked() {
+                    ed.services.request_open();
+                }
+                if button(ui, Icon::Record, "Record", "New Recording", ed.services.can_capture()).clicked() {
+                    record(ed, &ctx);
+                }
+            });
+        });
+    egui::Panel::bottom("video_start_status")
+        .exact_size(24.0)
+        .frame(egui::Frame::NONE.fill(t.toolbar).inner_margin(egui::Margin::symmetric(10, 0)))
+        .show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.label(RichText::new("No recording open").size(12.0).color(t.muted));
+            });
+        });
+    if ed.settings.show_tray {
+        crate::strip::show(ed, ui);
+    }
+    // The latest recordings, to open again.
+    let recordings: Vec<crate::services::RecentItem> =
+        ed.recent.iter().filter(|r| crate::editor::is_recording_path(&r.path)).take(5).cloned().collect();
+    egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
+        let room = ui.max_rect();
+        let mut chosen: Option<String> = None;
+        let mut start: Option<bool> = None;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_center_size(room.center(), vec2(380.0, room.height().min(560.0)))), |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.add_space(((room.height() - 360.0 - 52.0 * recordings.len() as f32) / 2.0).max(12.0));
+                egui::Frame::NONE
+                    .fill(t.panel)
+                    .stroke(Stroke::new(1.0, t.border))
+                    .corner_radius(crate::widgets::WINDOW_RADIUS)
+                    .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if t.dark { 110 } else { 40 }) })
+                    .inner_margin(egui::Margin::same(20))
+                    .show(ui, |ui| {
+                        ui.set_width(340.0);
+                        ui.label(RichText::new("No recording open").font(crate::widgets::strong_font(&ctx, 18.0)).color(t.text));
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Record the screen with your camera and your voice, or open a recording you made. Pictures open in the Editor, beside this window.")
+                                .size(12.5)
+                                .color(t.muted),
+                        );
+                        ui.add_space(12.0);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        if ed.services.can_capture() && crate::editor::welcome_row(ui, Icon::Record, "Record a Video", "").clicked() {
+                            start = Some(true);
+                        }
+                        if crate::editor::welcome_row(ui, Icon::Open, "Open a Recording…", "Ctrl+O").clicked() {
+                            start = Some(false);
+                        }
+                        if !recordings.is_empty() {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Recent recordings").size(12.5).strong().color(t.text));
+                            ui.add_space(2.0);
+                            for r in &recordings {
+                                let when = [r.day.as_str(), r.time.as_str()].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ");
+                                let label = if when.is_empty() { r.name.clone() } else { format!("{}  ·  {when}", r.name) };
+                                if crate::editor::welcome_row(ui, Icon::Play, &label, "").on_hover_text(&r.path).clicked() {
+                                    chosen = Some(r.path.clone());
+                                }
+                            }
+                        }
+                    });
+            });
+        });
+        match start {
+            Some(true) => record(ed, &ctx),
+            Some(false) => ed.services.request_open(),
+            None => {}
+        }
+        if let Some(p) = chosen {
+            ed.open_path(&ctx, &p);
+        }
+    });
 }
 
 #[cfg(test)]

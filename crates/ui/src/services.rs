@@ -147,6 +147,13 @@ pub trait Services {
     /// Asks for a file to open; the answer comes through [`Services::poll_dialog`].
     fn request_open(&self) {}
 
+    /// Opens a file in the other editor, a window of its own: a recording (`video`) in the video
+    /// editor, a picture or a project in the picture editor. False when the host has the one
+    /// window only (a browser, the tests): the file is opened here instead.
+    fn open_in_other_editor(&self, _path: &str, _video: bool) -> bool {
+        false
+    }
+
     /// Asks where to save; the answer comes through [`Services::poll_dialog`].
     fn request_save(&self, _suggested_name: &str, _filters: &[Filter]) {}
 

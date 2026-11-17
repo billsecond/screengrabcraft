@@ -113,6 +113,11 @@ pub struct Service {
     pub freezing: Option<CaptureMode>,
     /// A worker is on a picture: repeating the last area, or keeping a capture.
     keeping: bool,
+    /// The capture being kept was taken while recording: it is saved, and opened in the editor
+    /// only once the recording is over (nothing comes up over the screen being recorded).
+    keeping_held: bool,
+    /// Captures taken while recording, to open in the editor once it's over.
+    held: Vec<PathBuf>,
     /// A picture chosen in the overlay, kept on the next frame, once the overlay (the frozen
     /// screen) has gone: copying it to the clipboard takes a moment, and the screen shouldn't
     /// stay frozen meanwhile.
@@ -202,6 +207,8 @@ impl Service {
             after_countdown: None,
             freezing: None,
             keeping: false,
+            keeping_held: false,
+            held: Vec::new(),
             chosen: None,
             asked: None,
             ready_wanted: false,
@@ -417,6 +424,11 @@ impl Service {
                             self.notify("The editor could not be started", e, None, None, true);
                         }
                     }
+                    Some(Item::VideoEditor) => {
+                        if let Err(e) = launch::open_video_editor(&[]) {
+                            self.notify("The video editor could not be started", e, None, None, true);
+                        }
+                    }
                     Some(Item::Folder) => {
                         let d = paths::captures_dir(&self.settings);
                         let _ = std::fs::create_dir_all(&d);
@@ -454,18 +466,32 @@ impl Service {
                 self.keeping = false;
                 match result {
                     // The picture brings the editor back.
-                    Ok(done) if done.edited => self.editor_aside = false,
+                    Ok(done) if done.edited => {
+                        self.keeping_held = false;
+                        self.editor_aside = false;
+                    }
                     Ok(done) => {
+                        // Taken while recording: it opens in the editor once the recording is over.
+                        let held = std::mem::take(&mut self.keeping_held);
+                        if held && let Some(p) = &done.saved {
+                            self.held.push(p.clone());
+                        }
                         let text = match (&done.saved, done.copied) {
                             (Some(_), true) => "Saved and copied",
                             (Some(_), false) => "Saved",
                             (None, true) => "Copied to the clipboard",
                             (None, false) => "Captured",
                         };
-                        let detail = done.saved.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        let mut detail = done.saved.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        if held {
+                            detail = format!("{detail} \u{2014} it opens in the editor when the recording stops");
+                        }
                         self.notify(text, detail, done.saved.clone(), done.thumb, false);
                     }
-                    Err(e) => self.notify("The capture could not be kept", e, None, None, true),
+                    Err(e) => {
+                        self.keeping_held = false;
+                        self.notify("The capture could not be kept", e, None, None, true);
+                    }
                 }
             }
         }
@@ -478,8 +504,15 @@ impl Service {
         if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.chosen.is_some() {
             return;
         }
-        if self.recording.is_some() {
-            self.notify("A recording is running", "Stop it first (the tray icon, or its shortcut).", None, None, true);
+        // While recording, still pictures can be taken (the recording goes on); not another recording.
+        if (self.recording.is_some() || self.restarting.is_some()) && !mode.is_still() {
+            self.notify(
+                "A recording is running",
+                "Stop it first (the tray icon, or its shortcut). Pictures can be taken meanwhile.",
+                None,
+                None,
+                true,
+            );
             return;
         }
         // Video Production starts at its Recorder, where the area and the inputs are chosen.
@@ -694,6 +727,10 @@ impl Service {
     /// settings say. The file work is done on a worker thread.
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
         let (save, copy, edit) = what_to_keep(action, &self.settings.after_capture);
+        // While recording, nothing comes up over the screen being recorded: the capture is saved
+        // (and copied, if it's to be), and opened in the editor once the recording is over.
+        let (save, edit, held) = held_while_recording(save, edit, self.recording.is_some() || self.restarting.is_some());
+        self.keeping_held = held;
         self.keeping = true;
         let settings = self.settings.clone();
         let source = source.to_string();
@@ -731,6 +768,15 @@ impl Service {
     /// A recording has begun: its shortcuts are taken, the tray shows its menu, and its controls
     /// are shown (where they can be kept out of the recording; else they wait in the tray).
     fn recording_began(&mut self, r: Recording, again: Again) {
+        // The video editor is started out of sight meanwhile, as the picture editor is kept ready:
+        // the recording opens in it at once when it's over.
+        if self.ready_wanted && matches!(again, Again::Video { mode: CaptureMode::Production, .. }) {
+            let _ = std::thread::Builder::new().name("video-editor".into()).spawn(|| {
+                if let Err(e) = launch::ready_video_editor() {
+                    log::warn!("keeping the video editor ready: {e}");
+                }
+            });
+        }
         self.recording = Some(r);
         self.again = Some(again);
         self.controls_hidden = !crate::popups::controls_fit(self);
@@ -756,6 +802,16 @@ impl Service {
         }
         self.controls_drag = None;
         self.controls_hidden = false;
+        // The pictures taken while it ran: the last one opens in the editor now (each is saved,
+        // and in its Recent Captures).
+        if self.restarting.is_none()
+            && let Some(last) = self.held.drain(..).next_back()
+        {
+            match launch::open_editor(&[last.to_string_lossy().to_string()]) {
+                Ok(()) => self.editor_aside = false,
+                Err(e) => log::warn!("opening the editor: {e}"),
+            }
+        }
     }
 
     /// The tray's recording menu as things are now.
@@ -767,6 +823,7 @@ impl Service {
             border: self.settings.recording_border,
             pause_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Pause),
             stop_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Stop),
+            shot_key: self.keys.label(&self.settings.hotkeys, CaptureMode::Region),
         });
         if let Some(t) = &mut self.tray {
             t.show_recording(state);
@@ -887,9 +944,8 @@ impl Service {
                     self.captions.push(path.clone(), false);
                     args.insert(0, launch::CAPTIONS_COMING.to_string());
                 }
-                if launch::open_editor(&args).is_ok() {
-                    self.editor_aside = false;
-                } else {
+                // In the video editor, a window of its own: the picture editor comes back as it was.
+                if launch::open_video_editor(&args).is_err() {
                     self.notify("Recording saved", file_name(&path), Some(path), None, false);
                 }
             }
@@ -1011,6 +1067,7 @@ impl Service {
             // An editor kept ready ends with the service (an editor the owner has open stays).
             if self.ready_wanted {
                 launch::tell_editor(launch::EDITOR_UNREADY);
+                launch::tell_video_editor(launch::EDITOR_UNREADY);
             }
             self.guard.close();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1029,7 +1086,10 @@ impl Service {
                 self.ready_at = Some(now + READY_FIRST);
             } else {
                 self.ready_at = None;
-                let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_UNREADY));
+                let _ = std::thread::Builder::new().name("editor".into()).spawn(|| {
+                    launch::tell_editor(launch::EDITOR_UNREADY);
+                    launch::tell_video_editor(launch::EDITOR_UNREADY);
+                });
             }
         }
         let Some(at) = self.ready_at else { return };
@@ -1078,8 +1138,18 @@ impl Service {
         crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);
         crate::recorder::show(self, &ctx);
+        // While recording, a picture taken meanwhile stays out of the video: the screen frozen to
+        // choose it, its countdown and what it says once it's kept (Windows; see `cloak`).
+        if self.recording.is_some() {
+            for title in [OVERLAY_TITLE, crate::popups::COUNTDOWN_TITLE, crate::popups::NOTICE_TITLE] {
+                cloak::keep_out_of_captures(title);
+            }
+        }
     }
 }
+
+/// The overlay's windows' title (kept out of a recording going on by it).
+const OVERLAY_TITLE: &str = "ScreenGrabCraft capture";
 
 /// The overlay's purpose for a Video Production area chosen on the screen.
 fn production_purpose(r: &RecorderOptions) -> Purpose {
@@ -1104,7 +1174,7 @@ fn winit_screens(frame: &eframe::Frame) -> Vec<((i32, i32), (u32, u32), String)>
 /// while raising the window once the surface exists works.
 fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], raised: bool) -> ViewportBuilder {
     let mut b = ViewportBuilder::default()
-        .with_title("ScreenGrabCraft capture")
+        .with_title(OVERLAY_TITLE)
         .with_app_id(APP_ID)
         .with_decorations(false)
         .with_resizable(false)
@@ -1171,6 +1241,12 @@ fn step_aside(hide: bool) -> bool {
 /// Puts the editor back if it's aside (from a thread of its own: it may not answer at once).
 fn editor_back() {
     let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_SHOW));
+}
+
+/// What a capture taken while recording comes to (`recording`): saved rather than opened in the
+/// editor now, and held to open once the recording is over. (save, edit, held)
+fn held_while_recording(save: bool, edit: bool, recording: bool) -> (bool, bool, bool) {
+    if recording && edit { (true, false, true) } else { (save, edit, false) }
 }
 
 /// What a capture comes to: whether it's saved, copied and opened in the editor.
@@ -1266,6 +1342,18 @@ fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_taken_while_recording_is_saved_and_held_for_the_editor() {
+        // To open in the editor: saved instead, and opened once the recording is over.
+        assert_eq!(held_while_recording(false, true, true), (true, false, true));
+        assert_eq!(held_while_recording(true, true, true), (true, false, true));
+        // Only saved or copied: as it would be.
+        assert_eq!(held_while_recording(true, false, true), (true, false, false));
+        assert_eq!(held_while_recording(false, false, true), (false, false, false));
+        // Not recording: nothing held.
+        assert_eq!(held_while_recording(false, true, false), (false, true, false));
+    }
 
     #[test]
     fn a_capture_is_copied_and_opened_in_the_editor_unless_told_otherwise() {

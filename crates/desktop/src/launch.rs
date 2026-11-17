@@ -29,6 +29,11 @@ pub const ASK_CAPTIONS_AGAIN: &str = "--captions-again";
 /// What the service opens a recording in the editor with when its captions are being made
 /// (`--captions-coming <recording>`): the editor says so until they come.
 pub const CAPTIONS_COMING: &str = "--captions-coming";
+/// What the editor program is started with to be the video editor: a window of its own for
+/// recordings, beside the picture editor's (another copy of the same program).
+pub const VIDEO: &str = "--video";
+/// The video editor's name among the running programs ([`crate::instance`]).
+pub const VIDEO_INSTANCE: &str = "video-editor";
 
 fn exe_name(bin: &str) -> String {
     if cfg!(target_os = "windows") { format!("{bin}.exe") } else { bin.to_string() }
@@ -96,6 +101,54 @@ pub fn ready_editor() -> Result<(), String> {
 /// Tells the editor something if one is running, without starting one; `true` if one took it.
 pub fn tell_editor(word: &str) -> bool {
     crate::instance::tell("editor", &[word.to_string()])
+}
+
+/// The editor program: this one, if this is it, else the one installed beside this program.
+fn editor_program() -> Option<PathBuf> {
+    let here = std::env::current_exe().ok()?;
+    let stem = here.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    if stem == EDITOR_BIN || stem == "ScreenGrabCraft Editor" {
+        return Some(here);
+    }
+    sibling(EDITOR_BIN)
+        .or_else(|| if cfg!(target_os = "macos") { mac_bundle_sibling("ScreenGrabCraft Editor", "ScreenGrabCraft Editor") } else { None })
+}
+
+/// The arguments the video editor is started with: [`VIDEO`] first, then `args`.
+pub fn video_args(args: &[String]) -> Vec<String> {
+    std::iter::once(VIDEO.to_string()).chain(args.iter().cloned()).collect()
+}
+
+/// Opens the video editor with `args` (recordings to open); a running one takes them over, else
+/// one is started (the editor program with [`VIDEO`]).
+pub fn open_video_editor(args: &[String]) -> Result<(), String> {
+    if crate::instance::tell(VIDEO_INSTANCE, args) {
+        return Ok(());
+    }
+    if let Some(p) = editor_program() {
+        return spawn(&p, &video_args(args));
+    }
+    if cfg!(target_os = "macos") {
+        // A second copy of the editor's app (`-n`), as the video editor.
+        let mut c = Command::new("open");
+        c.args(["-n", "-b", EDITOR_BUNDLE_ID, "--args"]).args(video_args(args));
+        return c.spawn().map(|_| ()).map_err(|e| format!("open: {e}"));
+    }
+    spawn(Path::new(EDITOR_BIN), &video_args(args))
+}
+
+/// Starts the video editor out of sight, ready for the recording going on, unless one is running.
+pub fn ready_video_editor() -> Result<(), String> {
+    if crate::instance::running(VIDEO_INSTANCE) {
+        return Ok(());
+    }
+    let p = editor_program().ok_or("the editor isn't installed next to the capture service")?;
+    spawn(&p, &video_args(&[EDITOR_STANDBY.to_string()]))
+}
+
+/// Tells the video editor something if one is running, without starting one.
+pub fn tell_video_editor(word: &str) -> bool {
+    crate::instance::tell(VIDEO_INSTANCE, &[word.to_string()])
 }
 
 /// Asks the capture service for something (`--capture region`); a running one takes it over,
@@ -227,6 +280,13 @@ pub fn open_url(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_video_editor_is_the_editor_started_with_video_first() {
+        assert_eq!(video_args(&[]), vec!["--video".to_string()]);
+        assert_eq!(video_args(&[CAPTIONS_COMING.to_string(), "a.sgvideo".to_string()]), vec!["--video", "--captions-coming", "a.sgvideo"]);
+        assert_ne!(VIDEO_INSTANCE, "editor", "it runs beside the picture editor, not instead of it");
+    }
 
     #[test]
     fn explorer_is_told_the_whole_path_in_quotes() {
