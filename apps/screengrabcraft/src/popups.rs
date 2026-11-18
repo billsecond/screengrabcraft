@@ -80,17 +80,29 @@ pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
 /// What the recording control's buttons do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecordingChoice {
+    /// Stop and keep it.
     Stop,
-    Cancel,
+    /// Stop and throw it away.
+    Discard,
+    /// Pause it, or go on.
+    Pause,
+    /// Throw it away and record the same again.
+    Restart,
+    /// The red border round the area, off or on.
+    Border,
+    /// Put the controls away in the tray.
+    Hide,
+    /// The bar is being dragged somewhere else.
+    Drag,
 }
 
 fn recording_size(kind: Kind) -> Vec2 {
     let w = match kind {
-        Kind::Scrolling => 470.0,
-        Kind::Video | Kind::Production => 520.0,
-        Kind::Gif => 390.0,
+        Kind::Scrolling => 600.0,
+        Kind::Video | Kind::Production => 680.0,
+        Kind::Gif => 560.0,
     };
-    vec2(w, 54.0)
+    vec2(w, 56.0)
 }
 
 /// What the recording control shows.
@@ -104,29 +116,72 @@ struct RecordingView {
     saving: u32,
     /// Stop was pressed and it's finishing.
     stopping: bool,
+    paused: bool,
+    /// The red border round the area is shown.
+    border: bool,
     /// The computer's sound and the microphone, if they're recorded, and how loud they are.
     sound: Option<f32>,
     mic: Option<f32>,
     /// What was asked for and couldn't be had (`No camera: …`).
     missing: Vec<String>,
+    /// The shortcuts that pause and stop it, as the tips show them.
+    pause_key: Option<String>,
+    stop_key: Option<String>,
 }
 
-/// A red light that blinks every second, and the time.
-fn red_light(ui: &mut Ui, secs: u64, text: egui::Color32) {
+/// A red light that blinks every second and the time, or, paused, an amber pause sign.
+fn red_light(ui: &mut Ui, secs: u64, paused: bool, text: egui::Color32) {
     let (dot, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
-    let red = if secs.is_multiple_of(2) { egui::Color32::from_rgb(0xE5, 0x39, 0x35) } else { egui::Color32::from_rgb(0x99, 0x22, 0x22) };
-    ui.painter().circle_filled(dot.center(), 6.0, red);
+    if paused {
+        screengrabcraft_ui::icons::paint(ui.painter(), dot, screengrabcraft_ui::icons::Icon::Pause, egui::Color32::from_rgb(0xF5, 0x9E, 0x0B));
+    } else {
+        let red = if secs.is_multiple_of(2) { egui::Color32::from_rgb(0xE5, 0x39, 0x35) } else { egui::Color32::from_rgb(0x99, 0x22, 0x22) };
+        ui.painter().circle_filled(dot.center(), 6.0, red);
+    }
     ui.label(RichText::new(format!("{:02}:{:02}", secs / 60, secs % 60)).monospace().size(16.0).color(text));
+    if paused {
+        ui.label(RichText::new("Paused").strong().color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B)));
+    }
 }
 
-/// The recording control's face: how far it has got, then [Stop] [Cancel] at the right. Once
-/// Stop is pressed it says so at once, and only Cancel is left.
+/// Six dots at the bar's left: it can be dragged.
+fn grip(ui: &mut Ui, color: egui::Color32) {
+    let (r, _) = ui.allocate_exact_size(vec2(10.0, 22.0), egui::Sense::hover());
+    for row in 0..3 {
+        for col in 0..2 {
+            ui.painter().circle_filled(pos2(r.min.x + 2.5 + col as f32 * 5.0, r.min.y + 4.0 + row as f32 * 7.0), 1.4, color);
+        }
+    }
+}
+
+/// `words` and the shortcut that does the same, for a tip.
+fn with_key(words: &str, key: &Option<String>) -> String {
+    match key {
+        Some(k) => format!("{words} ({k})"),
+        None => words.to_string(),
+    }
+}
+
+/// The recording control's face: a grip, how far it has got, then Pause, Restart, Border and
+/// Minimize, and [Stop] [Discard] at the right. Anywhere that isn't a button drags it. Once Stop is
+/// pressed it says so at once, and only Discard is left.
 fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingChoice> {
+    use screengrabcraft_ui::icons::{self, Icon};
     let t = Tokens::get(ui.ctx());
     let mut choice = None;
     let making = matches!(kind, Kind::Video | Kind::Production) && v.saving > 0;
     let finishing = making || v.stopping;
+    // Made first, so the buttons on top of it take their clicks.
+    let bar = ui.interact(ui.max_rect(), ui.id().with("drag the bar"), egui::Sense::drag());
+    if bar.drag_started() {
+        choice = Some(RecordingChoice::Drag);
+    }
+    if bar.hovered() && !finishing {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+    }
     ui.horizontal_centered(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        grip(ui, t.muted);
         match kind {
             _ if v.stopping && !making => {
                 ui.add(egui::Spinner::new().size(16.0).color(t.text));
@@ -134,7 +189,7 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
                 ui.label(RichText::new(format!("Stopping… ({:02}:{:02} recorded)", secs / 60, secs % 60)).color(t.text));
             }
             Kind::Gif => {
-                red_light(ui, v.secs, t.text);
+                red_light(ui, v.secs, v.paused, t.text);
                 ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
             }
             Kind::Scrolling => {
@@ -147,12 +202,12 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
                 ui.add(egui::ProgressBar::new(done).desired_width(150.0).show_percentage());
             }
             Kind::Video | Kind::Production => {
-                red_light(ui, v.secs, t.text);
+                red_light(ui, v.secs, v.paused, t.text);
                 // A meter for each sound, so the owner sees it's being heard.
                 for (name, level) in [("Sound", v.sound), ("Mic", v.mic)] {
                     if let Some(l) = level {
                         ui.label(RichText::new(name).size(12.0).color(t.muted));
-                        ui.add(egui::ProgressBar::new(l.clamp(0.0, 1.0)).desired_width(44.0).desired_height(6.0));
+                        ui.add(egui::ProgressBar::new(l.clamp(0.0, 1.0)).desired_width(40.0).desired_height(6.0));
                     }
                 }
                 if !v.missing.is_empty() {
@@ -160,22 +215,69 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
                 }
             }
         }
-        let (stop, tip) = match kind {
-            Kind::Scrolling => ("Done", "Stop scrolling and keep the picture"),
-            _ => ("Stop", "Stop and save"),
-        };
-        let buttons: Vec<FooterButton<'_>> = if finishing {
-            vec![FooterButton::cancel("Cancel").tip("Stop waiting and throw the recording away")]
-        } else {
-            vec![FooterButton::primary(stop).tip(tip), FooterButton::cancel("Cancel")]
-        };
-        choice = widgets::footer(ui, &buttons).map(|i| if i == 0 && !finishing { RecordingChoice::Stop } else { RecordingChoice::Cancel });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if finishing {
+                if widgets::button(ui, "Discard").on_hover_text("Stop waiting and throw the recording away").clicked() {
+                    choice = Some(RecordingChoice::Discard);
+                }
+                return;
+            }
+            if widgets::button(ui, "Discard").on_hover_text("Stop and throw the recording away").clicked() {
+                choice = Some(RecordingChoice::Discard);
+            }
+            let (stop, tip) = match kind {
+                Kind::Scrolling => ("Done", "Stop scrolling and keep the picture".to_string()),
+                _ => ("Stop", with_key("Stop and save", &v.stop_key)),
+            };
+            if widgets::primary_button(ui, stop).on_hover_text(tip).clicked() {
+                choice = Some(RecordingChoice::Stop);
+            }
+            ui.add_space(4.0);
+            ui.separator();
+            if icons::button(ui, Icon::Minimize, "Put the controls away in the tray (its icon has them)", false, true).clicked() {
+                choice = Some(RecordingChoice::Hide);
+            }
+            let border = if v.border { "Hide the red border" } else { "Show the red border" };
+            if icons::button(ui, Icon::Marquee, border, v.border, true).clicked() {
+                choice = Some(RecordingChoice::Border);
+            }
+            if icons::button(ui, Icon::Restart, "Restart: throw this away and record again", false, true).clicked() {
+                choice = Some(RecordingChoice::Restart);
+            }
+            if kind != Kind::Scrolling {
+                let (icon, words) = if v.paused { (Icon::Play, "Resume") } else { (Icon::Pause, "Pause") };
+                if icons::button(ui, icon, &with_key(words, &v.pause_key), v.paused, true).clicked() {
+                    choice = Some(RecordingChoice::Pause);
+                }
+            }
+        });
     });
     choice
 }
 
+/// The title of the recording control's window (how it's found to be kept out of captures).
+const CONTROL_TITLE: &str = "ScreenGrabCraft recording";
+
+/// Whether the recording control can be on the screen: always on Windows, which keeps it out of
+/// the recording; elsewhere when it has a place off the area (else it waits in the tray until
+/// it's asked for).
+pub fn controls_fit(svc: &Service) -> bool {
+    if cfg!(target_os = "windows") {
+        return svc.recording.is_some();
+    }
+    let Some(rec) = &svc.recording else { return false };
+    let monitors: Vec<(IRect, f32)> =
+        screengrabcraft_capture::monitors().map(|ms| ms.into_iter().map(|m| (m.rect, m.scale)).collect()).unwrap_or_default();
+    control_place(rec.desktop, &monitors, recording_size(rec.kind)).is_some()
+}
+
 pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     let Some(rec) = &svc.recording else { return };
+    if svc.controls_hidden {
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        return;
+    }
     let (kind, d): (Kind, IRect) = (rec.kind, rec.desktop);
     let secs = rec.elapsed().as_secs();
     let progress = rec.progress.load(std::sync::atomic::Ordering::SeqCst);
@@ -185,37 +287,95 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     let level = |i: usize| rec.levels.get(i).map(|l| f32::from_bits(l.load(std::sync::atomic::Ordering::Relaxed))).unwrap_or(0.0);
     let sources = rec.sources.lock().map(|s| s.clone()).unwrap_or_default();
     let has = |prefix: &str| sources.iter().any(|s| s.starts_with(prefix));
+    let keys = &svc.settings.hotkeys;
     let view = RecordingView {
         secs,
         progress,
         lost,
         saving: rec.saving.load(std::sync::atomic::Ordering::SeqCst),
         stopping: rec.stopping(),
+        paused: rec.is_paused(),
+        border: svc.settings.recording_border,
         sound: has("Computer sound").then(|| level(0)),
         mic: has("Microphone:").then(|| level(1)),
         missing: sources.iter().filter(|s| s.starts_with("No ")).cloned().collect(),
+        pause_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Pause),
+        stop_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Stop),
     };
     let size = recording_size(kind);
-    // Never in the video: beside the area, else on a screen that isn't recorded, else nowhere
-    // (the tray icon stops it). Once it's making the video, the area doesn't matter.
-    let place = control_place(d, &monitors, size).or_else(|| (view.saving > 0).then_some((d.x as f32 + 10.0, d.y as f32 + 10.0, 1.0)));
-    let Some((x, y, s)) = place else {
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
-        return;
+    // Where the owner dragged it; else beside the area, else on a screen that isn't recorded,
+    // else (asked for from the tray) at the bottom of the area's screen. Windows keeps it out of
+    // the recording wherever it is.
+    let at = match svc.controls_at {
+        Some(p) => p,
+        None => {
+            let place = control_place(d, &monitors, size)
+                .or_else(|| (view.saving > 0).then_some((d.x as f32 + 10.0, d.y as f32 + 10.0, 1.0)))
+                .or_else(|| bottom_of(d, &monitors, size));
+            let Some((x, y, s)) = place else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+                return;
+            };
+            points(x, y, s)
+        }
     };
-    let at = points(x, y, s);
     let mut choice = None;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup("ScreenGrabCraft recording", at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(14, 8))).show(ui, |ui| {
+    // Where its window is (points), the points' size in pixels, and whether the button is down.
+    let mut seen: Option<(egui::Pos2, f32, bool)> = None;
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup(CONTROL_TITLE, at, size, false), |ui, _| {
+        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(12, 8))).show(ui, |ui| {
             choice = recording_ui(ui, kind, &view);
         });
+        let ppp = ui.ctx().pixels_per_point();
+        let (outer, down) = ui.ctx().input(|i| (i.viewport().outer_rect.map(|r| r.min), i.pointer.primary_down()));
+        seen = outer.map(|o| (o, ppp, down));
+        // Elsewhere the system moves it (on Windows its move loop would hold up the service, the
+        // tray and the shortcuts, for as long as it runs: there it follows the pointer, below).
+        if choice == Some(RecordingChoice::Drag) && !cfg!(target_os = "windows") {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
     });
+    // Out of every capture, this one's included (Windows 10 2004 and later; elsewhere it's kept
+    // off the area instead).
+    screengrabcraft_desktop::cloak::keep_out_of_captures(CONTROL_TITLE);
+    if let Some((outer, ppp, down)) = seen {
+        if choice == Some(RecordingChoice::Drag) {
+            // Where on it the pointer took hold (pixels), and from now on it stays where it's put.
+            svc.controls_drag = screengrabcraft_desktop::cloak::cursor_position().map(|(x, y)| (x as f32 - outer.x * ppp, y as f32 - outer.y * ppp));
+            svc.controls_at = Some(outer);
+        }
+        match svc.controls_drag {
+            // Dragged: it follows the pointer on the desktop, nothing else moving it meanwhile.
+            Some((gx, gy)) if down => {
+                if let Some((x, y)) = screengrabcraft_desktop::cloak::cursor_position() {
+                    svc.controls_at = Some(pos2((x as f32 - gx) / ppp.max(0.5), (y as f32 - gy) / ppp.max(0.5)));
+                }
+                ctx.request_repaint();
+            }
+            Some(_) => svc.controls_drag = None,
+            None => {}
+        }
+    }
     ctx.request_repaint_after(std::time::Duration::from_millis(250));
     match choice {
         Some(RecordingChoice::Stop) => svc.stop_recording(false),
-        Some(RecordingChoice::Cancel) => svc.stop_recording(true),
-        None => {}
+        Some(RecordingChoice::Discard) => svc.stop_recording(true),
+        Some(RecordingChoice::Pause) => svc.toggle_pause(),
+        Some(RecordingChoice::Restart) => svc.restart_recording(),
+        Some(RecordingChoice::Border) => svc.toggle_border(),
+        Some(RecordingChoice::Hide) => svc.controls_hidden = true,
+        Some(RecordingChoice::Drag) | None => {}
     }
+}
+
+/// The bottom middle of the screen the area is on (the area's middle), for controls asked for
+/// when there's no room off the area.
+fn bottom_of(area: IRect, monitors: &[(IRect, f32)], size: Vec2) -> Option<(f32, f32, f32)> {
+    let (cx, cy) = (i64::from(area.x) + i64::from(area.w / 2), i64::from(area.y) + i64::from(area.h / 2));
+    let (m, s) = monitors.iter().find(|(m, _)| m.contains(cx, cy)).or_else(|| monitors.first()).copied()?;
+    let x = m.x as f32 + (m.w as f32 - size.x * s) / 2.0;
+    let y = m.bottom() as f32 - size.y * s - 80.0 * s;
+    Some((x, y.max(m.y as f32), s))
 }
 
 /// How thick the outline round an area being recorded is, in desktop pixels.
@@ -230,7 +390,8 @@ const FRAME_TITLE: &str = "ScreenGrabCraft recording area";
 /// screen isn't outlined, nor anything once the video is being made. The strips are made hidden
 /// and shown on the next frame, without Windows' animation.
 pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
-    let Some(rec) = &svc.recording else {
+    // None while there's no recording, or the owner turned the border off.
+    let Some(rec) = svc.recording.as_ref().filter(|_| svc.settings.recording_border) else {
         svc.frame_frames = 0;
         return;
     };
@@ -582,10 +743,10 @@ mod tests {
     }
 
     #[test]
-    fn the_recording_control_stops_and_cancels_from_the_right() {
+    fn the_recording_control_stops_and_discards_from_the_right() {
         for kind in [Kind::Gif, Kind::Scrolling, Kind::Video, Kind::Production] {
             let stop = if kind == Kind::Scrolling { "Done" } else { "Stop" };
-            for (label, wanted) in [(stop, RecordingChoice::Stop), ("Cancel", RecordingChoice::Cancel)] {
+            for (label, wanted) in [(stop, RecordingChoice::Stop), ("Discard", RecordingChoice::Discard)] {
                 let view = RecordingView { secs: 7, progress: 212, ..RecordingView::default() };
                 let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
                 h.run_steps(2);
@@ -599,16 +760,16 @@ mod tests {
     }
 
     #[test]
-    fn once_stop_is_pressed_the_control_says_so_and_only_cancel_is_left() {
+    fn once_stop_is_pressed_the_control_says_so_and_only_discard_is_left() {
         for kind in [Kind::Gif, Kind::Scrolling, Kind::Video, Kind::Production] {
             let view = RecordingView { secs: 14, stopping: true, ..RecordingView::default() };
             let mut h = popup_harness(recording_size(kind), Theme::Light, move |ui| recording_ui(ui, kind, &view));
             h.run_steps(2);
             h.get_by_label_contains("Stopping… (00:14 recorded)");
             assert!(h.query_by_label("Stop").is_none() && h.query_by_label("Done").is_none(), "{kind:?}");
-            h.get_by_label("Cancel").click();
+            h.get_by_label("Discard").click();
             h.run_steps(1);
-            assert_eq!(*h.state(), Some(RecordingChoice::Cancel), "{kind:?}");
+            assert_eq!(*h.state(), Some(RecordingChoice::Discard), "{kind:?}");
         }
         // Making the video after: its progress, not "Stopping".
         let view = RecordingView { stopping: true, saving: 501, ..RecordingView::default() };
@@ -616,6 +777,105 @@ mod tests {
         h.run_steps(2);
         h.get_by_label("Making the video…");
         assert!(h.query_by_label_contains("Stopping").is_none());
+    }
+
+    #[test]
+    fn the_recording_control_pauses_restarts_hides_and_turns_the_border_off() {
+        let keys = (Some("F9".to_string()), Some("F10".to_string()));
+        for kind in [Kind::Gif, Kind::Video, Kind::Production, Kind::Scrolling] {
+            let view = RecordingView {
+                secs: 65,
+                border: true,
+                sound: Some(0.4),
+                mic: Some(0.2),
+                pause_key: keys.0.clone(),
+                stop_key: keys.1.clone(),
+                ..RecordingView::default()
+            };
+            let buttons: Vec<(&str, RecordingChoice)> = vec![
+                ("Pause (F9)", RecordingChoice::Pause),
+                ("Restart: throw this away and record again", RecordingChoice::Restart),
+                ("Hide the red border", RecordingChoice::Border),
+                ("Put the controls away in the tray (its icon has them)", RecordingChoice::Hide),
+            ];
+            for (label, wanted) in buttons {
+                let v = view.clone();
+                let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &v));
+                h.run_steps(2);
+                if kind == Kind::Scrolling && wanted == RecordingChoice::Pause {
+                    assert!(h.query_by_label(label).is_none(), "a scrolling capture can't be paused");
+                    continue;
+                }
+                let r = h.get_by_label(label).rect();
+                assert!(r.max.x <= recording_size(kind).x + ROOT, "{kind:?} {label} {r:?}");
+                h.get_by_label(label).click();
+                h.run_steps(1);
+                assert_eq!(*h.state(), Some(wanted), "{kind:?} {label}");
+            }
+        }
+        // Paused: it says so, and the button goes on with it.
+        let view = RecordingView { secs: 65, paused: true, pause_key: keys.0.clone(), ..RecordingView::default() };
+        let mut h = popup_harness(recording_size(Kind::Video), Theme::Dark, move |ui| recording_ui(ui, Kind::Video, &view));
+        h.run_steps(2);
+        h.get_by_label("Paused");
+        h.get_by_label("Resume (F9)").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(RecordingChoice::Pause));
+        if let Ok(dir) = std::env::var("SGC_SHOTS") {
+            for (name, paused) in [("recording-bar", false), ("recording-bar-paused", true)] {
+                let view = RecordingView {
+                    secs: 65,
+                    paused,
+                    border: true,
+                    sound: Some(0.5),
+                    mic: Some(0.3),
+                    pause_key: keys.0.clone(),
+                    stop_key: keys.1.clone(),
+                    ..RecordingView::default()
+                };
+                let mut h = popup_harness(recording_size(Kind::Production), Theme::Dark, move |ui| recording_ui(ui, Kind::Production, &view));
+                h.run_steps(2);
+                if let Ok(img) = h.render() {
+                    let _ = img.save(format!("{dir}/{name}.png"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_recording_menu_pauses_stops_restarts_and_says_whats_going_on() {
+        use crate::tray::{Item, RecordingEntry as E, RecordingState, recording_entries};
+        let s = RecordingState {
+            can_pause: true,
+            controls: true,
+            border: true,
+            pause_key: Some("F9".into()),
+            stop_key: Some("F10".into()),
+            ..RecordingState::default()
+        };
+        let m = recording_entries(&s);
+        assert_eq!(m.first(), Some(&E::Heading("Recording…".to_string())));
+        let item = |m: &[E], what: Item| {
+            m.iter().find_map(|e| match e {
+                E::Item(t, i) | E::Check(t, i, _) if *i == what => Some(t.clone()),
+                _ => None,
+            })
+        };
+        assert!(item(&m, Item::PauseRecording).unwrap().starts_with("Pause Recording") && item(&m, Item::PauseRecording).unwrap().contains("F9"));
+        assert!(item(&m, Item::StopRecording).unwrap().contains("F10"));
+        assert!(item(&m, Item::RestartRecording).is_some() && item(&m, Item::DiscardRecording).is_some());
+        assert_eq!(item(&m, Item::ToggleControls).as_deref(), Some("Hide the Controls in the Tray"));
+        assert!(m.contains(&E::Check("Red Border Round the Area".to_string(), Item::ToggleBorder, true)));
+        // Discard last, set apart.
+        assert_eq!(m.last(), Some(&E::Item("Discard Recording".to_string(), Item::DiscardRecording)));
+        assert_eq!(m.get(m.len() - 2), Some(&E::Separator));
+        // Paused, controls put away, border off; a scrolling capture can't be paused.
+        let paused = recording_entries(&RecordingState { paused: true, controls: false, border: false, ..s.clone() });
+        assert_eq!(paused.first(), Some(&E::Heading("Recording paused".to_string())));
+        assert!(item(&paused, Item::PauseRecording).unwrap().starts_with("Resume Recording"));
+        assert_eq!(item(&paused, Item::ToggleControls).as_deref(), Some("Show the Controls"));
+        assert!(paused.contains(&E::Check("Red Border Round the Area".to_string(), Item::ToggleBorder, false)));
+        assert!(item(&recording_entries(&RecordingState { can_pause: false, ..s }), Item::PauseRecording).is_none());
     }
 
     #[test]

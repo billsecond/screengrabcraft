@@ -41,3 +41,6 @@ winreg = "0.56"
 ureq = { workspace = true, features = ["win-system-proxy"] }
 # Windows' window animations turned off, and windows cloaked (cloak.rs), through a safe binding.
 winsafe = { version = "0.0.29", features = ["dwm"] }
+# Shows a file selected in its folder with Windows' own call (SHOpenFolderAndSelectItems): Explorer's
+# /select switch misses the file at times.
+opener = { version = "0.9", default-features = false, features = ["reveal"] }

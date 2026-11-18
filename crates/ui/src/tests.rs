@@ -556,10 +556,11 @@ fn a_snapped_line_stops_at_the_edge_on_its_angle() {
 }
 
 #[test]
-fn a_move_stops_at_the_edge_and_waits_for_the_pointer() {
+fn an_annotation_dragged_off_the_edge_grows_the_picture_and_back_on_it_the_growth_goes() {
     let mut ed = editor();
     let id = filled_rect(&mut ed, 100.0, 100.0, 80.0, 60.0);
     let mut h = ready(ed, Tool::Select);
+    let (w, tall) = (h.state().session.doc.width(), h.state().session.doc.height());
     let a = at(&h, 140.0, 130.0);
     h.hover_at(a);
     h.run_steps(2);
@@ -571,37 +572,52 @@ fn a_move_stops_at_the_edge_and_waits_for_the_pointer() {
         h.run_steps(1);
     }
     let bounds = |h: &Harness<'_, Editor>| h.state().session.doc.get(id).map(|o| o.shape.bounds(&o.style)).unwrap();
-    let stopped = bounds(&h);
-    assert!(picture(h.state()).encloses(stopped), "{stopped:?}");
-    assert!(stopped.right() > 399.0, "right up to the edge: {stopped:?}");
-    // Coming back, it doesn't move until the pointer is back where it took hold.
-    let p = at(&h, 500.0, 130.0);
-    h.hover_at(p);
-    h.run_steps(1);
-    assert_eq!(bounds(&h), stopped);
+    // Past the right edge it follows the pointer, and the picture has grown to hold it.
+    let out = bounds(&h);
+    assert!(out.right() > w as f32 + 150.0, "{out:?}");
+    assert!(picture(h.state()).encloses(out), "{out:?}");
+    assert!(h.state().session.doc.width() > w + 150);
+    // Back on the picture and let go: the growth is not needed, and the picture is its own size.
     let p = at(&h, 240.0, 130.0);
     h.hover_at(p);
     h.run_steps(1);
     h.drop_at(p);
     h.run_steps(3);
     let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
-    assert!((r.x - 200.0).abs() < 3.0, "under the pointer again: {r:?}");
+    assert!((r.x - 200.0).abs() < 3.0, "under the pointer: {r:?}");
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (w, tall));
     assert_eq!(h.state().session.undo_label(), Some("Move"));
+    // Let go off the left edge: the picture stays grown, see-through where it is new.
+    let (a, b) = (at(&h, 240.0, 130.0), at(&h, -20.0, 130.0));
+    drag(&mut h, a, b);
+    {
+        let d = &h.state().session.doc;
+        assert!(d.width() > w + 30 && d.height() == tall, "{} x {}", d.width(), d.height());
+        assert_eq!(d.base.pixel(0, 0).map(|c| c.a), Some(0));
+        let r = d.get(id).and_then(|o| o.shape.rect()).unwrap();
+        assert!(r.x < 6.0, "at the new left edge: {r:?}");
+    }
+    crate::quick_tests::shot(&mut h, "canvas-grown");
+    // One undo step: where it was, on the picture as it was.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(h.state().session.doc.width(), w);
 }
 
 #[test]
-fn an_annotation_over_the_edge_moves_in_without_jumping() {
+fn an_annotation_part_off_the_picture_is_held_by_it_once_it_is_moved() {
     let mut ed = editor();
     let id = filled_rect(&mut ed, -50.0, 100.0, 80.0, 60.0);
     let mut h = ready(ed, Tool::Select);
+    let w = h.state().session.doc.width();
     let (a, b) = (at(&h, 10.0, 130.0), at(&h, 20.0, 130.0));
     drag(&mut h, a, b);
-    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
-    assert!((r.x - -40.0).abs() < 3.0, "moved by what the pointer moved: {r:?}");
-    let (a, b) = (at(&h, 10.0, 130.0), at(&h, -60.0, 130.0));
-    drag(&mut h, a, b);
-    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
-    assert!(r.x >= -40.0 - 3.0, "no further out: {r:?}");
+    let d = &h.state().session.doc;
+    let o = d.get(id).unwrap();
+    // It moved in by what the pointer moved, and the picture grew by what is still off it.
+    assert!(d.width() >= w + 36 && d.width() <= w + 48, "{}", d.width());
+    assert!(picture(h.state()).encloses(o.shape.bounds(&o.style)), "{:?}", o.shape);
+    assert!(o.shape.rect().is_some_and(|r| r.x < 6.0), "{:?}", o.shape);
 }
 
 #[test]

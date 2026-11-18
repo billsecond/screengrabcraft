@@ -176,17 +176,23 @@ fn area(s: &Session, id: ObjectId) -> Rect {
 }
 
 #[test]
-fn a_nudge_stops_at_the_edge_of_the_picture() {
+fn a_nudge_past_the_edge_grows_the_picture_to_hold_it() {
     let mut s = session();
+    let (w, h) = (s.doc.width(), s.doc.height());
     let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 10, "w": 40, "h": 30}}));
     s.select(vec![a]);
-    s.execute("edit.nudge", &json!({"dx": 500, "dy": 500})).unwrap();
+    s.execute("edit.nudge", &json!({"dx": 100, "dy": 100})).unwrap();
     assert!(s.doc.bounds().encloses(area(&s, a)), "{:?}", area(&s, a));
-    assert!(area(&s, a).right() > 199.9 && area(&s, a).bottom() > 99.9, "it went as far as it could");
-    s.execute("edit.nudge", &json!({"dx": 1})).unwrap();
-    assert!(s.doc.bounds().encloses(area(&s, a)), "and no further");
-    s.execute("edit.nudge", &json!({"dx": -5, "dy": -5})).unwrap();
-    assert!(area(&s, a).right() < 196.0 && area(&s, a).bottom() < 96.0, "the way back is open");
+    assert!(s.doc.width() > w + 80 && s.doc.height() > h + 30, "the picture grew: {} x {}", s.doc.width(), s.doc.height());
+    assert_eq!(s.doc.base.pixel(s.doc.width() - 1, s.doc.height() - 1).map(|c| c.a), Some(0), "see-through where it is new");
+    assert_eq!(s.doc.base.pixel(5, 5).map(|c| c.a), Some(255), "the picture itself is as it was");
+    // However far it is asked to go, the picture only grows so far.
+    s.execute("edit.nudge", &json!({"dx": 1e9, "dy": 0})).unwrap();
+    assert!(s.doc.width() < w + 20_000);
+    // Undone, the picture is its own size again.
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (w, h));
 }
 
 #[test]
@@ -202,15 +208,15 @@ fn a_nudged_group_keeps_its_shape_at_the_edge() {
 }
 
 #[test]
-fn an_annotation_outside_is_nudged_in_without_a_jump() {
+fn an_annotation_off_the_picture_is_held_by_it_once_it_is_nudged() {
     let mut s = session();
+    let w = s.doc.width();
     let a = add(&mut s, json!({"type": "rect", "rect": {"x": -50, "y": 10, "w": 40, "h": 30}}));
     s.select(vec![a]);
-    let before = area(&s, a);
     s.execute("edit.nudge", &json!({"dx": -5})).unwrap();
-    assert_eq!(area(&s, a), before, "no further out");
-    s.execute("edit.nudge", &json!({"dx": 5})).unwrap();
-    assert!((area(&s, a).x - before.x - 5.0).abs() < 0.01, "and just as far in as asked");
+    assert!(s.doc.bounds().encloses(area(&s, a)), "{:?}", area(&s, a));
+    assert!(s.doc.width() >= w + 55, "it grew to the left by as much as was off it: {}", s.doc.width());
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0));
 }
 
 #[test]

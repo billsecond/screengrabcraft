@@ -36,4 +36,4 @@ winit = { version = "0.30", default-features = false }
 
 [dev-dependencies]
 # The small windows and the settings window, driven headless in tests.
-egui_kittest = { workspace = true }
+egui_kittest = { workspace = true, features = ["wgpu"] }

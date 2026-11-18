@@ -57,6 +57,12 @@ features = ["input-msmf"]
 version = "0.0.29"
 features = ["ole"]
 
+# The pointer in video recordings: which of the system's pointers shows (its pictures read from
+# the pointer files Windows uses, named in the registry).
+[target.'cfg(target_os = "windows")'.dependencies]
+winreg = "0.56"
+ico = "0.6"
+
 [target.'cfg(target_os = "macos")'.dependencies.nokhwa]
 version = "0.10.11"
 default-features = false

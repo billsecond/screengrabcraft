@@ -8,7 +8,7 @@
 //! `SCREENGRABCRAFT_NO_PREFS=1` makes a run that reads and writes no settings at all (tests,
 //! CI): nothing is registered to start at sign-in and no instance lock is taken.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use screengrabcraft_model::Settings;
 
@@ -45,4 +45,37 @@ pub fn captures_dir(settings: &Settings) -> PathBuf {
 /// The log folder.
 pub fn log_dir() -> Option<PathBuf> {
     settings_dir().map(|d| d.join("logs"))
+}
+
+/// A short name made from some text, the same every time (FNV-1a, 64 bits, in hex).
+fn key(text: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in text.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// A file's whole path, as one text (the same file the same way, however it was named).
+fn whole(path: &Path) -> String {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+/// Where the captions of a sound file or video brought into the editor are kept (SubRip): in
+/// the settings folder (the temporary folder when there are no settings), under a name made
+/// from its path, size and time written, so a changed file is heard again. None when the file
+/// isn't there.
+pub fn media_captions(path: &Path) -> Option<PathBuf> {
+    let meta = std::fs::metadata(path).ok()?;
+    let written = meta.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
+    let stem: String = path.file_stem()?.to_string_lossy().chars().filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-').take(40).collect();
+    let dir = if no_prefs() { None } else { settings_dir() }.unwrap_or_else(|| std::env::temp_dir().join("ScreenGrabCraft")).join("captions");
+    Some(dir.join(format!("{}-{}.srt", stem.trim(), key(&format!("{}|{}|{written}", whole(path), meta.len())))))
+}
+
+/// Where the program making a file's captions says how far it has got (in the temporary
+/// folder): a number from 0 to 1000, or `error: ` and why it couldn't.
+pub fn captions_progress(path: &Path) -> PathBuf {
+    std::env::temp_dir().join("ScreenGrabCraft").join("captions").join(format!("{}.progress", key(&whole(path))))
 }

@@ -416,7 +416,18 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             keys.editor = e;
             changed = true;
         }
+        let mut p = keys.pause.clone();
+        if hotkey_row(ui, "Pause or Resume Recording", &mut p, defaults.pause.clone()) {
+            keys.pause = p;
+            changed = true;
+        }
+        let mut s = keys.stop.clone();
+        if hotkey_row(ui, "Stop Recording", &mut s, defaults.stop.clone()) {
+            keys.stop = s;
+            changed = true;
+        }
     });
+    ui.label(RichText::new("Pause and Stop are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
     if changed {
         svc.settings.hotkeys = keys;
         svc.apply_settings();
@@ -600,6 +611,15 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.label(RichText::new("Each on a track of its own, to cut and edit in the Editor before you make the MP4.").size(12.0).color(t.muted));
     ui.add_space(4.0);
     sources(ui, "production", &mut s.production, d, true);
+    ui.add_space(4.0);
+    ui.checkbox(&mut s.production.captions, "Transcribe recordings automatically");
+    ui.label(
+        RichText::new(
+            "After each recording, what was said is written down in the background, on this computer: the Editor shows its progress, then the captions. You can also transcribe again in the Editor.",
+        )
+        .size(12.0)
+        .color(t.muted),
+    );
     ui.add_space(4.0);
     ui.label(
         RichText::new("Video Production opens the Recorder, where you choose the area (a region, a window, a whole screen, all screens or a fixed size), turn the screen and each of these on or off, and press Record. These are the same choices.")

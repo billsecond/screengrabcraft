@@ -23,6 +23,9 @@ pub const EDITOR_UNREADY: &str = "--end-standby";
 /// What the editor asks the capture service with for a recording's captions
 /// (`--captions <recording>`, [`ask_captions`]).
 pub const ASK_CAPTIONS: &str = "--captions";
+/// The same, to hear a file again even if its captions were made before (`--captions-again <file>`,
+/// [`ask_captions_again`]).
+pub const ASK_CAPTIONS_AGAIN: &str = "--captions-again";
 /// What the service opens a recording in the editor with when its captions are being made
 /// (`--captions-coming <recording>`): the editor says so until they come.
 pub const CAPTIONS_COMING: &str = "--captions-coming";
@@ -109,24 +112,99 @@ pub fn ask_service(args: &[String]) -> Result<(), String> {
     spawn(Path::new(SERVICE_BIN), args)
 }
 
-/// Asks the capture service to make a recording's captions (it makes one at a time, never while
+/// Asks the capture service to make the captions of a recording, a sound file or a video (it makes one at a time, never while
 /// recording); it starts if it isn't running.
 pub fn ask_captions(recording: &str) -> Result<(), String> {
     ask_service(&[ASK_CAPTIONS.to_string(), recording.to_string()])
 }
 
+/// Asks the capture service to make a file's captions again (a recording, a sound file or a video),
+/// even if they were made before.
+pub fn ask_captions_again(path: &str) -> Result<(), String> {
+    ask_service(&[ASK_CAPTIONS_AGAIN.to_string(), path.to_string()])
+}
+
 /// Shows a file selected in the file manager, or a folder.
 pub fn reveal(path: &Path) -> Result<(), String> {
     let is_dir = path.is_dir();
-    let result = if cfg!(target_os = "windows") {
-        if is_dir { Command::new("explorer").arg(path).spawn() } else { Command::new("explorer").arg(format!("/select,{}", path.display())).spawn() }
-    } else if cfg!(target_os = "macos") {
-        if is_dir { Command::new("open").arg(path).spawn() } else { Command::new("open").arg("-R").arg(path).spawn() }
+    #[cfg(target_os = "windows")]
+    let result = if is_dir {
+        Command::new("explorer").arg(path).spawn()
     } else {
+        // Windows' own "open the folder with this selected" (SHOpenFolderAndSelectItems), which
+        // picks the file out where Explorer's /select at times only opens the folder. On a thread
+        // of its own, as it wants a COM apartment of its own; Explorer's /select if it fails.
+        let file = std::path::PathBuf::from(path.to_string_lossy().replace('/', "\\"));
+        // The folder's window is Explorer's, and Windows keeps a program from coming to the front
+        // over the one in use: this program, in use as it asks, lets it.
+        let _ = winsafe::AllowSetForegroundWindow(None);
+        return std::thread::Builder::new()
+            .name("reveal".into())
+            .spawn(move || {
+                if let Err(e) = opener::reveal(&file) {
+                    log::warn!("showing {} selected: {e}; asking Explorer", file.display());
+                    // Explorer reads `/select,"C:\a folder\a file"` itself, quotes and all; Rust's
+                    // own quoting of the whole argument loses it in a folder with spaces or commas.
+                    use std::os::windows::process::CommandExt as _;
+                    let _ = Command::new("explorer").raw_arg(select_arg(&file.to_string_lossy())).spawn();
+                }
+            })
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    };
+    #[cfg(target_os = "macos")]
+    let result = if is_dir { Command::new("open").arg(path).spawn() } else { Command::new("open").arg("-R").arg(path).spawn() };
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let result = {
         let dir = if is_dir { path } else { path.parent().unwrap_or(path) };
+        if !is_dir {
+            // Linux and the BSDs: the file manager's own "show these items" (Files, Dolphin,
+            // Nemo, Caja, Thunar…), asked over D-Bus on a thread of its own as it may take a
+            // moment; the folder alone if nothing answers.
+            let (file, dir) = (path.to_path_buf(), dir.to_path_buf());
+            return std::thread::Builder::new()
+                .name("reveal".into())
+                .spawn(move || {
+                    let shown = Command::new("dbus-send")
+                        .args(["--session", "--print-reply", "--dest=org.freedesktop.FileManager1", "--type=method_call"])
+                        .args(["/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems"])
+                        .arg(format!("array:string:{}", file_uri(&file)))
+                        .arg("string:")
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .is_ok_and(|s| s.success());
+                    if !shown && let Err(e) = Command::new("xdg-open").arg(&dir).spawn() {
+                        log::warn!("showing {}: {e}", dir.display());
+                    }
+                })
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+        }
         Command::new("xdg-open").arg(dir).spawn()
     };
     result.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Explorer's argument to show a file selected: `/select,"C:\a folder\a file.mp4"`.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn select_arg(windows_path: &str) -> String {
+    format!("/select,\"{}\"", windows_path.replace('"', ""))
+}
+
+/// A path as a `file://` address, each byte that isn't plain written as `%XX`.
+#[cfg_attr(any(target_os = "windows", target_os = "macos"), allow(dead_code))]
+fn file_uri(path: &Path) -> String {
+    let whole = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut out = String::from("file://");
+    for b in whole.to_string_lossy().bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            out.push(char::from(b));
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Opens a file in the program the system uses for it (a video in its player).
@@ -144,4 +222,24 @@ pub fn open_file(path: &Path) -> Result<(), String> {
 /// Opens a web page in the browser.
 pub fn open_url(url: &str) -> Result<(), String> {
     webbrowser::open(url).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explorer_is_told_the_whole_path_in_quotes() {
+        assert_eq!(
+            select_arg(r"C:\Users\me\OneDrive - Home, Mine\Pictures\A clip.mp4"),
+            r#"/select,"C:\Users\me\OneDrive - Home, Mine\Pictures\A clip.mp4""#
+        );
+        assert_eq!(select_arg(r#"C:\odd"name.txt"#), r#"/select,"C:\oddname.txt""#);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn a_file_address_has_its_odd_bytes_written_out() {
+        assert_eq!(file_uri(Path::new("/home/me/My Clips/café #1.mp4")), "file:///home/me/My%20Clips/caf%C3%A9%20%231.mp4");
+    }
 }

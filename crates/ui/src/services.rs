@@ -25,6 +25,10 @@ pub enum DialogResult {
     Opened(Vec<OpenedFile>),
     /// A path to save to (the editor writes the file).
     SaveTo(String),
+    /// Files to bring into the video editor's media bin (paths; they're read where they are).
+    Import(Vec<String>),
+    /// Video or sound files to transcribe (paths).
+    Transcribe(Vec<String>),
     Cancelled,
 }
 
@@ -57,20 +61,70 @@ pub struct VideoExport {
     pub done: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
+/// What a video is made as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VideoFormat {
+    /// MP4 with H.264 pictures and AAC sound: every player opens it.
+    Mp4,
+    /// MP4 with AV1 pictures and Opus sound: smaller, but older players (Windows Media Player
+    /// among them) can't open it.
+    Mp4Av1,
+    /// An animated GIF: no sound, smaller pictures; for short clips.
+    Gif,
+}
+
+impl VideoFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 => "MP4 video: plays everywhere (H.264)",
+            VideoFormat::Mp4Av1 => "MP4 video: smaller, newer players only (AV1)",
+            VideoFormat::Gif => "Animated GIF: no sound, for short clips",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 | VideoFormat::Mp4Av1 => "mp4",
+            VideoFormat::Gif => "gif",
+        }
+    }
+
+    /// Its file type in a save dialog.
+    pub fn filter(self) -> Filter {
+        match self {
+            VideoFormat::Mp4 | VideoFormat::Mp4Av1 => ("MP4 video", &["mp4"]),
+            VideoFormat::Gif => ("Animated GIF", &["gif"]),
+        }
+    }
+
+    /// Whether it has a sound track (and so whether subtitles beside it make sense).
+    pub fn has_sound(self) -> bool {
+        self != VideoFormat::Gif
+    }
+}
+
 /// What to make a video from.
 #[derive(Clone)]
 pub struct VideoJob {
     pub recording: std::sync::Arc<Recording>,
     pub timeline: Timeline,
-    /// Where it's wanted; the host picks a free name beside it if that one is taken.
+    /// Where it's wanted.
     pub out: String,
+    /// Whether `out` was picked in a save dialog (a file there is replaced); else the host picks
+    /// a free name beside it if that one is taken.
+    pub replace: bool,
+    pub format: VideoFormat,
     /// The largest it's made.
     pub max_size: (u32, u32),
     pub fps: u32,
-    /// The captions as they fall on the edited video, if there are some: written beside it
-    /// (`.srt` and `.txt`), and burned into its pictures if `burn`.
+    /// The captions as they fall on the edited video, if there are some: burned into its
+    /// pictures if `burn`, written beside it as subtitles (`.srt`, the video's name) if
+    /// `subtitles`.
     pub captions: Option<Vec<Cue>>,
     pub burn: bool,
+    pub subtitles: bool,
+    /// The media bin's pictures and sound, for the layers' items.
+    pub media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
 }
 
 /// Sound the host is playing; dropping it stops it.
@@ -160,7 +214,8 @@ pub trait Services {
         None
     }
 
-    /// Shows a folder (the captures folder when `path` is none) in the file manager.
+    /// Shows a file selected in its folder in the file manager, or a folder (the captures folder
+    /// when `path` is none).
     fn open_folder(&self, _path: Option<&str>) {}
 
     /// Asks the capture service for a new capture.
@@ -194,13 +249,34 @@ pub trait Services {
         Err("files are not available here".to_string())
     }
 
-    /// Starts making an MP4 (on a thread of the host's).
+    /// What videos can be made here, the one to offer first first (none in a browser).
+    fn video_formats(&self) -> Vec<VideoFormat> {
+        Vec::new()
+    }
+
+    /// Asks for files to bring into the video editor's media bin (pictures, sound, recordings);
+    /// the answer comes through [`Services::poll_dialog`] as [`DialogResult::Import`].
+    fn request_import(&self) {}
+
+    /// Starts reading a file for the media bin (on a thread of the host's).
+    fn load_media(&self, _path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        Err("media is brought in by the editor on the desktop".to_string())
+    }
+
+    /// Starts making a video (on a thread of the host's).
     fn export_video(&self, _job: VideoJob) -> Result<VideoExport, String> {
         Err("videos are made by the editor on the desktop".to_string())
     }
 
-    /// Plays the edited sound from `from_us`, until it's dropped.
-    fn play_sound(&self, _recording: std::sync::Arc<Recording>, _timeline: Timeline, _from_us: u64) -> Option<Box<dyn SoundOut>> {
+    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, until it's
+    /// dropped.
+    fn play_sound(
+        &self,
+        _recording: std::sync::Arc<Recording>,
+        _timeline: Timeline,
+        _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
+        _from_us: u64,
+    ) -> Option<Box<dyn SoundOut>> {
         None
     }
 
@@ -214,10 +290,38 @@ pub trait Services {
         None
     }
 
-    /// Asks for a recording's captions to be made (by the capture service, in the background).
-    fn make_captions(&self, _recording: &str) -> Result<(), String> {
+    /// Asks for the captions of a recording, a sound file or a video to be made (by the capture
+    /// service, in the background). A sound file's or a video's made before are kept.
+    fn make_captions(&self, _path: &str) -> Result<(), String> {
         Err("captions are made by the ScreenGrabCraft capture service on the desktop".to_string())
     }
+
+    /// [`Services::make_captions`], hearing it again even if its captions were made before.
+    fn make_captions_again(&self, path: &str) -> Result<(), String> {
+        self.make_captions(path)
+    }
+
+    /// How far the captions of a file being made have got (0 to 1), or why they couldn't be
+    /// made; none when nothing is being made of it.
+    fn captions_progress(&self, _path: &str) -> Option<Result<f32, String>> {
+        None
+    }
+
+    /// The captions of a sound file or a video (in its own time) when they've been made or
+    /// changed since `seen` (a time of the host's, 0 at first): that time, and the lines.
+    fn poll_media_captions(&self, _path: &str, _seen: u64) -> Option<(u64, Vec<Cue>)> {
+        None
+    }
+
+    /// Whether recordings, and what's put on their timelines, are transcribed by themselves
+    /// (Settings, Video).
+    fn auto_captions(&self) -> bool {
+        false
+    }
+
+    /// Asks for video or sound files to transcribe; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::Transcribe`].
+    fn request_transcribe(&self) {}
 
     /// The model Remove Background runs (on a thread of the editor's own; reading its file is
     /// left to the model's first use), or why there is none here.
