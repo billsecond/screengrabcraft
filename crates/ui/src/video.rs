@@ -36,6 +36,7 @@ use serde_json::{Value, json};
 
 mod export_window;
 mod library;
+mod transcript;
 pub use library::{LibDrop, LibTab};
 
 pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
@@ -116,11 +117,11 @@ impl TranscriptFormat {
         }
     }
 
-    /// The lines written out this way.
-    pub fn write(self, cues: &[Cue]) -> String {
+    /// The lines written out this way, each with who said it as they're named.
+    pub fn write(self, lines: &[(Cue, String)]) -> String {
         match self {
-            TranscriptFormat::Text => captions::to_text(cues),
-            TranscriptFormat::Subtitles => captions::to_srt(cues),
+            TranscriptFormat::Text => captions::to_text_named(lines),
+            TranscriptFormat::Subtitles => captions::to_srt_named(lines),
         }
     }
 
@@ -179,6 +180,13 @@ struct Playing {
 enum Spot {
     /// The ruler (or the band, the captions): every track.
     All,
+    Track(usize),
+    Layer(u32),
+}
+
+/// What's being renamed: a track (by its place) or a layer (by its id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Rename {
     Track(usize),
     Layer(u32),
 }
@@ -284,6 +292,44 @@ pub struct VideoView {
     /// Words were just put on the video with Add Text: their box in the panel takes the keys, its
     /// words chosen, so typing replaces them.
     pub(crate) type_words: bool,
+    /// The transcript pane at the right is open.
+    pub transcript_open: bool,
+    /// Everything said in the video as edited, each line with who said it (for the transcript),
+    /// and a count of the times it was made again.
+    pub lines: Arc<Vec<(Cue, captions::Who)>>,
+    lines_rev: u64,
+    /// The transcript's line the pane last followed while playing.
+    transcript_follow: Option<usize>,
+    /// The transcript's lines' heights, for the lines (by `lines_rev`) and the width they were laid out at.
+    transcript_heights: Option<(u64, f32, Vec<f32>)>,
+    /// A track's or a layer's name being typed (in its header, or the transcript), the words so
+    /// far, whether the box has had the keys yet, and whether it's the transcript's.
+    pub(crate) renaming: Option<(Rename, String, bool, bool)>,
+}
+
+/// A small button with a triangle pointing up (or down): true when it's clicked.
+fn order_button(ui: &mut Ui, rect: Rect, up: bool, enabled: bool, label: &str) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let resp = ui.interact(rect, ui.id().with(("order", label)), if enabled { Sense::click() } else { Sense::hover() });
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
+    if enabled && resp.hovered() {
+        ui.painter().rect_filled(rect, 3.0, t.hover);
+    }
+    let (c, s) = (rect.center(), 3.8);
+    let points = if up {
+        vec![pos2(c.x - s, c.y + s * 0.55), pos2(c.x, c.y - s * 0.65), pos2(c.x + s, c.y + s * 0.55)]
+    } else {
+        vec![pos2(c.x - s, c.y - s * 0.55), pos2(c.x + s, c.y - s * 0.55), pos2(c.x, c.y + s * 0.65)]
+    };
+    let colour = if !enabled {
+        t.muted.gamma_multiply(0.35)
+    } else if resp.hovered() {
+        t.text
+    } else {
+        t.muted
+    };
+    ui.painter().add(egui::Shape::convex_polygon(points, colour, Stroke::NONE));
+    enabled && resp.on_hover_text(label).clicked()
 }
 
 /// A mark at each end of what's chosen on the timeline: its ends are there to be dragged.
@@ -520,6 +566,12 @@ impl VideoView {
             lib_search: String::new(),
             zoom_ask: None,
             menu: None,
+            transcript_open: false,
+            lines: Arc::new(Vec::new()),
+            lines_rev: 0,
+            transcript_follow: None,
+            transcript_heights: None,
+            renaming: None,
             type_words: false,
         }
     }
@@ -537,6 +589,8 @@ impl VideoView {
         }
         self.cues_for = Some(key);
         self.cues = Arc::new(screengrabcraft_media::captions::edited_cues(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
+        self.lines = Arc::new(captions::transcript(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
+        self.lines_rev += 1;
         self.composer.set_captions(self.showing_captions().then(|| self.cues.clone()));
         self.shown = None;
     }
@@ -716,7 +770,7 @@ impl VideoView {
             ed.saving_project = false;
             ed.saving_transcript = Some(format);
             ed.services.request_save(&name, &format.filters());
-        } else if let Err(e) = ed.services.download(&name, format.write(&self.cues).as_bytes()) {
+        } else if let Err(e) = ed.services.download(&name, format.write(&self.named_lines()).as_bytes()) {
             ed.error(ctx, e);
         }
     }
@@ -992,8 +1046,9 @@ impl VideoView {
     }
 
     fn keys(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        // Export Video's windows take the keys (Enter, Esc) while one is up.
-        if ed.dialog.is_some() || self.export.is_some() || ctx.egui_wants_keyboard_input() {
+        // Export Video's windows take the keys (Enter, Esc) while one is up, and a name being
+        // typed takes them too (Esc lets it go: see `rename_box`).
+        if ed.dialog.is_some() || self.export.is_some() || self.renaming.is_some() || ctx.egui_wants_keyboard_input() {
             return;
         }
         let now = ctx.input(|i| i.time);
@@ -1235,6 +1290,7 @@ impl VideoView {
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.library_open, "Library and Media Bin");
+                    ui.checkbox(&mut self.transcript_open, "Transcript");
                     if ui.checkbox(&mut ed.settings.show_tray, "Recent Recordings").changed() {
                         ed.services.save_settings(&ed.settings);
                     }
@@ -1332,6 +1388,10 @@ impl VideoView {
                     let tip = "Put words on the video at the playhead (T), then type them. The Library has titles and more";
                     if button(ui, Icon::Text, "Text", "Add Text", tip, false, true, true).clicked() {
                         self.add_text(ed, &ctx);
+                    }
+                    let tip = "Everything said, line by line, with who said it: click a line to go there, a name to change it";
+                    if button(ui, Icon::Callout, "Transcript", "Transcript", tip, self.transcript_open, true, true).clicked() {
+                        self.transcript_open = !self.transcript_open;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing = vec2(8.0, 0.0);
@@ -1767,7 +1827,14 @@ impl VideoView {
             let now = ui.ctx().input(|i| i.time);
             let playing = self.playing.is_some();
             let length = self.length();
-            let (cx, mid) = (area.center().x, bottom + 10.0 + PLAY / 2.0);
+            // The buttons in the middle under the picture, and the time after them; moved left
+            // as far as it takes for the time to be seen whole in a narrow preview.
+            let time_w =
+                ui.painter().layout_no_wrap(format!("{} / {}", clock(self.playhead), clock(length)), egui::FontId::monospace(14.0), t.text).size().x;
+            let (left_reach, right_reach) = (PLAY / 2.0 + 58.0 + 15.0, PLAY / 2.0 + 58.0 + 40.0 + 15.0 + 16.0 + time_w);
+            let room = (whole.min.x - 24.0, whole.max.x + 24.0);
+            let cx = area.center().x.min(room.1 - right_reach).max(room.0 + left_reach);
+            let mid = bottom + 10.0 + PLAY / 2.0;
             let button = Rect::from_center_size(pos2(cx, mid), vec2(PLAY, PLAY));
             let tip = if playing { "Pause (Space)" } else { "Play (Space)" };
             let resp = ui.interact(button, ui.id().with("play-under-video"), egui::Sense::click());
@@ -1841,7 +1908,8 @@ impl VideoView {
     fn header(&mut self, ed: &mut Editor, ui: &mut Ui, row: Rect, i: usize, track: &Track) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
-        let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+        let kind_name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+        let name = track.name.clone().unwrap_or_else(|| kind_name.to_string());
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, kind_colour(track.kind));
         let painter = ui.painter_at(row);
         // What it is, drawn and said: faint while it's hidden or muted.
@@ -1853,7 +1921,10 @@ impl VideoView {
         };
         let (mark, words) = if track.muted { (t.muted.gamma_multiply(0.7), t.muted) } else { (kind_colour(track.kind), t.text) };
         icons::paint(&painter, Rect::from_min_size(row.min + vec2(12.0, 5.0), vec2(15.0, 15.0)), icon, mark);
-        painter.text(row.min + vec2(34.0, 4.0), egui::Align2::LEFT_TOP, name, egui::FontId::proportional(13.0), words);
+        let order = (i > 0, i + 1 < self.session.timeline.tracks.len());
+        if let Some(up) = self.header_name(ed, ui, row, 34.0, Rename::Track(i), &name, words, order, 0.0) {
+            self.move_track(ed, &ctx, i, up);
+        }
         // Every track can be shown or hidden: a hidden picture isn't in the video, a hidden
         // sound isn't heard.
         let shown = !track.muted;
@@ -1863,7 +1934,7 @@ impl VideoView {
         }
         if track.kind.is_video() {
             let device = self.rec.stream(track.stream).map(|s| s.name.clone()).unwrap_or_default();
-            if !device.is_empty() && device != name {
+            if !device.is_empty() && device != kind_name && device != name {
                 painter.text(row.min + vec2(42.0, 25.0), egui::Align2::LEFT_TOP, device, egui::FontId::proportional(11.0), t.muted);
             }
             return;
@@ -1901,7 +1972,14 @@ impl VideoView {
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, colour);
         let painter = ui.painter_at(row);
         let words = if layer.hidden { t.muted } else { t.text };
-        painter.text(row.min + vec2(14.0, 4.0), egui::Align2::LEFT_TOP, &layer.name, egui::FontId::proportional(13.0), words);
+        drop(painter);
+        let layers = &self.session.timeline.layers;
+        let at = layers.iter().position(|l| l.id == layer.id).unwrap_or(0);
+        // The top row is the one in front: up brings it forward.
+        let order = (at + 1 < layers.len(), at > 0);
+        if let Some(up) = self.header_name(ed, ui, row, 14.0, Rename::Layer(layer.id), &layer.name, words, order, 28.0) {
+            self.move_layer(ed, &ctx, layer.id, up);
+        }
         let del = Rect::from_min_size(pos2(row.max.x - 26.0, row.min.y + 3.0), vec2(22.0, 18.0));
         let r = ui.put(del, egui::Button::new(RichText::new("×").size(14.0)).frame(false));
         r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Delete {}", layer.name)));
@@ -1964,6 +2042,9 @@ impl VideoView {
             return;
         }
         let faded = !self.session.timeline.captions.show;
+        let tl = &self.session.timeline;
+        let (you, others) =
+            (captions::speaker_name(tl, captions::Who::Speaker(Speaker::You)), captions::speaker_name(tl, captions::Who::Speaker(Speaker::Others)));
         for c in self.cues.iter() {
             let (a, b) = (x_of(c.start), x_of(c.end));
             if b < lane.min.x || a > lane.max.x {
@@ -1976,7 +2057,12 @@ impl VideoView {
             if r.width() > 28.0 {
                 let inside = painter.with_clip_rect(r.shrink(3.0).intersect(lane));
                 inside.text(r.min + vec2(6.0, 5.0), egui::Align2::LEFT_TOP, &c.text, egui::FontId::proportional(12.0), t.text);
-                inside.text(r.min + vec2(6.0, 23.0), egui::Align2::LEFT_TOP, c.speaker.label(), egui::FontId::proportional(10.5), t.muted);
+                let who = match c.speaker {
+                    Speaker::You => you.as_str(),
+                    Speaker::Others => others.as_str(),
+                    Speaker::Media => "",
+                };
+                inside.text(r.min + vec2(6.0, 23.0), egui::Align2::LEFT_TOP, who, egui::FontId::proportional(10.5), t.muted);
             }
         }
     }
@@ -2018,6 +2104,118 @@ impl VideoView {
                 self.transcribe(ed, &ctx, false);
             }
         }
+    }
+
+    /// Moves a track up (or down) a place; what's chosen on the tracks is let go.
+    fn move_track(&mut self, ed: &mut Editor, ctx: &egui::Context, i: usize, up: bool) {
+        let to = if up { i.saturating_sub(1) } else { i + 1 };
+        self.selected = None;
+        self.run(ed, ctx, "video.moveTrack", json!({"track": i, "to": to}));
+    }
+
+    /// Moves a layer forward (up a row) or back.
+    fn move_layer(&mut self, ed: &mut Editor, ctx: &egui::Context, id: u32, up: bool) {
+        let Some(at) = self.session.timeline.layers.iter().position(|l| l.id == id) else { return };
+        let to = if up { at + 1 } else { at.saturating_sub(1) };
+        self.run(ed, ctx, "video.moveLayer", json!({"layer": id, "to": to}));
+    }
+
+    /// Starts renaming a track or a layer: a box with its name, all chosen, takes the keys.
+    /// `in_pane`: in the transcript (else in its header): the box is shown there only.
+    pub(crate) fn start_rename(&mut self, target: Rename, name: &str, in_pane: bool) {
+        self.renaming = Some((target, name.to_string(), false, in_pane));
+    }
+
+    /// The name being typed for `target`, in a box (in `place`, else where the layout puts it):
+    /// Enter, or a click elsewhere, keeps it; Esc lets it go. True while it's being typed.
+    pub(crate) fn rename_box(&mut self, ed: &mut Editor, ui: &mut Ui, target: Rename, place: Option<Rect>) -> bool {
+        let Some((who, mut words, started, in_pane)) = self.renaming.clone() else { return false };
+        if who != target || in_pane != place.is_none() {
+            return false;
+        }
+        let ctx = ui.ctx().clone();
+        // Esc lets it go (seen before the box, which takes the key, has its turn).
+        if started && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            self.renaming = None;
+            return false;
+        }
+        let edit = egui::TextEdit::singleline(&mut words)
+            .font(egui::FontId::proportional(13.0))
+            .margin(egui::Margin::symmetric(4, 1))
+            .desired_width(place.map_or(180.0, |r| r.width() - 8.0));
+        let r = match place {
+            Some(rect) => ui.put(rect, edit),
+            None => ui.add(edit),
+        };
+        if !started {
+            r.request_focus();
+            let mut state = egui::text_edit::TextEditState::load(&ctx, r.id).unwrap_or_default();
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(words.chars().count()));
+            state.cursor.set_char_range(Some(all));
+            state.store(&ctx, r.id);
+            self.renaming = Some((who, words, true, in_pane));
+            return true;
+        }
+        if r.lost_focus() || !r.has_focus() {
+            self.renaming = None;
+            match target {
+                Rename::Track(i) => self.run(ed, &ctx, "video.renameTrack", json!({"track": i, "name": words})),
+                Rename::Layer(id) => self.run(ed, &ctx, "video.layer", json!({"layer": id, "name": words})),
+            }
+            return false;
+        }
+        self.renaming = Some((who, words, true, in_pane));
+        true
+    }
+
+    /// A header's name: its words (a double click renames it, in a box in their place) and, at the
+    /// row's right (keeping `right` free), buttons to move it up or down. Some(true) when it's
+    /// to go up.
+    #[allow(clippy::too_many_arguments)]
+    fn header_name(
+        &mut self,
+        ed: &mut Editor,
+        ui: &mut Ui,
+        row: Rect,
+        x: f32,
+        target: Rename,
+        name: &str,
+        colour: Color32,
+        (up, down): (bool, bool),
+        right: f32,
+    ) -> Option<bool> {
+        let arrows = Rect::from_min_size(pos2(row.max.x - right - 40.0, row.min.y + 3.0), vec2(36.0, 17.0));
+        let place = Rect::from_min_max(pos2(row.min.x + x - 4.0, row.min.y + 2.0), pos2(arrows.min.x - 2.0, row.min.y + 21.0));
+        if !self.rename_box(ed, ui, target, Some(place)) {
+            let resp = ui.interact(place, ui.id().with(("header-name", format!("{target:?}"))), Sense::click());
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, name));
+            ui.painter_at(place).text(
+                pos2(place.min.x + 4.0, place.center().y),
+                egui::Align2::LEFT_CENTER,
+                name,
+                egui::FontId::proportional(13.0),
+                colour,
+            );
+            if resp.on_hover_text("Double-click to rename it").double_clicked() {
+                self.start_rename(target, name, false);
+            }
+        }
+        let a = Rect::from_min_size(arrows.min, vec2(17.0, 17.0));
+        let b = Rect::from_min_size(arrows.min + vec2(19.0, 0.0), vec2(17.0, 17.0));
+        let mut moved = None;
+        if order_button(ui, a, true, up, &format!("Move {name} Up")) {
+            moved = Some(true);
+        }
+        if order_button(ui, b, false, down, &format!("Move {name} Down")) {
+            moved = Some(false);
+        }
+        moved
+    }
+
+    /// Everything said, each line with who said it as they're named (for Export Transcript).
+    pub fn named_lines(&self) -> Vec<(Cue, String)> {
+        let tl = &self.session.timeline;
+        self.lines.iter().map(|(c, w)| (c.clone(), captions::speaker_name(tl, *w))).collect()
     }
 
     /// The timeline's right-button menu at a moment: about one track there, one layer there, or
@@ -2094,6 +2292,19 @@ impl VideoView {
                     self.run(ed, ctx, "video.mute", json!({"track": i, "muted": !track.muted}));
                     ui.close();
                 }
+                if ui.button("Rename…").on_hover_text("Its name here, and in the transcript for what's heard on it").clicked() {
+                    self.start_rename(Rename::Track(i), track.name.as_deref().unwrap_or(name), false);
+                    ui.close();
+                }
+                let n = self.session.timeline.tracks.len();
+                if ui.add_enabled(i > 0, egui::Button::new("Move Up")).clicked() {
+                    self.move_track(ed, ctx, i, true);
+                    ui.close();
+                }
+                if ui.add_enabled(i + 1 < n, egui::Button::new("Move Down")).clicked() {
+                    self.move_track(ed, ctx, i, false);
+                    ui.close();
+                }
                 self.playing_items(ed, ui, at, now);
             }
             Spot::Layer(id) => {
@@ -2123,6 +2334,19 @@ impl VideoView {
                 }
                 if ui.button(if layer.hidden { "Show This Layer" } else { "Hide This Layer" }).clicked() {
                     self.run(ed, ctx, "video.layer", json!({"layer": id, "hidden": !layer.hidden}));
+                    ui.close();
+                }
+                if ui.button("Rename…").clicked() {
+                    self.start_rename(Rename::Layer(id), &layer.name, false);
+                    ui.close();
+                }
+                let (place, n) = (self.session.timeline.layers.iter().position(|l| l.id == id).unwrap_or(0), self.session.timeline.layers.len());
+                if ui.add_enabled(place + 1 < n, egui::Button::new("Move Up (in Front)")).clicked() {
+                    self.move_layer(ed, ctx, id, true);
+                    ui.close();
+                }
+                if ui.add_enabled(place > 0, egui::Button::new("Move Down (Behind)")).clicked() {
+                    self.move_layer(ed, ctx, id, false);
                     ui.close();
                 }
                 if ui.button("Delete This Layer").on_hover_text("And everything on it").clicked() {
@@ -2942,6 +3166,9 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         crate::strip::show(ed, ui);
     }
     v.timeline(ed, ui);
+    if v.transcript_open {
+        v.transcript_panel(ed, ui);
+    }
     if !v.item_panel(ed, ui) {
         v.camera_panel(ed, ui);
     }

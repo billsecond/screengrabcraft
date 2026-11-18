@@ -148,6 +148,11 @@ impl Captions {
 /// line follows its item, and is left out where the item was trimmed, or its layer hidden or
 /// silenced.
 pub fn layer_cues(timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<Cue> {
+    layer_lines(timeline, of_media).into_iter().map(|(c, _)| c).collect()
+}
+
+/// The lines of what was put on the layers, each with the layer it's on.
+fn layer_lines(timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<(Cue, u32)> {
     use crate::layers::What;
     let mut out = Vec::new();
     for l in &timeline.layers {
@@ -169,7 +174,7 @@ pub fn layer_cues(timeline: &Timeline, of_media: &std::collections::HashMap<u32,
                     continue;
                 }
                 let start = item.at.saturating_add(from - item.from);
-                out.push(Cue { start, end: start.saturating_add(piece), speaker: cue.speaker, text: cue.text.clone() });
+                out.push((Cue { start, end: start.saturating_add(piece), speaker: cue.speaker, text: cue.text.clone() }, l.id));
             }
             if out.len() > MAX_CUES {
                 break;
@@ -177,8 +182,39 @@ pub fn layer_cues(timeline: &Timeline, of_media: &std::collections::HashMap<u32,
         }
     }
     out.truncate(MAX_CUES);
-    out.sort_by_key(|c| (c.start, c.speaker));
+    out.sort_by_key(|(c, l)| (c.start, c.speaker, *l));
     out
+}
+
+/// Who said a line of the transcript: one of the recording's speakers (You on its microphone,
+/// Others on the computer's sound), or what was put on a layer (by the layer's id).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Who {
+    Speaker(Speaker),
+    Layer(u32),
+}
+
+/// Everything said in the edited video, in order, each line with who said it.
+pub fn transcript(captions: Option<&Captions>, timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<(Cue, Who)> {
+    let mut out: Vec<(Cue, Who)> =
+        captions.map(|c| c.on_timeline(timeline)).unwrap_or_default().into_iter().map(|c| (c.clone(), Who::Speaker(c.speaker))).collect();
+    out.extend(layer_lines(timeline, of_media).into_iter().map(|(c, l)| (c, Who::Layer(l))));
+    out.sort_by_key(|(c, w)| (c.start, *w));
+    out.truncate(MAX_CUES);
+    out
+}
+
+/// What the transcript calls who said a line: the name given to the track it was heard on (the
+/// microphone's for You, the computer's sound's for Others), else You or Others; a layer's name.
+pub fn speaker_name(timeline: &Timeline, who: Who) -> String {
+    match who {
+        Who::Speaker(s) => timeline
+            .find(s.source())
+            .and_then(|i| timeline.tracks.get(i))
+            .and_then(|t| t.name.clone())
+            .unwrap_or_else(|| if s == Speaker::Media { "Media".to_string() } else { s.label().to_string() }),
+        Who::Layer(id) => timeline.layer(id).map(|l| l.name.clone()).unwrap_or_else(|| "Media".to_string()),
+    }
 }
 
 /// Everything said in the edited video: the recording's lines (if it has captions) and the
@@ -243,14 +279,6 @@ pub fn from_srt(text: &str) -> Vec<Cue> {
     out
 }
 
-/// What goes before a line's words: its speaker's name and a colon, or nothing.
-fn said_by(speaker: Speaker) -> String {
-    match speaker.label() {
-        "" => String::new(),
-        name => format!("{name}: "),
-    }
-}
-
 /// The lines showing at `t`: the latest one of each speaker that covers it, the others' first.
 pub fn showing(cues: &[Cue], t: u64) -> Vec<&Cue> {
     let mut out: Vec<&Cue> = Vec::with_capacity(3);
@@ -278,9 +306,28 @@ fn clock(us: u64) -> String {
 /// The lines as SubRip subtitles (`.srt`), each with its speaker: `You: …`, `Others: …` (a
 /// media file's lines have none).
 pub fn to_srt(cues: &[Cue]) -> String {
+    to_srt_named(&by_label(cues))
+}
+
+/// Each line with its speaker's own label (You, Others, none for a media file's).
+fn by_label(cues: &[Cue]) -> Vec<(Cue, String)> {
+    cues.iter().map(|c| (c.clone(), c.speaker.label().to_string())).collect()
+}
+
+/// What goes before a line's words: a name and a colon, or nothing.
+fn said_by_name(name: &str) -> String {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect();
+    match name.trim() {
+        "" => String::new(),
+        name => format!("{name}: "),
+    }
+}
+
+/// The lines as SubRip subtitles, each with who said it as named (`Bill: …`; an empty name, none).
+pub fn to_srt_named(lines: &[(Cue, String)]) -> String {
     let mut out = String::new();
-    for (i, c) in cues.iter().enumerate() {
-        out.push_str(&format!("{}\n{} --> {}\n{}{}\n\n", i + 1, srt_time(c.start), srt_time(c.end), said_by(c.speaker), clean_text(&c.text)));
+    for (i, (c, who)) in lines.iter().enumerate() {
+        out.push_str(&format!("{}\n{} --> {}\n{}{}\n\n", i + 1, srt_time(c.start), srt_time(c.end), said_by_name(who), clean_text(&c.text)));
     }
     out
 }
@@ -288,12 +335,17 @@ pub fn to_srt(cues: &[Cue]) -> String {
 /// The lines as a plain transcript: a paragraph for each turn (the same speaker's lines less
 /// than two seconds apart), with when it started.
 pub fn to_text(cues: &[Cue]) -> String {
+    to_text_named(&by_label(cues))
+}
+
+/// The lines as a plain transcript, each turn with who said it as named.
+pub fn to_text_named(lines: &[(Cue, String)]) -> String {
     let mut out = String::new();
-    let mut last: Option<(Speaker, u64)> = None;
-    for c in cues {
+    let mut last: Option<(&str, u64)> = None;
+    for (c, who) in lines {
         let text = clean_text(&c.text);
         match last {
-            Some((s, end)) if s == c.speaker && c.start <= end.saturating_add(2_000_000) => {
+            Some((s, end)) if s == who.as_str() && c.start <= end.saturating_add(2_000_000) => {
                 out.push(' ');
                 out.push_str(&text);
             }
@@ -301,10 +353,10 @@ pub fn to_text(cues: &[Cue]) -> String {
                 if last.is_some() {
                     out.push('\n');
                 }
-                out.push_str(&format!("[{}] {}{}", clock(c.start), said_by(c.speaker), text));
+                out.push_str(&format!("[{}] {}{}", clock(c.start), said_by_name(who), text));
             }
         }
-        last = Some((c.speaker, last.filter(|(s, _)| *s == c.speaker).map_or(c.end, |(_, e)| e.max(c.end))));
+        last = Some((who.as_str(), last.filter(|(s, _)| *s == who.as_str()).map_or(c.end, |(_, e)| e.max(c.end))));
     }
     if !out.is_empty() {
         out.push('\n');
@@ -322,7 +374,8 @@ mod tests {
     }
 
     fn timeline() -> Timeline {
-        let track = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }] };
+        let track =
+            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }], name: None };
         Timeline {
             tracks: vec![track(0, StreamKind::Screen), track(1, StreamKind::SystemSound), track(2, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -463,5 +516,53 @@ mod tests {
         // Its layer silenced: its lines go.
         tl.set_layer(layer, None, Some(0.0), None).unwrap();
         assert!(layer_cues(&tl, &of).is_empty());
+    }
+
+    #[test]
+    fn the_transcript_says_who_said_each_line_by_the_names_given() {
+        use crate::layers::{Item, MediaItem, MediaKind, What};
+        let mut tl = timeline();
+        let song = MediaItem {
+            name: "Song.mp3".into(),
+            path: "C:/Music/Song.mp3".into(),
+            kind: MediaKind::Sound,
+            duration: 30_000_000,
+            ..MediaItem::default()
+        };
+        let id = tl.add_media(song).unwrap();
+        let item = Item { len: 4_000_000, from: 0, what: What::Media { id }, ..Item::default() };
+        let (layer, _) = tl.place(item, None, 2_000_000).unwrap();
+        let mut of = std::collections::HashMap::new();
+        of.insert(id, vec![cue(1_000_000, 2_000_000, Speaker::Media, "From the song.")]);
+        let caps = Captions {
+            cues: vec![cue(1_000_000, 2_000_000, Speaker::You, "Hello."), cue(5_000_000, 6_000_000, Speaker::Others, "Hi back.")],
+            model: String::new(),
+        };
+        let lines = transcript(Some(&caps), &tl, &of);
+        let said: Vec<(&str, Who)> = lines.iter().map(|(c, w)| (c.text.as_str(), *w)).collect();
+        assert_eq!(
+            said,
+            vec![("Hello.", Who::Speaker(Speaker::You)), ("From the song.", Who::Layer(layer)), ("Hi back.", Who::Speaker(Speaker::Others))]
+        );
+        assert_eq!(lines[1].0.start, 3_000_000, "on the timeline, where the song is");
+        // Named: You and Others, and the layer by its name.
+        assert_eq!(speaker_name(&tl, Who::Speaker(Speaker::You)), "You");
+        assert_eq!(speaker_name(&tl, Who::Speaker(Speaker::Others)), "Others");
+        assert_eq!(speaker_name(&tl, Who::Layer(layer)), "Sound 1");
+        // Renamed: the microphone's track, the computer's sound's, the layer.
+        let mic = tl.find(StreamKind::Microphone).unwrap();
+        tl.rename_track(mic, "Bill").unwrap();
+        let sound = tl.find(StreamKind::SystemSound).unwrap();
+        tl.rename_track(sound, "Guest").unwrap();
+        tl.set_layer(layer, None, None, Some("Theme song")).unwrap();
+        assert_eq!(speaker_name(&tl, Who::Speaker(Speaker::You)), "Bill");
+        assert_eq!(speaker_name(&tl, Who::Speaker(Speaker::Others)), "Guest");
+        assert_eq!(speaker_name(&tl, Who::Layer(layer)), "Theme song");
+        assert_eq!(speaker_name(&tl, Who::Layer(999)), "Media", "a layer gone");
+        // Written out with those names.
+        let named: Vec<(Cue, String)> = lines.iter().map(|(c, w)| (c.clone(), speaker_name(&tl, *w))).collect();
+        let text = to_text_named(&named);
+        assert!(text.contains("] Bill: Hello.") && text.contains("] Theme song: From the song.") && text.contains("] Guest: Hi back."), "{text}");
+        assert!(to_srt_named(&named).contains("\nBill: Hello.\n"));
     }
 }

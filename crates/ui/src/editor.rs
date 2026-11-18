@@ -1092,7 +1092,7 @@ impl Editor {
     /// Export Transcript's file: what was said in the video as edited, as a transcript or as
     /// subtitles by the name's extension (else as asked; a name with none is given that one's).
     fn write_transcript(&mut self, ctx: &egui::Context, path: &str, asked: crate::video::TranscriptFormat) {
-        let Some(cues) = self.video.as_ref().map(|v| v.cues.clone()).filter(|c| !c.is_empty()) else {
+        let Some(cues) = self.video.as_ref().map(|v| v.named_lines()).filter(|c| !c.is_empty()) else {
             self.error(ctx, "There are no captions to export");
             return;
         };

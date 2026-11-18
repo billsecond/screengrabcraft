@@ -450,6 +450,22 @@ fn layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+fn rename_track(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?.unwrap_or_default();
+    s.timeline.rename_track(index(p, "track")?, &name).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn move_track(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.move_track(index(p, "track")?, index(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn move_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.move_layer(id(p, "layer")?, index(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 fn delete_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     s.timeline.delete_layer(id(p, "layer")?).map_err(edit_err)?;
     Ok(json!({}))
@@ -533,6 +549,24 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand { id: "video.layer", label: "Layer", params: r#"{"layer": id, "hidden"?: bool, "volume"?: 0..2, "name"?: text}"#, run: layer },
     VideoCommand { id: "video.deleteLayer", label: "Delete Layer", params: r#"{"layer": id}"#, run: delete_layer },
     VideoCommand {
+        id: "video.renameTrack",
+        label: "Rename Track",
+        params: r#"{"track": n, "name": text}: its header's name and the transcript's for its words; empty: what it is again"#,
+        run: rename_track,
+    },
+    VideoCommand {
+        id: "video.moveTrack",
+        label: "Move Track",
+        params: r#"{"track": n, "to": n}: its place among the tracks, 0 the top"#,
+        run: move_track,
+    },
+    VideoCommand {
+        id: "video.moveLayer",
+        label: "Move Layer",
+        params: r#"{"layer": id, "to": n}: its place among the layers, 0 at the back"#,
+        run: move_layer,
+    },
+    VideoCommand {
         id: "video.cameraAt",
         label: "Move Camera",
         params: r#"{"x": -0.5..1.5, "y": -0.5..1.5, "size"?: 0.1..0.5}: its middle, as a share of the picture (past 0 or 1 it is off it); {"corner": …} puts it back in a corner"#,
@@ -547,7 +581,7 @@ mod tests {
 
     use super::*;
 
-    fn session() -> VideoSession {
+    fn recording() -> Recording {
         let streams = vec![
             StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
             StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
@@ -557,8 +591,35 @@ mod tests {
             w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
             w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
         }
-        let rec = Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap();
-        VideoSession::new(&rec)
+        Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap()
+    }
+
+    fn session() -> VideoSession {
+        VideoSession::new(&recording())
+    }
+
+    #[test]
+    fn tracks_are_renamed_and_moved_and_stay_so_when_opened_again() {
+        let mut s = session();
+        s.execute("video.renameTrack", &json!({"track": 1, "name": "Bill"})).unwrap();
+        s.execute("video.moveTrack", &json!({"track": 1, "to": 0})).unwrap();
+        assert_eq!(s.timeline.tracks[0].kind, StreamKind::Microphone);
+        assert_eq!(s.timeline.tracks[0].name.as_deref(), Some("Bill"));
+        assert_eq!(s.undo_label(), Some("Move Track"));
+        // Written with the recording and read again: as they were left.
+        let saved: screengrabcraft_media::timeline::Timeline = serde_json::from_value(serde_json::to_value(&s.timeline).unwrap()).unwrap();
+        let fresh = session();
+        let rec_kinds = |t: &screengrabcraft_media::timeline::Timeline| t.tracks.iter().map(|t| t.kind).collect::<Vec<_>>();
+        assert_eq!(rec_kinds(&fresh.timeline), vec![StreamKind::Screen, StreamKind::Microphone], "the recording's own order");
+        let again = saved.checked(&recording());
+        assert_eq!(rec_kinds(&again), vec![StreamKind::Microphone, StreamKind::Screen]);
+        assert_eq!(again.tracks[0].name.as_deref(), Some("Bill"));
+        // Undone, back as recorded.
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.tracks[1].name, None);
+        assert!(s.execute("video.moveTrack", &json!({"track": 9, "to": 0})).is_err());
+        assert!(s.execute("video.renameTrack", &json!({"track": 0, "name": 5})).is_err());
     }
 
     #[test]

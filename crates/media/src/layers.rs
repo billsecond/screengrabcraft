@@ -701,6 +701,16 @@ impl Timeline {
         Ok(id)
     }
 
+    /// Moves a layer to another place among the layers (`to`: 0 is the one at the back, the last
+    /// the one in front).
+    pub fn move_layer(&mut self, layer: u32, to: usize) -> Result<(), EditError> {
+        let Some(from) = self.layers.iter().position(|l| l.id == layer) else { return Err(bad("there's no such layer")) };
+        let l = self.layers.remove(from);
+        let to = to.min(self.layers.len());
+        self.layers.insert(to, l);
+        Ok(())
+    }
+
     /// Puts an item on a layer (`None`: a new one) at `at`, or the nearest place it fits there;
     /// where it doesn't fit at all, or the layer is of the other kind, on a new layer. Its media
     /// must be in the bin. The layer and item it went to.
@@ -839,8 +849,9 @@ impl Timeline {
             }
             l.volume = v.clamp(0.0, 2.0);
         }
-        if let Some(n) = name {
-            l.name = clip_text(n, 60);
+        // One clean line; an empty name keeps the one it has.
+        if let Some(n) = name.and_then(crate::timeline::clean_name) {
+            l.name = n;
         }
         Ok(())
     }
@@ -973,6 +984,7 @@ mod tests {
                 muted: false,
                 volume: 1.0,
                 clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }],
+                name: None,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),

@@ -125,8 +125,17 @@ the picture editor to the video editor. Its timeline has a row for each track:
   transitions, to drag onto the timeline; and a bin for your own pictures, videos and sound. Each
   card shows the item as it will be on the video, where and as large; hold the pointer on one and
   it plays, larger.
-- Each sound track has **Mute** and a volume slider; the camera's corner, size and shape
-  (square, rounded, circle) are on the right.
+- Each track and layer has a switch to **hide or mute** it, and arrows to **move it up or down**
+  (a layer higher up is in front); **double-click its name to rename it** (or use the right
+  button). Each sound track has a volume slider; the camera's corner, size and shape (square,
+  rounded, circle) are on the right.
+- **Transcript** (the tool bar, or View) opens a pane at the right with everything said, line by
+  line: when, who and what. Words from the microphone are **You**, from the computer's sound
+  **Others**, and from a sound or video you added, its layer's name; rename any of them (the pencil,
+  or a double click) and the name is the track's or the layer's, in the transcript, on the
+  timeline and in Export Transcript. A click on a line takes the playhead there; while the video
+  plays, the line playing is marked and kept in view. Copy puts the whole transcript on the
+  clipboard.
 - Undo and redo everything. The edits are saved into the recording file a moment after each
   change (the recording itself is never changed), and File › Revert to Recording brings every
   track back whole.
