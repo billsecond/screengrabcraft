@@ -16,7 +16,11 @@ pub(crate) fn editor() -> Editor {
 }
 
 pub(crate) fn harness(ed: Editor) -> Harness<'static, Editor> {
-    Harness::builder().with_size(egui::vec2(1200.0, 800.0)).build_ui_state(
+    harness_sized(ed, egui::vec2(1200.0, 800.0))
+}
+
+pub(crate) fn harness_sized(ed: Editor, size: egui::Vec2) -> Harness<'static, Editor> {
+    Harness::builder().with_size(size).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
             ed.logic(&ctx);
@@ -422,6 +426,18 @@ fn draw_tools() -> Vec<(Tool, Kind)> {
 
 pub(crate) fn ready(ed: Editor, tool: Tool) -> Harness<'static, Editor> {
     let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(tool);
+    h.run_steps(1);
+    h
+}
+
+/// [`ready`], in a window as tall as a full-HD screen's, with Properties given most of the
+/// panes' height (the bar between them dragged down): for tests that reach the tool properties
+/// under a long list of quick styles, all of it in sight without scrolling.
+pub(crate) fn ready_tall(mut ed: Editor, tool: Tool) -> Harness<'static, Editor> {
+    ed.settings.properties_share = Some(0.9);
+    let mut h = harness_sized(ed, egui::vec2(1200.0, 1080.0));
     h.run_steps(4);
     h.state_mut().set_tool(tool);
     h.run_steps(1);

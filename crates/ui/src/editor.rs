@@ -211,6 +211,8 @@ pub struct Editor {
     /// Copy takes the whole picture as shown.
     pub(crate) everything: Option<Vec<ObjectId>>,
     pub(crate) dialog: Option<Dialog>,
+    /// The settings in the Effects pane, under Properties.
+    pub(crate) effects: crate::effects::Effects,
     pub(crate) pending: Option<Pending>,
     /// What a save dialog that is open will save as.
     pub(crate) saving: Option<ImageFormat>,
@@ -307,6 +309,7 @@ impl Editor {
             area: None,
             everything: None,
             dialog: None,
+            effects: crate::effects::Effects::default(),
             pending: None,
             saving: None,
             saving_project: false,
@@ -1708,7 +1711,7 @@ impl Editor {
         });
     }
 
-    /// The Effects menu's items (in the menu bar, and under the Effects button of the panel).
+    /// The Effects menu's items (in the menu bar; the Effects pane has them too, with their settings).
     pub(crate) fn effects_menu(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         for (label, d) in [

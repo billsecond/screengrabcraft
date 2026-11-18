@@ -1,6 +1,6 @@
-//! The properties panel, at the right: the Quick Styles for the tool or the selection, the tool
-//! properties under them (fill, outline, text colour, the shape and more, then sliders with
-//! number boxes), and the Effects and Properties buttons along its bottom.
+//! The panes at the right, docked: Properties (the Quick Styles for the tool or the selection,
+//! the tool properties under them: fill, outline, text colour, the shape and more, then sliders
+//! with number boxes) over Effects (`crate::effects`), with handles to resize them.
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
@@ -12,7 +12,7 @@ use crate::quick;
 use crate::theme::Tokens;
 use crate::{from_color32, to_color32};
 
-/// How wide the panel is.
+/// How wide the panes are, usually.
 pub const PANEL_WIDTH: f32 = 272.0;
 
 /// Copies onto `target` the fields that differ between `old` and `new`.
@@ -164,56 +164,141 @@ fn outline_name(kind: Kind) -> (&'static str, &'static str) {
     }
 }
 
+/// How wide the panes are, as their left edge was dragged (their usual width at first), within
+/// what a window `window` points wide leaves room for.
+pub fn panes_width(ed: &Editor, window: f32) -> f32 {
+    let most = if window.is_finite() { (window * 0.6).clamp(PANEL_MIN, PANEL_MAX) } else { PANEL_MAX };
+    ed.settings.side_width.filter(|w| w.is_finite()).unwrap_or(PANEL_WIDTH).clamp(PANEL_MIN, most)
+}
+
+/// The panes at the right, docked: Properties (the quick styles and the tool properties of the
+/// tool or the selection) over Effects (the picture's effects, each with its settings). Their
+/// left edge is dragged to make them wider or narrower, and the bar between them to give one
+/// more of the height; a double click on either puts it back.
 pub fn panel(ed: &mut Editor, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
-    egui::Panel::right("properties").exact_size(PANEL_WIDTH).resizable(false).frame(egui::Frame::NONE.fill(t.panel)).show(ui, |ui| {
-        egui::Panel::bottom("properties_footer")
-            .frame(egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::symmetric(10, 6)))
-            .show_separator_line(true)
-            .show(ui, |ui| footer(ed, ui));
-        egui::CentralPanel::default().frame(egui::Frame::NONE.inner_margin(egui::Margin::same(12))).show(ui, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| contents(ed, ui));
-        });
+    let window = ui.ctx().viewport_rect().width();
+    let width = panes_width(ed, window);
+    egui::Panel::right("properties").exact_size(width).resizable(false).frame(egui::Frame::NONE.fill(t.panel)).show(ui, |ui| {
+        let whole = ui.available_rect_before_wrap();
+        // ---- the handle along the left edge: dragged left, the panes grow ----
+        let edge = egui::Rect::from_min_max(whole.left_top(), pos2(whole.left() + EDGE, whole.bottom()));
+        let grip = ui.interact(edge, ui.id().with("panes-edge"), Sense::click_and_drag());
+        grip.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, EDGE_NAME));
+        if grip.dragged() {
+            let dx = ui.ctx().input(|i| i.pointer.delta().x);
+            if dx.is_finite() && dx != 0.0 {
+                let most = if window.is_finite() { (window * 0.6).clamp(PANEL_MIN, PANEL_MAX) } else { PANEL_MAX };
+                ed.settings.side_width = Some((width - dx).clamp(PANEL_MIN, most));
+            }
+        }
+        if grip.drag_stopped() {
+            ed.services.save_settings(&ed.settings);
+        }
+        if grip.double_clicked() {
+            ed.settings.side_width = None;
+            ed.services.save_settings(&ed.settings);
+        }
+        let lit = grip.hovered() || grip.dragged();
+        if lit {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        handle(ui.painter(), edge, false, lit, &t);
+        let _ = grip.on_hover_text("Drag to make the panes wider or narrower (a double click: their usual width)");
+
+        // ---- Properties over Effects, the bar between them ----
+        let area = egui::Rect::from_min_max(pos2(edge.right(), whole.top()), whole.right_bottom());
+        let room = (area.height() - SPLIT).max(0.0);
+        let share = ed.settings.properties_share.filter(|s| s.is_finite()).unwrap_or(PROPERTIES_SHARE);
+        let least = PANE_MIN.min(room / 2.0);
+        let top_h = (share * room).clamp(least, (room - least).max(least));
+        let top = egui::Rect::from_min_size(area.min, vec2(area.width(), top_h));
+        let bar = egui::Rect::from_min_size(pos2(area.left(), top.bottom()), vec2(area.width(), SPLIT));
+        let bottom = egui::Rect::from_min_max(pos2(area.left(), bar.bottom()), area.max);
+        pane(ui, top, Icon::Settings, "Properties", "properties-pane", |ui| contents(ed, ui));
+        pane(ui, bottom, Icon::Effects, "Effects", "effects-pane", |ui| crate::effects::pane(ed, ui));
+        let split = ui.interact(bar, ui.id().with("panes-split"), Sense::click_and_drag());
+        split.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Other, true, SPLIT_NAME));
+        if split.dragged() && room > 0.0 {
+            let dy = ui.ctx().input(|i| i.pointer.delta().y);
+            if dy.is_finite() && dy != 0.0 {
+                ed.settings.properties_share = Some(((top_h + dy) / room).clamp(0.0, 1.0));
+            }
+        }
+        if split.drag_stopped() {
+            ed.services.save_settings(&ed.settings);
+        }
+        if split.double_clicked() {
+            ed.settings.properties_share = None;
+            ed.services.save_settings(&ed.settings);
+        }
+        let lit = split.hovered() || split.dragged();
+        if lit {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+        }
+        handle(ui.painter(), bar, true, lit, &t);
+        let _ = split.on_hover_text("Drag to give Properties or Effects more room (a double click: as they were)");
     });
 }
 
-/// A button of the panel's footer: an icon and a word. `name` is what it is called.
-fn footer_button(ui: &mut Ui, icon: Icon, label: &str, name: &str, on: bool) -> egui::Response {
-    let t = Tokens::get(ui.ctx());
-    let galley = ui.painter().layout_no_wrap(label.to_string(), egui::FontId::proportional(13.0), t.text);
-    let (rect, resp) = ui.allocate_exact_size(vec2(18.0 + 8.0 + galley.size().x + 20.0, 30.0), Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-    let bg = if on {
-        t.selected
-    } else if resp.hovered() {
-        t.hover
+/// What the two handles are called (their tooltips say how they work).
+pub const EDGE_NAME: &str = "Resize the panes";
+pub const SPLIT_NAME: &str = "Resize Properties and Effects";
+/// How wide the handle along the panes' left edge is, and how tall the bar between them.
+const EDGE: f32 = 7.0;
+const SPLIT: f32 = 9.0;
+/// The panes' narrowest and widest.
+const PANEL_MIN: f32 = 248.0;
+const PANEL_MAX: f32 = 640.0;
+/// Properties' usual share of the height, and the least either pane keeps.
+const PROPERTIES_SHARE: f32 = 0.64;
+const PANE_MIN: f32 = 96.0;
+/// How tall a pane's title is.
+const PANE_TITLE: f32 = 28.0;
+
+/// A handle to drag: a line along it and a grip of dots in its middle, lit while it's hovered.
+fn handle(p: &egui::Painter, r: egui::Rect, across: bool, lit: bool, t: &Tokens) {
+    // A bar of its own, edged on both sides, so it reads as something to take hold of.
+    p.rect_filled(r, 0.0, if lit { t.hover } else { t.toolbar });
+    let line = Stroke::new(1.0, t.border);
+    if across {
+        p.hline(r.x_range(), r.top() + 0.5, line);
+        p.hline(r.x_range(), r.bottom() - 0.5, line);
     } else {
-        Color32::TRANSPARENT
-    };
-    ui.painter().rect_filled(rect, 5.0, bg);
-    let icon_rect = egui::Rect::from_center_size(pos2(rect.left() + 8.0 + 9.0, rect.center().y), vec2(18.0, 18.0));
-    icons::paint(ui.painter(), icon_rect, icon, if on { t.accent } else { t.text });
-    ui.painter().galley(pos2(icon_rect.right() + 8.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
-    resp
+        p.vline(r.left() + 0.5, r.y_range(), line);
+        p.vline(r.right() - 0.5, r.y_range(), line);
+    }
+    let dot = if lit { t.accent } else { t.muted };
+    for i in -2..=2 {
+        let o = i as f32 * 5.0;
+        let c = if across { pos2(r.center().x + o, r.center().y) } else { pos2(r.center().x, r.center().y + o) };
+        p.circle_filled(c, 1.5, dot);
+    }
 }
 
-/// Effects (the picture's effects, in a menu) and Properties (shows or folds away the tool
-/// properties).
-fn footer(ed: &mut Editor, ui: &mut Ui) {
-    ui.horizontal(|ui| {
-        let effects = footer_button(ui, Icon::Effects, "Effects", "Picture effects", false)
-            .on_hover_text("Effects for the whole picture: border, shadow, torn edge…");
-        egui::Popup::menu(&effects).show(|ui| {
-            ui.set_min_width(200.0);
-            ed.effects_menu(ui);
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let shown = !ed.settings.hide_properties;
-            let tip = if shown { "Fold the tool properties away" } else { "Show the tool properties" };
-            if footer_button(ui, Icon::Settings, "Properties", "Properties", shown).on_hover_text(tip).clicked() {
-                ed.settings.hide_properties = shown;
-                ed.services.save_settings(&ed.settings);
-            }
+/// One of the panes: its title along the top, and what's in it under that, scrolling.
+fn pane(ui: &mut Ui, r: egui::Rect, icon: Icon, title: &str, id: &str, add: impl FnOnce(&mut Ui)) {
+    let t = Tokens::get(ui.ctx());
+    let head = egui::Rect::from_min_size(r.min, vec2(r.width(), PANE_TITLE.min(r.height())));
+    ui.painter().rect_filled(head, 0.0, t.toolbar);
+    ui.painter().hline(head.x_range(), head.bottom() - 0.5, Stroke::new(1.0, t.border));
+    let icon_rect = egui::Rect::from_center_size(pos2(head.left() + 18.0, head.center().y), vec2(15.0, 15.0));
+    icons::paint(ui.painter(), icon_rect, icon, t.muted);
+    ui.painter().text(
+        pos2(icon_rect.right() + 7.0, head.center().y),
+        egui::Align2::LEFT_CENTER,
+        title,
+        crate::widgets::strong_font(ui.ctx(), 13.0),
+        t.text,
+    );
+    let body = egui::Rect::from_min_max(pos2(r.left(), head.bottom()), r.max);
+    if body.height() < 1.0 {
+        return;
+    }
+    ui.scope_builder(egui::UiBuilder::new().max_rect(body).id_salt(id), |ui| {
+        ui.set_clip_rect(body.intersect(ui.clip_rect()));
+        egui::ScrollArea::vertical().id_salt(id).auto_shrink([false, false]).max_height(body.height()).show(ui, |ui| {
+            egui::Frame::NONE.inner_margin(egui::Margin::same(12)).show(ui, add);
         });
     });
 }
@@ -268,11 +353,9 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             ui.heading("Fill");
             ui.add_space(6.0);
             quick::fill_section(ed, ui);
-            if !ed.settings.hide_properties {
-                ui.add_space(10.0);
-                ui.separator();
-                fill_settings(ed, ui);
-            }
+            ui.add_space(10.0);
+            ui.separator();
+            fill_settings(ed, ui);
             return;
         }
         (None, Tool::Select) => {
@@ -326,13 +409,11 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     }
     // A quick style may just have changed the selection.
     let first = first(ed);
-    if !ed.settings.hide_properties {
-        ui.separator();
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Tool properties").strong());
-        ui.add_space(4.0);
-        properties(ed, ui, kind, first.as_ref());
-    }
+    ui.separator();
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("Tool properties").strong());
+    ui.add_space(4.0);
+    properties(ed, ui, kind, first.as_ref());
     // A slider dragged is one undo step, ended when the button is let go.
     if ed.props_editing && ed.editing.is_none() && !ui.ctx().input(|i| i.pointer.any_down()) {
         ed.session.commit();

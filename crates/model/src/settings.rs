@@ -844,8 +844,14 @@ pub struct EditorSettings {
     /// is let go, not the others.
     #[serde(deserialize_with = "readable")]
     pub favorites: Vec<QuickStyle>,
-    /// The tool properties folded away under the quick styles (the Properties button).
-    pub hide_properties: bool,
+    /// How wide the panes at the right (Properties over Effects) are, in points, as their left
+    /// edge was dragged; none for their usual width. Kept in bounds where it's used.
+    #[serde(deserialize_with = "or_none")]
+    pub side_width: Option<f32>,
+    /// The share of those panes' height that Properties has over Effects, as the bar between
+    /// them was dragged; none for the usual share. Kept in bounds where it's used.
+    #[serde(deserialize_with = "or_none")]
+    pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
 }
@@ -1280,11 +1286,14 @@ mod tests {
     fn favourites_and_tool_options_are_kept_and_a_bad_one_spoils_nothing() {
         use crate::object::{ArrowHeads, CalloutForm, TailSpot};
         let fresh = EditorSettings::from_json("{}");
-        assert!(fresh.favorites.is_empty() && !fresh.hide_properties && fresh.quick_theme.is_empty());
+        assert!(fresh.favorites.is_empty() && fresh.side_width.is_none() && fresh.properties_share.is_none() && fresh.quick_theme.is_empty());
+        // Panes sized by an older version (or a bad file) read as their usual size.
+        let odd = EditorSettings::from_json(r#"{"hideProperties":true,"sideWidth":"wide","propertiesShare":0.4}"#);
+        assert_eq!((odd.side_width, odd.properties_share), (None, Some(0.4)));
         assert_eq!(fresh.options(Kind::Arrow).heads, Some(ArrowHeads::End));
         assert_eq!(fresh.options(Kind::Callout).tail, Some(TailSpot::DownLeft));
         let look = crate::quick::presets(Kind::Callout, crate::quick::theme("Bold")).into_iter().nth(8).map(|p| p.look).unwrap();
-        let mut e = EditorSettings { quick_theme: "Soft".into(), hide_properties: true, ..EditorSettings::default() };
+        let mut e = EditorSettings { quick_theme: "Soft".into(), side_width: Some(320.0), ..EditorSettings::default() };
         assert!(e.toggle_favorite(&look));
         assert!(e.is_favorite(&look));
         e.options.insert(Kind::Callout, ShapeOptions { form: Some(CalloutForm::Arrow), ..ShapeOptions::default() });

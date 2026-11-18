@@ -83,7 +83,7 @@ impl Dialog {
         Dialog::Brightness { brightness: 0.0, contrast: 0.0 }
     }
 
-    fn title(&self) -> &'static str {
+    pub(crate) fn title(&self) -> &'static str {
         match self {
             Dialog::Resize { .. } => "Resize Image",
             Dialog::Canvas { .. } => "Canvas Size",
@@ -122,8 +122,9 @@ fn settings<R>(ui: &mut Ui, id: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
     egui::Grid::new(id).num_columns(2).spacing([16.0, 10.0]).min_col_width(72.0).show(ui, add).inner
 }
 
-/// The dialog's controls; the command to run when it is applied.
-fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
+/// The dialog's controls; the command to run when it is applied. The Effects pane shows the
+/// effects' controls too.
+pub(crate) fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
     match d {
         Dialog::Resize { width, height, keep, aspect } => {
             settings(ui, "resize", |ui| {
@@ -196,11 +197,16 @@ fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
         Dialog::Torn { top, right, bottom, left, depth } => {
             settings(ui, "torn", |ui| {
                 ui.label("Tear");
-                ui.horizontal(|ui| {
-                    ui.checkbox(top, "Top");
-                    ui.checkbox(right, "Right");
-                    ui.checkbox(bottom, "Bottom");
-                    ui.checkbox(left, "Left");
+                // Two by two, so the edges fit a narrow pane too.
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(top, "Top");
+                        ui.checkbox(bottom, "Bottom");
+                    });
+                    ui.horizontal(|ui| {
+                        ui.checkbox(left, "Left");
+                        ui.checkbox(right, "Right");
+                    });
                 });
                 ui.end_row();
                 ui.label("Depth");
