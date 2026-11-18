@@ -65,7 +65,7 @@ pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
         None => pos2(200.0, 200.0),
     };
     let mut cancel = false;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("countdown"), popup("ScreenGrabCraft countdown", at, size, false), |ui, _| {
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("countdown"), popup(COUNTDOWN_TITLE, at, size, false), |ui, _| {
         egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
             cancel = countdown_ui(ui, left);
         });
@@ -258,6 +258,9 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
 
 /// The title of the recording control's window (how it's found to be kept out of captures).
 const CONTROL_TITLE: &str = "ScreenGrabCraft recording";
+/// The countdown's window and the notice's (kept out of a recording going on).
+pub const COUNTDOWN_TITLE: &str = "ScreenGrabCraft countdown";
+pub const NOTICE_TITLE: &str = "ScreenGrabCraft";
 
 /// Whether the recording control can be on the screen: always on Windows, which keeps it out of
 /// the recording; elsewhere when it has a place off the area (else it waits in the tray until
@@ -594,7 +597,7 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
         .unwrap_or(pos2(40.0, 40.0));
     let mut choice = None;
     let mut hold = false;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("notice"), popup("ScreenGrabCraft", at, size, false), |ui, _| {
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("notice"), popup(NOTICE_TITLE, at, size, false), |ui, _| {
         egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
             hold = ui.ui_contains_pointer();
             choice = notice_ui(ui, &view);

@@ -203,8 +203,11 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     ui.separator();
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        if widgets::button(ui, "Open the Editor").clicked() {
+        if widgets::button(ui, "Open the Image Editor").clicked() {
             let _ = launch::open_editor(&[]);
+        }
+        if widgets::button(ui, "Open the Video Editor").on_hover_text("Recordings open in it, in a window of its own").clicked() {
+            let _ = launch::open_video_editor(&[]);
         }
         if widgets::button(ui, "Open the captures folder").clicked() {
             let d = paths::captures_dir(&svc.settings);
@@ -325,7 +328,7 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     ui.label(RichText::new("What happens to a capture once you have chosen the area.").size(12.0).color(t.muted));
     ui.add_space(4.0);
     ui.checkbox(&mut s.after_capture.copy, "Copy it to the clipboard");
-    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Editor");
+    ui.checkbox(&mut s.after_capture.open_editor, "Open it in the Image Editor");
     ui.checkbox(&mut s.after_capture.save, "Save it in the captures folder");
     ui.add_space(12.0);
     ui.checkbox(&mut s.after_capture.show_bar, "Stop first, with a bar to adjust the area or choose Edit, Copy or Save");
@@ -450,7 +453,7 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             }
         }
         let mut e = keys.editor.clone();
-        if hotkey_row(ui, "Open the Editor", &mut e, defaults.editor.clone()) {
+        if hotkey_row(ui, "Open the Image Editor", &mut e, defaults.editor.clone()) {
             keys.editor = e;
             changed = true;
         }
@@ -636,14 +639,14 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     ui.checkbox(&mut s.video_full_size, "Keep the full size (else no larger than 1920 × 1080, for smaller files)");
     ui.add_space(14.0);
     ui.label(RichText::new("Video Production").strong());
-    ui.label(RichText::new("Each on a track of its own, to cut and edit in the Editor before you make the MP4.").size(12.0).color(t.muted));
+    ui.label(RichText::new("Each on a track of its own, to cut and edit in the Video Editor before you make the MP4.").size(12.0).color(t.muted));
     ui.add_space(4.0);
     sources(ui, "production", &mut s.production, d, true);
     ui.add_space(4.0);
     ui.checkbox(&mut s.production.captions, "Transcribe recordings automatically");
     ui.label(
         RichText::new(
-            "After each recording, what was said is written down in the background, on this computer: the Editor shows its progress, then the captions. You can also transcribe again in the Editor.",
+            "After each recording, what was said is written down in the background, on this computer: the Video Editor shows its progress, then the captions. You can also transcribe again in the Video Editor.",
         )
         .size(12.0)
         .color(t.muted),

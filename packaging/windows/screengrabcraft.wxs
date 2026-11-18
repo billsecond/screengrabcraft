@@ -245,9 +245,16 @@
       <!-- The editor. -->
       <Component Id="EditorApp" Guid="3A266682-07F5-4C1D-9625-0A0D11CFF9A0">
         <File Id="EditorExe" Source="$(var.BinDir)\screengrabcraft-editor.exe" KeyPath="yes">
-          <Shortcut Id="EditorStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Editor"
+          <Shortcut Id="EditorStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Image Editor"
               Description="Mark up screenshots and pictures" WorkingDirectory="INSTALLFOLDER"
               Advertise="yes" Icon="ScreenGrabCraftEditorIcon.ico" IconIndex="0" />
+          <!-- The video editor: the editor started with its video switch, a window (and a taskbar
+               button) of its own. -->
+          <Shortcut Id="VideoEditorStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Video Editor"
+              Description="Edit Video Production recordings" WorkingDirectory="INSTALLFOLDER" Arguments="--video"
+              Advertise="yes" Icon="ScreenGrabCraftEditorIcon.ico" IconIndex="0">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.billsecond.screengrabcraft.video" />
+          </Shortcut>
         </File>
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft-editor.exe" Value="[#EditorExe]" Type="string" />
       </Component>
@@ -261,10 +268,10 @@
            editor. Removed again on uninstall. -->
       <Component Id="EditorFileTypes" Guid="29FA50D6-B7E9-447B-B667-8020A6AFE666">
         <RegistryValue Root="HKMU" Key="Software\RegisteredApplications" Name="ScreenGrabCraft Editor" Value="Software\ScreenGrabCraft\Editor\Capabilities" Type="string" KeyPath="yes" />
-        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationName" Value="ScreenGrabCraft Editor" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationName" Value="ScreenGrabCraft Image Editor" Type="string" />
         <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationDescription" Value="Marks up screenshots and pictures: arrows, callouts, highlights, blur and text." Type="string" />
         <RegistryValue Root="HKMU" Key="Software\ScreenGrabCraft\Editor\Capabilities" Name="ApplicationIcon" Value="&quot;[#EditorExe]&quot;,0" Type="string" />
-        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe" Name="FriendlyAppName" Value="ScreenGrabCraft Editor" Type="string" />
+        <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe" Name="FriendlyAppName" Value="ScreenGrabCraft Image Editor" Type="string" />
         <RegistryValue Root="HKMU" Key="Software\Classes\Applications\screengrabcraft-editor.exe\shell\open\command" Value="&quot;[#EditorExe]&quot; &quot;%1&quot;" Type="string" />
 
         <ProgId Id="ScreenGrabCraft.Png" Description="PNG Image" Icon="EditorExe" IconIndex="0" />

@@ -26,7 +26,7 @@ pub mod widgets;
 
 use std::sync::Arc;
 
-pub use editor::{Editor, Tool};
+pub use editor::{Editor, EditorKind, Tool};
 pub use services::{DialogResult, NoServices, OpenedFile, RecentItem, Services};
 
 use screengrabcraft_model::Color;

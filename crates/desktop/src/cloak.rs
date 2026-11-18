@@ -48,6 +48,13 @@ pub fn keep_out_of_captures(title: &str) {
     imp::keep_out_of_captures(title);
 }
 
+/// Gives this program's windows a taskbar button of their own, apart from those of another copy
+/// started from the same file with another `app_id` (the video editor beside the picture editor).
+/// Windows; elsewhere it does nothing. Call it before any window is made.
+pub fn own_taskbar_button(app_id: &str) {
+    imp::own_taskbar_button(app_id);
+}
+
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::Mutex;
@@ -64,6 +71,12 @@ mod imp {
 
     pub fn cursor_position() -> Option<(i32, i32)> {
         winsafe::GetCursorPos().ok().map(|p| (p.x, p.y))
+    }
+
+    pub fn own_taskbar_button(app_id: &str) {
+        if let Err(e) = winsafe::SetCurrentProcessExplicitAppUserModelID(app_id) {
+            log::warn!("no taskbar button of its own: {e}");
+        }
     }
 
     pub fn keep_out_of_captures(title: &str) {
@@ -158,6 +171,8 @@ mod imp {
     pub fn plain_windows(_title: &str, _rgb: [u8; 3]) {}
 
     pub fn keep_out_of_captures(_title: &str) {}
+
+    pub fn own_taskbar_button(_app_id: &str) {}
 
     pub fn cursor_position() -> Option<(i32, i32)> {
         None

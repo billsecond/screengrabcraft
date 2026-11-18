@@ -221,6 +221,15 @@ impl CaptureMode {
         }
     }
 
+    /// Whether it makes a still picture there and then (no recording, no scrolling): these can be
+    /// taken while a recording runs.
+    pub fn is_still(self) -> bool {
+        matches!(
+            self,
+            CaptureMode::Region | CaptureMode::Adjust | CaptureMode::Window | CaptureMode::Screen | CaptureMode::AllScreens | CaptureMode::Repeat
+        )
+    }
+
     pub fn from_arg(text: &str) -> Option<CaptureMode> {
         CaptureMode::ALL.into_iter().find(|m| m.arg().eq_ignore_ascii_case(text.trim()))
     }
@@ -341,7 +350,7 @@ impl Hotkeys {
     pub fn clashes(&self) -> Vec<(String, String)> {
         let mut named: Vec<(&str, &Hotkey)> = CaptureMode::ALL.iter().filter_map(|m| self.get(*m).map(|k| (m.label(), k))).collect();
         if let Some(k) = &self.editor {
-            named.push(("Open Editor", k));
+            named.push(("Open the Image Editor", k));
         }
         if let Some(k) = &self.pause {
             named.push(("Pause or Resume Recording", k));
@@ -1013,6 +1022,15 @@ pub fn expand_name(template: &str, at: Stamp, source: &str, n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_still_pictures_are_taken_while_recording() {
+        let still: Vec<CaptureMode> = CaptureMode::ALL.into_iter().filter(|m| m.is_still()).collect();
+        assert_eq!(
+            still,
+            vec![CaptureMode::Region, CaptureMode::Adjust, CaptureMode::Window, CaptureMode::Screen, CaptureMode::AllScreens, CaptureMode::Repeat]
+        );
+    }
 
     #[test]
     fn hotkeys_parse_and_print() {

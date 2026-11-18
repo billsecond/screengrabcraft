@@ -22,6 +22,8 @@ pub enum Item {
     Capture(CaptureMode),
     Delayed(u32),
     Editor,
+    /// The video editor: the editor's window for recordings.
+    VideoEditor,
     Folder,
     Settings,
     StopRecording,
@@ -52,6 +54,8 @@ pub struct RecordingState {
     /// Its shortcuts, as menus show them.
     pub pause_key: Option<String>,
     pub stop_key: Option<String>,
+    /// Capture Region's shortcut: a picture can be taken while recording.
+    pub shot_key: Option<String>,
 }
 
 /// One entry of the menu shown while a recording runs.
@@ -77,6 +81,9 @@ pub fn recording_entries(s: &RecordingState) -> Vec<RecordingEntry> {
     e.push(E::Item(label("Stop and Save", s.stop_key.clone()), Item::StopRecording));
     e.push(E::Item("Restart Recording".to_string(), Item::RestartRecording));
     e.push(E::Separator);
+    // A picture, while the recording goes on.
+    e.push(E::Item(label("Take a Screenshot", s.shot_key.clone()), Item::Capture(CaptureMode::Region)));
+    e.push(E::Separator);
     let controls = if s.controls { "Hide the Controls in the Tray" } else { "Show the Controls" };
     e.push(E::Item(controls.to_string(), Item::ToggleControls));
     e.push(E::Check("Red Border Round the Area".to_string(), Item::ToggleBorder, s.border));
@@ -99,6 +106,9 @@ pub enum Entry {
 
 /// What Video Production's item says: it opens a window, hence the dots.
 pub const PRODUCTION_ITEM: &str = "Video Production…";
+/// The editors' items: the one for pictures and screen captures, and the one for recordings.
+pub const IMAGE_EDITOR_ITEM: &str = "Open Image Editor";
+pub const VIDEO_EDITOR_ITEM: &str = "Open Video Editor";
 
 /// The menu's entries, top to bottom: `shortcut` is a capture's shortcut as the menu shows it,
 /// `update` the update waiting.
@@ -118,12 +128,14 @@ pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<
     .map(capture)
     .collect();
     e.push(Entry::Delays);
-    // Video, a section of its own.
+    // The pictures' editor, at the end of the pictures.
+    e.push(Entry::Item(IMAGE_EDITOR_ITEM.to_string(), Item::Editor));
+    // Video, a section of its own, with its own editor.
     e.push(Entry::Separator);
     e.push(Entry::Marked(label(PRODUCTION_ITEM, shortcut(CaptureMode::Production)), Item::Capture(CaptureMode::Production)));
     e.push(capture(CaptureMode::Video));
+    e.push(Entry::Item(VIDEO_EDITOR_ITEM.to_string(), Item::VideoEditor));
     e.push(Entry::Separator);
-    e.push(Entry::Item("Open Editor".to_string(), Item::Editor));
     e.push(Entry::Item("Open Captures Folder".to_string(), Item::Folder));
     e.push(Entry::Item("Settings…".to_string(), Item::Settings));
     e.extend(crate::update::tray_items(update).into_iter().map(|(text, item)| Entry::Item(text, item)));
@@ -410,6 +422,35 @@ impl Tray {
 mod tests {
     use super::*;
 
+    #[test]
+    fn the_recording_menu_takes_a_screenshot_and_the_menu_opens_either_editor() {
+        let s = RecordingState {
+            paused: false,
+            can_pause: true,
+            controls: true,
+            border: true,
+            pause_key: None,
+            stop_key: None,
+            shot_key: Some("PrintScreen".to_string()),
+        };
+        let r = recording_entries(&s);
+        let shot = r.iter().find_map(|e| match e {
+            RecordingEntry::Item(t, Item::Capture(CaptureMode::Region)) => Some(t.as_str()),
+            _ => None,
+        });
+        assert!(shot.is_some_and(|t| t.starts_with("Take a Screenshot") && t.contains("PrintScreen")), "{r:?}");
+        let m = menu();
+        // The Image Editor at the end of the pictures, the Video Editor under Video Production.
+        let at = |item: Item| m.iter().position(|e| matches!(e, Entry::Item(_, i) | Entry::Marked(_, i) if *i == item)).unwrap();
+        let (image, video, production) = (at(Item::Editor), at(Item::VideoEditor), at(Item::Capture(CaptureMode::Production)));
+        assert_eq!(m.get(image), Some(&Entry::Item(IMAGE_EDITOR_ITEM.to_string(), Item::Editor)));
+        assert_eq!(m.get(image - 1), Some(&Entry::Delays));
+        assert_eq!(m.get(image + 1), Some(&Entry::Separator));
+        assert_eq!(m.get(video), Some(&Entry::Item(VIDEO_EDITOR_ITEM.to_string(), Item::VideoEditor)));
+        assert_eq!(video, at(Item::Capture(CaptureMode::Video)) + 1);
+        assert!(video > production && m.get(video + 1) == Some(&Entry::Separator));
+    }
+
     fn menu() -> Vec<Entry> {
         let shortcut = |m: CaptureMode| (m == CaptureMode::Video).then(|| "Ctrl+Alt+Shift+PrintScreen".to_string());
         entries(&shortcut, None)
@@ -428,10 +469,11 @@ mod tests {
         let at = |what: Item| m.iter().position(|e| matches!(e, Entry::Item(_, i) | Entry::Marked(_, i) if *i == what));
         let production = at(Item::Capture(CaptureMode::Production)).unwrap();
         let video = at(Item::Capture(CaptureMode::Video)).unwrap();
-        // [separator] Video Production… / Record Video [separator]
+        // [separator] Video Production… / Record Video / Open Video Editor [separator]
         assert_eq!(video, production + 1);
         assert_eq!(m.get(production - 1), Some(&Entry::Separator));
-        assert_eq!(m.get(video + 1), Some(&Entry::Separator));
+        assert_eq!(m.get(video + 1), Some(&Entry::Item(VIDEO_EDITOR_ITEM.to_string(), Item::VideoEditor)));
+        assert_eq!(m.get(video + 2), Some(&Entry::Separator));
         assert_eq!(m.get(production), Some(&Entry::Marked(PRODUCTION_ITEM.to_string(), Item::Capture(CaptureMode::Production))));
         assert!(words(&m[video]).unwrap().starts_with("Record Video") && words(&m[video]).unwrap().contains("Ctrl+Alt+Shift+PrintScreen"));
         // Only Video Production is marked, and the captures come before the video section.
