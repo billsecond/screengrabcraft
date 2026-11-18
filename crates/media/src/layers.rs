@@ -237,6 +237,21 @@ pub enum TextStyle {
     StingerProgress,
     /// A tick in a disc that grows over the picture (done): a training transition.
     StingerCheck,
+    // Added later (new ones go at the end, so saved files keep their names).
+    /// A thick arrow drawing itself on to what it points at, words at its tail if there are any.
+    Arrow,
+    /// What's under a box blurred so it can't be read: a password, an address (no words).
+    Blur,
+    /// A count down (from the number in the title) in a disc with a ring sweeping round.
+    Countdown,
+    /// The end of a video: big words and a button with a plus sign under them.
+    EndCard,
+    /// A lower third for a handle: an "@" in a disc, the handle and a line under it.
+    Social,
+    /// A card with a heading and a ticked point for each line of the title.
+    Checklist,
+    /// A click shown: rings going out from a point, again and again (no words).
+    Click,
 }
 
 impl TextStyle {
@@ -406,6 +421,13 @@ pub fn style_name(s: TextStyle) -> &'static str {
         TextStyle::StingerStep => "Transition: next step",
         TextStyle::StingerProgress => "Transition: progress bar",
         TextStyle::StingerCheck => "Transition: done",
+        TextStyle::Arrow => "Arrow",
+        TextStyle::Blur => "Blur",
+        TextStyle::Countdown => "Countdown",
+        TextStyle::EndCard => "End card",
+        TextStyle::Social => "Social handle",
+        TextStyle::Checklist => "Checklist",
+        TextStyle::Click => "Click",
     }
 }
 
@@ -510,6 +532,7 @@ pub fn library() -> Vec<Template> {
             LowerThirds,
             at(TextStyle::LowerTag, "Your Name", "What you do", amber, p(0.3, 0.82, 1.0), 5_000_000),
         ),
+        t("social", "Social handle", LowerThirds, at(TextStyle::Social, "@yourname", "Follow along", blue, p(0.3, 0.82, 1.0), 5_000_000)),
         t("news-live", "Live bug", News, s(TextStyle::NewsLive, "City Hall", "", red, 8_000_000)),
         t(
             "news-ticker",
@@ -529,7 +552,18 @@ pub fn library() -> Vec<Template> {
         t("title", "Title", Titles, at(TextStyle::Title, "Your title", "", "#ffffff", p(0.5, 0.45, 1.0), 4_000_000)),
         t("title-box", "Title card", Titles, at(TextStyle::TitleBox, "Your title", "", blue, p(0.5, 0.45, 1.0), 4_000_000)),
         t("banner", "Banner", Titles, at(TextStyle::Banner, "Chapter one", "", teal, p(0.5, 0.08, 1.0), 4_000_000)),
+        t("countdown", "Countdown", Titles, s(TextStyle::Countdown, "3", "", blue, 3_000_000)),
+        t("end-card", "End card", Titles, s(TextStyle::EndCard, "Thanks for watching", "Follow for more", blue, 5_000_000)),
+        t(
+            "checklist",
+            "Checklist",
+            Titles,
+            s(TextStyle::Checklist, "Open the editor\nTrim the start\nAdd a title\nExport the video", "In this video", teal, 6_000_000),
+        ),
         t("callout", "Callout", Overlays, at(TextStyle::Callout, "Click here", "", blue, p(0.62, 0.35, 1.0), 4_000_000)),
+        // The arrow's place is where its tip points.
+        t("arrow", "Arrow", Overlays, at(TextStyle::Arrow, "", "", "#ff3b30", p(0.62, 0.42, 1.0), 4_000_000)),
+        t("arrow-label", "Arrow with words", Overlays, at(TextStyle::Arrow, "Click here", "", blue, p(0.62, 0.42, 1.0), 4_000_000)),
         t("leader", "Label with a line", Overlays, s(TextStyle::Leader, "This is the one", "", blue, 4_000_000)),
         t("step", "Step", Overlays, s(TextStyle::Step, "1", "What to do first", teal, 4_000_000)),
         t("keys", "Keys", Overlays, s(TextStyle::Keys, "Ctrl + S", "", blue, 3_000_000)),
@@ -537,6 +571,8 @@ pub fn library() -> Vec<Template> {
         t("highlight", "Highlight", Overlays, at(TextStyle::Highlight, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
         t("circle", "Circle", Overlays, at(TextStyle::Circle, "", "", "#ff3b30", p(0.5, 0.5, 0.3), 3_000_000)),
         t("spotlight", "Spotlight", Overlays, at(TextStyle::Spotlight, "", "", "#000000", p(0.5, 0.5, 0.35), 3_000_000)),
+        t("blur", "Blur", Overlays, at(TextStyle::Blur, "", "", "#000000", p(0.5, 0.5, 0.25), 4_000_000)),
+        t("click", "Click", Overlays, s(TextStyle::Click, "", "", amber, 2_000_000)),
         t("stinger-news-flash", "Breaking flash", NewsTransitions, s(TextStyle::StingerNewsFlash, "BREAKING NEWS", "", red, 1_800_000)),
         t("stinger-headline", "Headline bumper", NewsTransitions, s(TextStyle::StingerHeadline, "Coming up", "The story so far", blue, 2_600_000)),
         t("stinger-split", "Split sweep", NewsTransitions, s(TextStyle::StingerSplit, "", "", blue, 1_200_000)),

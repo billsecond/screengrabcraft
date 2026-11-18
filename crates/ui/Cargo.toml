@@ -23,3 +23,5 @@ log = { workspace = true }
 # need no graphics card.
 egui_kittest = { workspace = true, features = ["wgpu"] }
 image = { workspace = true }
+# The README's pictures are taken from the interface running in real windows (`examples/shots.rs`, `live`).
+eframe = { workspace = true, features = ["default_fonts", "wgpu", "x11", "wayland"] }

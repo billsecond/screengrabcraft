@@ -67,8 +67,12 @@ fn a_recording_opens_in_the_video_editor_with_a_row_for_each_track() {
     let v = h.state().video.as_ref().expect("the video editor is open");
     assert_eq!(v.session.timeline.tracks.len(), 3);
     assert_eq!(length(&h), 4_000_000);
-    for label in ["Export Video", "Split", "Show", "Top left", "Circle"] {
+    for label in ["Export Video", "Show", "Top left", "Circle", "Full Screen (F11)"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // Splitting and cutting are on the timeline's right button, not on the tool bar.
+    for gone in ["Split", "Cut"] {
+        assert!(h.query_by_label(gone).is_none(), "{gone} is on the tool bar");
     }
     if let Ok(dir) = std::env::var("SGC_SHOTS")
         && let Ok(img) = h.render()
@@ -83,7 +87,7 @@ fn split_then_cut_a_stretch_then_undo() {
     if let Some(v) = h.state_mut().video.as_mut() {
         v.playhead = 1_500_000;
     }
-    h.get_by_label("Split").click();
+    h.key_press(egui::Key::S);
     h.run_steps(2);
     let clips: Vec<usize> = h.state().video.as_ref().unwrap().session.timeline.tracks.iter().map(|t| t.clips.len()).collect();
     assert_eq!(clips, vec![2, 2, 2], "every track split at the playhead");
@@ -91,7 +95,7 @@ fn split_then_cut_a_stretch_then_undo() {
         v.range = Some((1_000_000, 2_000_000));
     }
     h.run_steps(1);
-    h.get_by_label("Cut").click();
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::X);
     h.run_steps(2);
     assert_eq!(length(&h), 3_000_000);
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
@@ -753,6 +757,33 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     assert!(h.state().video.as_ref().unwrap().thumbnails_made() >= 6, "the cards show what they look like");
+    // A card is the whole video with the item where it will be and as large: the Name card at the
+    // bottom left of it, the rest the screen under it.
+    let card = crate::video::VideoView::template_card_picture("news-name").unwrap();
+    let screen = crate::video::VideoView::template_card_picture("blank-for-the-test");
+    assert!(screen.is_none(), "no such template");
+    let (w, h_px) = (card.width() as usize, card.height() as usize);
+    let dark = |x0: usize, y0: usize, x1: usize, y1: usize| {
+        let mut n = 0;
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let p = &card.pixels()[(y * w + x) * 4..(y * w + x) * 4 + 3];
+                n += usize::from(p.iter().all(|c| *c < 60));
+            }
+        }
+        n
+    };
+    assert!(dark(0, h_px * 3 / 4, w / 3, h_px) > 80, "its dark card at the bottom left");
+    assert!(dark(w / 2, 0, w, h_px / 2) < 20, "and nothing of it at the top right");
+    // The pointer on a card: a larger preview of it plays.
+    let name_card = h.get_by_label("Name card").rect().center();
+    h.hover_at(name_card);
+    h.run_steps(8);
+    assert_eq!(h.state().video.as_ref().unwrap().previewing(), Some("news-name"));
+    shot(&mut h, "video-library-preview");
+    h.hover_at(egui::pos2(700.0, 300.0));
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().previewing(), None);
     if let Some(v) = h.state_mut().video.as_mut() {
         v.playhead = 1_000_000;
     }
@@ -1179,13 +1210,16 @@ fn an_item_is_dragged_off_the_picture_and_taken_hold_of_again_out_there() {
 fn the_preview_goes_over_the_whole_screen_and_comes_back() {
     let mut h = harness();
     let full = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().full_screen;
-    // The button at the picture's right end.
+    // The button beside the ones that play, under the picture.
+    let (play, button) = (h.get_by_label("Play (Space)").rect(), h.get_by_label("Full Screen (F11)").rect());
+    assert!((play.center().y - button.center().y).abs() < 1.0, "in the same row: {play:?} {button:?}");
+    assert!(button.min.x > play.max.x && button.min.x - play.max.x < 120.0, "just after the play buttons: {play:?} {button:?}");
     h.get_by_label("Full Screen (F11)").click();
     h.run_steps(3);
     assert!(full(&h));
     assert!(h.state().window_full, "the window follows");
     // Nothing but the picture and its controls.
-    for gone in ["Export Video", "Split", "Top left"] {
+    for gone in ["Export Video", "Show", "Top left"] {
         assert!(h.query_by_label(gone).is_none(), "{gone} is still there");
     }
     // It plays there, and the bar seeks along the whole video.
@@ -1297,16 +1331,141 @@ fn the_right_button_on_the_timeline_chooses_what_is_under_it_and_offers_what_can
     }
     h.run_steps(3);
     assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, 0)), "the clip under it is chosen");
-    h.get_by_label("Move the Playhead Here");
-    h.get_by_label_contains("Delete the Clip");
-    // Split Here: the playhead goes there, and the clip is two.
-    let split = h.get_by_label_contains("Split Here");
-    split.click();
+    h.get_by_label_contains("Screen at 0:0");
+    for label in
+        ["Split Every Track Here", "Select This Clip's Stretch", "Delete the Clip, Leaving a Gap", "Move the Playhead Here", "Hide This Track"]
+    {
+        h.get_by_label_contains(label);
+    }
+    // Nothing chosen yet: the stretch's ways are there, but greyed.
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Remove the Selection from This Track")).is_disabled());
+    shot(&mut h, "video-track-menu");
+    // Split This Track Here: the playhead goes there, and only this track's clip is two.
+    h.get_by_label("Split This Track Here").click();
     h.run_steps(3);
     let v = h.state().video.as_ref().unwrap();
     assert!(v.playhead.abs_diff(v.session.timeline.length() / 2) < 200_000, "{}", v.playhead);
     assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(2));
+    assert_eq!(v.session.timeline.tracks.get(1).map(|t| t.clips.len()), Some(1), "the others aren't split");
     assert_eq!(v.session.undo_label(), Some("Split"));
+}
+
+/// The right button pressed and let go at a point.
+fn right_click(h: &mut Harness<'_, Editor>, p: egui::Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+}
+
+#[test]
+fn the_right_button_on_a_track_takes_the_chosen_stretch_out_of_that_track_alone() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().range = Some((1_000_000, 2_000_000));
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // The second row: the microphone.
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 48.0 + 20.0));
+    h.get_by_label_contains("Microphone at");
+    h.get_by_label("Remove the Selection from This Track").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.source_time(1, 1_500_000), None, "silence there");
+    assert_eq!(v.session.timeline.source_time(1, 2_500_000), Some(2_500_000), "and after it, still in time");
+    assert_eq!(v.session.timeline.source_time(0, 1_500_000), Some(1_500_000), "the screen plays on");
+    assert_eq!(length(&h), 4_000_000);
+    assert_eq!(v.range, Some((1_000_000, 2_000_000)), "the stretch stays chosen");
+}
+
+#[test]
+fn the_right_button_on_the_ruler_is_about_every_track_chooses_and_cuts() {
+    let mut h = harness();
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // On the ruler, three quarters of the way along.
+    let x = lane.min.x + (lane.width() - 24.0) * 0.75;
+    right_click(&mut h, egui::pos2(x, lane.min.y + 8.0));
+    h.get_by_label_contains("Every track at");
+    assert!(h.query_by_label("Split This Track Here").is_none(), "nothing about one track");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Cut the Selection")).is_disabled());
+    shot(&mut h, "video-ruler-menu");
+    h.get_by_label("Select from Here to the End").click();
+    h.run_steps(3);
+    let (a, b) = h.state().video.as_ref().unwrap().range.expect("a stretch chosen");
+    assert!(a.abs_diff(3_000_000) < 150_000 && b == 4_000_000, "{a}..{b}");
+    // Again, and Cut: the stretch goes from every track.
+    right_click(&mut h, egui::pos2(x, lane.min.y + 8.0));
+    h.get_by_label_contains("Cut the Selection").click();
+    h.run_steps(3);
+    assert_eq!(length(&h), a);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.range.is_none());
+    assert!(v.session.timeline.tracks.iter().all(|t| t.clips.last().is_some_and(|c| c.end() == a)));
+    // Select All, from the keys; Esc lets it go.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().range, Some((0, a)));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().range.is_none());
+}
+
+#[test]
+fn a_handle_beside_the_playhead_drags_out_a_stretch_that_play_keeps_to() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.run_steps(3);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    let pps = h.state().video.as_ref().unwrap().pps;
+    let x_of = |us: u64| lane.min.x + us as f32 / 1e6 * pps;
+    // Low on the ruler, where the handles are (the ruler is above the band over the rows).
+    let ruler_y = lane.min.y + 20.0;
+    assert!(ruler_y < top - 22.0, "{ruler_y} {top}");
+    // The handle just right of the playhead's head, dragged to 2.5 s: the stretch is 1 s to 2.5 s,
+    // and the picture shows its end meanwhile.
+    let handle = egui::pos2(x_of(1_000_000) + 7.0 + 5.5, ruler_y);
+    crate::tests::drag(&mut h, handle, egui::pos2(x_of(2_500_000) + 5.5, ruler_y));
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap();
+    let (a, b) = v.range.expect("a stretch chosen by the handle");
+    assert_eq!(a, 1_000_000, "the playhead's end stays");
+    assert!(b.abs_diff(2_500_000) < 100_000, "{b}");
+    assert_eq!(v.playhead, b, "the playhead follows the handle being dragged");
+    shot(&mut h, "video-selection-handles");
+    // The playhead outside it: Play starts at its start, and stops at its end.
+    h.state_mut().video.as_mut().unwrap().playhead = 3_500_000;
+    h.key_press(egui::Key::Space);
+    h.run_steps(1);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.is_playing());
+    assert!(v.playhead >= a && v.playhead < a + 400_000, "from the stretch's start: {}", v.playhead);
+    h.run_steps(12);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(!v.is_playing(), "stopped at the stretch's end");
+    assert_eq!(v.playhead, b);
+    // The playhead in it: Play starts there.
+    let middle = (a + b) / 2;
+    h.state_mut().video.as_mut().unwrap().playhead = middle;
+    h.key_press(egui::Key::Space);
+    h.run_steps(1);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.is_playing() && v.playhead >= middle && v.playhead < middle + 400_000, "{}", v.playhead);
+    h.key_press(egui::Key::Space);
+    h.run_steps(1);
+    // A click on the ruler in the stretch moves the playhead and keeps the stretch; outside it,
+    // the stretch is let go and the handles ride with the playhead again.
+    crate::tests::click_at(&mut h, egui::pos2(x_of(1_500_000), lane.min.y + 8.0));
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.range.is_some() && v.playhead.abs_diff(1_500_000) < 100_000, "{:?} {}", v.range, v.playhead);
+    crate::tests::click_at(&mut h, egui::pos2(x_of(3_500_000), lane.min.y + 8.0));
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.range.is_none() && v.playhead.abs_diff(3_500_000) < 100_000, "{:?} {}", v.range, v.playhead);
+    // Nothing chosen: Play plays on to the end.
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.key_press(egui::Key::Space);
+    h.run_steps(8);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 4_000_000);
 }
 
 #[test]
@@ -1456,16 +1615,13 @@ fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() 
     // Wide enough for the picture editor's names (the window the editor opens in is): each
     // button has its own under it.
     let mut h = wide(1320.0);
-    for label in ["Library", "Open (Ctrl+O)", "Split", "Delete"] {
+    for label in ["Library", "Open (Ctrl+O)", "Add Text"] {
         // (The first so named: the library's panel has a Library tab of its own.)
         let r = h.query_all_by_label(label).next().unwrap().rect();
         assert!((r.height() - (side + 14.0)).abs() < 0.5, "{label}: {r:?}");
     }
     shot(&mut h, "video-tool-bar-named");
     // They still do what they did.
-    h.get_by_label("Split").click();
-    h.run_steps(2);
-    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), None, "nothing to split at the very start");
     h.query_all_by_label("Library").next().unwrap().click();
     h.run_steps(2);
     assert!(!h.state().video.as_ref().unwrap().library_open);
@@ -1473,9 +1629,9 @@ fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() 
     // as its buttons.
     h.state_mut().settings.hide_tool_names = true;
     h.run_steps(2);
-    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+    assert!((h.get_by_label("Open (Ctrl+O)").rect().height() - side).abs() < 0.5);
     let h = wide(800.0);
-    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+    assert!((h.get_by_label("Open (Ctrl+O)").rect().height() - side).abs() < 0.5);
 }
 
 #[test]
@@ -1630,8 +1786,34 @@ fn the_right_button_on_nothing_lets_go_of_the_clip_chosen_and_splits_every_track
     }
     h.run_steps(3);
     assert_eq!(h.state().video.as_ref().unwrap().selected, None);
-    h.get_by_label_contains("Split Here").click();
+    h.get_by_label_contains("Every track at");
+    h.get_by_label_contains("Split Every Track Here").click();
     h.run_steps(3);
     let v = h.state().video.as_ref().unwrap();
     assert!(v.session.timeline.tracks.iter().all(|t| t.clips.len() == 2), "every track is split: {:?}", v.session.timeline.tracks);
+}
+
+#[test]
+fn every_library_card_is_drawn_and_shows_its_own_item() {
+    let lib = screengrabcraft_media::layers::library();
+    let cards: Vec<(&str, Raster)> = lib
+        .iter()
+        .map(|t| (t.key, crate::video::VideoView::template_card_picture(t.key).unwrap_or_else(|| panic!("{} has no card", t.key))))
+        .collect();
+    for (i, (a, pa)) in cards.iter().enumerate() {
+        for (b, pb) in cards.iter().skip(i + 1) {
+            assert_ne!(pa.pixels(), pb.pixels(), "the cards of {a} and {b} are the same picture");
+        }
+    }
+    // A sheet of them all, to look at.
+    if let Ok(dir) = std::env::var("SGC_SHOTS") {
+        let (w, h) = (cards[0].1.width(), cards[0].1.height());
+        let mut sheet = image::RgbaImage::new(w * 6 + 50, h * cards.len().div_ceil(6) as u32 + 10 * cards.len().div_ceil(6) as u32);
+        for (k, (_, pic)) in cards.iter().enumerate() {
+            let card = image::RgbaImage::from_raw(pic.width(), pic.height(), pic.pixels().to_vec()).unwrap();
+            let (x, y) = ((k as u32 % 6) * (w + 10), (k as u32 / 6) * (h + 10));
+            image::imageops::overlay(&mut sheet, &card, i64::from(x), i64::from(y));
+        }
+        sheet.save(format!("{dir}/video-library-cards.png")).unwrap();
+    }
 }

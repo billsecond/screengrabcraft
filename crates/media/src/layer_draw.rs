@@ -93,11 +93,101 @@ fn stock_place(style: TextStyle, g: &crate::stock::Graphic, place: layers::Place
     }
     let (cx, cy) = (bounds.x + bounds.w / 2.0, bounds.y + bounds.h / 2.0);
     let (k, grow) = (w / W, if g.sized { 1.0 } else { place.w.clamp(0.2, 3.0) });
-    Transform::from_translate(-cx, -cy)
+    // An arrow grows about its tip, so it stays on what it points at.
+    let (px, py) = if style == TextStyle::Arrow { g.anchor } else { (cx, cy) };
+    Transform::from_translate(-px, -py)
         .post_scale(grow, grow)
-        .post_translate(cx + place.x * W - g.anchor.0, cy + place.y * H - g.anchor.1)
+        .post_translate(px + place.x * W - g.anchor.0, py + place.y * H - g.anchor.1)
         .post_scale(k, k)
         .post_translate(0.0, (h - H * k) * (cy / H))
+}
+
+/// Blurs `pix` inside `rect` (in its pixels), `amount` of the way (0 to 1): two passes of a box
+/// blur across and down, each about a 45th of the picture's width, so words there can't be read.
+/// The box is kept to the picture (what's past its edges is its edge again); an empty one, or
+/// one that isn't a number, does nothing.
+pub(crate) fn blur_box(pix: &mut Pixmap, rect: Rect, amount: f32) {
+    let amount = if amount.is_finite() { amount.clamp(0.0, 1.0) } else { 0.0 };
+    if amount <= 0.0 || ![rect.x, rect.y, rect.w, rect.h].iter().all(|v| v.is_finite()) {
+        return;
+    }
+    let (pw, ph) = (pix.width() as usize, pix.height() as usize);
+    let edge = |v: f32, most: usize| if v <= 0.0 { 0 } else { (v.round() as usize).min(most) };
+    let (x0, x1) = (edge(rect.x.min(rect.x + rect.w), pw), edge(rect.x.max(rect.x + rect.w), pw));
+    let (y0, y1) = (edge(rect.y.min(rect.y + rect.h), ph), edge(rect.y.max(rect.y + rect.h), ph));
+    let (bw, bh) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    let Some(n) = bw.checked_mul(bh).and_then(|n| n.checked_mul(4)) else { return };
+    if n == 0 {
+        return;
+    }
+    let radius = ((pw as f32 / 45.0).round() as usize).clamp(3, 400);
+    let data = pix.data_mut();
+    // The box's pixels (premultiplied, as the picture holds them).
+    let mut was = Vec::with_capacity(n);
+    for y in y0..y1 {
+        let start = y.saturating_mul(pw).saturating_add(x0).saturating_mul(4);
+        match data.get(start..start.saturating_add(bw * 4)) {
+            Some(row) => was.extend_from_slice(row),
+            None => return,
+        }
+    }
+    let mut blurred = was.clone();
+    let mut between = vec![0u8; n];
+    for _ in 0..2 {
+        box_pass(&blurred, &mut between, bw, bh, radius, true);
+        box_pass(&between, &mut blurred, bw, bh, radius, false);
+    }
+    for (row, y) in (y0..y1).enumerate() {
+        let start = y.saturating_mul(pw).saturating_add(x0).saturating_mul(4);
+        let from = row.saturating_mul(bw * 4);
+        let (Some(out), Some(old), Some(new)) =
+            (data.get_mut(start..start.saturating_add(bw * 4)), was.get(from..from + bw * 4), blurred.get(from..from + bw * 4))
+        else {
+            return;
+        };
+        for ((o, a), b) in out.iter_mut().zip(old).zip(new) {
+            *o = (f32::from(*a) + (f32::from(*b) - f32::from(*a)) * amount).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+}
+
+/// One pass of a box blur over a `w × h` picture of RGBA pixels, across its rows or down its
+/// columns, `r` pixels each way (the edge pixel standing in for what's past the edge).
+fn box_pass(src: &[u8], dst: &mut [u8], w: usize, h: usize, r: usize, across: bool) {
+    let (lines, len) = if across { (h, w) } else { (w, h) };
+    if len == 0 {
+        return;
+    }
+    let at = |line: usize, i: usize| if across { (line * w + i) * 4 } else { (i * w + line) * 4 };
+    let span = (2 * r + 1) as u32;
+    let last = len - 1;
+    for line in 0..lines {
+        let px = |i: isize| -> [u32; 4] {
+            let k = at(line, i.clamp(0, last as isize) as usize);
+            match src.get(k..k + 4) {
+                Some(&[r, g, b, a]) => [r.into(), g.into(), b.into(), a.into()],
+                _ => [0; 4],
+            }
+        };
+        let (ri, mut sum) = (r as isize, [0u32; 4]);
+        for i in -ri..=ri {
+            for (s, v) in sum.iter_mut().zip(px(i)) {
+                *s = s.saturating_add(v);
+            }
+        }
+        for i in 0..len {
+            let k = at(line, i);
+            if let Some(out) = dst.get_mut(k..k + 4) {
+                for (o, s) in out.iter_mut().zip(sum) {
+                    *o = (s.saturating_add(span / 2) / span).min(255) as u8;
+                }
+            }
+            let (add, take) = (px(i as isize + ri + 1), px(i as isize - ri));
+            for ((s, a), t) in sum.iter_mut().zip(add).zip(take) {
+                *s = s.saturating_add(a).saturating_sub(t);
+            }
+        }
+    }
 }
 
 /// A box through a transform (one that doesn't turn it).
@@ -449,6 +539,17 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                 let Some(ready) = pictures.get(*id, &pic) else { continue };
                 picture_at(&mut pix, &ready, media_rect(item, pic.width(), pic.height(), w, h), m);
             }
+            What::Text { style: TextStyle::Blur, title, subtitle, color } => {
+                // What's under its box blurred (it draws nothing of its own), coming on and going
+                // as the graphics do, and as the item's own animations and opacity say.
+                let Some(g) = graphic(Some(&mut *texts), TextStyle::Blur, title, subtitle, color, item.len, item.place.w) else { continue };
+                let amount = crate::stock::blur_amount(item.len, t.saturating_sub(item.at) as f32 / 1e6) * m.alpha;
+                let r = moved(g.bounds, stock_place(TextStyle::Blur, &g, item.place, w, h));
+                // Moved and grown about the middle of the picture, as a graphic's picture is.
+                let (k, cx, cy) = (m.scale.max(0.01), w / 2.0, h / 2.0);
+                let r = Rect::new((r.x - cx) * k + cx + m.dx, (r.y - cy) * k + cy + m.dy, r.w * k, r.h * k);
+                blur_box(&mut pix, r, amount);
+            }
             What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
                 // A broadcast graphic: played, a frame for each moment of its item.
                 let Some(g) = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len, item.place.w) else { continue };
@@ -551,15 +652,34 @@ mod tests {
         Raster::filled(w, h, Color::rgb(120, 120, 120)).unwrap()
     }
 
+    /// Black and white squares `side` pixels across.
+    fn checks(w: u32, h: u32, side: u32) -> Raster {
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = if (x / side + y / side).is_multiple_of(2) { 0 } else { 255 };
+                px.extend_from_slice(&[v, v, v, 255]);
+            }
+        }
+        Raster::new(w, h, px).unwrap()
+    }
+
+    fn blur_item(place: Placement, len: u64) -> Item {
+        Item { place, len, ..template("blur").unwrap().item }
+    }
+
     #[test]
     fn every_library_item_draws_something_and_says_where() {
         for t in layers::library() {
             let mut tl = timeline();
             let (_, _) = tl.place(t.item.clone(), None, 0).unwrap();
-            let mut out = grey(320, 180);
+            // A blur draws nothing of its own: it shows on a picture with something in it.
+            let blur = matches!(t.item.what, What::Text { style: TextStyle::Blur, .. });
+            let back = || if blur { checks(320, 180, 4) } else { grey(320, 180) };
+            let mut out = back();
             let mid = t.item.len / 2;
             draw_layers(&mut out, &tl, &NoMedia, mid, &mut TextCache::default(), &mut PictureCache::default());
-            assert_ne!(out, grey(320, 180), "{} changes the picture", t.key);
+            assert_ne!(out, back(), "{} changes the picture", t.key);
             let item = &tl.layers[0].items[0];
             let rect = item_rect(item, &tl, &NoMedia, 320.0, 180.0);
             assert_eq!(rect.is_none(), matches!(item.what, What::Transition { .. }), "{}", t.key);
@@ -631,5 +751,92 @@ mod tests {
         let mut mixed = vec![0.0f32; 20];
         mix_layers(&mut mixed, &tl, &OnePicture(red), 48_000, 10);
         assert!(mixed.iter().all(|v| (*v - 0.5).abs() < 1e-6), "{mixed:?}");
+    }
+
+    #[test]
+    fn a_blur_hides_what_is_under_its_box_and_nothing_else() {
+        let (w, h) = (640u32, 360u32);
+        let mut tl = timeline();
+        let (layer, id) = tl.place(blur_item(Placement { x: 0.5, y: 0.5, w: 0.25, opacity: 1.0 }, 4_000_000), None, 0).unwrap();
+        let item = tl.item(layer, id).unwrap().clone();
+        let at = |t: u64| {
+            let mut out = checks(w, h, 3);
+            draw_layers(&mut out, &tl, &NoMedia, t, &mut TextCache::default(), &mut PictureCache::default());
+            out
+        };
+        // Its box, where the designer puts its handles: a quarter of the width, in the middle.
+        let r = item_rect(&item, &tl, &NoMedia, w as f32, h as f32).unwrap();
+        assert!((r.w - w as f32 * 0.25).abs() < 1.0 && (r.x + r.w / 2.0 - w as f32 / 2.0).abs() < 1.0, "{r:?}");
+        let mid = at(2_000_000);
+        // Inside: grey, the squares gone (the most and least of a patch in its middle close).
+        let (cx, cy) = (w / 2, h / 2);
+        let patch: Vec<u8> =
+            (cy - 10..cy + 10).flat_map(|y| (cx - 10..cx + 10).map(move |x| (x, y))).map(|(x, y)| mid.pixel(x, y).unwrap().r).collect();
+        let (lo, hi) = (*patch.iter().min().unwrap(), *patch.iter().max().unwrap());
+        assert!(lo > 90 && hi < 165 && hi - lo < 30, "blurred to grey: {lo}..{hi}");
+        // Well outside it: as it was.
+        let before = checks(w, h, 3);
+        for (x, y) in [(10, 10), (w - 10, h / 2), (w / 2, 8), (60, h - 20), (w / 2 - (r.w as u32) / 2 - 20, h / 2)] {
+            assert_eq!(mid.pixel(x, y), before.pixel(x, y), "({x}, {y}) is left alone");
+        }
+        // It comes on and goes: nothing at its very start and at its very end, all of it between.
+        assert_eq!(at(0), before, "nothing yet at its start");
+        assert_eq!(at(3_999_999), before, "nothing left at its end");
+        let soon = at(150_000).pixel(cx, cy).unwrap().r;
+        assert!(soon != 0 && soon != 255 && (soon as i32 - 128).abs() > (mid.pixel(cx, cy).unwrap().r as i32 - 128).abs(), "part-blurred: {soon}");
+    }
+
+    #[test]
+    fn an_arrow_keeps_its_tip_where_it_was_put_at_any_size() {
+        let g = crate::stock::build(TextStyle::Arrow, "Click here", "", [255, 59, 48], 4_000_000, 1.0).unwrap();
+        for grow in [0.5, 1.0, 2.5] {
+            let place = Placement { x: 0.62, y: 0.42, w: grow, opacity: 1.0 };
+            let t = stock_place(TextStyle::Arrow, &g, place, 1280.0, 720.0);
+            let (x, y) = (g.anchor.0 * t.sx + t.tx, g.anchor.1 * t.sy + t.ty);
+            assert!((x - 0.62 * 1280.0).abs() < 0.5 && (y - 0.42 * 720.0).abs() < 0.5, "{grow}: ({x}, {y})");
+        }
+    }
+
+    #[test]
+    fn a_blur_placed_anyhow_never_panics() {
+        let junk = [
+            Placement { x: f32::NAN, y: f32::NAN, w: f32::NAN, opacity: f32::NAN },
+            Placement { x: f32::INFINITY, y: f32::NEG_INFINITY, w: f32::MAX, opacity: 1.0 },
+            Placement { x: -1.0e30, y: 1.0e30, w: -5.0, opacity: -3.0 },
+            Placement { x: 0.0, y: 0.0, w: 3.0, opacity: 9.0 },
+            Placement { x: 1.5, y: -0.5, w: 0.02, opacity: 1.0 },
+            Placement { x: 0.999, y: 0.999, w: 1.0e-9, opacity: 1.0 },
+        ];
+        for place in junk {
+            for len in [1, 300_000, 4_000_000, u64::MAX / 8, u64::MAX] {
+                let item = Item { at: 0, ..blur_item(place, len) };
+                // As a file might hold it (nothing made safe), and as the timeline places it.
+                let mut raw = timeline();
+                raw.layers = vec![layers::Layer { id: 1, items: vec![item.clone()], ..Default::default() }];
+                let mut placed = timeline();
+                placed.place(item, None, 0).unwrap();
+                for tl in [&raw, &placed] {
+                    for t in [0, 1, 200_000, 2_000_000, u64::MAX / 16] {
+                        for (w, h) in [(64, 36), (1, 1), (3, 200)] {
+                            let mut out = checks(w, h, 2);
+                            draw_layers(&mut out, tl, &NoMedia, t, &mut TextCache::default(), &mut PictureCache::default());
+                            let _ = item_rect(&tl.layers[0].items[0], tl, &NoMedia, w as f32, h as f32);
+                        }
+                    }
+                }
+            }
+        }
+        // And straight on a picture: boxes that are empty, outside it, or junk.
+        let mut pix = Pixmap::new(8, 8).unwrap();
+        for r in [
+            Rect::new(f32::NAN, 0.0, 4.0, 4.0),
+            Rect::new(-50.0, -50.0, 10.0, 10.0),
+            Rect::new(2.0, 2.0, 0.0, 0.0),
+            Rect::new(6.0, 6.0, -9.0, -9.0),
+            Rect::new(0.0, 0.0, 1e30, 1e30),
+        ] {
+            blur_box(&mut pix, r, 1.0);
+            blur_box(&mut pix, r, f32::NAN);
+        }
     }
 }

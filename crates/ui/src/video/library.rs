@@ -58,21 +58,100 @@ pub enum CanvasDrag {
     Camera { grab: Vec2, resize: Option<(f32, f32)> },
 }
 
-/// The picture under the library's thumbnails: a calm gradient.
+/// A card's picture is drawn on a video this large (16:9), then made a third as large: the card
+/// shows the item as it will be on the video, where it will be and as large.
+const THUMB_DRAWN: (u32, u32) = (768, 432);
+/// How many cards' pictures are drawn in one frame (the rest in the next ones).
+const THUMBS_PER_FRAME: usize = 4;
+/// The preview shown while the pointer is on a card: as large as this (points), playing.
+const PREVIEW: Vec2 = vec2(384.0, 216.0);
+
+/// The made-up screen under the library's pictures at a point (shares of its width and height): a
+/// program's window on a desktop, as a screen recording looks, kept faint so that what's put on
+/// it is what the eye finds. Drawn by this code.
+fn scene(x: f32, y: f32) -> [u8; 3] {
+    let inside = |x0: f32, y0: f32, x1: f32, y1: f32| x >= x0 && x < x1 && y >= y0 && y < y1;
+    let (left, top, right, bottom) = (0.07, 0.08, 0.93, 0.86);
+    if !inside(left, top, right, bottom) {
+        // The desktop, and the window's soft shadow on it.
+        let k = (x + y) / 2.0;
+        let shade = if inside(left + 0.006, top + 0.012, right + 0.006, bottom + 0.016) { 0.85 } else { 1.0 };
+        return [((88.0 + 30.0 * k) * shade) as u8, ((108.0 + 36.0 * k) * shade) as u8, ((140.0 + 30.0 * k) * shade) as u8];
+    }
+    let bar = top + 0.055;
+    if y < bar {
+        // Its title bar, with a name in it.
+        return if inside(0.45, top + 0.02, 0.55, top + 0.035) { [204, 208, 216] } else { [226, 229, 235] };
+    }
+    if x < 0.25 {
+        // A side bar of places, the second one chosen.
+        for (i, wide) in [0.10f32, 0.08, 0.11, 0.07, 0.09, 0.10].iter().enumerate() {
+            let ly = bar + 0.06 + i as f32 * 0.075;
+            if inside(0.095, ly, 0.095 + wide, ly + 0.022) {
+                return if i == 1 { [246, 248, 255] } else { [210, 214, 222] };
+            }
+            if i == 1 && inside(0.085, ly - 0.018, 0.235, ly + 0.04) {
+                return [178, 192, 236];
+            }
+        }
+        return [231, 234, 239];
+    }
+    // A heading, three numbers on cards, a chart and lines of words.
+    if inside(0.285, bar + 0.04, 0.50, bar + 0.075) {
+        return [198, 203, 212];
+    }
+    for i in 0..3 {
+        let cx = 0.285 + i as f32 * 0.205;
+        if inside(cx, bar + 0.11, cx + 0.185, bar + 0.27) {
+            if inside(cx + 0.02, bar + 0.135, cx + 0.09, bar + 0.152) {
+                return [218, 222, 229];
+            }
+            if inside(cx + 0.02, bar + 0.18, cx + 0.12 + 0.015 * i as f32, bar + 0.235) {
+                return [196, 201, 210];
+            }
+            return [249, 250, 252];
+        }
+    }
+    if inside(0.285, bar + 0.31, 0.70, bottom - 0.04) {
+        let floor = bottom - 0.08;
+        for (i, tall) in [0.12f32, 0.2, 0.15, 0.26, 0.19, 0.31, 0.24, 0.34].iter().enumerate() {
+            let bx = 0.31 + i as f32 * 0.048;
+            if inside(bx, floor - tall, bx + 0.03, floor) {
+                return if i == 7 { [184, 198, 240] } else { [212, 220, 242] };
+            }
+        }
+        return [249, 250, 252];
+    }
+    if inside(0.72, bar + 0.31, 0.905, bottom - 0.04) {
+        for i in 0..6 {
+            let ly = bar + 0.35 + i as f32 * 0.06;
+            if inside(0.74, ly, 0.88 - 0.02 * (i % 3) as f32, ly + 0.018) {
+                return [220, 224, 230];
+            }
+        }
+        return [249, 250, 252];
+    }
+    [240, 242, 246]
+}
+
+/// The made-up screen as a picture `w × h`, toned down to the middle: white words and dark plates
+/// both read on it.
 fn backdrop(w: u32, h: u32) -> Option<Raster> {
-    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    let (w, h) = (w.clamp(1, 4096), h.clamp(1, 4096));
+    let mut px = Vec::with_capacity(w as usize * h as usize * 4);
+    let tone = |c: u8, lift: f32| (f32::from(c) * 0.58 + lift) as u8;
     for y in 0..h {
         for x in 0..w {
-            let (fx, fy) = (x as f32 / w as f32, y as f32 / h as f32);
-            px.extend_from_slice(&[(40.0 + 50.0 * fx) as u8, (52.0 + 30.0 * fy) as u8, (90.0 + 60.0 * (1.0 - fx)) as u8, 255]);
+            let [r, g, b] = scene(x as f32 / w as f32, y as f32 / h as f32);
+            px.extend_from_slice(&[tone(r, 22.0), tone(g, 30.0), tone(b, 46.0), 255]);
         }
     }
     Raster::new(w, h, px).ok()
 }
 
-/// A template drawn as its card shows it.
-fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
-    let (w, h) = (256u32, 144u32);
+/// A template as it is on a `w × h` video `at` µs after it starts: placed and sized as it will
+/// be, over the made-up screen.
+fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut layer_draw::TextCache) -> Option<Raster> {
     let mut pic = backdrop(w, h)?;
     let mut tl = screengrabcraft_media::timeline::Timeline {
         tracks: Vec::new(),
@@ -82,30 +161,27 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
         media: Vec::new(),
         pointer: Default::default(),
     };
-    // A broadcast graphic: shown close up, as it is once it has come on (a transition, part-way).
-    if let What::Text { style, title, subtitle, color } = &t.item.what
-        && screengrabcraft_media::stock::is_stock(*style)
-    {
-        return screengrabcraft_media::stock::card(
-            *style,
-            title,
-            subtitle,
-            layers::color(color, [0x0b, 0x5f, 0xff]),
-            t.item.len,
-            t.item.place.w,
-            &pic,
-        );
-    }
-    // Words drawn larger than on a video, so they can be read on a card.
-    let mut item = t.item.clone();
-    if matches!(item.what, What::Text { .. }) {
-        item.place.w = (item.place.w * 2.4).min(3.0);
-    }
-    let (_, _) = tl.place(item, None, 0).ok()?;
-    // Half-way into a transition shows it at its strongest; anything else, once it has come in.
-    let at = if matches!(t.item.what, What::Transition { .. }) { t.item.len * 2 / 5 } else { t.item.len / 2 };
-    layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at, &mut Default::default(), &mut Default::default());
+    tl.place(t.item.clone(), None, 0).ok()?;
+    layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
     Some(pic)
+}
+
+/// When a template is shown on its card: a transition part-way across (as it covers the
+/// picture; one with words at its middle, where they are), anything else once it has come in.
+fn held_at(t: &layers::Template) -> u64 {
+    match &t.item.what {
+        What::Text { style, .. } if screengrabcraft_media::stock::is_stinger(*style) && style.has_words() => t.item.len / 2,
+        What::Text { style, .. } if screengrabcraft_media::stock::is_stinger(*style) => t.item.len / 100 * 32,
+        What::Transition { .. } => t.item.len / 5 * 2,
+        _ => t.item.len / 2,
+    }
+}
+
+/// A template drawn as its card shows it: the whole video, a third the size it's drawn at.
+fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
+    let (w, h) = THUMB_DRAWN;
+    let pic = template_frame(t, w, h, held_at(t), &mut Default::default())?;
+    screengrabcraft_media::compose::scale(&pic, w / 3, h / 3)
 }
 
 fn texture(ctx: &egui::Context, name: &str, pic: &Raster) -> egui::TextureHandle {
@@ -289,27 +365,23 @@ impl VideoView {
                 ui.add_space(8.0);
                 ui.label(RichText::new(format!("Nothing in the library is called \u{201c}{}\u{201d}.", self.lib_search.trim())).color(t.muted));
             }
+            let mut budget = THUMBS_PER_FRAME;
+            let mut hovered = false;
             for row in found.chunks(2) {
                 ui.horizontal(|ui| {
                     for tpl in row {
-                        let key = format!("template-{}", tpl.key);
-                        if !self.thumbs.contains_key(&key)
-                            && let Some(pic) = template_thumbnail(tpl)
-                        {
-                            self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
-                        }
-                        let tex = self.thumbs.get(&key).cloned();
-                        let added = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, tpl.group.label(), None);
-                        if added {
-                            let at = self.playhead;
-                            self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
-                        }
+                        self.template_card(ed, ui, ctx, tpl, tpl.group.label(), &mut budget, &mut hovered);
                     }
                 });
+            }
+            if !hovered {
+                self.lib_hover = None;
             }
             return;
         }
         // A section for each kind, opened and closed by its heading (the first is open).
+        let mut budget = THUMBS_PER_FRAME;
+        let mut hovered = false;
         for g in Group::ALL {
             let cards: Vec<&layers::Template> = lib.iter().filter(|x| x.group == g).collect();
             egui::CollapsingHeader::new(RichText::new(g.label()).size(14.0).strong().color(t.text))
@@ -321,19 +393,7 @@ impl VideoView {
                     for row in cards.chunks(2) {
                         ui.horizontal(|ui| {
                             for tpl in row {
-                                let key = format!("template-{}", tpl.key);
-                                // A card's picture is drawn the first time its section is open.
-                                if !self.thumbs.contains_key(&key)
-                                    && let Some(pic) = template_thumbnail(tpl)
-                                {
-                                    self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
-                                }
-                                let tex = self.thumbs.get(&key).cloned();
-                                let added = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, "", None);
-                                if added {
-                                    let at = self.playhead;
-                                    self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
-                                }
+                                self.template_card(ed, ui, ctx, tpl, "", &mut budget, &mut hovered);
                             }
                         });
                     }
@@ -341,6 +401,76 @@ impl VideoView {
                 });
             ui.add_space(2.0);
         }
+        if !hovered {
+            self.lib_hover = None;
+        }
+    }
+
+    /// A template's card: its picture drawn the first time it's shown (a few a frame), and while
+    /// the pointer is on it, a larger preview playing it.
+    #[allow(clippy::too_many_arguments)]
+    fn template_card(
+        &mut self,
+        ed: &mut Editor,
+        ui: &mut Ui,
+        ctx: &egui::Context,
+        tpl: &layers::Template,
+        detail: &str,
+        budget: &mut usize,
+        hovered: &mut bool,
+    ) {
+        let key = format!("template-{}", tpl.key);
+        if !self.thumbs.contains_key(&key) {
+            if *budget > 0 {
+                *budget -= 1;
+                if let Some(pic) = template_thumbnail(tpl) {
+                    self.thumbs.insert(key.clone(), texture(ctx, &key, &pic));
+                }
+            } else {
+                ctx.request_repaint();
+            }
+        }
+        let tex = self.thumbs.get(&key).cloned();
+        let (added, resp) = self.card(ui, LibDrop::Template(tpl.key), tex.as_ref(), None, tpl.name, detail, None);
+        if added {
+            let at = self.playhead;
+            self.drop_on_timeline(ed, ctx, &LibDrop::Template(tpl.key), None, at);
+        }
+        if resp.hovered() && !resp.dragged() && egui::DragAndDrop::payload::<LibDrop>(ctx).is_none() {
+            *hovered = true;
+            if let Some(tex) = self.preview_frame(ctx, tpl) {
+                resp.on_hover_ui(|ui| {
+                    ui.image((tex.id(), PREVIEW));
+                    ui.label(RichText::new(format!("{}: {:.1} s", tpl.name, tpl.item.len as f64 / 1e6)).size(12.0));
+                });
+            }
+        }
+    }
+
+    /// The preview of a template with the pointer on its card: the moment it's at, played over
+    /// and over (with a short rest at its end), drawn as on a video.
+    fn preview_frame(&mut self, ctx: &egui::Context, tpl: &layers::Template) -> Option<egui::TextureHandle> {
+        let now = ctx.input(|i| i.time);
+        let since = match self.lib_hover {
+            Some((k, s)) if k == tpl.key => s,
+            _ => {
+                self.lib_hover = Some((tpl.key, now));
+                now
+            }
+        };
+        let len = tpl.item.len.max(1);
+        let round = len as f64 / 1e6 + 0.8;
+        let at = ((((now - since).max(0.0)) % round) * 1e6) as u64;
+        let ppp = ctx.pixels_per_point().clamp(1.0, 2.0);
+        let (w, h) = ((PREVIEW.x * ppp).round() as u32, (PREVIEW.y * ppp).round() as u32);
+        let pic = template_frame(tpl, w, h, at, &mut self.preview_texts)?;
+        let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
+        match &mut self.preview_tex {
+            Some(tex) => tex.set(img, egui::TextureOptions::LINEAR),
+            None => self.preview_tex = Some(ctx.load_texture("library-preview", img, egui::TextureOptions::LINEAR)),
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(40));
+        self.preview_tex.clone()
     }
 
     fn media_tab(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context) {
@@ -392,7 +522,7 @@ impl VideoView {
                         (MediaKind::Picture, _) => format!("{} × {}", m.width, m.height),
                         _ => mins(m.duration),
                     };
-                    let added = self.card(ui, LibDrop::Media(m.id), tex.as_ref(), icon, &m.name, &detail, Some(&mut remove));
+                    let (added, _) = self.card(ui, LibDrop::Media(m.id), tex.as_ref(), icon, &m.name, &detail, Some(&mut remove));
                     if added {
                         let at = self.playhead;
                         self.drop_on_timeline(ed, ctx, &LibDrop::Media(m.id), None, at);
@@ -408,7 +538,7 @@ impl VideoView {
     }
 
     /// One card: its picture (or icon), its name and a line under it; dragged onto the timeline,
-    /// or + adds it at the playhead (true). A file of the bin can be taken out of it (its id goes
+    /// or + adds it at the playhead (true, with the card's response). A file of the bin can be taken out of it (its id goes
     /// in `remove`).
     #[allow(clippy::too_many_arguments)]
     fn card(
@@ -420,7 +550,7 @@ impl VideoView {
         name: &str,
         detail: &str,
         remove: Option<&mut Option<u32>>,
-    ) -> bool {
+    ) -> (bool, egui::Response) {
         let t = Tokens::get(ui.ctx());
         let id = ui.id().with(("card", format!("{what:?}")));
         let mut added = false;
@@ -467,7 +597,7 @@ impl VideoView {
                 }
             });
         }
-        added
+        (added, card_resp)
     }
 
     // ---- the item chosen: the panel at the right ----
@@ -528,7 +658,8 @@ impl VideoView {
                             self.text_change(r, || json!({"subtitle": s2.clone()}), &set);
                         }
                     }
-                    let coloured = matches!(&item.what, What::Text { style, .. } if !matches!(style, layers::TextStyle::Spotlight));
+                    let coloured =
+                        matches!(&item.what, What::Text { style, .. } if !matches!(style, layers::TextStyle::Spotlight | layers::TextStyle::Blur));
                     if coloured || on_picture {
                         super::section(ui, "Look", &mut first);
                     }
@@ -883,5 +1014,15 @@ impl VideoView {
     /// How many of the library's cards have their picture drawn (for tests).
     pub fn thumbnails_made(&self) -> usize {
         self.thumbs.keys().filter(|k| k.starts_with("template-")).count()
+    }
+
+    /// The template whose preview is playing (the pointer on its card).
+    pub fn previewing(&self) -> Option<&'static str> {
+        self.lib_hover.map(|(k, _)| k).filter(|_| self.preview_tex.is_some())
+    }
+
+    /// A template's card picture, as drawn (for tests and the README's pictures).
+    pub fn template_card_picture(key: &str) -> Option<Raster> {
+        template_thumbnail(&layers::template(key)?)
     }
 }

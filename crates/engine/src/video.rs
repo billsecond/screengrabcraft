@@ -185,6 +185,13 @@ fn cut(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({"length": s.timeline.length()}))
 }
 
+fn lift(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    s.timeline.lift(from, to, track).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 fn split(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let at = int(p, "at")?;
     let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
@@ -464,6 +471,12 @@ fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
 
 pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand { id: "video.cut", label: "Cut", params: r#"{"from": µs, "to": µs}: takes the stretch out of every track"#, run: cut },
+    VideoCommand {
+        id: "video.lift",
+        label: "Remove",
+        params: r#"{"from": µs, "to": µs, "track"?: n}: takes the stretch out of one track, or all, leaving a gap (nothing moves)"#,
+        run: lift,
+    },
     VideoCommand { id: "video.split", label: "Split", params: r#"{"at": µs, "track"?: n}: one track, or all"#, run: split },
     VideoCommand { id: "video.deleteClip", label: "Delete Clip", params: r#"{"track": n, "clip": n}: leaves a gap"#, run: delete_clip },
     VideoCommand { id: "video.trimStart", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_start },
@@ -559,6 +572,22 @@ mod tests {
         assert_eq!(s.timeline.length(), 5_000_000);
         s.execute("edit.redo", &json!({})).unwrap();
         assert_eq!(s.timeline.length(), 4_000_000);
+    }
+
+    #[test]
+    fn removing_a_stretch_from_one_track_leaves_a_gap_and_is_undone() {
+        let mut s = session();
+        s.execute("video.lift", &json!({"from": 1_000_000, "to": 2_000_000, "track": 1})).unwrap();
+        assert_eq!(s.timeline.length(), 5_000_000, "nothing moved up");
+        assert_eq!(s.timeline.source_time(1, 1_500_000), None);
+        assert_eq!(s.timeline.source_time(0, 1_500_000), Some(1_500_000), "the screen plays on");
+        assert_eq!(s.undo_label(), Some("Remove"));
+        s.execute("video.lift", &json!({"from": 3_000_000, "to": 4_000_000})).unwrap();
+        assert_eq!(s.timeline.source_time(0, 3_500_000), None);
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.source_time(1, 1_500_000), Some(1_500_000));
+        assert!(s.execute("video.lift", &json!({"from": 2, "to": 1})).is_err());
     }
 
     #[test]

@@ -1,9 +1,15 @@
-//! Pictures of the interface, drawn headless with the GPU, for the README and for looking at the
-//! interface without a desktop session: the picture editor with annotations, one of its dialogs,
-//! the video editor with a recording, the capture overlay while choosing (crosshair and
-//! magnifier) and while adjusting (handles and the capture bar), and the Recorder.
+//! Pictures of the interface, drawn headless with the GPU, for looking at the interface without a
+//! desktop session: the picture editor with annotations, one of its dialogs, the video editor with
+//! a recording, the capture overlay while choosing (crosshair and magnifier) and while adjusting
+//! (handles and the capture bar), and the Recorder.
 //!
 //! `cargo run -p screengrabcraft-ui --example shots -- <out dir> [light|dark]`
+//!
+//! With `live` after them, the README's pictures instead: the same interface running in real
+//! windows on this computer (each opens for a few seconds, then saves a picture of itself, only
+//! of itself, and closes), each put on a made-up desktop.
+//!
+//! `cargo run -p screengrabcraft-ui --example shots -- <out dir> dark live`
 //!
 //! Everything in them is made up and painted here: the program in the pictures ("Fernhill
 //! Market") doesn't exist, nor do its customers, and the person on the camera is three circles.
@@ -148,11 +154,9 @@ const WINDOW: (f32, f32, f32) = (96.0, 36.0, 1088.0);
 /// The height of that window's title bar.
 const TITLE: f32 = 34.0;
 
-/// A made-up desktop filling `r`: a wallpaper, the made-up program's window on it, a task bar.
-fn paint_desktop(p: &egui::Painter, ctx: &egui::Context, r: egui::Rect) {
-    let u = r.width() / 1280.0;
-    // The wallpaper: from deep blue down to green.
-    let bands = 64;
+/// A made-up wallpaper filling `r`: from deep blue down to green, two soft lights on it.
+fn paint_wallpaper(p: &egui::Painter, r: egui::Rect) {
+    let bands = 96;
     for i in 0..bands {
         let t = i as f32 / (bands - 1) as f32;
         let mix = |a: f32, b: f32| (a + (b - a) * t) as u8;
@@ -160,6 +164,20 @@ fn paint_desktop(p: &egui::Painter, ctx: &egui::Context, r: egui::Rect) {
         let band = egui::Rect::from_min_max(pos2(r.min.x, y), pos2(r.max.x, y + r.height() / bands as f32 + 1.0));
         p.rect_filled(band, 0.0, Color32::from_rgb(mix(31.0, 44.0), mix(58.0, 140.0), mix(110.0, 150.0)));
     }
+    for (centre, radius) in [
+        (pos2(r.min.x + r.width() * 0.18, r.min.y + r.height() * 0.12), r.width() * 0.34),
+        (pos2(r.max.x - r.width() * 0.12, r.max.y), r.width() * 0.3),
+    ] {
+        for k in 0..10 {
+            p.circle_filled(centre, radius * (1.0 - k as f32 * 0.09), Color32::from_white_alpha(3));
+        }
+    }
+}
+
+/// A made-up desktop filling `r`: a wallpaper, the made-up program's window on it, a task bar.
+fn paint_desktop(p: &egui::Painter, ctx: &egui::Context, r: egui::Rect) {
+    let u = r.width() / 1280.0;
+    paint_wallpaper(p, r);
     // The window, with a soft shadow under it.
     let body_tall = WINDOW.2 * APP.1 / APP.0;
     let win = egui::Rect::from_min_size(pos2(r.min.x + WINDOW.0 * u, r.min.y + WINDOW.1 * u), vec2(WINDOW.2 * u, (TITLE + body_tall) * u));
@@ -294,15 +312,10 @@ fn editor_harness(ed: Editor) -> Harness<'static, Editor> {
     )
 }
 
-fn main() -> Result<(), String> {
-    let mut args = std::env::args().skip(1);
-    let dir = std::path::PathBuf::from(args.next().unwrap_or_else(|| ".".to_string()));
-    let theme = if args.next().as_deref() == Some("light") { Theme::Light } else { Theme::Dark };
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-
-    // ---- the picture editor: the made-up program's window, marked up ----
-    let mut settings = EditorSettings { theme, ..EditorSettings::default() };
-    settings.show_tray = false;
+/// The picture editor with the made-up program's window in it, marked up: the addresses blurred,
+/// the number that matters boxed, the total asked about marked, the order that waits pointed at,
+/// three steps, and a callout chosen.
+fn picture_editor(settings: &EditorSettings) -> Result<Editor, String> {
     let mut ed = Editor::new(Box::new(NoServices), settings.clone());
     let mut doc = Document::new(drawn(APP.0 as u32, APP.1 as u32, paint_app)?);
     let add = |d: &mut Document, s: Shape| {
@@ -332,7 +345,58 @@ fn main() -> Result<(), String> {
         ed.session.select(vec![id]);
     }
     ed.tool = Tool::Select;
-    let mut h = editor_harness(ed);
+    Ok(ed)
+}
+
+/// The video editor with the made-up recording in it, a name put on it, and that edit in the file
+/// with the recording, as the editor writes it (opened again, it is as it was left, "Edits
+/// saved"). `chosen`: a stretch chosen, the playhead in it; else the name chosen.
+fn video_editor(settings: &EditorSettings, chosen: bool) -> Result<Editor, String> {
+    let mut bytes = recording()?;
+    let mut ed = Editor::new(Box::new(NoServices), settings.clone());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Market week.sgvideo".into(), path: None, bytes: bytes.clone() });
+    let v = ed.video.as_mut().ok_or("the recording didn't open")?;
+    let name = serde_json::json!({"template": "lower-bar", "at": 400_000, "title": "Maya Chen", "subtitle": "Fernhill Market"});
+    v.session.execute("video.place", &name).map_err(|e| e.to_string())?;
+    bytes.extend(screengrabcraft_media::recording::edit_bytes(&v.session.timeline).map_err(said)?);
+    let mut ed = Editor::new(Box::new(NoServices), settings.clone());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Market week.sgvideo".into(), path: None, bytes });
+    let v = ed.video.as_mut().ok_or("the recording didn't open again")?;
+    if chosen {
+        v.range = Some((2_400_000, 5_200_000));
+        v.playhead = 3_000_000;
+    } else {
+        v.item = v.session.timeline.layers.first().and_then(|layer| layer.items.first().map(|item| (layer.id, item.id)));
+        v.playhead = 1_400_000;
+    }
+    Ok(ed)
+}
+
+/// The made-up desktop, and the capture overlay over it with the chart chosen and the capture
+/// bar under it.
+fn overlay_on_desktop() -> Result<Overlay, String> {
+    let desktop = drawn(1280, 800, paint_desktop)?;
+    let mut o =
+        Overlay::new(vec![OverlayMonitor { rect: IRect::new(0, 0, 1280, 800), picture: desktop, name: "Main".into() }], Vec::new(), Purpose::Picture);
+    o.preselect(0, IRect::new(302, 260, 574, 252));
+    Ok(o)
+}
+
+fn main() -> Result<(), String> {
+    let mut args = std::env::args().skip(1);
+    let dir = std::path::PathBuf::from(args.next().unwrap_or_else(|| ".".to_string()));
+    let theme = if args.next().as_deref() == Some("light") { Theme::Light } else { Theme::Dark };
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    match args.next().as_deref() {
+        Some("live") => return live::all(&dir, theme),
+        Some("live-one") => return live::one(&dir, theme, &args.next().unwrap_or_default()),
+        _ => {}
+    }
+
+    // ---- the picture editor: the made-up program's window, marked up ----
+    let mut settings = EditorSettings { theme, ..EditorSettings::default() };
+    settings.show_tray = false;
+    let mut h = editor_harness(picture_editor(&settings)?);
     h.run_steps(6);
     save(&mut h, &dir.join("editor.png"))?;
 
@@ -343,27 +407,7 @@ fn main() -> Result<(), String> {
     save(&mut h, &dir.join("dialog.png"))?;
 
     // ---- the video editor: a made-up recording, a name put on it ----
-    let mut bytes = recording()?;
-    let opened = |bytes: Vec<u8>| {
-        let mut ed = Editor::new(Box::new(NoServices), settings.clone());
-        ed.open_file(&egui::Context::default(), OpenedFile { name: "Market week.sgvideo".into(), path: None, bytes });
-        let mut h = editor_harness(ed);
-        h.run_steps(4);
-        h
-    };
-    // The name is put on it, and that edit goes into the file with the recording, as the editor
-    // writes it: opened again, it is as it was left.
-    let mut h = opened(bytes.clone());
-    if let Some(v) = h.state_mut().video.as_mut() {
-        let name = serde_json::json!({"template": "lower-bar", "at": 400_000, "title": "Maya Chen", "subtitle": "Fernhill Market"});
-        v.session.execute("video.place", &name).map_err(|e| e.to_string())?;
-        bytes.extend(screengrabcraft_media::recording::edit_bytes(&v.session.timeline).map_err(said)?);
-    }
-    let mut h = opened(bytes);
-    if let Some(v) = h.state_mut().video.as_mut() {
-        v.item = v.session.timeline.layers.first().and_then(|layer| layer.items.first().map(|item| (layer.id, item.id)));
-        v.playhead = 1_400_000;
-    }
+    let mut h = editor_harness(video_editor(&settings, false)?);
     h.run_steps(12);
     save(&mut h, &dir.join("video-editor.png"))?;
 
@@ -381,8 +425,7 @@ fn main() -> Result<(), String> {
     save(&mut h, &dir.join("overlay-choosing.png"))?;
 
     // ---- the overlay, adjusting: the chart chosen, the capture bar under it ----
-    let mut o = Overlay::new(vec![monitor()], Vec::new(), Purpose::Picture);
-    o.preselect(0, IRect::new(302, 260, 574, 252));
+    let o = overlay_on_desktop()?;
     let mut h = Harness::builder().with_size(vec2(1280.0, 800.0)).build_ui_state(|ui, o: &mut Overlay| o.show_monitor(ui, 0), o);
     screengrabcraft_ui::install_fonts(&h.ctx);
     h.run_steps(4);
@@ -406,22 +449,8 @@ fn main() -> Result<(), String> {
 /// microphone's meter; a fixed size of one's own; the camera alone.
 fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
     use screengrabcraft_model::{RecordArea, Settings};
-    use screengrabcraft_ui::recorder::{self, MicLevel, RecorderDevices, RecorderMonitor, RecorderView};
-    let devices = RecorderDevices {
-        monitors: vec![
-            RecorderMonitor { name: "DELL U2720Q".into(), x: 0, y: 0, width: 3840, height: 2160, primary: true },
-            RecorderMonitor { name: "Built-in display".into(), x: -1920, y: 540, width: 1920, height: 1080, primary: false },
-        ],
-        all_screens: Some((3840, 1620)),
-        microphones: vec!["Headset microphone".into(), "Webcam microphone".into()],
-        default_microphone: Some("Headset microphone".into()),
-        cameras: Some(vec![(0, "Integrated Webcam".into())]),
-        camera_supported: true,
-        system_sound: true,
-        system_sound_platform: true,
-        speakers: vec!["Speakers".to_string()],
-        default_speaker: Some("Speakers".to_string()),
-    };
+    use screengrabcraft_ui::recorder::{self, MicLevel, RecorderView};
+    let devices = made_up_devices();
     let mut fixed = Settings::default();
     fixed.recorder.area = RecordArea::Fixed;
     (fixed.recorder.width, fixed.recorder.height) = (1000, 640);
@@ -461,4 +490,214 @@ fn recorder_shots(dir: &std::path::Path, theme: Theme) -> Result<(), String> {
         save_within(&mut h, &dir.join(name), MARGIN as u32)?;
     }
     Ok(())
+}
+
+/// The made-up computer the Recorder is shown on: two monitors, two microphones, a camera.
+fn made_up_devices() -> screengrabcraft_ui::recorder::RecorderDevices {
+    use screengrabcraft_ui::recorder::{RecorderDevices, RecorderMonitor};
+    RecorderDevices {
+        monitors: vec![
+            RecorderMonitor { name: "DELL U2720Q".into(), x: 0, y: 0, width: 3840, height: 2160, primary: true },
+            RecorderMonitor { name: "Built-in display".into(), x: -1920, y: 540, width: 1920, height: 1080, primary: false },
+        ],
+        all_screens: Some((3840, 1620)),
+        microphones: vec!["Headset microphone".into(), "Webcam microphone".into()],
+        default_microphone: Some("Headset microphone".into()),
+        cameras: Some(vec![(0, "Integrated Webcam".into())]),
+        camera_supported: true,
+        system_sound: true,
+        system_sound_platform: true,
+        speakers: vec!["Speakers".to_string()],
+        default_speaker: Some("Speakers".to_string()),
+    }
+}
+
+/// The README's pictures, from the interface running in real windows on this computer.
+mod live {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    use egui::{Color32, Stroke, StrokeKind, pos2, vec2};
+    use egui_kittest::Harness;
+    use screengrabcraft_model::{EditorSettings, Raster, Settings, Theme};
+    use screengrabcraft_ui::Editor;
+    use screengrabcraft_ui::overlay::Overlay;
+    use screengrabcraft_ui::recorder::{self, CameraPreview, MicLevel, RecorderDevices, RecorderView};
+
+    use super::{drawn, paint_desktop, paint_person, paint_wallpaper, said};
+
+    /// How many frames a window is drawn before its picture is taken: its fonts, textures and the
+    /// pictures made over several frames (the library's cards) all in.
+    const SETTLE: u32 = 45;
+
+    type RecorderScene = (Settings, RecorderView, RecorderDevices, Raster, Option<CameraPreview>, Theme);
+
+    /// What a window shows.
+    enum Scene {
+        Editor(Box<Editor>),
+        Overlay(Box<Overlay>),
+        Recorder(Box<RecorderScene>),
+    }
+
+    /// A real window showing a scene: once it has been drawn a while, it saves a picture of
+    /// itself (what it shows, nothing else of the screen) and closes.
+    struct Live {
+        scene: Scene,
+        frames: u32,
+        out: PathBuf,
+        done: Arc<Mutex<Option<Result<(), String>>>>,
+    }
+
+    impl eframe::App for Live {
+        fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+            if let Scene::Editor(ed) = &mut self.scene {
+                ed.logic(ctx);
+            }
+            let shot = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Screenshot { image, .. } => Some(image.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(image) = shot {
+                let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+                let saved = image::RgbaImage::from_raw(image.size[0] as u32, image.size[1] as u32, rgba)
+                    .ok_or_else(|| "the picture of the window".to_string())
+                    .and_then(|img| img.save(&self.out).map_err(said));
+                if let Ok(mut done) = self.done.lock() {
+                    *done = Some(saved);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            self.frames += 1;
+            if self.frames == SETTLE {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
+            }
+            ctx.request_repaint();
+        }
+
+        fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            match &mut self.scene {
+                Scene::Editor(ed) => ed.ui(ui),
+                Scene::Overlay(o) => o.show_monitor(ui, 0),
+                Scene::Recorder(r) => {
+                    let (settings, view, devices, person, camera, theme) = &mut **r;
+                    screengrabcraft_ui::theme::apply(ui.ctx(), *theme);
+                    let preview = camera.get_or_insert_with(|| {
+                        let size = [person.width() as usize, person.height() as usize];
+                        let picture = egui::ColorImage::from_rgba_unmultiplied(size, person.pixels());
+                        CameraPreview::Live(ui.ctx().load_texture("camera", picture, egui::TextureOptions::LINEAR))
+                    });
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let _ = recorder::recorder_ui(
+                            ui,
+                            view,
+                            &mut settings.recorder,
+                            &mut settings.production,
+                            devices,
+                            &MicLevel::Level(0.6),
+                            &MicLevel::Level(0.25),
+                            preview,
+                        );
+                    });
+                }
+            }
+        }
+    }
+
+    /// One scene in a real window of its own, its picture saved as `window-<scene>.png`.
+    pub fn one(dir: &Path, theme: Theme, scene: &str) -> Result<(), String> {
+        let mut settings = EditorSettings { theme, ..EditorSettings::default() };
+        settings.show_tray = false;
+        let (shown, size, title) = match scene {
+            "editor" => (Scene::Editor(Box::new(super::picture_editor(&settings)?)), super::EDITOR, screengrabcraft_model::EDITOR_NAME),
+            "video" => (Scene::Editor(Box::new(super::video_editor(&settings, true)?)), super::EDITOR, screengrabcraft_model::EDITOR_NAME),
+            "overlay" => (Scene::Overlay(Box::new(super::overlay_on_desktop()?)), vec2(1280.0, 800.0), "ScreenGrabCraft"),
+            "recorder" => {
+                let mut view = RecorderView::default();
+                view.listen = true;
+                let person = drawn(320, 240, paint_person)?;
+                (Scene::Recorder(Box::new((Settings::default(), view, super::made_up_devices(), person, None, theme))), recorder::SIZE, "Recorder")
+            }
+            other => return Err(format!("no scene called {other}")),
+        };
+        let out = dir.join(format!("window-{scene}.png"));
+        let done = Arc::new(Mutex::new(None));
+        let options = eframe::NativeOptions {
+            viewport: egui::ViewportBuilder::default().with_title(title).with_inner_size(size).with_resizable(false),
+            ..Default::default()
+        };
+        let finished = done.clone();
+        eframe::run_native(
+            title,
+            options,
+            Box::new(move |cc| {
+                screengrabcraft_ui::install_fonts(&cc.egui_ctx);
+                Ok(Box::new(Live { scene: shown, frames: 0, out, done: finished }))
+            }),
+        )
+        .map_err(said)?;
+        let result = done.lock().map_err(said)?.take();
+        result.unwrap_or_else(|| Err("the window closed before its picture was taken".to_string()))
+    }
+
+    /// A window's picture on a made-up desktop: the wallpaper (or the whole made-up desktop), a
+    /// soft shadow, and the window with rounded corners, its top left at `at`.
+    fn on_desktop(window: &image::RgbaImage, size: (u32, u32), at: (f32, f32), whole_desktop: bool) -> Result<image::RgbaImage, String> {
+        let (w, h) = (window.width() as usize, window.height() as usize);
+        let picture = egui::ColorImage::from_rgba_unmultiplied([w, h], window.as_raw());
+        let mut texture: Option<egui::TextureHandle> = None;
+        let mut harness = Harness::builder().with_size(vec2(size.0 as f32, size.1 as f32)).build_ui(move |ui| {
+            let ctx = ui.ctx().clone();
+            let p = ctx.layer_painter(egui::LayerId::background());
+            let r = ctx.viewport_rect();
+            if whole_desktop {
+                paint_desktop(&p, &ctx, r);
+            } else {
+                paint_wallpaper(&p, r);
+            }
+            let tex = texture.get_or_insert_with(|| ctx.load_texture("window", picture.clone(), egui::TextureOptions::NEAREST));
+            let win = egui::Rect::from_min_size(pos2(at.0, at.1), vec2(w as f32, h as f32));
+            p.add(egui::epaint::Shadow { offset: [0, 16], blur: 48, spread: 2, color: Color32::from_black_alpha(120) }.as_shape(win, 10.0));
+            p.add(
+                egui::epaint::RectShape::filled(win, 10.0, Color32::WHITE)
+                    .with_texture(tex.id(), egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))),
+            );
+            p.rect_stroke(win, 10.0, Stroke::new(1.0, Color32::from_white_alpha(46)), StrokeKind::Outside);
+        });
+        screengrabcraft_ui::install_fonts(&harness.ctx);
+        harness.run_steps(3);
+        harness.render()
+    }
+
+    /// Every scene, each in a process of its own (a window system is opened once a process), then
+    /// each window put on the made-up desktop as the README shows it.
+    pub fn all(dir: &Path, theme: Theme) -> Result<(), String> {
+        let me = std::env::current_exe().map_err(said)?;
+        let word = if theme == Theme::Light { "light" } else { "dark" };
+        for scene in ["editor", "video", "overlay", "recorder"] {
+            let status = std::process::Command::new(&me).arg(dir).arg(word).arg("live-one").arg(scene).status().map_err(said)?;
+            if !status.success() {
+                return Err(format!("the {scene} window: {status}"));
+            }
+        }
+        let window = |scene: &str| image::open(dir.join(format!("window-{scene}.png"))).map(|i| i.to_rgba8()).map_err(said);
+        let margin = 56u32;
+        for (scene, name) in [("editor", "editor.png"), ("video", "video-editor.png")] {
+            let w = window(scene)?;
+            let size = (w.width() + 2 * margin, w.height() + 2 * margin);
+            on_desktop(&w, size, (margin as f32, margin as f32 - 16.0), false)?.save(dir.join(name)).map_err(said)?;
+        }
+        // The overlay is over the whole screen: its window is the picture.
+        window("overlay")?.save(dir.join("overlay.png")).map_err(said)?;
+        // The Recorder sits over the desktop it is about to record.
+        let r = window("recorder")?;
+        let at = (((1280 - r.width().min(1280)) / 2) as f32, (800u32.saturating_sub(44 + r.height() + 36)) as f32);
+        on_desktop(&r, (1280, 800), at, true)?.save(dir.join("recorder.png")).map_err(said)?;
+        for scene in ["editor", "video", "overlay", "recorder"] {
+            let _ = std::fs::remove_file(dir.join(format!("window-{scene}.png")));
+        }
+        println!("wrote editor.png, video-editor.png, overlay.png and recorder.png in {}", dir.display());
+        Ok(())
+    }
 }
