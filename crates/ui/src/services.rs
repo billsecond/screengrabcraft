@@ -218,6 +218,11 @@ pub trait Services {
     /// when `path` is none).
     fn open_folder(&self, _path: Option<&str>) {}
 
+    /// Whether there is a capture service to ask (not in a browser).
+    fn can_capture(&self) -> bool {
+        false
+    }
+
     /// Asks the capture service for a new capture.
     fn new_capture(&self, _mode: CaptureMode) -> Result<(), String> {
         Err("capturing is done by the ScreenGrabCraft capture service on the desktop".to_string())
@@ -314,7 +319,7 @@ pub trait Services {
     }
 
     /// Whether recordings, and what's put on their timelines, are transcribed by themselves
-    /// (Settings, Video).
+    /// (Settings, Recording).
     fn auto_captions(&self) -> bool {
         false
     }

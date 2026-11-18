@@ -427,6 +427,10 @@ fn main() -> std::process::ExitCode {
             for f in &files {
                 editor.open_path(&ctx, f);
             }
+            // Started with nothing to open: what there is to start with is offered.
+            if files.is_empty() {
+                editor.offer_welcome();
+            }
             if coming {
                 editor.expect_captions(0.0);
             }

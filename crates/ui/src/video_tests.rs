@@ -772,7 +772,7 @@ fn the_library_puts_a_lower_third_on_a_layer_of_its_own_and_its_words_change() {
         assert_ne!(before.pixels(), after.pixels(), "it's on the picture");
     }
     // Its panel: its words, how it comes and goes, and a way to delete it.
-    for label in ["Words", "Comes in", "Goes out", "Delete"] {
+    for label in ["Text", "Entrance", "Exit", "Delete"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -1117,7 +1117,7 @@ fn a_breaking_news_lower_third_is_added_played_and_moved_on_the_picture() {
     assert!(held > 60, "its red tab is on the picture: {held}");
     assert!(red(&mut h, 5_990_000) < held / 3, "all but gone by its end");
     // Its words are changed in its panel (through the engine, as the panel does).
-    for label in ["Words", "Colour", "Delete"] {
+    for label in ["Text", "Colour", "Delete"] {
         assert!(h.query_all_by_label(label).next().is_some(), "{label}");
     }
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -1235,4 +1235,403 @@ fn the_preview_goes_over_the_whole_screen_and_comes_back() {
     }
     h.run_steps(3);
     assert!(!full(&h));
+}
+
+#[test]
+fn the_buttons_beside_play_step_a_frame_and_go_to_the_ends() {
+    let mut h = harness();
+    let at = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().playhead;
+    let length = h.state().video.as_ref().unwrap().session.timeline.length();
+    // Ten frames a second: a frame is a tenth of one.
+    h.get_by_label("Forward One Frame (Right Arrow)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), 100_000);
+    h.get_by_label("Go to the End (End)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), length);
+    h.get_by_label("Back One Frame (Left Arrow)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), length - 100_000);
+    h.get_by_label("Go to the Start (Home)").click();
+    h.run_steps(2);
+    assert_eq!(at(&h), 0);
+    // Playing is under the picture, once: not on the tool bar as well.
+    assert_eq!(h.query_all_by_label("Play (Space)").count(), 1);
+}
+
+#[test]
+fn the_timeline_zooms_by_its_buttons_around_the_playhead_and_fits_again() {
+    let mut h = harness();
+    let pps = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().pps;
+    let fitted = pps(&h);
+    h.get_by_label("Zoom the Timeline In (Ctrl++)").click();
+    h.run_steps(3);
+    assert!((pps(&h) - fitted * 1.25).abs() < 0.01, "{} from {fitted}", pps(&h));
+    h.get_by_label("Zoom the Timeline Out (Ctrl+-)").click();
+    h.run_steps(3);
+    h.get_by_label("Zoom the Timeline Out (Ctrl+-)").click();
+    h.run_steps(3);
+    assert!(pps(&h) < fitted);
+    h.get_by_label("Fit the Whole Video on the Timeline (Ctrl+0)").click();
+    h.run_steps(3);
+    assert!((pps(&h) - fitted).abs() < 0.01);
+    // The keys do the same.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Equals);
+    h.run_steps(3);
+    assert!(pps(&h) > fitted);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Num0);
+    h.run_steps(3);
+    assert!((pps(&h) - fitted).abs() < 0.01);
+}
+
+#[test]
+fn the_right_button_on_the_timeline_chooses_what_is_under_it_and_offers_what_can_be_done() {
+    let mut h = harness();
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // On the first track's clip, half way along.
+    let p = egui::pos2(lane.min.x + (lane.width() - 24.0) / 2.0, top + 20.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, 0)), "the clip under it is chosen");
+    h.get_by_label("Move the Playhead Here");
+    h.get_by_label_contains("Delete the Clip");
+    // Split Here: the playhead goes there, and the clip is two.
+    let split = h.get_by_label_contains("Split Here");
+    split.click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.playhead.abs_diff(v.session.timeline.length() / 2) < 200_000, "{}", v.playhead);
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(2));
+    assert_eq!(v.session.undo_label(), Some("Split"));
+}
+
+#[test]
+fn a_chosen_clip_is_named_in_the_panel_with_what_is_done_to_it() {
+    let mut h = harness();
+    assert!(h.query_by_label("Video").is_some(), "nothing chosen: the video's own panel");
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(3);
+    assert!(h.query_by_label("Screen clip").is_some());
+    assert!(h.query_by_label_contains("Starts at 0:00.0").is_some());
+    // The playhead is at its very start: nothing to split there.
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Split at Playhead")).is_disabled());
+    let half = length(&h) / 2;
+    h.state_mut().video.as_mut().unwrap().playhead = half;
+    h.run_steps(3);
+    shot(&mut h, "video-clip-panel");
+    h.get_by_label("Split at Playhead").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(2));
+    assert_eq!(v.session.timeline.tracks.get(1).map(|t| t.clips.len()), Some(1), "its own track only");
+    // Delete Clip takes the chosen one out.
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 1));
+    h.run_steps(3);
+    h.get_by_label("Delete Clip").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(v.session.timeline.tracks.first().map(|t| t.clips.len()), Some(1));
+    assert!(v.selected.is_none());
+    assert!(h.query_by_label("Video").is_some(), "back to the video's own panel");
+    // A stretch chosen across the tracks: said, and let go of.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 1_500_000));
+    h.run_steps(3);
+    assert!(h.query_by_label("Chosen stretch").is_some());
+    assert!(h.query_by_label_contains("0:01.0 long").is_some());
+    shot(&mut h, "video-stretch-panel");
+    h.get_by_label("Let Go").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().range.is_none());
+}
+
+#[test]
+fn add_text_puts_words_at_the_playhead_ready_to_be_typed_over() {
+    let mut h = harness();
+    let half = length(&h) / 2;
+    h.state_mut().video.as_mut().unwrap().playhead = half;
+    h.run_steps(2);
+    h.get_by_label("Add Text").click();
+    h.run_steps(4);
+    let v = h.state().video.as_ref().unwrap();
+    let (layer, id) = v.item.expect("the words are chosen");
+    let item = v.session.timeline.item(layer, id).cloned().unwrap();
+    assert!(item.at.abs_diff(half) < 100_000, "at the playhead: {}", item.at);
+    assert!(matches!(&item.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Your title"));
+    // Typing replaces the words it came with: their box has the keys, its words chosen.
+    h.event(egui::Event::Text("Step one".into()));
+    h.run_steps(4);
+    let v = h.state().video.as_ref().unwrap();
+    let item = v.session.timeline.item(layer, id).cloned().unwrap();
+    assert!(matches!(&item.what, screengrabcraft_media::layers::What::Text { title, .. } if title == "Step one"), "{:?}", item.what);
+    shot(&mut h, "video-add-text");
+    // T does the same once nothing is being typed (Esc leaves the box), and is one undo step.
+    let items = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.layers.iter().map(|l| l.items.len()).sum::<usize>();
+    h.key_press(egui::Key::T);
+    h.run_steps(3);
+    assert_eq!(items(&h), 1, "typed into the box, not taken as the key");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press(egui::Key::T);
+    h.run_steps(4);
+    assert_eq!(items(&h), 2);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert_eq!(items(&h), 1);
+}
+
+#[test]
+fn the_library_is_searched_by_name_whatever_the_section() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().lib_search = "chapter".into();
+    h.run_steps(3);
+    assert!(h.query_by_label("Chapter card").is_some(), "found though its section is shut");
+    assert!(h.query_by_label("Breaking news").is_none());
+    // A section's name finds all of it.
+    h.state_mut().video.as_mut().unwrap().lib_search = "training".into();
+    h.run_steps(3);
+    for label in ["Chapter card", "Next step", "Progress bar", "Done"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    shot(&mut h, "video-library-search");
+    h.state_mut().video.as_mut().unwrap().lib_search = "zebra".into();
+    h.run_steps(3);
+    assert!(h.query_by_label_contains("Nothing in the library").is_some());
+    // Cleared, the sections are back.
+    h.state_mut().video.as_mut().unwrap().lib_search.clear();
+    h.run_steps(3);
+    assert!(h.query_by_label("Lower Thirds").is_some() && h.query_by_label("Breaking news").is_some());
+}
+
+#[test]
+fn a_track_is_hidden_and_shown_by_the_switch_in_its_header() {
+    let mut h = harness();
+    let muted = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks.first().map(|t| t.muted);
+    assert_eq!(muted(&h), Some(false));
+    h.query_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(muted(&h), Some(true));
+    h.query_all_by_label("Show").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(muted(&h), Some(false));
+}
+
+#[test]
+fn help_lists_the_video_editors_keys() {
+    let mut h = harness();
+    h.get_by_label("Help").click();
+    h.run_steps(2);
+    h.get_by_label("Keyboard Shortcuts").click();
+    h.run_steps(10);
+    h.get_by_label("Play or pause");
+    h.get_by_label_contains("Split at the playhead");
+    shot(&mut h, "video-shortcuts");
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().dialog.is_none());
+}
+
+#[test]
+fn a_wide_window_names_the_video_tool_bars_buttons_as_the_picture_editors_are() {
+    let wide = |width: f32| {
+        let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+        ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+        let mut h = Harness::builder().with_size(egui::vec2(width, 900.0)).build_ui_state(
+            |ui, ed: &mut Editor| {
+                let ctx = ui.ctx().clone();
+                ed.logic(&ctx);
+                ed.ui(ui);
+            },
+            ed,
+        );
+        h.run_steps(3);
+        h
+    };
+    let side = crate::editor::BAR_BUTTON;
+    // Wide enough for the picture editor's names (the window the editor opens in is): each
+    // button has its own under it.
+    let mut h = wide(1320.0);
+    for label in ["Library", "Open (Ctrl+O)", "Split", "Delete"] {
+        // (The first so named: the library's panel has a Library tab of its own.)
+        let r = h.query_all_by_label(label).next().unwrap().rect();
+        assert!((r.height() - (side + 14.0)).abs() < 0.5, "{label}: {r:?}");
+    }
+    shot(&mut h, "video-tool-bar-named");
+    // They still do what they did.
+    h.get_by_label("Split").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), None, "nothing to split at the very start");
+    h.query_all_by_label("Library").next().unwrap().click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().library_open);
+    // Turned off in View, or in a window too narrow for the picture editor's: the bar is as tall
+    // as its buttons.
+    h.state_mut().settings.hide_tool_names = true;
+    h.run_steps(2);
+    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+    let h = wide(800.0);
+    assert!((h.get_by_label("Split").rect().height() - side).abs() < 0.5);
+}
+
+#[test]
+fn a_zoomed_timeline_has_a_bar_to_scroll_by_and_the_ruler_says_the_time_under_the_pointer() {
+    let mut h = harness();
+    assert!(h.query_by_label("Scroll the Timeline").is_none(), "all of it fits: nothing to scroll");
+    for _ in 0..5 {
+        h.get_by_label("Zoom the Timeline In (Ctrl++)").click();
+        h.run_steps(3);
+    }
+    let bar = h.get_by_label("Scroll the Timeline").rect();
+    assert_eq!(h.state().video.as_ref().unwrap().scrolled(), 0.0);
+    crate::tests::drag(&mut h, egui::pos2(bar.min.x + 20.0, bar.center().y), egui::pos2(bar.min.x + 220.0, bar.center().y));
+    let along = h.state().video.as_ref().unwrap().scrolled();
+    assert!(along > 100.0, "{along}");
+    // A click further along its track goes there.
+    crate::tests::click_at(&mut h, egui::pos2(bar.max.x - 10.0, bar.center().y));
+    assert!(h.state().video.as_ref().unwrap().scrolled() > along);
+    // Fitted again, there's nothing to scroll and nothing scrolled.
+    h.get_by_label("Fit the Whole Video on the Timeline (Ctrl+0)").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Scroll the Timeline").is_none());
+    assert_eq!(h.state().video.as_ref().unwrap().scrolled(), 0.0);
+    // The pointer over the ruler: the picture shows its time there (looked at, not asserted).
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    h.hover_at(egui::pos2(lane.min.x + lane.width() * 0.6, lane.min.y + 10.0));
+    h.run_steps(2);
+    shot(&mut h, "video-ruler-time");
+}
+
+#[test]
+fn an_item_dragged_along_the_timeline_catches_on_the_playhead_and_alt_lets_it_past() {
+    let mut h = media_harness(MediaHost::default());
+    let (layer, item) = {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title"), None, 0);
+        // The playhead well along, where nothing else ends.
+        v.playhead = 2_300_000;
+        v.pps = 0.0;
+        let chosen = v.item.unwrap();
+        ed.video = Some(v);
+        chosen
+    };
+    h.run_steps(3);
+    let at = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at;
+    let rect = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().item_on_timeline(layer, item).unwrap();
+    let pps = h.state().video.as_ref().unwrap().pps;
+    // Dragged so its start is a few points short of the playhead: it's caught there, exactly.
+    let r = rect(&h);
+    let nearly = 2_300_000.0 / 1e6 * pps - 4.0;
+    crate::tests::drag(&mut h, r.center(), r.center() + egui::vec2(nearly, 0.0));
+    assert_eq!(at(&h), 2_300_000, "its start is on the playhead");
+    // Back where it was, then the same with Alt held: it stays where it was put.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(at(&h), 0);
+    let r = rect(&h);
+    let (from, to) = (r.center(), r.center() + egui::vec2(nearly, 0.0));
+    let alt = egui::Modifiers::ALT;
+    h.hover_at(from);
+    h.run_steps(1);
+    h.event(egui::Event::ModifiersChanged(alt));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: alt });
+    h.run_steps(1);
+    for k in 1..=4 {
+        h.hover_at(from + (to - from) * (k as f32 / 4.0));
+        h.run_steps(1);
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: alt });
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run_steps(3);
+    let free = at(&h);
+    assert!(free != 2_300_000 && free.abs_diff(2_300_000) < 200_000, "near it, not on it: {free}");
+}
+
+#[test]
+fn an_item_dragged_near_the_middle_of_the_picture_is_caught_there() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    // Let go a few points off the middle, both ways: its middle is on the picture's (to a pixel
+    // of this small video, which is two points here).
+    crate::tests::drag(&mut h, on.center(), pic.center() + egui::vec2(5.5, -5.5));
+    let now = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((now.center().x - pic.center().x).abs() < 2.0 && (now.center().y - pic.center().y).abs() < 2.0, "{now:?} in {pic:?}");
+    // Well away from the middle and the edges, it stays where it was put.
+    crate::tests::drag(&mut h, now.center(), pic.center() + egui::vec2(60.0, 40.0));
+    let away = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    assert!((away.center().x - pic.center().x - 60.0).abs() < 6.0 && (away.center().y - pic.center().y - 40.0).abs() < 6.0, "{away:?}");
+}
+
+#[test]
+fn the_video_editor_is_readable_in_the_light_look() {
+    let settings = EditorSettings { theme: screengrabcraft_model::Theme::Light, ..EditorSettings::default() };
+    let mut ed = Editor::new(Box::new(MediaHost::default()), settings);
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1600.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 2_000_000;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("news-name"), None, 0);
+        ed.video = Some(v);
+    }
+    // A track switched off, to see its switch.
+    h.run_steps(3);
+    h.query_all_by_label("Show").nth(2).unwrap().click();
+    h.run_steps(3);
+    assert!(!crate::theme::Tokens::get(&h.ctx).dark, "the light look is the one drawn");
+    for label in ["Text", "Look", "Position", "Animation", "Entrance", "Exit"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    shot(&mut h, "video-editor-light");
+}
+
+#[test]
+fn the_right_button_on_nothing_lets_go_of_the_clip_chosen_and_splits_every_track() {
+    let mut h = harness();
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    // A clip chosen first, on the first track.
+    crate::tests::click_at(&mut h, egui::pos2(lane.min.x + 60.0, top + 20.0));
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, 0)));
+    // Then the right button on the band above the rows, where there is nothing.
+    let p = egui::pos2(lane.min.x + (lane.width() - 24.0) / 2.0, top - 10.0);
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().selected, None);
+    h.get_by_label_contains("Split Here").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(v.session.timeline.tracks.iter().all(|t| t.clips.len() == 2), "every track is split: {:?}", v.session.timeline.tracks);
 }

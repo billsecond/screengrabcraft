@@ -369,6 +369,20 @@ pub fn dialog_footer(ui: &mut Ui, buttons: &[FooterButton<'_>]) -> Option<usize>
     shown.inner.or_else(|| pressed_key(ui, buttons))
 }
 
+/// How something is worked, a line each: what's done (bold) and what that does, as small as a
+/// panel's other notes.
+pub fn tips(ui: &mut Ui, lines: &[(&str, &str)]) {
+    let t = Tokens::get(ui.ctx());
+    for (keys, what) in lines {
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            ui.label(egui::RichText::new(*keys).size(12.0).strong().color(t.text));
+            ui.label(egui::RichText::new(*what).size(12.0).color(t.muted));
+        });
+        ui.add_space(2.0);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use egui_kittest::Harness;

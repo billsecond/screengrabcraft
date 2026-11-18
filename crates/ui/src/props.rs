@@ -276,10 +276,18 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
         }
         (None, Tool::Select) => {
             ui.heading("Move");
-            ui.add_space(6.0);
-            ui.label("Click an annotation to change it, drag it to move it, or drag across several to select them all.");
-            ui.add_space(8.0);
-            ui.label(egui::RichText::new("Pick a tool above to draw. Arrows nudge the selection; Delete removes it.").color(t.muted));
+            ui.label(egui::RichText::new("Click an annotation to change it, or pick a tool above to draw.").size(12.0).color(t.muted));
+            ui.add_space(10.0);
+            crate::widgets::tips(
+                ui,
+                &[
+                    ("Click", "an annotation to select it. Shift adds another, or lets one go."),
+                    ("Drag", "it to move it, a handle to resize it, or across several to select them all."),
+                    ("Double-click", "its words to change them."),
+                    ("Arrows", "nudge what's selected; Delete removes it."),
+                    ("Right-click", "the picture for more."),
+                ],
+            );
             return;
         }
         (None, Tool::Favorites) => return,
@@ -294,7 +302,7 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     };
     ui.heading(title);
     if sel.is_empty() {
-        ui.label(egui::RichText::new("For the next one you draw").size(12.0).color(t.muted));
+        ui.label(egui::RichText::new(how_to(kind)).size(12.0).color(t.muted));
     }
     ui.add_space(8.0);
     if kind != Kind::Image {
@@ -319,21 +327,34 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     if first.is_some() {
         ui.add_space(14.0);
         ui.separator();
-        ui.horizontal_wrapped(|ui| {
-            let ctx = ui.ctx().clone();
-            if ui.button("Front").on_hover_text("Bring to front").clicked() {
+        ui.add_space(6.0);
+        let ctx = ui.ctx().clone();
+        // What's done with the selection, in two rows of even buttons (kept low: the panel of a
+        // callout is already as tall as a small window).
+        let wide = ui.available_width();
+        let even = |ui: &mut Ui, n: f32, label: &str, tip: &str| {
+            let w = ((wide - (n - 1.0) * 6.0) / n).floor();
+            ui.add(egui::Button::new(label).min_size(vec2(w, 26.0))).on_hover_text(tip).clicked()
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if even(ui, 2.0, "Bring to Front", "In front of every other annotation") {
                 ed.run(&ctx, "object.order", serde_json::json!({"to": "front"}));
             }
-            if ui.button("Back").on_hover_text("Send to back").clicked() {
+            if even(ui, 2.0, "Send to Back", "Behind every other annotation") {
                 ed.run(&ctx, "object.order", serde_json::json!({"to": "back"}));
             }
-            if ui.button("Duplicate").clicked() {
+        });
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            if even(ui, 3.0, "Duplicate", "Another one like it, beside it (Ctrl+D)") {
                 ed.run(&ctx, "edit.duplicate", serde_json::json!({}));
             }
-            if ui.button("Delete").clicked() {
+            if even(ui, 3.0, "Delete", "Take it off the picture (Del)") {
                 ed.run(&ctx, "edit.delete", serde_json::json!({}));
             }
-            if ui.button("Flatten").on_hover_text("Draw the selected annotations into the picture for good (Ctrl+Shift+F)").clicked() {
+            if even(ui, 3.0, "Flatten", "Draw the selected annotations into the picture for good (Ctrl+Shift+F)") {
                 ed.flatten(&ctx, false);
             }
         });
@@ -377,6 +398,25 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
     );
 }
 
+/// How the tool for `kind` is used, in a line under its name while nothing is selected.
+pub(crate) fn how_to(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Arrow => "Drag on the picture, from where it starts to what it points at. Shift keeps it straight.",
+        Kind::Line => "Drag on the picture to draw one. Shift keeps it straight.",
+        Kind::Rect | Kind::Ellipse => "Drag on the picture to draw one. Shift makes it a square or a circle.",
+        Kind::Text => "Click the picture where the words go, or drag out a box, then type.",
+        Kind::Callout => "Click what it's about, or drag out a box, then type. Its tail can be dragged.",
+        Kind::Step => "Click the picture: each click puts the next number there.",
+        Kind::Stamp => "Click the picture to put one there, or drag for its size.",
+        Kind::Pen => "Draw on the picture with the button held down.",
+        Kind::Highlight => "Drag over what should stand out.",
+        Kind::Blur | Kind::Pixelate => "Drag a box over what shouldn't be read.",
+        Kind::Spotlight => "Drag a box round what matters: the rest is dimmed.",
+        Kind::Magnify => "Click what to enlarge, or drag a box round it.",
+        _ => "For the next one you draw",
+    }
+}
+
 /// A slider with its name above it (the slider has its number box).
 fn slider(ui: &mut Ui, name: &str, value: &mut f32, range: std::ops::RangeInclusive<f32>, step: f64, suffix: &str) -> bool {
     let t = Tokens::get(ui.ctx());
@@ -384,10 +424,42 @@ fn slider(ui: &mut Ui, name: &str, value: &mut f32, range: std::ops::RangeInclus
     ui.scope(|ui| {
         // As wide as the panel leaves beside the number box.
         ui.spacing_mut().slider_width = (ui.available_width() - 76.0).max(80.0);
-        ui.add(egui::Slider::new(value, range).step_by(step).suffix(suffix)).changed()
+        // As many decimals as its steps have: "22 px", not "22.0 px".
+        let decimals = if step >= 1.0 {
+            0
+        } else if (step * 10.0).fract() == 0.0 {
+            1
+        } else {
+            2
+        };
+        ui.add(egui::Slider::new(value, range).step_by(step).fixed_decimals(decimals).suffix(suffix)).changed()
     })
     .inner
 }
+
+/// A button with a letter on it that is on or off (bold, italic, the typewriter's letters), drawn
+/// as the icon buttons beside it are. `name` is what it is called.
+fn letter_button(ui: &mut Ui, on: &mut bool, face: egui::RichText, name: &str) {
+    let t = Tokens::get(ui.ctx());
+    let is_on = *on;
+    let colour = if is_on { t.accent } else { t.text };
+    let galley = egui::WidgetText::from(face.color(colour)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::TextStyle::Button);
+    let (rect, resp) = ui.allocate_exact_size(vec2((galley.size().x + 14.0).max(STYLE_BUTTON), STYLE_BUTTON), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, is_on, name));
+    if is_on {
+        ui.painter().rect_filled(rect, 5.0, t.selected);
+        ui.painter().rect_stroke(rect, 5.0, egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.hover);
+    }
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, colour);
+    if resp.on_hover_text(name).clicked() {
+        *on = !is_on;
+    }
+}
+
+/// The side of the buttons for how words look (bold, italic, which side they're against).
+const STYLE_BUTTON: f32 = 28.0;
 
 /// The tool properties of a kind: for the selected annotations when there are some, else for
 /// the next one the tool draws.
@@ -451,17 +523,26 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     if kind.has_text() {
         slider(ui, "Text size", &mut s.font_size, 8.0..=120.0, 1.0, " px");
         if kind != Kind::Step {
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
-                ui.toggle_value(&mut s.bold, egui::RichText::new("B").strong());
-                ui.toggle_value(&mut s.italic, egui::RichText::new("I").italics());
-                ui.toggle_value(&mut s.mono, egui::RichText::new("Mono").monospace());
+                ui.spacing_mut().item_spacing.x = 3.0;
+                letter_button(ui, &mut s.bold, egui::RichText::new("B").size(14.0).strong(), "Bold");
+                letter_button(ui, &mut s.italic, egui::RichText::new("I").size(14.0).italics(), "Italic");
+                letter_button(ui, &mut s.mono, egui::RichText::new("Mono").size(12.5).monospace(), "Typewriter letters, each as wide as the next");
+                ui.add_space(3.0);
                 ui.separator();
-                for (a, label) in [(TextAlign::Left, "Left"), (TextAlign::Center, "Centre"), (TextAlign::Right, "Right")] {
-                    if ui.selectable_label(s.align == a, label).clicked() {
+                ui.add_space(3.0);
+                for (a, icon, name) in [
+                    (TextAlign::Left, Icon::AlignLeft, "Against the left"),
+                    (TextAlign::Center, Icon::AlignCentre, "In the middle"),
+                    (TextAlign::Right, Icon::AlignRight, "Against the right"),
+                ] {
+                    if icons::button_sized(ui, icon, name, s.align == a, true, STYLE_BUTTON).clicked() {
                         s.align = a;
                     }
                 }
             });
+            ui.add_space(2.0);
         }
         if letters && s.text_outline.a > 0 {
             slider(ui, "Text outline", &mut s.text_outline_width, 0.0..=16.0, 0.5, " px");

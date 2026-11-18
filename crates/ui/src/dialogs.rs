@@ -11,14 +11,45 @@ use crate::widgets::{self, FooterButton, Role};
 
 #[derive(Clone, Debug)]
 pub enum Dialog {
-    Resize { width: u32, height: u32, keep: bool, aspect: f32 },
-    Canvas { left: i32, top: i32, right: i32, bottom: i32, color: Color32 },
-    Border { width: u32, color: Color32 },
-    Shadow { offset: u32, softness: u32, color: Color32 },
-    Torn { top: bool, right: bool, bottom: bool, left: bool, depth: u32 },
-    Round { radius: u32 },
-    Brightness { brightness: f32, contrast: f32 },
+    Resize {
+        width: u32,
+        height: u32,
+        keep: bool,
+        aspect: f32,
+    },
+    Canvas {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        color: Color32,
+    },
+    Border {
+        width: u32,
+        color: Color32,
+    },
+    Shadow {
+        offset: u32,
+        softness: u32,
+        color: Color32,
+    },
+    Torn {
+        top: bool,
+        right: bool,
+        bottom: bool,
+        left: bool,
+        depth: u32,
+    },
+    Round {
+        radius: u32,
+    },
+    Brightness {
+        brightness: f32,
+        contrast: f32,
+    },
     Shortcuts,
+    /// The video editor's keys.
+    VideoShortcuts,
     About,
 }
 
@@ -61,7 +92,7 @@ impl Dialog {
             Dialog::Torn { .. } => "Torn Edge",
             Dialog::Round { .. } => "Round Corners",
             Dialog::Brightness { .. } => "Brightness and Contrast",
-            Dialog::Shortcuts => "Keyboard Shortcuts",
+            Dialog::Shortcuts | Dialog::VideoShortcuts => "Keyboard Shortcuts",
             Dialog::About => "About",
         }
     }
@@ -70,6 +101,7 @@ impl Dialog {
     fn width(&self) -> f32 {
         match self {
             Dialog::Shortcuts => 560.0,
+            Dialog::VideoShortcuts => 640.0,
             Dialog::About => 420.0,
             _ => 380.0,
         }
@@ -202,6 +234,11 @@ fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
             egui::ScrollArea::vertical().max_height(room).show(ui, shortcuts);
             None
         }
+        Dialog::VideoShortcuts => {
+            let room = (ui.ctx().viewport_rect().height() - 200.0).max(160.0);
+            egui::ScrollArea::vertical().max_height(room).show(ui, video_shortcuts);
+            None
+        }
         Dialog::About => {
             let t = Tokens::get(ui.ctx());
             ui.label(egui::RichText::new(screengrabcraft_model::EDITOR_NAME).font(widgets::strong_font(ui.ctx(), 18.0)));
@@ -219,9 +256,44 @@ fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)> {
     }
 }
 
+/// Every key the video editor knows, and what the mouse does on its timeline.
+fn video_shortcuts(ui: &mut Ui) {
+    egui::Grid::new("video-keys").num_columns(2).striped(true).spacing([18.0, 4.0]).max_col_width(370.0).show(ui, |ui| {
+        for (k, what) in [
+            ("Space", "Play or pause"),
+            ("Left / Right", "Back or on by one frame"),
+            ("Home / End", "Go to the start or the end"),
+            ("F11 or F", "The preview over the whole screen (Esc comes back)"),
+            ("S", "Split at the playhead: the selected clip's track, or every track"),
+            ("T", "Put words on the video at the playhead, then type them"),
+            ("Delete", "Delete what's selected, or cut the chosen stretch out of every track"),
+            ("Ctrl+X", "Cut the chosen stretch"),
+            ("Esc", "Let go of what's chosen"),
+            ("Ctrl+Z / Ctrl+Y", "Undo / Redo"),
+            ("Ctrl++ / Ctrl+-", "Zoom the timeline in or out"),
+            ("Ctrl+0", "Fit the whole video on the timeline"),
+            ("Ctrl+wheel", "Zoom the timeline around the pointer"),
+            ("Wheel", "Scroll along the timeline"),
+            ("Ctrl+E", "Export Video"),
+            ("Ctrl+O", "Open"),
+            ("Click the ruler", "Move the playhead there"),
+            ("Drag a clip", "Slide it along its track; drag one of its ends to trim it"),
+            ("Drag across the tracks", "Choose a stretch of the video"),
+            ("Alt while dragging", "Nothing catches on the playhead or on other clips' ends"),
+            ("Right-click the timeline", "Split there, move the playhead there, delete, zoom"),
+            ("Drag from the Library", "Put a title, an overlay, a transition or your own media on the timeline"),
+            ("Double-click a Library card", "Add it at the playhead"),
+        ] {
+            ui.label(egui::RichText::new(k).monospace());
+            ui.label(what);
+            ui.end_row();
+        }
+    });
+}
+
 /// Every key the editor knows, and what it does.
 fn shortcuts(ui: &mut Ui) {
-    egui::Grid::new("keys").num_columns(2).striped(true).spacing([18.0, 4.0]).show(ui, |ui| {
+    egui::Grid::new("keys").num_columns(2).striped(true).spacing([18.0, 4.0]).max_col_width(330.0).show(ui, |ui| {
         let mut row = |k: &str, what: &str| {
             ui.label(egui::RichText::new(k).monospace());
             ui.label(what);
