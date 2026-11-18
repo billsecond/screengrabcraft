@@ -156,7 +156,8 @@ fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_no
 /// What the colour of lines and borders is called for a kind.
 fn outline_name(kind: Kind) -> (&'static str, &'static str) {
     match kind {
-        Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight => ("Line colour", "Colour"),
+        Kind::Arrow | Kind::Line | Kind::Pen => ("Line colour", "Colour"),
+        Kind::Highlight => ("Highlight colour", "Colour"),
         Kind::Text | Kind::Callout => ("Border colour", "Border"),
         Kind::Magnify => ("Ring colour", "Ring"),
         _ => ("Outline colour", "Outline"),
@@ -290,6 +291,20 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             );
             return;
         }
+        (None, Tool::Hand) => {
+            ui.heading("Hand");
+            ui.label(egui::RichText::new("Drag the picture to see another part of it.").size(12.0).color(t.muted));
+            ui.add_space(10.0);
+            crate::widgets::tips(
+                ui,
+                &[
+                    ("Drag", "the picture to move it round in the window."),
+                    ("Ctrl and the wheel", "zoom in or out; Ctrl+0 fits it all in."),
+                    ("Space", "held down, with any tool, moves the picture too, as does the middle button."),
+                ],
+            );
+            return;
+        }
         (None, Tool::Favorites) => return,
     };
     let sel = ed.session.selected();
@@ -409,7 +424,7 @@ pub(crate) fn how_to(kind: Kind) -> &'static str {
         Kind::Step => "Click the picture: each click puts the next number there.",
         Kind::Stamp => "Click the picture to put one there, or drag for its size.",
         Kind::Pen => "Draw on the picture with the button held down.",
-        Kind::Highlight => "Drag over what should stand out.",
+        Kind::Highlight => "Drag a box over what should stand out. Its handles resize it after.",
         Kind::Blur | Kind::Pixelate => "Drag a box over what shouldn't be read.",
         Kind::Spotlight => "Drag a box round what matters: the rest is dimmed.",
         Kind::Magnify => "Click what to enlarge, or drag a box round it.",
@@ -549,15 +564,15 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         }
         ui.add_space(4.0);
     }
-    if outline {
+    // A highlight is a box of colour, with no line to be thick.
+    if outline && kind != Kind::Highlight {
         let name = match kind {
-            Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight => "Thickness",
+            Kind::Arrow | Kind::Line | Kind::Pen => "Thickness",
             Kind::Text | Kind::Callout => "Border width",
             Kind::Magnify => "Ring width",
             _ => "Outline width",
         };
-        let max = if kind == Kind::Highlight { 80.0 } else { 40.0 };
-        slider(ui, name, &mut s.width, 0.0..=max, 1.0, " px");
+        slider(ui, name, &mut s.width, 0.0..=40.0, 1.0, " px");
     }
     match kind {
         Kind::Blur => {

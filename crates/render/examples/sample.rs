@@ -32,7 +32,7 @@ fn main() -> Result<(), String> {
     e(add(&mut d, Shape::Arrow { from: Pt::new(420.0, 470.0), to: Pt::new(250.0, 330.0), heads: ArrowHeads::End }))?;
     e(add(&mut d, Shape::Rect { rect: Rect::new(330.0, 90.0, 260.0, 90.0), radius: 10.0 }))?;
     e(add(&mut d, Shape::Ellipse { rect: Rect::new(620.0, 90.0, 200.0, 110.0) }))?;
-    e(add(&mut d, Shape::Highlight { points: vec![Pt::new(335.0, 240.0), Pt::new(700.0, 240.0)] }))?;
+    e(add(&mut d, Shape::highlight(Rect::new(324.0, 229.0, 387.0, 22.0))))?;
     e(add(&mut d, Shape::Pen { points: (0..40).map(|i| Pt::new(640.0 + i as f32 * 5.0, 300.0 + (i as f32 * 0.5).sin() * 18.0)).collect() }))?;
     e(add(&mut d, Shape::Text { rect: Rect::new(600.0, 360.0, 260.0, 60.0), text: "Click Save to keep it".into() }))?;
     e(add(

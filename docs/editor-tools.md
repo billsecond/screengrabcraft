@@ -44,10 +44,15 @@ had before 0.1.19, and what is still missing.
   the Picture, Zoom to Fit. A right-click picks the annotation under it first.
 - **Copy and cut** with annotations selected take only those (on see-through, cut to what they
   cover; blur, pixelate, spotlight and magnify with the picture under them).
-- **The tool bar in groups** with a faint line between them: Move, Selection, Crop; Arrow, Line,
+- **The tool bar in groups** with a faint line between them: Move, Hand, Selection, Crop; Arrow, Line,
   Text, Callout, Shape, Stamp, Step; Pen, Highlighter, Fill; Blur, Pixelate, Spotlight, Magnify.
-- **Pen and highlighter strokes** are shown selected along themselves (a thin dashed line, a dot
-  at each end) rather than by a box, keep their colour, and aren't selected once drawn.
+- **Pen strokes** are shown selected along themselves (a thin dashed line, a dot at each end)
+  rather than by a box, keep their colour, and aren't selected once drawn.
+- **The highlighter draws boxes** (0.1.52): a drag makes a see-through box of colour, left
+  selected with handles to resize it, as a shape is. A stroke from an older file opens as the box
+  round it.
+- **Hand** (D, 0.1.52): a drag moves the picture round in the window; nothing is drawn or
+  selected. Space with the left button, or the middle button, still does it with any tool.
 - **Recent captures**: the mouse wheel goes back through every capture (thumbnails are made for
   those in view only); **All captures** shows every one bigger, newest first, under Today,
   Yesterday or its date, with its time and a search. Videos have a play mark.

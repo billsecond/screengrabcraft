@@ -220,9 +220,16 @@ pub enum Shape {
     Pen {
         points: Vec<Pt>,
     },
-    /// A see-through marker stroke, multiplied into the picture under it.
+    /// A see-through marker over a box, multiplied into the picture under it (its colour is the
+    /// style's line colour).
     Highlight {
-        points: Vec<Pt>,
+        #[serde(default)]
+        rect: Rect,
+        /// A stroke, as the highlighter drew before it drew boxes (0.1.51 and older), from an
+        /// older file or a script: read, then made the box round it as the document takes it in
+        /// ([`Shape::sanitized`]). Never written.
+        #[serde(default, rename = "points", skip_serializing)]
+        stroke: Vec<Pt>,
     },
     /// Text in a box (the box shows when the style has a fill or a border).
     Text {
@@ -679,6 +686,7 @@ impl Shape {
         match self {
             Shape::Rect { rect, .. }
             | Shape::Ellipse { rect }
+            | Shape::Highlight { rect, .. }
             | Shape::Text { rect, .. }
             | Shape::Callout { rect, .. }
             | Shape::Blur { rect }
@@ -695,6 +703,7 @@ impl Shape {
         match self {
             Shape::Rect { rect, .. }
             | Shape::Ellipse { rect }
+            | Shape::Highlight { rect, .. }
             | Shape::Text { rect, .. }
             | Shape::Callout { rect, .. }
             | Shape::Blur { rect }
@@ -731,13 +740,14 @@ impl Shape {
                 Rect::from_points(*from, *to).inflate(grow)
             }
             Shape::Line { from, to } => Rect::from_points(*from, *to).inflate(half),
-            Shape::Pen { points } | Shape::Highlight { points } => Rect::bounding(points).inflate(half),
+            Shape::Pen { points } => Rect::bounding(points).inflate(half),
             Shape::Step { center, .. } => {
                 let r = step_radius(style.font_size) + half;
                 Rect::new(center.x - r, center.y - r, 2.0 * r, 2.0 * r)
             }
             Shape::Callout { rect, tail, form, .. } => rect.inflate(form.bulge(*rect)).union(Rect::new(tail.x, tail.y, 0.0, 0.0)).inflate(half),
-            Shape::Spotlight { rect, .. } | Shape::Blur { rect } | Shape::Pixelate { rect } => *rect,
+            // A highlight is its box, with no line round it.
+            Shape::Spotlight { rect, .. } | Shape::Blur { rect } | Shape::Pixelate { rect } | Shape::Highlight { rect, .. } => *rect,
             _ => self.rect().unwrap_or_default().inflate(half),
         }
     }
@@ -746,7 +756,7 @@ impl Shape {
     pub fn extent(&self) -> Rect {
         match self {
             Shape::Arrow { from, to, .. } | Shape::Line { from, to } => Rect::from_points(*from, *to),
-            Shape::Pen { points } | Shape::Highlight { points } => Rect::bounding(points),
+            Shape::Pen { points } => Rect::bounding(points),
             Shape::Step { center, .. } => Rect::new(center.x, center.y, 0.0, 0.0),
             Shape::Callout { rect, tail, .. } => rect.union(Rect::new(tail.x, tail.y, 0.0, 0.0)),
             _ => self.rect().unwrap_or_default(),
@@ -758,7 +768,7 @@ impl Shape {
         let reach = style.width.max(0.0) / 2.0 + tol;
         match self {
             Shape::Arrow { from, to, .. } | Shape::Line { from, to } => distance_to_segment(p, *from, *to) <= reach.max(arrow_reach(self, style)),
-            Shape::Pen { points } | Shape::Highlight { points } => distance_to_polyline(p, points) <= reach,
+            Shape::Pen { points } => distance_to_polyline(p, points) <= reach,
             Shape::Rect { rect, .. } => {
                 if !style.fill.is_transparent() {
                     rect.inflate(reach).contains(p)
@@ -787,7 +797,7 @@ impl Shape {
         match self {
             Shape::Arrow { from, to, .. } | Shape::Line { from, to } => vec![(Handle::Start, *from), (Handle::End, *to)],
             Shape::Step { .. } => Vec::new(),
-            Shape::Pen { .. } | Shape::Highlight { .. } => {
+            Shape::Pen { .. } => {
                 let b = self.bounds(style);
                 Handle::BOX.iter().map(|h| (*h, h.on(b))).collect()
             }
@@ -810,11 +820,11 @@ impl Shape {
             (Shape::Arrow { from, .. } | Shape::Line { from, .. }, Handle::Start) => *from = p,
             (Shape::Arrow { to, .. } | Shape::Line { to, .. }, Handle::End) => *to = p,
             (Shape::Callout { tail, .. }, Handle::Tail) => *tail = p,
-            (shape @ (Shape::Pen { .. } | Shape::Highlight { .. }), h) => {
+            (shape @ Shape::Pen { .. }, h) => {
                 let old = shape.bounds(style).inflate(-style.width.max(0.0) / 2.0);
                 let new = h.drag_rect(old, p, keep_aspect);
                 let (sx, sy) = (if old.w > 0.0 { new.w / old.w } else { 1.0 }, if old.h > 0.0 { new.h / old.h } else { 1.0 });
-                if let Shape::Pen { points } | Shape::Highlight { points } = shape {
+                if let Shape::Pen { points } = shape {
                     for q in points.iter_mut() {
                         *q = Pt::new(new.x + (q.x - old.x) * sx, new.y + (q.y - old.y) * sy);
                     }
@@ -843,10 +853,16 @@ impl Shape {
                 *from = f(*from).finite();
                 *to = f(*to).finite();
             }
-            Shape::Pen { points } | Shape::Highlight { points } => {
+            Shape::Pen { points } => {
                 for p in points.iter_mut() {
                     *p = f(*p).finite();
                 }
+            }
+            Shape::Highlight { rect, stroke } => {
+                for p in stroke.iter_mut() {
+                    *p = f(*p).finite();
+                }
+                *rect = Rect::from_points(f(rect.min()), f(rect.max()));
             }
             Shape::Step { center, .. } => *center = f(*center).finite(),
             Shape::Callout { rect, tail, .. } => {
@@ -861,12 +877,24 @@ impl Shape {
         }
     }
 
+    /// A highlight over `rect`.
+    pub fn highlight(rect: Rect) -> Shape {
+        Shape::Highlight { rect, stroke: Vec::new() }
+    }
+
     /// The same shape with every coordinate finite and every list bounded, for anything read from
-    /// outside.
-    pub fn sanitized(mut self) -> Shape {
+    /// outside. A highlighter stroke of an older file is made the box round it, its line `width`
+    /// (`style.width`) included.
+    pub fn sanitized(mut self, width: f32) -> Shape {
         self.map_points(&|p| p);
         match &mut self {
-            Shape::Pen { points } | Shape::Highlight { points } => points.truncate(MAX_POINTS),
+            Shape::Pen { points } => points.truncate(MAX_POINTS),
+            Shape::Highlight { rect, stroke } if !stroke.is_empty() => {
+                stroke.truncate(MAX_POINTS);
+                let half = if width.is_finite() { width.clamp(0.0, MAX_WIDTH) / 2.0 } else { 0.0 };
+                *rect = Rect::bounding(stroke).inflate(half).finite();
+                stroke.clear();
+            }
             Shape::Text { text, .. } | Shape::Callout { text, .. } => truncate_text(text, MAX_TEXT),
             Shape::Step { number, .. } => *number = (*number).min(9_999),
             _ => {}
@@ -975,10 +1003,35 @@ mod tests {
         r.map_points(&|p| Pt::new(100.0 - p.y, p.x));
         assert_eq!(r.rect(), Some(Rect::new(40.0, 10.0, 40.0, 30.0)));
         let mut t = Shape::Text { rect: Rect::default(), text: "é".repeat(MAX_TEXT) };
-        t = t.sanitized();
+        t = t.sanitized(0.0);
         assert!(t.text().unwrap().len() <= MAX_TEXT);
-        let nan = Shape::Line { from: Pt::new(f32::NAN, 1.0), to: Pt::new(f32::INFINITY, 2.0) }.sanitized();
+        let nan = Shape::Line { from: Pt::new(f32::NAN, 1.0), to: Pt::new(f32::INFINITY, 2.0) }.sanitized(0.0);
         assert_eq!(nan, Shape::Line { from: Pt::new(0.0, 1.0), to: Pt::new(0.0, 2.0) });
+    }
+
+    /// The highlighter draws boxes; a stroke it drew before (an older file, or a script giving
+    /// points) is read as the box round the stroke, its width included, and written as a box.
+    #[test]
+    fn old_highlighter_strokes_read_as_their_boxes() {
+        let old = r#"{"id":1,"type":"highlight","points":[{"x":10,"y":50},{"x":200,"y":50}],"style":{"width":22}}"#;
+        let o: Object = serde_json::from_str(old).unwrap();
+        let shape = o.shape.sanitized(o.style.width);
+        assert_eq!(shape, Shape::highlight(Rect::new(-1.0, 39.0, 212.0, 22.0)));
+        assert_eq!(shape.rect(), Some(Rect::new(-1.0, 39.0, 212.0, 22.0)));
+        let v = serde_json::to_value(&shape).unwrap();
+        assert_eq!(v["type"], "highlight");
+        assert!(v.get("points").is_none(), "never written: {v}");
+        assert_eq!(serde_json::from_value::<Shape>(v).unwrap().sanitized(22.0), shape);
+        // Hostile strokes stay finite and bounded.
+        let junk = Shape::Highlight { rect: Rect::default(), stroke: vec![Pt::new(f32::NAN, f32::INFINITY), Pt::new(5.0, 5.0)] }.sanitized(f32::NAN);
+        let r = junk.rect().unwrap();
+        assert!(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite());
+        // A box is a box: it's hit inside, and its handles are its corners and sides.
+        let b = Shape::highlight(Rect::new(0.0, 0.0, 100.0, 20.0));
+        assert!(b.hit(&style(), Pt::new(50.0, 10.0), 0.0));
+        assert!(!b.hit(&style(), Pt::new(50.0, 30.0), 2.0));
+        assert_eq!(b.handles(&style()).len(), Handle::BOX.len());
+        assert_eq!(b.bounds(&Style { width: 40.0, ..style() }), Rect::new(0.0, 0.0, 100.0, 20.0), "no line round it");
     }
 
     #[test]

@@ -169,7 +169,11 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
   these and the rest. Copy with annotations selected copies just them.
 - **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
-  or an ellipse), **pen** and **highlighter**; Shift draws at 45° and makes squares and circles.
+  or an ellipse) and **pen**; Shift draws at 45° and makes squares and circles.
+- **Highlighter** (H): drag a box over what should stand out; it's tinted as under a marker
+  (dark stays dark), and resized by its handles or moved like any shape.
+- **Hand** (D): drag the picture round in the window. Space held down, or the middle button,
+  does the same with any tool.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
   with the text in it) with a tail set to point down left, down right, left, right, up or down,
   and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
@@ -187,7 +191,7 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   edge, round corners, greyscale, invert, brightness and contrast.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
-  pen and highlighter draw over things); its handles take hold even when the press is a little off.
+  pen draws over things); its handles take hold even when the press is a little off.
 - Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),

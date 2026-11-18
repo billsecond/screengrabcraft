@@ -172,8 +172,9 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
             row("marker", &|s| (Style { stroke: s.color, width: 10.0, ..base }, none));
         }
         Kind::Highlight => {
-            row("highlighter", &|s| (Style { stroke: s.color.with_alpha(120), width: 22.0, ..base }, none));
-            row("wide highlighter", &|s| (Style { stroke: s.color.with_alpha(120), width: 40.0, ..base }, none));
+            // A box of see-through colour: as a marker, and lighter.
+            row("highlighter", &|s| (Style { stroke: s.color.with_alpha(120), ..base }, none));
+            row("light highlighter", &|s| (Style { stroke: s.color.with_alpha(70), ..base }, none));
         }
         Kind::Rect => {
             row("outline", &|s| (Style { stroke: s.color, fill: Color::TRANSPARENT, width: 4.0, shadow: true, ..base }, none));

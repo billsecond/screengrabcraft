@@ -90,7 +90,7 @@ impl Document {
         }
         let id = ObjectId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        self.objects.push(Object { id, shape: shape.sanitized(), style: style.clamped() });
+        self.objects.push(Object { id, shape: shape.sanitized(style.width), style: style.clamped() });
         Ok(id)
     }
 
@@ -108,7 +108,7 @@ impl Document {
             object.id = ObjectId(self.next_id);
         }
         self.next_id = self.next_id.max(object.id.0.saturating_add(1));
-        object.shape = object.shape.sanitized();
+        object.shape = object.shape.sanitized(object.style.width);
         object.style = object.style.clamped();
         let id = object.id;
         self.objects.push(object);
