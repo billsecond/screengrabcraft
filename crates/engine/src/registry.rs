@@ -91,7 +91,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Add Annotation",
         "Annotate",
         None,
-        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen/highlight {"points":[…]}, text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?}, stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
+        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?}, stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
         always,
         add_object
     ),
@@ -417,6 +417,10 @@ fn add_object(s: &mut Session, p: &Value) -> Result<Value> {
 fn update_object(s: &mut Session, p: &Value) -> Result<Value> {
     let id = id_param(s, p)?;
     let Some(current) = s.doc.get(id).cloned() else { return Err(EngineError::NoObject(id.0)) };
+    let style = match p.get("style") {
+        Some(patch) => merge_style(&current.style, patch)?,
+        None => current.style,
+    };
     let mut shape = current.shape.clone();
     if let Some(Value::Object(patch)) = p.get("object") {
         let mut v = serde_json::to_value(&current.shape).map_err(|e| EngineError::Params(e.to_string()))?;
@@ -427,12 +431,8 @@ fn update_object(s: &mut Session, p: &Value) -> Result<Value> {
                 }
             }
         }
-        shape = serde_json::from_value::<Shape>(v).map_err(|e| EngineError::Params(format!("object: {e}")))?.sanitized();
+        shape = serde_json::from_value::<Shape>(v).map_err(|e| EngineError::Params(format!("object: {e}")))?.sanitized(style.width);
     }
-    let style = match p.get("style") {
-        Some(patch) => merge_style(&current.style, patch)?,
-        None => current.style,
-    };
     if let Some(o) = s.doc.get_mut(id) {
         o.shape = shape;
         o.style = style;

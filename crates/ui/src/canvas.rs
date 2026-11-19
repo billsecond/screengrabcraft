@@ -196,7 +196,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
         Kind::Rect => Shape::Rect { rect: boxed(false), radius: 0.0 },
         Kind::Ellipse => Shape::Ellipse { rect: boxed(false) },
         Kind::Pen => Shape::Pen { points: vec![start, now] },
-        Kind::Highlight => Shape::Highlight { points: vec![start, now] },
+        Kind::Highlight => Shape::highlight(boxed(false)),
         Kind::Text => Shape::Text { rect: boxed(false), text: String::new() },
         Kind::Callout => {
             // The tail goes where the tool says, as far as the picture goes.
@@ -219,7 +219,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
 fn big_enough(shape: &Shape) -> bool {
     match shape {
         Shape::Arrow { from, to, .. } | Shape::Line { from, to } => from.distance(*to) >= 4.0,
-        Shape::Pen { points } | Shape::Highlight { points } => points.len() >= 2 && Rect::bounding(points).w.max(Rect::bounding(points).h) >= 2.0,
+        Shape::Pen { points } => points.len() >= 2 && Rect::bounding(points).w.max(Rect::bounding(points).h) >= 2.0,
         Shape::Step { .. } => true,
         other => other.rect().is_some_and(|r| r.w >= 4.0 && r.h >= 4.0),
     }
@@ -291,7 +291,7 @@ impl Editor {
         }
         let id = *sel.first()?;
         let o = self.session.doc.get(id)?;
-        // A pen or highlighter stroke has no box to pull: it's moved, not reshaped.
+        // A pen stroke has no box to pull: it's moved, not reshaped.
         if stroke_points(&o.shape).is_some() {
             return None;
         }
@@ -480,7 +480,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         ed.everything = None;
     }
 
-    // Panning: the middle button, or Space with the left one.
+    // Panning: the middle button, Space with the left one, or the Hand tool's left one.
     if let Some(Drag::Pan { last }) = ed.drag.clone() {
         if let Some(now) = ctx.input(|i| i.pointer.latest_pos()) {
             let s = ed.view.scale();
@@ -493,13 +493,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         ctx.set_cursor_icon(CursorIcon::Grabbing);
         return;
     }
-    if resp.hovered() && (middle || (space && ctx.input(|i| i.pointer.primary_down()))) && ed.drag.is_none() {
+    let hand = ed.tool == Tool::Hand && ctx.input(|i| i.pointer.primary_pressed());
+    if resp.hovered() && (middle || hand || (space && ctx.input(|i| i.pointer.primary_down()))) && ed.drag.is_none() {
         if let Some(p) = ctx.input(|i| i.pointer.latest_pos()) {
             ed.drag = Some(Drag::Pan { last: p });
         }
         return;
     }
-    if space && resp.hovered() {
+    if (space || ed.tool == Tool::Hand) && resp.hovered() {
         ctx.set_cursor_icon(CursorIcon::Grab);
     }
 
@@ -543,6 +544,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     {
         let on_picture = ed.session.doc.bounds().contains(to_img(h, &ed.view));
         let cursor = match ed.tool {
+            Tool::Hand => CursorIcon::Grab,
             Tool::Select | Tool::Favorites => {
                 if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) {
                     CursorIcon::Move
@@ -577,7 +579,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Tool::Fill => CursorIcon::Default,
             // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
             Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
-            Tool::Draw(k) if !matches!(k, Kind::Pen | Kind::Highlight) && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
+            Tool::Draw(k) if k != Kind::Pen && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
             Tool::Draw(_) if !on_picture => CursorIcon::Default,
             Tool::Draw(Kind::Text) => CursorIcon::Text,
             Tool::Draw(_) => CursorIcon::Crosshair,
@@ -664,6 +666,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     ed.drag = Some(Drag::CropNew { start });
                 }
             }
+            // The Hand tool's press pans (above), so it never gets here.
+            Tool::Hand => {}
             // A fill happens where the button went down; moving on before letting go is no drag.
             Tool::Fill => fill_at(ed, &ctx, start),
             Tool::Area => {
@@ -690,9 +694,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     return;
                 }
                 // Starting on an annotation picks it up and moves it, whatever the tool, as a
-                // click selects it. Pen and highlighter strokes are drawn over things, so they
-                // always draw.
-                if !matches!(kind, Kind::Pen | Kind::Highlight)
+                // click selects it. Pen strokes are drawn over things, so they always draw.
+                if kind != Kind::Pen
                     && let Some(id) = ed.object_under(start)
                 {
                     ed.session.select(vec![id]);
@@ -734,10 +737,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 let fresh = ed.with_defaults(shape_for(kind, start, inside, shift, opts, step, image_size));
                 if let Some(o) = ed.session.doc.get_mut(id) {
                     match (&mut o.shape, kind) {
-                        (Shape::Pen { points }, _) | (Shape::Highlight { points }, _) => {
-                            if shift && kind == Kind::Highlight {
-                                *points = vec![start, Pt::new(inside.x, start.y)];
-                            } else if points.last().is_none_or(|l| l.distance(inside) * ed.view.scale() >= 1.5)
+                        (Shape::Pen { points }, _) => {
+                            if points.last().is_none_or(|l| l.distance(inside) * ed.view.scale() >= 1.5)
                                 && points.len() < screengrabcraft_model::object::MAX_POINTS
                             {
                                 points.push(inside);
@@ -840,9 +841,10 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                         ed.start_editing(id);
                     } else {
                         ed.session.commit();
-                        // A pen or highlighter stroke is left as drawn, as on paper: not
-                        // selected, so nothing is drawn over it and the next stroke can follow.
-                        if matches!(kind, Kind::Pen | Kind::Highlight) {
+                        // A pen stroke is left as drawn, as on paper: not selected, so nothing
+                        // is drawn over it and the next stroke can follow. A highlight is a box,
+                        // left selected as a shape is, to resize or move at once.
+                        if kind == Kind::Pen {
                             ed.session.select(Vec::new());
                         }
                     }
@@ -1055,6 +1057,7 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     let editing_before = ed.editing.is_some();
     ed.stop_editing();
     match ed.tool {
+        Tool::Hand => {}
         Tool::Select | Tool::Favorites | Tool::Crop => {
             if ed.tool == Tool::Crop {
                 return;
@@ -1187,7 +1190,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     let selected = ed.session.selected();
     for id in &selected {
         let Some(o) = ed.session.doc.get(*id) else { continue };
-        // A pen or highlighter stroke is shown selected along itself, with no box round it, and
+        // A pen stroke is shown selected along itself, with no box round it, and
         // not at all while it's being drawn: it looks as it will.
         if let Some(points) = stroke_points(&o.shape) {
             if !matches!(&ed.drag, Some(Drag::Create { id: drawing, .. }) if drawing == id) {
@@ -1278,15 +1281,15 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     }
 }
 
-/// The points of a pen or highlighter stroke (shown selected along itself, not by a box).
+/// The points of a pen stroke (shown selected along itself, not by a box).
 fn stroke_points(shape: &Shape) -> Option<&[Pt]> {
     match shape {
-        Shape::Pen { points } | Shape::Highlight { points } => Some(points),
+        Shape::Pen { points } => Some(points),
         _ => None,
     }
 }
 
-/// A pen or highlighter stroke marked as hovered or selected along its own middle: a thin line
+/// A pen stroke marked as hovered or selected along its own middle: a thin line
 /// (dashes, white under the colour, when selected) and a dot at each end. Nothing covers the
 /// stroke, so it keeps its colour, and a thin line can't fold over itself where the stroke turns.
 fn stroke_mark(p: &egui::Painter, ed: &Editor, points: &[Pt], color: Color32, selected: bool) {

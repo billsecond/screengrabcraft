@@ -22,6 +22,8 @@ use crate::theme::Tokens;
 pub enum Tool {
     /// Selects and moves annotations (the Move tool).
     Select,
+    /// Moves the picture round in the window, as Space or the middle button does with any tool.
+    Hand,
     Draw(Kind),
     /// Fills an area of the picture, or a shape, with a colour.
     Fill,
@@ -35,8 +37,9 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool with a key: the tool, its icon, its name and its key.
-    pub const ALL: [(Tool, Icon, &'static str, Key); 18] = [
+    pub const ALL: [(Tool, Icon, &'static str, Key); 19] = [
         (Tool::Select, Icon::Move, "Move", Key::V),
+        (Tool::Hand, Icon::Hand, "Hand", Key::D),
         (Tool::Area, Icon::Marquee, "Selection", Key::Q),
         (Tool::Draw(Kind::Arrow), Icon::Arrow, "Arrow", Key::A),
         (Tool::Draw(Kind::Line), Icon::Line, "Line", Key::L),
@@ -57,11 +60,11 @@ impl Tool {
     ];
 
     /// The tool bar's tools after Favorites, in groups with a gap between them: moving and
-    /// selecting (annotations, an area of the picture, the crop); annotations; freehand and paint;
+    /// selecting (annotations, the picture in the window, an area of the picture, the crop); annotations; freehand and paint;
     /// hiding and pointing out. Each has its own button, at full size. The Shape button stands for
     /// the rectangle and the ellipse.
     pub const BAR_GROUPS: [&'static [Tool]; 4] = [
-        &[Tool::Select, Tool::Area, Tool::Crop],
+        &[Tool::Select, Tool::Hand, Tool::Area, Tool::Crop],
         &[
             Tool::Draw(Kind::Arrow),
             Tool::Draw(Kind::Line),
@@ -76,8 +79,9 @@ impl Tool {
     ];
 
     /// Every tool on the tool bar after Favorites, in order.
-    pub const BAR: [Tool; 17] = [
+    pub const BAR: [Tool; 18] = [
         Tool::Select,
+        Tool::Hand,
         Tool::Area,
         Tool::Crop,
         Tool::Draw(Kind::Arrow),

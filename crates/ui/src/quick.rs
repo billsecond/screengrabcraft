@@ -128,7 +128,7 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
                 })
                 .collect(),
         },
-        Kind::Highlight => Shape::Highlight { points: vec![Pt::new(12.0, 31.0), Pt::new(96.0, 31.0)] },
+        Kind::Highlight => Shape::highlight(Rect::new(12.0, 20.0, 84.0, 22.0)),
         Kind::Rect => {
             let rect = Rect::new(16.0, 14.0, 76.0, 52.0);
             if o.round.unwrap_or(shape == Kind::Ellipse) { Shape::Ellipse { rect } } else { Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) } }

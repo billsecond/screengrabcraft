@@ -2171,33 +2171,79 @@ fn the_move_tool_selects_part_of_the_picture_where_there_are_no_annotations() {
     assert!(h.state().area.is_none());
 }
 
-#[test]
-fn a_highlight_is_shown_selected_along_itself_with_no_box_to_pull() {
-    let mut ed = editor();
-    let id = ed
-        .session
-        .doc
-        .add(
-            Shape::Highlight { points: vec![screengrabcraft_model::Pt::new(60.0, 100.0), screengrabcraft_model::Pt::new(300.0, 120.0)] },
-            Kind::Highlight.default_style(),
-        )
-        .unwrap();
-    let mut h = ready(ed, Tool::Select);
-    let p = at(&h, 180.0, 110.0);
-    click_at(&mut h, p);
-    assert_eq!(h.state().session.selected(), vec![id], "clicking the highlight selects it");
-    crate::quick_tests::shot(&mut h, "highlight-selected");
-    // Where a box's corner would be, nothing takes hold.
-    let corner = h.state().view.to_screen(screengrabcraft_model::Pt::new(60.0, 100.0));
-    assert!(h.state().handle_at(corner).is_none());
-    // It still moves.
-    let (from, to) = (at(&h, 180.0, 110.0), at(&h, 180.0, 160.0));
-    drag(&mut h, from, to);
-    let moved = h.state().session.doc.get(id).and_then(|o| match &o.shape {
-        Shape::Highlight { points } => points.first().copied(),
+/// The highlight's box, if the only annotation is one.
+fn highlight_box(h: &Harness<'_, Editor>) -> Option<screengrabcraft_model::Rect> {
+    match h.state().session.doc.objects.as_slice() {
+        [o] if o.shape.kind() == Kind::Highlight => o.shape.rect(),
         _ => None,
-    });
-    assert!(moved.is_some_and(|p| (p.y - 150.0).abs() < 4.0), "{moved:?}");
+    }
+}
+
+fn near(a: screengrabcraft_model::Rect, b: screengrabcraft_model::Rect) -> bool {
+    (a.x - b.x).abs() < 3.0 && (a.y - b.y).abs() < 3.0 && (a.w - b.w).abs() < 3.0 && (a.h - b.h).abs() < 3.0
+}
+
+/// The highlighter draws as the shape tool does: a drag makes a box, which stays selected with
+/// handles to resize it, and moves when dragged.
+#[test]
+fn the_highlighter_drags_out_a_box_to_resize_and_move() {
+    use screengrabcraft_model::Rect;
+    let mut h = ready(editor(), Tool::Draw(Kind::Highlight));
+    let (a, b) = (at(&h, 60.0, 100.0), at(&h, 300.0, 130.0));
+    drag(&mut h, a, b);
+    let drawn = highlight_box(&h);
+    assert!(drawn.is_some_and(|r| near(r, Rect::new(60.0, 100.0, 240.0, 30.0))), "{drawn:?}");
+    let id = h.state().session.doc.objects.first().map(|o| o.id);
+    assert_eq!(h.state().session.selected(), id.into_iter().collect::<Vec<_>>(), "left selected, as a shape is");
+    assert_eq!(h.state().session.undo_label(), Some("Draw Highlighter"));
+    crate::quick_tests::shot(&mut h, "highlight-box");
+    // Its corner is a handle: pulling it resizes the box.
+    let corner = at(&h, 300.0, 130.0);
+    assert!(h.state().handle_at(corner).is_some(), "a handle at the corner");
+    let to = at(&h, 340.0, 160.0);
+    drag(&mut h, corner, to);
+    let resized = highlight_box(&h);
+    assert!(resized.is_some_and(|r| near(r, Rect::new(60.0, 100.0, 280.0, 60.0))), "{resized:?}");
+    // A drag inside it moves it, even with the highlighter still the tool.
+    let (from, to) = (at(&h, 150.0, 130.0), at(&h, 150.0, 180.0));
+    drag(&mut h, from, to);
+    let moved = highlight_box(&h);
+    assert!(moved.is_some_and(|r| near(r, Rect::new(60.0, 150.0, 280.0, 60.0))), "{moved:?}");
+    // Too small a drag draws nothing.
+    let mut h = ready(editor(), Tool::Draw(Kind::Highlight));
+    let (a, b) = (at(&h, 50.0, 50.0), at(&h, 51.0, 51.0));
+    drag(&mut h, a, b);
+    assert!(h.state().session.doc.objects.is_empty());
+}
+
+/// The Hand tool moves the picture round in the window: nothing is drawn, selected or moved.
+#[test]
+fn the_hand_tool_moves_the_picture_round() {
+    let mut ed = editor();
+    let id = filled_rect(&mut ed, 100.0, 100.0, 200.0, 100.0);
+    let mut h = ready(ed, Tool::Select);
+    // D picks it, as its tooltip says.
+    h.key_press(egui::Key::D);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Hand);
+    let (before, scale) = (h.state().view.center, h.state().view.scale());
+    let rect_before = h.state().session.doc.get(id).map(|o| o.shape.clone());
+    // A drag that starts on the annotation moves the picture, not the annotation.
+    let from = at(&h, 200.0, 150.0);
+    let to = pos2(from.x - 120.0, from.y - 60.0);
+    drag(&mut h, from, to);
+    let after = h.state().view.center;
+    assert!((after.x - (before.x + 120.0 / scale)).abs() < 2.0 && (after.y - (before.y + 60.0 / scale)).abs() < 2.0, "{before:?} -> {after:?}");
+    assert_eq!(h.state().session.doc.get(id).map(|o| o.shape.clone()), rect_before, "the annotation stays");
+    assert!(h.state().session.selected().is_empty(), "nothing selected");
+    assert_eq!(h.state().session.doc.objects.len(), 1, "nothing drawn");
+    assert_eq!(h.state().session.undo_label(), None, "nothing to undo");
+    // The picture point that was under the pointer is under it still.
+    let under = h.state().view.to_image(to);
+    assert!(under.distance(screengrabcraft_model::Pt::new(200.0, 150.0)) < 2.0, "{under:?}");
+    // A click does nothing either.
+    click_at(&mut h, to);
+    assert!(h.state().session.selected().is_empty());
 }
 
 #[test]

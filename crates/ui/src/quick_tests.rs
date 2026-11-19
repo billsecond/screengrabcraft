@@ -29,9 +29,10 @@ fn callout(ed: &mut Editor) -> screengrabcraft_model::ObjectId {
 }
 
 /// Every tool's button on the tool bar, in order.
-const BAR: [&str; 18] = [
+const BAR: [&str; 19] = [
     "Favorites",
     "Move (V)",
+    "Hand (D)",
     "Selection (Q)",
     "Crop (K)",
     "Arrow (A)",

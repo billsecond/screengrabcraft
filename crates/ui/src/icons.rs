@@ -50,6 +50,8 @@ pub enum Icon {
     Favorites,
     Shape,
     Move,
+    /// The Hand tool: an open hand, as it is when it moves the picture.
+    Hand,
     More,
     Effects,
     Eyedropper,
@@ -179,9 +181,9 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             )));
         }
         Icon::Highlight => {
-            let bar = Stroke::new(5.0 * u, Color32::from_rgba_unmultiplied(255, 214, 0, 170));
-            p.line_segment([at(3.0, 13.0), at(17.0, 13.0)], bar);
-            fill_poly(vec![at(9.0, 3.0), at(14.0, 3.0), at(13.0, 10.0), at(10.0, 10.0)], color);
+            // A box of marker yellow, and the marker's tip at its corner.
+            p.rect_filled(rect_at(2.5, 9.5, 15.5, 16.5), 0.0, Color32::from_rgba_unmultiplied(255, 214, 0, 170));
+            fill_poly(vec![at(12.0, 3.0), at(17.5, 3.0), at(16.4, 10.5), at(13.1, 10.5)], color);
         }
         Icon::Blur => {
             for (i, a) in [(0, 255u8), (1, 150), (2, 80)] {
@@ -245,6 +247,27 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                     color,
                 );
             }
+        }
+        Icon::Hand => {
+            // An open hand's outline: four fingers with round tips, the thumb out to the left and
+            // the palm, in one line.
+            let mut pts = Vec::new();
+            let tip = |pts: &mut Vec<Pos2>, cx: f32, cy: f32| {
+                for i in 0..=6 {
+                    let a = std::f32::consts::PI * (1.0 + i as f32 / 6.0);
+                    pts.push(at(cx + 1.15 * a.cos(), cy + 1.15 * a.sin()));
+                }
+            };
+            // Up the palm's left side to the thumb, round its tip and back.
+            pts.extend([at(5.6, 18.0), at(5.15, 15.2), at(3.2, 12.6), at(2.9, 11.4), at(3.5, 10.6), at(4.4, 10.9), at(5.15, 12.0)]);
+            for (cx, top) in [(6.3, 6.0), (8.8, 3.6), (11.3, 3.8), (13.8, 5.6)] {
+                pts.push(at(cx - 1.15, 9.6));
+                tip(&mut pts, cx, top);
+                pts.push(at(cx + 1.15, 9.6));
+            }
+            // Down the right side and round the bottom of the palm.
+            pts.extend([at(14.95, 13.6), at(14.6, 15.8), at(13.4, 17.5), at(11.6, 18.3), at(8.0, 18.3)]);
+            poly(pts, true);
         }
         Icon::More => {
             for x in [4.5, 10.0, 15.5] {

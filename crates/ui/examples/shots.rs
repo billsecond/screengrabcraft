@@ -325,7 +325,7 @@ fn picture_editor(settings: &EditorSettings) -> Result<Editor, String> {
     // The addresses aren't for showing; the number that matters is boxed; the total that was
     // asked about is marked; the order that waits is pointed at.
     add(&mut doc, Shape::Blur { rect: Rect::new(512.0, 534.0, 236.0, 124.0) });
-    add(&mut doc, Shape::Highlight { points: vec![Pt::new(788.0, 548.0), Pt::new(850.0, 548.0)] });
+    add(&mut doc, Shape::highlight(Rect::new(777.0, 537.0, 84.0, 22.0)));
     add(&mut doc, Shape::Rect { rect: Rect::new(502.0, 84.0, 284.0, 108.0), radius: 12.0 });
     add(&mut doc, Shape::Arrow { from: Pt::new(1052.0, 624.0), to: Pt::new(992.0, 586.0), heads: ArrowHeads::End });
     add(&mut doc, Shape::Step { center: Pt::new(164.0, 130.0), number: 1 });

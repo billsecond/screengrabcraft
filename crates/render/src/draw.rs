@@ -236,16 +236,16 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
                 }
             });
         }
-        Shape::Highlight { points } => {
-            // Drawn opaque in a layer, then multiplied in at the colour's own transparency, so a
-            // stroke that crosses itself isn't darker where it does.
+        Shape::Highlight { rect, .. } => {
+            // A box drawn opaque in a layer, then multiplied in at the colour's own transparency:
+            // the picture under it shows through, tinted, as under a marker.
+            let rect = *rect;
             let alpha = f32::from(style.stroke.a) / 255.0;
             let opaque = style.stroke.with_alpha(255);
             let plain = Style { shadow: false, ..style };
             layered(canvas, bounds, &plain, BlendMode::Multiply, alpha, &|c, t| {
-                if let Some(path) = smooth(points) {
-                    let s = Stroke { width: style.width.max(1.0), line_cap: LineCap::Square, line_join: LineJoin::Round, ..Stroke::default() };
-                    c.stroke_path(&path, &paint(opaque), &s, t, None);
+                if let Some(path) = rounded_rect(rect, 0.0) {
+                    c.fill_path(&path, &paint(opaque), FillRule::Winding, t, None);
                 }
             });
         }
@@ -687,7 +687,8 @@ mod tests {
             Shape::Ellipse { rect: r },
             Shape::Pen { points: vec![Pt::new(1.0, 1.0), Pt::new(30.0, 40.0), Pt::new(60.0, 10.0)] },
             Shape::Pen { points: vec![Pt::new(1.0, 1.0)] },
-            Shape::Highlight { points: vec![Pt::new(10.0, 60.0), Pt::new(190.0, 60.0)] },
+            Shape::highlight(Rect::new(10.0, 50.0, 180.0, 20.0)),
+            Shape::highlight(Rect::new(-40.0, 100.0, 400.0, 0.0)),
             Shape::Text { rect: r, text: "Hello, world".into() },
             Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded },
             Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square },
@@ -885,8 +886,9 @@ mod stroke_tests {
         best
     }
 
-    /// The owner's scribble with a wide highlighter left a wedge (a "crease") where it turned
-    /// sharply: nothing of a stroke is drawn far from where it went.
+    /// The owner's scribble with a wide highlighter (when it drew strokes, as the pen does) left a
+    /// wedge (a "crease") where it turned sharply: nothing of a stroke is drawn far from where it
+    /// went.
     #[test]
     fn a_sharply_turning_stroke_has_no_crease() {
         let scribbles: Vec<Vec<Pt>> = vec![
@@ -903,10 +905,10 @@ mod stroke_tests {
                 .collect(),
             vec![Pt::new(20.0, 100.0), Pt::new(90.0, 30.0), Pt::new(93.0, 29.0), Pt::new(95.0, 31.0), Pt::new(96.0, 36.0), Pt::new(97.0, 100.0)],
         ];
-        for (kind, width) in [(Kind::Highlight, 30.0), (Kind::Highlight, 60.0), (Kind::Pen, 24.0), (Kind::Pen, 50.0)] {
+        for (kind, width) in [(Kind::Pen, 24.0), (Kind::Pen, 50.0)] {
             for points in &scribbles {
                 let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
-                let shape = if kind == Kind::Highlight { Shape::Highlight { points: points.clone() } } else { Shape::Pen { points: points.clone() } };
+                let shape = Shape::Pen { points: points.clone() };
                 let style = Style { width, shadow: false, ..kind.default_style() };
                 d.add(shape, style).unwrap();
                 let out = render(&d).unwrap();
@@ -926,6 +928,27 @@ mod stroke_tests {
                 }
                 assert!(stray.is_empty(), "{kind:?} {points:?}: {} pixels drawn away from the stroke, e.g. {:?}", stray.len(), stray.first());
             }
+        }
+    }
+
+    /// A highlight tints its box as a marker does, and nothing outside it: white turns the
+    /// marker's colour, black stays black (it's multiplied in), the edges are straight.
+    #[test]
+    fn a_highlight_tints_its_box_only() {
+        let mut pic = Raster::filled(200, 120, Color::WHITE).unwrap();
+        // A black line across, at y = 60.
+        for px in pic.pixels_mut()[60 * 200 * 4..61 * 200 * 4].as_chunks_mut::<4>().0 {
+            *px = [0, 0, 0, 255];
+        }
+        let mut d = Document::new(pic);
+        d.add(Shape::highlight(Rect::new(40.0, 40.0, 100.0, 40.0)), Kind::Highlight.default_style()).unwrap();
+        let out = render(&d).unwrap();
+        let inside = out.pixel(90, 50).unwrap();
+        assert!(inside.r > 230 && inside.g > 190 && inside.b < 160, "yellow inside: {inside:?}");
+        assert_eq!(out.pixel(90, 60), Some(Color::BLACK), "dark stays dark");
+        assert_eq!(out.pixel(41, 79), Some(inside), "to its corners");
+        for (x, y) in [(38, 50), (142, 50), (90, 38), (90, 82), (10, 10)] {
+            assert_eq!(out.pixel(x, y), Some(Color::WHITE), "nothing outside at {x},{y}");
         }
     }
 }
