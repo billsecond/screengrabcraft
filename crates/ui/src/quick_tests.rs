@@ -6,7 +6,7 @@ use egui_kittest::kittest::Queryable as _;
 use screengrabcraft_model::{CalloutForm, Color, Kind, Pt, Rect, Shape, Style};
 
 use crate::editor::{Editor, Tool};
-use crate::tests::{at, drag, editor, harness, ready};
+use crate::tests::{at, drag, editor, harness, ready, ready_tall};
 
 /// Saves what the window looks like, when asked (`SGC_SHOTS=folder`).
 pub(crate) fn shot(h: &mut Harness<'_, Editor>, name: &str) {
@@ -252,7 +252,7 @@ fn the_theme_changes_the_quick_styles_colours() {
 #[test]
 fn every_tool_has_quick_styles_in_its_panel() {
     for (tool, ..) in Tool::ALL {
-        let mut h = ready(editor(), tool);
+        let mut h = ready_tall(editor(), tool);
         let presets = match tool {
             Tool::Draw(k) => screengrabcraft_model::quick::presets(k, screengrabcraft_model::quick::theme("")),
             _ => continue,
@@ -280,29 +280,91 @@ fn the_fill_tool_offers_its_colours_as_tiles() {
     h.get_by_label("Tolerance");
 }
 
+/// Properties are always shown (there's no button to fold them away), with the Effects pane
+/// docked under them: each effect a section with its settings and Apply.
 #[test]
-fn properties_fold_away_and_effects_are_a_click_away() {
-    let mut h = ready(editor(), Tool::Draw(Kind::Arrow));
-    for name in ["Line colour", "Shape options", "More options", "Thickness", "Opacity"] {
+fn properties_stay_shown_over_the_effects_pane() {
+    // A window as tall as a full-HD screen's, so an opened effect is in sight in the pane.
+    let mut h = crate::tests::harness_sized(editor(), egui::vec2(1200.0, 1080.0));
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Draw(Kind::Arrow));
+    h.run_steps(2);
+    for name in ["Red, arrow", "Line colour", "Shape options", "More options", "Thickness", "Opacity"] {
         h.get_by_label(name);
     }
-    click(&mut h, "Properties");
-    assert!(h.state().settings.hide_properties);
-    assert!(h.query_by_label("Thickness").is_none(), "folded away");
-    h.get_by_label("Red, arrow");
-    click(&mut h, "Properties");
-    h.get_by_label("Thickness");
-    // Effects: the picture's effects in a menu.
-    click(&mut h, "Picture effects");
+    assert!(h.query_by_label("Properties").is_none(), "no button to fold them away");
+    assert!(h.query_by_label("Picture effects").is_none(), "the effects aren't a menu under a button");
+    // The effects are listed, closed; one opened shows its settings and Apply.
+    for name in ["Border", "Drop Shadow", "Torn Edge", "Round Corners", "Brightness and Contrast", crate::effects::COLOURS] {
+        h.get_by_label(name);
+    }
+    assert!(h.query_by_label("Apply Border").is_none());
+    click(&mut h, "Border");
+    shot(&mut h, "effects-pane");
+    click(&mut h, "Apply Border");
+    assert_eq!(h.state().session.undo_label(), Some("Border"));
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (408, 308), "four pixels round");
+    // Closed again, and the colours opened: Invert is one click.
+    click(&mut h, "Border");
+    click(&mut h, crate::effects::COLOURS);
+    // The section opens with a short slide: once it has, Invert is where it stays.
+    h.run_steps(20);
     click(&mut h, "Invert Colors");
     assert_eq!(h.state().session.undo_label(), Some("Invert Colors"));
+}
+
+/// The panes' left edge is dragged to make them wider or narrower, and the bar between them to
+/// give Properties or Effects more of the height; both are kept in bounds and remembered.
+#[test]
+fn the_panes_are_resized_by_their_handles() {
+    use crate::props::{EDGE_NAME, PANEL_WIDTH, SPLIT_NAME, panes_width};
+    let mut h = ready(editor(), Tool::Draw(Kind::Arrow));
+    let window = 1200.0;
+    assert_eq!(panes_width(h.state(), window), PANEL_WIDTH);
+    let thickness_before = h.get_by_label("Thickness").rect();
+    // Wider, by the edge.
+    let edge = h.get_by_label(EDGE_NAME).rect().center();
+    drag(&mut h, edge, egui::pos2(edge.x - 80.0, edge.y));
+    let wide = h.state().settings.side_width.unwrap_or_default();
+    assert!((wide - (PANEL_WIDTH + 80.0)).abs() < 2.0, "{wide}");
+    let edge_now = h.get_by_label(EDGE_NAME).rect().center();
+    assert!((edge_now.x - (edge.x - 80.0)).abs() < 2.0, "the edge follows: {edge_now:?}");
+    assert!(h.get_by_label("Thickness").rect().left() < thickness_before.left() - 60.0, "what's in them moves with it");
+    // As wide as the window leaves room for, and no narrower than they work at.
+    drag(&mut h, edge_now, egui::pos2(10.0, edge.y));
+    assert!(panes_width(h.state(), window) <= window * 0.6 + 0.5);
+    let edge_now = h.get_by_label(EDGE_NAME).rect().center();
+    drag(&mut h, edge_now, egui::pos2(1190.0, edge.y));
+    assert!(panes_width(h.state(), window) >= 240.0);
+    // Properties taller, by the bar between them; then Effects.
+    let split = h.get_by_label(SPLIT_NAME).rect().center();
+    drag(&mut h, split, egui::pos2(split.x, split.y + 60.0));
+    let more = h.state().settings.properties_share.unwrap_or_default();
+    assert!(more > 0.64, "{more}");
+    let split_now = h.get_by_label(SPLIT_NAME).rect().center();
+    assert!((split_now.y - (split.y + 60.0)).abs() < 2.0, "the bar follows: {split_now:?}");
+    drag(&mut h, split_now, egui::pos2(split.x, 5.0));
+    let top = h.get_by_label(SPLIT_NAME).rect().top();
+    assert!(top > 150.0, "Properties keeps some room: {top}");
+    shot(&mut h, "panes-resized");
+    // Junk in the settings is no trouble: the usual sizes.
+    h.state_mut().settings.side_width = Some(f32::NAN);
+    h.state_mut().settings.properties_share = Some(f32::INFINITY);
+    h.run_steps(3);
+    assert_eq!(panes_width(h.state(), window), PANEL_WIDTH);
+    h.state_mut().settings.side_width = Some(-5.0);
+    h.state_mut().settings.properties_share = Some(-3.0);
+    h.run_steps(3);
+    assert!(panes_width(h.state(), window) >= 240.0);
+    h.get_by_label("Thickness");
+    h.get_by_label("Border");
 }
 
 #[test]
 fn the_tool_properties_change_the_colours_and_the_callout_form() {
     let mut ed = editor();
     let id = callout(&mut ed);
-    let mut h = ready(ed, Tool::Select);
+    let mut h = ready_tall(ed, Tool::Select);
     h.state_mut().session.select(vec![id]);
     h.run_steps(3);
     for name in ["Fill colour", "Border colour", "Text colour", "Shape options", "More options", "Text size", "Border width", "Opacity"] {
@@ -348,7 +410,7 @@ fn text_overlays_come_outlined_shadowed_on_boxes_and_as_titles() {
     let mut ed = editor();
     let style = Kind::Text.default_style();
     let id = ed.session.doc.add(Shape::Text { rect: Rect::new(40.0, 40.0, 260.0, 44.0), text: "Hello".into() }, style).unwrap();
-    let mut h = ready(ed, Tool::Draw(Kind::Text));
+    let mut h = ready_tall(ed, Tool::Draw(Kind::Text));
     for name in ["Red, outlined text", "Red, shadowed text", "Red, label", "Red, see-through label", "Red, boxed text", "Red, title"] {
         h.get_by_label(name);
     }

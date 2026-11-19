@@ -90,8 +90,13 @@ had before 0.1.19, and what is still missing.
   too. "Add the current look" stars a look you made yourself.
 - **Tool properties** under it: Fill, Outline (or Border, Ring…), Text colour, a shape picker
   (callout form, rectangle or ellipse, arrow heads, stamp, round spotlight) and More (shadow,
-  dashes, text style), then sliders with number boxes. **Effects** and **Properties** buttons sit at
-  the bottom of the panel; Properties folds the tool properties away.
+  dashes, text style), then sliders with number boxes. **Effects** and **Properties** buttons sat at
+  the bottom of the panel until 0.1.53; Properties folded the tool properties away.
+- **Properties over Effects** (0.1.53), docked at the right as a format pane is: the properties
+  are always shown, and the picture's effects are a list under them, each opened with its
+  settings and Apply (Colours: grayscale and invert). A grip along the panes' left edge makes them
+  wider or narrower, and the bar between them gives either more of the height; both are
+  remembered, and a double click on either puts it back.
 - **Text overlays**: the Text tool's quick styles are plain text, text with an outline round its
   letters, text with a shadow, text on a filled box, on a see-through box, in a bordered box, and
   titles (big, outlined and shadowed; a title sets the text's size, the other looks keep it). The

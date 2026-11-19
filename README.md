@@ -187,8 +187,11 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
-- **Effects** (in the menu, and the Effects button under the panel): border, drop shadow, torn
-  edge, round corners, greyscale, invert, brightness and contrast.
+- **Properties and Effects, docked at the right**: Properties (the quick styles and the tool
+  properties) over Effects (border, drop shadow, torn edge, round corners, brightness and
+  contrast, each opened with its settings and Apply; greyscale and invert under Colours). Drag
+  the panes' left edge to make them wider, and the bar between them to give either more room
+  (a double click puts it back). The Effects menu has them too.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen draws over things); its handles take hold even when the press is a little off.
