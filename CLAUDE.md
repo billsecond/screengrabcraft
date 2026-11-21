@@ -1,6 +1,6 @@
 # ScreenGrabCraft — instructions for agents
 
-ScreenGrabCraft is a clean-room, open-source, Rust-native screen capture and annotation suite targeting Snagit parity: a capture service in the system tray and an annotation editor, on macOS, Windows, Linux and BSD, with the editor also on the web via WASM. It follows the conventions of its siblings, chiefly `../MailCraft` (Outlook) and the other Craft apps. Shared rules and learnings: [`storytold/craftrules`](https://github.com/storytold/craftrules) — read its `AGENTS.md`.
+ScreenGrabCraft is a clean-room, open-source, Rust-native screen capture and annotation suite that aims to do everything the leading commercial capture and screen recording tools do: a capture service in the system tray and an annotation editor, on macOS, Windows, Linux and BSD, with the editor also on the web via WASM. It follows the conventions of its siblings, chiefly `../MailCraft` (Outlook) and the other Craft apps. Shared rules and learnings: [`storytold/craftrules`](https://github.com/storytold/craftrules) — read its `AGENTS.md`.
 
 ## Start every session here
 1. Read `plan/STATUS.md` (current milestone, next task) if it exists. `plan/` is gitignored (local only); if it's missing, start from `ROADMAP.md`.
@@ -21,15 +21,18 @@ A screen capture tool runs all the time; a crash loses a capture the owner can't
 - **Screen recording permission is the system's:** on macOS the service asks Core Graphics and tells the owner where to allow it; on Wayland the portal decides. Never work around either.
 - **Never test against the owner's own screen without saying so,** and never commit a capture of it. Tests use made-up pictures; screenshots in `docs/images` are of ScreenGrabCraft's own sample.
 
-## Assets: absolutely no TechSmith (or Microsoft/Apple/Google) iconography or images
+## Assets: absolutely no other vendor's iconography or images (Microsoft, Apple, Google or anyone else)
 **This rule is non-negotiable.**
-- Never copy, trace, screenshot-crop or recreate icons, images, stamps, themes, sounds, fonts or any other asset from Snagit or any other vendor's product. Not even "temporarily".
+- Never copy, trace, screenshot-crop or recreate icons, images, stamps, themes, sounds, fonts or any other asset from any other vendor's product. Not even "temporarily".
 - Every asset must be **original** (drawn in code — prefer this: `crates/ui/src/icons.rs`, `crates/render/src/stamp.rs`, `crates/desktop/src/tray_icon.rs`, `xtask/src/art.rs`), **public domain / CC0**, **OSI open source**, or **Creative Commons that allows redistribution**.
 - **Every asset file has a row in [`ATTRIBUTION.md`](ATTRIBUTION.md)** (author, source, licence). `cargo xtask assets` (part of `cargo xtask ci`) fails otherwise.
 - The app icons are flat pictures drawn in Rust (`xtask/src/art.rs`, `cargo xtask icon`): a selection and a cursor for the capture service, a selection and a pencil for the editor. See `assets/app-icon/README.md`.
 
 ## Clean room
-Snagit may be **observed** black-box: run it, use it, note how it behaves. Never commit screenshots of it, never read, disassemble or copy anything inside it, never copy its wording beyond feature names. File formats come from public specs (PNG, JPEG, GIF89a, WebP, BMP, PDF 1.4).
+Other capture and video tools may be **observed** black-box: run them, use them, note how they behave. Never commit screenshots of them, never read, disassemble or copy anything inside them, never copy their wording beyond feature names. File formats come from public specs (PNG, JPEG, GIF89a, WebP, BMP, PDF 1.4).
+
+## No product names
+Never name the commercial capture and video tools ScreenGrabCraft is modelled on, or their maker, anywhere in the repository: code, comments, tests, strings, docs, file names. Say what a feature does instead ("scrolling capture", "cursor highlight", "quick styles"). Keep them out of commit messages and pull requests too. `cargo xtask names` (part of `cargo xtask ci`) fails if one appears; it keeps only the words' hashes, and `cargo xtask names hash <word>` prints the line to add for another.
 
 ## Architecture (see `docs/architecture.md`)
 | Layer | Crate | Job |
@@ -58,7 +61,7 @@ Snagit may be **observed** black-box: run it, use it, note how it behaves. Never
 - Updates: `crates/desktop/src/update.rs` (check, download, checksum, install) and `apps/screengrabcraft/src/update.rs` (when, and what the owner sees). The installer closes the service, so on Windows Update now hands `msiexec /passive` to a detached `cmd.exe` that waits for it and then starts `screengrabcraft.exe --background` again. Only a copy the MSI installed updates itself; never run the installer from a test. `cargo run -p screengrabcraft-desktop --example update_check -- --as 0.1.6` asks GitHub live.
 
 ## Quality gates
-Before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, layers, wasm). Commit after every arc of work that builds, with a task id in the message (`M1.2: scrolling capture`).
+Before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, assets, names, layers, wasm). Commit after every arc of work that builds, with a task id in the message (`M1.2: scrolling capture`).
 
 ## Running and looking at the app
 - `cargo run --release -p screengrabcraft` (the service; add `-- --capture region` to capture at once), `cargo run --release -p screengrabcraft-editor -- picture.png`.

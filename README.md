@@ -4,7 +4,7 @@
 
 **An open-source screen capture and annotation suite, written from scratch in Rust.**
 
-ScreenGrabCraft does what people use Snagit for: press Print Screen, drag out an area (or click a
+ScreenGrabCraft does what people use a screen capture tool for: press Print Screen, drag out an area (or click a
 window), and mark it up with arrows, callouts, numbered steps, blur and highlights before sharing
 it. It is two programs:
 
@@ -283,4 +283,4 @@ off. See [PRIVACY.md](PRIVACY.md).
 MIT OR Apache-2.0, at your option. The bundled fonts are the
 [PatroneOS fonts](https://patroneos.com/fonts) (PatroneOS Sans, PatroneOS Mono), under the SIL Open
 Font Licence. Every asset is listed in [ATTRIBUTION.md](ATTRIBUTION.md); ScreenGrabCraft contains no
-other vendor's icons or artwork, and is not affiliated with TechSmith or Snagit.
+other vendor's icons or artwork, and is not affiliated with the maker of any other capture or video tool.
