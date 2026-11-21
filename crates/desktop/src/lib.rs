@@ -4,8 +4,8 @@
 //! shown and hidden without animation ([`cloak`]), the persistent sign-in service and its
 //! supervisor ([`service`]), starting the other program
 //! ([`launch`]), the graphics backend on Windows ([`graphics`]), the tray icon ([`tray_icon`]),
-//! local time ([`time`]), the version line ([`version`]) and updates from GitHub's releases
-//! ([`update`], the only network code).
+//! text read off a picture ([`text`], Grab Text), local time ([`time`]), the version line
+//! ([`version`]) and updates from GitHub's releases ([`update`], the only network code).
 //!
 //! Layer L6, desktop only.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
@@ -20,6 +20,7 @@ pub mod models;
 pub mod paths;
 pub mod service;
 pub mod store;
+pub mod text;
 pub mod time;
 pub mod tray_icon;
 pub mod update;

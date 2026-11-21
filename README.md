@@ -47,6 +47,7 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 | Ctrl+Alt+Shift+Print Screen | Ctrl+Shift+V | **Record Video**: a small MP4 of an area, with the computer's sound (press again to stop) |
 | — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
+| — (set one in Settings) | — | **Grab Text**: drag out an area (or click a window) and its text goes on the clipboard (Windows) |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
 every capture, a delayed capture (3, 5 or 10 s), the editor and the captures folder. While choosing
@@ -163,6 +164,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
   tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+- **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
+  area selected, read on this computer by Windows' own text reader and shown to copy (put anything
+  right first). On macOS and Linux it isn't there yet.
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
@@ -211,13 +215,14 @@ screengrabcraft-cli capture --all -o desktop.png
 screengrabcraft-cli capture --window Notepad --clipboard
 screengrabcraft-cli run shot.png --cmd 'object.add={"object":{"type":"arrow","from":{"x":20,"y":20},"to":{"x":200,"y":120}}}' --cmd 'effect.shadow' -o shot.sgcraft
 screengrabcraft-cli render shot.sgcraft -o shot.png
+screengrabcraft-cli text shot.png
 screengrabcraft-cli commands
 screengrabcraft-cli service status
 ```
 
 The capture service takes requests too, which is how a capture is bound to a key on a Wayland
 desktop (where programs can't take global shortcuts): `screengrabcraft --capture region`,
-`--capture adjust|window|screen|all|repeat|scrolling|gif`, `--delay 5`, `--settings`, `--quit`.
+`--capture adjust|window|screen|all|repeat|scrolling|gif|text`, `--delay 5`, `--settings`, `--quit`.
 
 ## Platforms
 

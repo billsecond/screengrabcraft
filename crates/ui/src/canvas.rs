@@ -974,6 +974,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
                 ed.crop_to_area(ctx);
                 ui.close();
             }
+            crate::grab_text::item(ed, ui);
             ui.separator();
         }
         let sel = ed.session.selected();
@@ -1032,6 +1033,9 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
         if item(ui, !ed.session.doc.objects.is_empty(), "Flatten All", "") {
             ed.flatten(ctx, true);
             ui.close();
+        }
+        if ed.area.is_none() {
+            crate::grab_text::item(ed, ui);
         }
         ui.separator();
         if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {

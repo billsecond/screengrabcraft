@@ -16,7 +16,7 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{
-    DialogResult, Filter, OpenedFile, RecentItem, SaveJob, Saved, Services, SoundOut, VideoExport, VideoFormat, VideoJob,
+    DialogResult, Filter, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
 };
 
 /// Files larger than this are not opened.
@@ -48,6 +48,8 @@ pub struct DesktopServices {
     saved_rx: Receiver<Saved>,
     /// Remove Background's model, looked for once.
     model: OnceLock<Result<Arc<dyn Matting>, String>>,
+    /// Whether the system can read text off a picture (Grab Text), or why not, asked once.
+    text_ready: OnceLock<Result<(), String>>,
     /// This window is the video editor (else the picture editor).
     video: bool,
     /// The editor's settings, shared with the other editor's window.
@@ -95,7 +97,19 @@ impl DesktopServices {
                 None
             }
         };
-        DesktopServices { ctx, tx, rx, thumbs, thumb_tx, save_tx, saved_rx, model: OnceLock::new(), video, settings_file }
+        DesktopServices {
+            ctx,
+            tx,
+            rx,
+            thumbs,
+            thumb_tx,
+            save_tx,
+            saved_rx,
+            model: OnceLock::new(),
+            text_ready: OnceLock::new(),
+            video,
+            settings_file,
+        }
     }
 }
 
@@ -533,5 +547,20 @@ impl Services for DesktopServices {
 
     fn background_model(&self) -> Result<Arc<dyn Matting>, String> {
         self.model.get_or_init(screengrabcraft_desktop::models::background_model).clone()
+    }
+
+    fn text_reader(&self) -> Result<Arc<dyn ReadText>, String> {
+        self.text_ready.get_or_init(screengrabcraft_desktop::text::ready).clone()?;
+        Ok(Arc::new(SystemText))
+    }
+}
+
+/// Grab Text with the system's own text reader ([`screengrabcraft_desktop::text`]).
+struct SystemText;
+
+impl ReadText for SystemText {
+    fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
+        let lines = screengrabcraft_desktop::text::read(picture)?;
+        Ok(lines.into_iter().map(|l| TextLine { text: l.text, rect: screengrabcraft_model::Rect::new(l.x, l.y, l.w, l.h) }).collect())
     }
 }

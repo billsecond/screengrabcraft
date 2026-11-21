@@ -14,6 +14,8 @@ workspace = true
 screengrabcraft-model = { workspace = true }
 # Remove Background's model, which the editor and the command-line program lend their sessions.
 screengrabcraft-matte = { workspace = true }
+# Grab Text (text.rs): a small picture is made larger before it is read.
+screengrabcraft-render = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -45,3 +47,5 @@ winsafe = { version = "0.0.29", features = ["dwm", "shell"] }
 # Shows a file selected in its folder with Windows' own call (SHOpenFolderAndSelectItems): Explorer's
 # /select switch misses the file at times.
 opener = { version = "0.9", default-features = false, features = ["reveal"] }
+# Grab Text (text.rs): Windows' own text recognition, through its safe WinRT projection.
+windows = { workspace = true, features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Security_Cryptography", "Storage_Streams"] }

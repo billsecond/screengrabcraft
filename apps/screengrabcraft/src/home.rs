@@ -242,6 +242,7 @@ fn capture_buttons(ui: &mut Ui, delay: &mut u32, shortcut: &dyn Fn(CaptureMode) 
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
+        (CaptureMode::Text, Icon::Text, "Copy the text in an area"),
     ];
     let recordings = [
         (CaptureMode::Production, Icon::Edit, "With the camera and sound, to edit"),

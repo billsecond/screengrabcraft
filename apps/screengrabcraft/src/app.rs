@@ -41,6 +41,8 @@ pub enum Msg {
     Frozen(CaptureMode, Result<Frozen, String>),
     Picture(Raster, String),
     Saved(Result<Done, String>),
+    /// Grab Text's answer: the text read off the area, or why there is none.
+    TextRead(Result<String, String>),
 }
 
 /// What became of a finished capture.
@@ -462,6 +464,7 @@ impl Service {
                 }
             }
             Msg::Picture(pic, source) => self.finish(pic, &source, Action::Default),
+            Msg::TextRead(result) => self.text_read(result),
             Msg::Saved(result) => {
                 self.keeping = false;
                 match result {
@@ -656,7 +659,8 @@ impl Service {
                     .collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
                 let after = &self.settings.after_capture;
-                overlay.preview = after.show_bar;
+                // Grab Text reads the area at once: there is nothing to choose on a bar.
+                overlay.preview = after.show_bar && mode != CaptureMode::Text;
                 if mode == CaptureMode::Adjust {
                     // The area stays to be adjusted, starting from the last one.
                     overlay.preview = true;
@@ -713,6 +717,12 @@ impl Service {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
                 let origin = (area.x.max(0) as u32, area.y.max(0) as u32);
                 let Some(pic) = mon.picture.crop(origin.0, origin.1, area.w, area.h) else { return };
+                if run.mode == CaptureMode::Text {
+                    self.settings.last_region = Some(desktop);
+                    store::save_settings(&self.settings);
+                    self.read_text(pic);
+                    return;
+                }
                 let pic = self.with_pointer(&pic, &m, (mon.picture.width(), mon.picture.height()), origin, run.pointer);
                 self.settings.last_region = Some(desktop);
                 store::save_settings(&self.settings);
@@ -720,6 +730,36 @@ impl Service {
                 self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action));
                 self.ctx.request_repaint();
             }
+        }
+    }
+
+    /// Grab Text: reads the text off the area on a worker thread (the system's own reader, on
+    /// this computer); [`App::text_read`] copies it.
+    fn read_text(&mut self, pic: Raster) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let spawned = std::thread::Builder::new().name("grab-text".into()).spawn(move || {
+            let read = std::panic::catch_unwind(|| screengrabcraft_desktop::text::read(&pic))
+                .unwrap_or_else(|_| Err("the text reader failed unexpectedly".to_string()));
+            let _ = tx.send(Msg::TextRead(read.map(|lines| screengrabcraft_desktop::text::joined(&lines))));
+            ctx.request_repaint();
+        });
+        if let Err(e) = spawned {
+            self.notify("The text could not be read", e.to_string(), None, None, true);
+        }
+    }
+
+    /// Grab Text's answer: the text goes on the clipboard, and the notice shows how it begins.
+    fn text_read(&mut self, read: Result<String, String>) {
+        match read {
+            Ok(text) if text.trim().is_empty() => self.notify("No text was found in the area", "", None, None, false),
+            Ok(text) => match screengrabcraft_desktop::clipboard::copy_text(&text) {
+                Ok(()) => {
+                    log::info!("grab text: {} lines copied", text.lines().count());
+                    self.notify("Text copied", text_preview(&text), None, None, false);
+                }
+                Err(e) => self.notify("The text could not be copied", e, None, None, true),
+            },
+            Err(e) => self.notify("The text could not be read", e, None, None, true),
         }
     }
 
@@ -1243,6 +1283,24 @@ fn editor_back() {
     let _ = std::thread::Builder::new().name("editor".into()).spawn(|| launch::tell_editor(launch::EDITOR_SHOW));
 }
 
+/// How text read by Grab Text begins, for its notice: its first three lines, each cut short.
+fn text_preview(text: &str) -> String {
+    let mut lines: Vec<String> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .map(|l| {
+            let l = l.trim();
+            if l.chars().count() > 60 { format!("{}\u{2026}", l.chars().take(59).collect::<String>()) } else { l.to_string() }
+        })
+        .collect();
+    let more = text.lines().filter(|l| !l.trim().is_empty()).count().saturating_sub(3);
+    if more > 0 {
+        lines.push(format!("and {more} more line{}", if more == 1 { "" } else { "s" }));
+    }
+    lines.join("\n")
+}
+
 /// What a capture taken while recording comes to (`recording`): saved rather than opened in the
 /// editor now, and held to open once the recording is over. (save, edit, held)
 fn held_while_recording(save: bool, edit: bool, recording: bool) -> (bool, bool, bool) {
@@ -1342,6 +1400,17 @@ fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grab_texts_notice_shows_how_the_text_begins() {
+        assert_eq!(text_preview("one\n\ntwo\n"), "one\ntwo");
+        let long = "x".repeat(80);
+        let p = text_preview(&format!("{long}\nb\nc\nd\ne"));
+        assert!(p.starts_with(&"x".repeat(59)) && p.contains('\u{2026}'), "{p}");
+        assert!(p.ends_with("and 2 more lines"), "{p}");
+        assert!(text_preview("a\nb\nc\nd").ends_with("and 1 more line"));
+        assert_eq!(text_preview(""), "");
+    }
 
     #[test]
     fn a_picture_taken_while_recording_is_saved_and_held_for_the_editor() {
