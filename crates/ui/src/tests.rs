@@ -2462,3 +2462,48 @@ fn the_welcome_and_the_named_tool_bar_are_readable_in_the_light_look() {
     h.get_by_label("Capture an Area");
     crate::quick_tests::shot(&mut h, "welcome-light");
 }
+
+#[test]
+fn cut_out_takes_the_strip_dragged_across_out_and_joins_the_rest() {
+    let mut ed = editor();
+    // Something right of the strip, to move with the picture.
+    ed.session.execute("object.add", &serde_json::json!({"object": {"type": "rect", "rect": {"x": 300, "y": 100, "w": 40, "h": 40}}})).unwrap();
+    let mut h = ready(ed, Tool::CutOut);
+    for label in ["Cut Out", "Columns", "Rows", "Straight", "Saw", "Wave"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // Columns 100 to 200 out, dragged a little slanted (only across counts).
+    let (a, b) = (at(&h, 100.0, 40.0), at(&h, 200.0, 260.0));
+    drag(&mut h, a, b);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/cut-out-columns.png"));
+    }
+    {
+        let ed = h.state();
+        assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (300, 300));
+        let o = ed.session.doc.objects.first().unwrap();
+        assert!((o.shape.rect().unwrap().x - 200.0).abs() < 1.5, "{:?}", o.shape.rect());
+    }
+    // Rows, with a wave: a see-through gap along the join.
+    h.state_mut().settings.cut_out.rows = true;
+    h.state_mut().settings.cut_out.edge = screengrabcraft_model::settings::CutEdge::Wave;
+    h.run_steps(2);
+    let (a, b) = (at(&h, 20.0, 50.0), at(&h, 20.0, 110.0));
+    drag(&mut h, a, b);
+    {
+        let ed = h.state();
+        assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (300, 240));
+        assert!((0..300).any(|x| ed.session.doc.base.pixel(x, 50).is_some_and(|p| p.a == 0)), "a gap along the join");
+    }
+    // One undo step each.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    assert_eq!((h.state().session.doc.width(), h.state().session.doc.height()), (400, 300));
+    // A click takes nothing out.
+    let p = at(&h, 50.0, 50.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.doc.width(), 400);
+}

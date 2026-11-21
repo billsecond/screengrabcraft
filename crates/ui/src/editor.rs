@@ -28,6 +28,8 @@ pub enum Tool {
     /// Fills an area of the picture, or a shape, with a colour.
     Fill,
     Crop,
+    /// Takes a strip out of the picture, all the way across, and joins the rest.
+    CutOut,
     /// Selects an area of the picture itself, to move, copy, cut, delete or crop to.
     Area,
     /// The starred quick styles of every tool in the panel; the canvas selects and moves, as
@@ -37,7 +39,7 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool with a key: the tool, its icon, its name and its key.
-    pub const ALL: [(Tool, Icon, &'static str, Key); 19] = [
+    pub const ALL: [(Tool, Icon, &'static str, Key); 20] = [
         (Tool::Select, Icon::Move, "Move", Key::V),
         (Tool::Hand, Icon::Hand, "Hand", Key::D),
         (Tool::Area, Icon::Marquee, "Selection", Key::Q),
@@ -57,6 +59,7 @@ impl Tool {
         (Tool::Draw(Kind::Stamp), Icon::Stamp, "Stamp", Key::G),
         (Tool::Fill, Icon::Fill, "Fill", Key::F),
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
+        (Tool::CutOut, Icon::CutOut, "Cut Out", Key::U),
     ];
 
     /// The tool bar's tools after Favorites, in groups with a gap between them: moving and
@@ -64,7 +67,7 @@ impl Tool {
     /// hiding and pointing out. Each has its own button, at full size. The Shape button stands for
     /// the rectangle and the ellipse.
     pub const BAR_GROUPS: [&'static [Tool]; 4] = [
-        &[Tool::Select, Tool::Hand, Tool::Area, Tool::Crop],
+        &[Tool::Select, Tool::Hand, Tool::Area, Tool::Crop, Tool::CutOut],
         &[
             Tool::Draw(Kind::Arrow),
             Tool::Draw(Kind::Line),
@@ -79,11 +82,12 @@ impl Tool {
     ];
 
     /// Every tool on the tool bar after Favorites, in order.
-    pub const BAR: [Tool; 18] = [
+    pub const BAR: [Tool; 19] = [
         Tool::Select,
         Tool::Hand,
         Tool::Area,
         Tool::Crop,
+        Tool::CutOut,
         Tool::Draw(Kind::Arrow),
         Tool::Draw(Kind::Line),
         Tool::Draw(Kind::Text),
@@ -1458,7 +1462,7 @@ impl Editor {
             self.crop = Some(self.session.doc.bounds());
         }
         // These act on the picture, not on a selection, and the panel shows their own settings.
-        if matches!(tool, Tool::Crop | Tool::Fill | Tool::Area) {
+        if matches!(tool, Tool::Crop | Tool::CutOut | Tool::Fill | Tool::Area) {
             self.session.select(Vec::new());
         }
     }

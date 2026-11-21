@@ -145,6 +145,11 @@ pub enum Drag {
     AreaNew {
         start: Pt,
     },
+    /// A strip being chosen with the Cut Out tool.
+    CutNew {
+        start: Pt,
+        now: Pt,
+    },
 }
 
 /// The picture's tiles on the GPU (a long scrolling capture is more than one texture).
@@ -562,6 +567,9 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 None if ed.crop.is_some_and(|c| c != ed.session.doc.bounds() && c.contains(to_img(h, &ed.view))) => CursorIcon::Move,
                 None => CursorIcon::Crosshair,
             },
+            Tool::CutOut if on_picture && ed.settings.cut_out.rows => CursorIcon::ResizeRow,
+            Tool::CutOut if on_picture => CursorIcon::ResizeColumn,
+            Tool::CutOut => CursorIcon::Default,
             // Inside the selected area (or on the piece taken out of it) a drag moves it.
             Tool::Area if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) => CursorIcon::Move,
             Tool::Area if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
@@ -666,6 +674,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     ed.drag = Some(Drag::CropNew { start });
                 }
             }
+            Tool::CutOut => ed.drag = Some(Drag::CutNew { start, now: start }),
             // The Hand tool's press pans (above), so it never gets here.
             Tool::Hand => {}
             // A fill happens where the button went down; moving on before letting go is no drag.
@@ -792,6 +801,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.touch();
             }
             Some(Drag::Rubber { start, .. }) => ed.drag = Some(Drag::Rubber { start, now: inside }),
+            Some(Drag::CutNew { start, .. }) => ed.drag = Some(Drag::CutNew { start, now: inside }),
             Some(Drag::CropNew { start }) => {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.crop = Rect::from_points(start, end).intersect(bounds);
@@ -863,6 +873,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 }
                 ed.session.commit()
             }
+            Some(Drag::CutNew { start, now }) => cut_strip(ed, &ctx, start, now),
             // Too small to be an area: none.
             Some(Drag::AreaNew { .. }) => {
                 if ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
@@ -894,6 +905,29 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 /// Whether a kind is a shape with an inside to fill.
 fn has_inside(kind: Kind) -> bool {
     matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
+}
+
+/// The strip a Cut Out drag from `start` to `now` takes out: all the way down the picture
+/// (columns) or across it (rows), in whole pixels; none if it's under a pixel.
+pub fn cut_strip_rect(bounds: Rect, start: Pt, now: Pt, rows: bool) -> Option<Rect> {
+    let (a, b, len) = if rows { (start.y, now.y, bounds.h) } else { (start.x, now.x, bounds.w) };
+    let (lo, hi) = (a.min(b).clamp(0.0, len).round(), a.max(b).clamp(0.0, len).round());
+    if hi - lo < 1.0 {
+        return None;
+    }
+    Some(if rows { Rect::new(0.0, lo, bounds.w, hi - lo) } else { Rect::new(lo, 0.0, hi - lo, bounds.h) })
+}
+
+/// Cut Out at the end of a drag: the strip chosen is taken out and the rest joined, as the
+/// tool's settings say. One undo step.
+fn cut_strip(ed: &mut Editor, ctx: &egui::Context, start: Pt, now: Pt) {
+    let rows = ed.settings.cut_out.rows;
+    let Some(strip) = cut_strip_rect(ed.session.doc.bounds(), start, now, rows) else { return };
+    let (from, to) = if rows { (strip.y, strip.y + strip.h) } else { (strip.x, strip.x + strip.w) };
+    let edge = ed.settings.cut_out.edge.name();
+    if ed.run(ctx, "image.cutOut", serde_json::json!({"from": from, "to": to, "rows": rows, "edge": edge})).is_some() {
+        ed.area = None;
+    }
 }
 
 /// The Fill tool at an image point: a shape with an inside there takes the colour as its fill;
@@ -973,6 +1007,23 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
             if item(ui, true, "Crop to Selection", "") {
                 ed.crop_to_area(ctx);
                 ui.close();
+            }
+            if let Some(a) = ed.area {
+                for (label, rows) in [("Cut Out Its Columns", false), ("Cut Out Its Rows", true)] {
+                    let tip = if rows {
+                        "Take these rows out of the picture and join the rest"
+                    } else {
+                        "Take these columns out of the picture and join the rest"
+                    };
+                    if ui.add(egui::Button::new(label)).on_hover_text(tip).clicked() {
+                        let (start, end) = (Pt::new(a.x, a.y), Pt::new(a.x + a.w, a.y + a.h));
+                        let keep = ed.settings.cut_out.rows;
+                        ed.settings.cut_out.rows = rows;
+                        cut_strip(ed, ctx, start, end);
+                        ed.settings.cut_out.rows = keep;
+                        ui.close();
+                    }
+                }
             }
             crate::grab_text::item(ed, ui);
             ui.separator();
@@ -1061,7 +1112,8 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     let editing_before = ed.editing.is_some();
     ed.stop_editing();
     match ed.tool {
-        Tool::Hand => {}
+        // A click takes nothing out: the strip is dragged across.
+        Tool::Hand | Tool::CutOut => {}
         Tool::Select | Tool::Favorites | Tool::Crop => {
             if ed.tool == Tool::Crop {
                 return;
@@ -1245,6 +1297,27 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let galley = painter.layout_no_wrap(label, egui::FontId::proportional(12.0), Color32::WHITE);
         let bg = egui::Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
         painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
+        painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    }
+
+    // Cut Out: the strip being chosen, all the way across the picture, with its width.
+    if let Some(Drag::CutNew { start, now }) = ed.drag
+        && let Some(strip) = cut_strip_rect(ed.session.doc.bounds(), start, now, ed.settings.cut_out.rows)
+    {
+        let r = ed.view.rect_to_screen(strip);
+        painter.rect_filled(r, 0.0, Color32::from_rgba_unmultiplied(220, 40, 40, 90));
+        let edge = Stroke::new(1.5, Color32::WHITE);
+        let (a, b) = if ed.settings.cut_out.rows {
+            ([r.left_top(), r.right_top()], [r.left_bottom(), r.right_bottom()])
+        } else {
+            ([r.left_top(), r.left_bottom()], [r.right_top(), r.right_bottom()])
+        };
+        painter.extend(egui::Shape::dashed_line(&a, edge, 6.0, 4.0));
+        painter.extend(egui::Shape::dashed_line(&b, edge, 6.0, 4.0));
+        let size = if ed.settings.cut_out.rows { strip.h } else { strip.w };
+        let galley = painter.layout_no_wrap(format!("{size:.0} px"), egui::FontId::proportional(12.0), Color32::WHITE);
+        let bg = egui::Rect::from_center_size(r.center(), galley.size() + vec2(12.0, 6.0));
+        painter.rect_filled(bg, 4.0, Color32::from_black_alpha(170));
         painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
     }
 

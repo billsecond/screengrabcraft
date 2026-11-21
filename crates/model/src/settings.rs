@@ -845,6 +845,9 @@ pub struct EditorSettings {
     /// What the Fill tool fills with.
     #[serde(deserialize_with = "or_default")]
     pub fill: FillTool,
+    /// What the Cut Out tool takes out (columns or rows) and how the parts meet.
+    #[serde(deserialize_with = "or_default")]
+    pub cut_out: CutOutTool,
     /// What each tool sets about the shapes it draws besides their style (arrow heads, corners,
     /// a callout's form and tail, the stamp, round or square).
     #[serde(deserialize_with = "or_default")]
@@ -881,6 +884,52 @@ impl Default for FillTool {
     fn default() -> FillTool {
         FillTool { color: crate::color::Color::RED, tolerance: 32 }
     }
+}
+
+/// How the two parts of a picture meet after Cut Out.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CutEdge {
+    #[default]
+    Straight,
+    /// Teeth, as a saw's, with a thin see-through gap.
+    Saw,
+    /// A gentle wave, with a thin see-through gap.
+    Wave,
+}
+
+impl CutEdge {
+    pub const ALL: [CutEdge; 3] = [CutEdge::Straight, CutEdge::Saw, CutEdge::Wave];
+
+    /// Its name in commands.
+    pub fn name(self) -> &'static str {
+        match self {
+            CutEdge::Straight => "straight",
+            CutEdge::Saw => "saw",
+            CutEdge::Wave => "wave",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CutEdge::Straight => "Straight",
+            CutEdge::Saw => "Saw",
+            CutEdge::Wave => "Wave",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<CutEdge> {
+        CutEdge::ALL.into_iter().find(|e| e.name().eq_ignore_ascii_case(s.trim()))
+    }
+}
+
+/// The Cut Out tool's settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CutOutTool {
+    /// Rows (a strip from side to side) rather than columns (one from top to bottom).
+    pub rows: bool,
+    pub edge: CutEdge,
 }
 
 /// A setting that can't be read is its default.

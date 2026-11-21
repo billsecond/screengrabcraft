@@ -546,3 +546,33 @@ fn flatten_draws_only_the_annotations_given_or_all() {
     assert_eq!(s.doc.base.pixel(120, 30), Some(Color::rgb(0, 0, 255)));
     assert!(s.execute("object.flatten", &json!({"ids": [999]})).is_err(), "no such annotation");
 }
+
+#[test]
+fn cut_out_takes_a_strip_out_and_moves_the_annotations_with_the_picture() {
+    let mut s = session();
+    let right = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 20, "w": 10, "h": 10}}));
+    let inside = add(&mut s, json!({"type": "step", "center": {"x": 90, "y": 50}, "number": 1}));
+    let left = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 20, "w": 10, "h": 10}}));
+    // Columns 80 to 120 out (given either way round), with a saw's edge.
+    s.execute("image.cutOut", &json!({"from": 120, "to": 80, "edge": "saw"})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (160, 100));
+    assert_eq!(s.doc.get(right).unwrap().shape.rect().unwrap().x, 110.0);
+    assert_eq!(s.doc.get(left).unwrap().shape.rect().unwrap().x, 10.0);
+    assert!(matches!(s.doc.get(inside).unwrap().shape, Shape::Step { center, .. } if center.x == 80.0), "to the join");
+    assert_eq!(s.undo_label(), Some("Cut Out"));
+    // Rows, straight.
+    s.execute("image.cutOut", &json!({"from": 0, "to": 10, "rows": true})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (160, 90));
+    assert_eq!(s.doc.get(right).unwrap().shape.rect().unwrap().y, 10.0);
+    // One undo step each.
+    s.execute("edit.undo", &json!({})).unwrap();
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+    assert_eq!(s.doc.get(right).unwrap().shape.rect().unwrap().x, 150.0);
+    // Nothing, everything, or a strange edge: refused, nothing changed.
+    assert!(s.execute("image.cutOut", &json!({"from": 50, "to": 50})).is_err());
+    assert!(s.execute("image.cutOut", &json!({"from": -10, "to": 900})).is_err());
+    assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": "zigzag"})).is_err());
+    assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": 3})).is_err());
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+}

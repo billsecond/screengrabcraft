@@ -349,6 +349,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             area_panel(ed, ui);
             return;
         }
+        (None, Tool::CutOut) => {
+            cut_out_panel(ed, ui);
+            return;
+        }
         (None, Tool::Fill) => {
             ui.heading("Fill");
             ui.add_space(6.0);
@@ -713,6 +717,42 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     if s != old {
         commit_style(ed, kind, &old, &s, first.is_some());
     }
+}
+
+/// The Cut Out tool's panel: what it takes out (columns or rows) and how the parts meet.
+fn cut_out_panel(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Cut Out");
+    ui.add_space(6.0);
+    ui.label("Drag across the picture over what to take out. The strip goes all the way across, and the rest is joined.");
+    ui.add_space(10.0);
+    let mut c = ed.settings.cut_out;
+    ui.label(egui::RichText::new("Take out").size(12.0).color(t.muted));
+    ui.horizontal(|ui| {
+        if ui.selectable_label(!c.rows, "Columns").on_hover_text("A strip from top to bottom: the picture gets narrower").clicked() {
+            c.rows = false;
+        }
+        if ui.selectable_label(c.rows, "Rows").on_hover_text("A strip from side to side: the picture gets shorter").clicked() {
+            c.rows = true;
+        }
+    });
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new("Where the parts meet").size(12.0).color(t.muted));
+    ui.horizontal(|ui| {
+        for e in screengrabcraft_model::settings::CutEdge::ALL {
+            if ui.selectable_label(c.edge == e, e.label()).clicked() {
+                c.edge = e;
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.label(egui::RichText::new("A saw or a wave leaves a thin see-through gap, so it shows something was taken out.").size(12.0).color(t.muted));
+    if c != ed.settings.cut_out {
+        ed.settings.cut_out = c;
+        ed.services.save_settings(&ed.settings);
+    }
+    ui.add_space(12.0);
+    crate::widgets::tips(ui, &[("Drag", "across the part to take out."), ("Undo", "puts it back (Ctrl+Z).")]);
 }
 
 /// The Fill tool's own settings, under its colours: any other colour, and the tolerance.

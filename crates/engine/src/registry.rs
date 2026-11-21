@@ -174,6 +174,15 @@ pub static COMMANDS: &[CommandSpec] = &[
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
     cmd!(
+        "image.cutOut",
+        "Cut Out",
+        "Image",
+        None,
+        r#"{"from": px, "to": px, "rows"?: false, "edge"?: "straight"|"saw"|"wave"} — takes the columns (or rows) from..to out of the picture and joins the rest"#,
+        always,
+        cut_out
+    ),
+    cmd!(
         "image.fill",
         "Fill",
         "Image",
@@ -608,6 +617,34 @@ fn crop(s: &mut Session, p: &Value) -> Result<Value> {
         area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
     s.doc.base = effects::crop(&s.doc.base, area)?;
     shift_all(&mut s.doc, -(x as f32), -(y as f32));
+    Ok(json!({ "width": s.doc.width(), "height": s.doc.height() }))
+}
+
+/// Cut Out: the columns (or rows) `from..to` taken out and the rest joined; the annotations past
+/// the strip move back with the picture, those in it go to the join.
+fn cut_out(s: &mut Session, p: &Value) -> Result<Value> {
+    use screengrabcraft_render::cut;
+    let rows = boolean(p, "rows", false);
+    let edge = match p.get("edge") {
+        None | Some(Value::Null) => cut::Edge::default(),
+        Some(Value::String(e)) => cut::Edge::from_name(e).ok_or_else(|| EngineError::Params("`edge` is straight, saw or wave".to_string()))?,
+        Some(_) => return Err(EngineError::Params("`edge` is straight, saw or wave".to_string())),
+    };
+    let across = if rows { s.doc.height() } else { s.doc.width() } as f32;
+    let (a, b) = (need(p, "from")?, need(p, "to")?);
+    let (from, to) = (a.min(b).clamp(0.0, across).round(), a.max(b).clamp(0.0, across).round());
+    if to - from < 1.0 {
+        return Err(EngineError::Params("the strip to take out is empty".to_string()));
+    }
+    if to - from >= across {
+        return Err(EngineError::Params("that would take out all of the picture".to_string()));
+    }
+    s.doc.base = cut::cut_out(&s.doc.base, from as u32, to as u32, !rows, edge)?;
+    if rows {
+        s.doc.map_objects(&|q| Pt::new(q.x, cut::moved(q.y, from, to)), 1.0);
+    } else {
+        s.doc.map_objects(&|q| Pt::new(cut::moved(q.x, from, to), q.y), 1.0);
+    }
     Ok(json!({ "width": s.doc.width(), "height": s.doc.height() }))
 }
 
