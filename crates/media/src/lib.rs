@@ -27,6 +27,7 @@ pub mod recording;
 pub mod stock;
 pub mod timeline;
 pub mod yuv;
+pub mod zoom;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MediaError {

@@ -120,6 +120,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
   clip's ends to trim it, or the clip to slide it along its track.
 - **S** splits at the playhead: the selected clip's track, or every track.
+- **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
+  a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
+  should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
+  starts where another ends pans straight from one to the other. Only the screen and the pointer
+  are zoomed; the camera, titles and captions stay where they are.
 - **Text** (T) puts words on the video at the playhead, ready to type over. The **Library** at
   the left has titles, lower thirds, news graphics, callouts, arrows, a countdown, an end card, a
   checklist, a click and a **blur** that hides what's under it (a password, an address), and

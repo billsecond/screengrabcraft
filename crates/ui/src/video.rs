@@ -204,8 +204,8 @@ pub struct VideoView {
     playing: Option<Playing>,
     composer: Composer,
     texture: Option<egui::TextureHandle>,
-    /// What the texture shows: (playhead, revision).
-    shown: Option<(u64, u64)>,
+    /// What the texture shows: (playhead, revision, zooms shown).
+    shown: Option<(u64, u64, bool)>,
     pub selected: Option<(usize, usize)>,
     /// A stretch chosen on the timeline.
     pub range: Option<(u64, u64)>,
@@ -1669,7 +1669,10 @@ impl VideoView {
 
     /// The picture at the playhead, as a texture: made again when the playhead or the edits move.
     fn refresh_frame(&mut self, ctx: &egui::Context) {
-        let key = (self.playhead, self.session.revision());
+        // While a zoom is chosen (and the video is still) the whole screen shows, with the zoom's
+        // frame to place.
+        self.composer.zoom = !self.zoom_chosen() || self.is_playing();
+        let key = (self.playhead, self.session.revision(), self.composer.zoom);
         if self.shown != Some(key) {
             let pic = self.composer.frame(&self.session.timeline, self.playhead);
             let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());

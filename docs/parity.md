@@ -209,7 +209,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Items come and go: fade, slide, pop | Has | |
-| **Zoom into part of the screen and back (zoom and pan)** | Missing | |
+| **Zoom into part of the screen and back (zoom and pan)** | Has (0.1.55) | smooth or at once; touching zooms pan from one to the next |
 | Zoom that follows the clicks by itself | Missing | |
 | Keyframe animation (place, size, opacity over time) | Missing | |
 | Motion along a path | Missing | |
@@ -274,39 +274,39 @@ By how much someone using it every day would miss each one. Built ones move to a
 
 1. Grab Text: the text of a picture, an area of it, or an area of the screen, to copy
    (0.1.54; Windows).
+2. Zoom and pan in the video editor: zoom into part of the screen and back (0.1.55).
 
 **Still to build, in this order**
 
-1. Zoom and pan in the video editor: zoom into part of the screen and back.
-2. Cut Out: take a strip out of a picture and close the gap.
-3. Speed up or slow down a stretch of video.
-4. Fade sound in and out; take background noise out.
-5. Edit captions: put a word right, split, join, move.
-6. Scrolling capture that scrolls by itself.
-7. Pointer highlight, spotlight and magnifier; click sounds.
-8. Step badges as letters or Roman numerals, and other badge shapes.
-9. Polygons, triangles and stars; curved arrows.
-10. A stamp library with search, emoji, and pictures of your own as stamps.
-11. Markers on the timeline, kept as chapters in the MP4.
-12. A frame saved as a picture; just the chosen stretch; just the sound.
-13. Hold a frame.
-14. Keys pressed shown in the video.
-15. Any font on the computer.
-16. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-17. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+1. Cut Out: take a strip out of a picture and close the gap.
+2. Speed up or slow down a stretch of video.
+3. Fade sound in and out; take background noise out.
+4. Edit captions: put a word right, split, join, move.
+5. Scrolling capture that scrolls by itself.
+6. Pointer highlight, spotlight and magnifier; click sounds.
+7. Step badges as letters or Roman numerals, and other badge shapes.
+8. Polygons, triangles and stars; curved arrows.
+9. A stamp library with search, emoji, and pictures of your own as stamps.
+10. Markers on the timeline, kept as chapters in the MP4.
+11. A frame saved as a picture; just the chosen stretch; just the sound.
+12. Hold a frame.
+13. Keys pressed shown in the video.
+14. Any font on the computer.
+15. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+16. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-18. Rotate, group and align annotations; select all of one kind.
-19. Magic wand, eraser, ellipse and freehand selections.
-20. Camera background removed, or a colour removed.
-21. Transitions between clips; keyframe animation.
-22. Drawing on the screen while recording.
-23. Volume along a clip; music lowered under the voice; levels evened out.
-24. Tags, favourites, and captures sorted by program.
-25. Templates; several pictures combined into one.
-26. A picture per click made into a how-to guide.
-27. Groups, pushing later clips along, locked and solo tracks, clip colours.
-28. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-29. Print; batch changes; captures on a timer or at a set time.
-30. Cutting words from the transcript; filler words taken out.
-31. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+17. Rotate, group and align annotations; select all of one kind.
+18. Magic wand, eraser, ellipse and freehand selections.
+19. Camera background removed, or a colour removed.
+20. Transitions between clips; keyframe animation.
+21. Drawing on the screen while recording.
+22. Volume along a clip; music lowered under the voice; levels evened out.
+23. Tags, favourites, and captures sorted by program.
+24. Templates; several pictures combined into one.
+25. A picture per click made into a how-to guide.
+26. Groups, pushing later clips along, locked and solo tracks, clip colours.
+27. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+28. Print; batch changes; captures on a timer or at a set time.
+29. Cutting words from the transcript; filler words taken out.
+30. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

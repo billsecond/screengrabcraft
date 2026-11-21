@@ -306,6 +306,9 @@ pub enum What {
     Transition {
         kind: TransitionKind,
     },
+    /// Zooms the screen into part of it for as long as it lasts, its frame where its place says
+    /// (see [`crate::zoom`]).
+    Zoom,
 }
 
 impl Default for What {
@@ -375,6 +378,7 @@ impl Item {
             What::Text { style, title, .. } if style.has_words() && !title.trim().is_empty() => title.clone(),
             What::Text { style, .. } => style_name(*style).to_string(),
             What::Transition { kind } => transition_name(*kind).to_string(),
+            What::Zoom => "Zoom".to_string(),
         }
     }
 }
@@ -445,6 +449,8 @@ pub fn transition_name(k: TransitionKind) -> &'static str {
 /// A group of the library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Group {
+    /// Zooming into part of the screen and back.
+    Zoom,
     /// Transitions with the look of the news.
     NewsTransitions,
     /// Transitions for lessons and walk-throughs: chapters, steps, progress.
@@ -458,11 +464,20 @@ pub enum Group {
 }
 
 impl Group {
-    pub const ALL: [Group; 7] =
-        [Group::LowerThirds, Group::News, Group::Titles, Group::Overlays, Group::NewsTransitions, Group::TrainingTransitions, Group::Transitions];
+    pub const ALL: [Group; 8] = [
+        Group::Zoom,
+        Group::LowerThirds,
+        Group::News,
+        Group::Titles,
+        Group::Overlays,
+        Group::NewsTransitions,
+        Group::TrainingTransitions,
+        Group::Transitions,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Group::Zoom => "Zoom and Pan",
             Group::News => "News and Broadcast",
             Group::Titles => "Titles",
             Group::LowerThirds => "Lower Thirds",
@@ -505,6 +520,13 @@ fn transition(kind: TransitionKind, len: u64) -> Item {
     }
 }
 
+/// A zoom of four seconds into the frame at `place` (its middle and how wide), going in and out
+/// smoothly.
+fn zoom_item(place: Placement) -> Item {
+    let ease = Anim { kind: AnimKind::Fade, len: crate::zoom::EASE_US };
+    Item { len: 4_000_000, what: What::Zoom, place, intro: ease, outro: ease, ..Item::default() }
+}
+
 /// The library: titles, lower thirds, callouts and overlays, transitions. All drawn in code.
 pub fn library() -> Vec<Template> {
     let p = |x: f32, y: f32, w: f32| Placement { x, y, w, opacity: 1.0 };
@@ -516,6 +538,14 @@ pub fn library() -> Vec<Template> {
     let (red, blue, amber, teal) = ("#d0021b", "#0b5fff", "#f5a524", "#22c1a4");
     use Group::*;
     vec![
+        t("zoom", "Zoom in", Zoom, zoom_item(p(0.5, 0.5, 0.5))),
+        t("zoom-close", "Zoom in close", Zoom, zoom_item(p(0.5, 0.5, 0.3))),
+        t(
+            "zoom-cut",
+            "Zoom in at once",
+            Zoom,
+            Item { intro: Anim { kind: AnimKind::None, len: 0 }, outro: Anim { kind: AnimKind::None, len: 0 }, ..zoom_item(p(0.5, 0.5, 0.4)) },
+        ),
         t(
             "news-breaking",
             "Breaking news",

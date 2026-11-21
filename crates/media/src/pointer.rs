@@ -375,20 +375,30 @@ fn stamp(out: &mut Raster, shape: &Shape, x: f32, y: f32, f: f32) {
 /// Draws the pointer as it was at recording time `t` onto a picture of the screen track made
 /// `scale` times its size: its clicks' rings, then the pointer itself.
 pub fn draw(out: &mut Raster, track: &Track, look: Look, t: u64, scale: f32, fallback: Option<&Shape>) {
+    draw_view(out, track, look, t, (scale, 0.0, 0.0), fallback);
+}
+
+/// [`draw`] onto a picture of part of the screen (a zoom): a point `(x, y)` of the recording
+/// lands at `((x - left) * scale, (y - top) * scale)`, `view` being `(scale, left, top)`.
+pub fn draw_view(out: &mut Raster, track: &Track, look: Look, t: u64, view: (f32, f32, f32), fallback: Option<&Shape>) {
+    let (scale, left, top) = view;
     let look = look.checked();
-    if !look.show || track.is_empty() || !scale.is_finite() || scale <= 0.0 {
+    if !look.show || track.is_empty() || !scale.is_finite() || scale <= 0.0 || !left.is_finite() || !top.is_finite() {
         return;
     }
+    let at = |x: f32, y: f32| ((x - left) * scale, (y - top) * scale);
     let size = look.size * scale;
     if look.clicks {
         for (c, p) in track.rings(t) {
-            ring(out, c.x * scale, c.y * scale, 34.0 * size, p, c.button);
+            let (x, y) = at(c.x, c.y);
+            ring(out, x, y, 34.0 * size, p, c.button);
         }
     }
     let Some(pose) = track.pose(t, look.smooth) else { return };
     let Some(shape) = track.shape(pose.shape).or(fallback) else { return };
     let f = f32::from(shape.nominal) * size / (shape.pic.width() as f32).max(1.0);
-    stamp(out, shape, pose.x * scale, pose.y * scale, f);
+    let (x, y) = at(pose.x, pose.y);
+    stamp(out, shape, x, y, f);
 }
 
 #[cfg(test)]
