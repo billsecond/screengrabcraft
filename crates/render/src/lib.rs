@@ -11,6 +11,7 @@
 pub mod anim;
 pub mod canvas;
 pub mod codec;
+pub mod cut;
 pub mod draw;
 pub mod effects;
 pub mod lottie;

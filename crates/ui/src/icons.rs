@@ -57,6 +57,8 @@ pub enum Icon {
     Eyedropper,
     /// The Selection tool: a box of dashes round part of the picture.
     Marquee,
+    /// The Cut Out tool: a picture in two parts, a strip taken out between their saw-toothed edges.
+    CutOut,
     /// Put a window away (in the tray).
     Minimize,
     /// Start again: a circling arrow.
@@ -311,6 +313,37 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(at(8.5, 3.0), at(6.0, 0.8));
             fill_poly(vec![at(16.5, 10.5), at(18.3, 14.5), at(14.7, 14.5)], color);
             p.circle_filled(at(16.5, 15.0), 1.8 * u, color);
+        }
+        Icon::CutOut => {
+            // The left part, its right edge a saw; the right part, its left edge one too.
+            poly(
+                vec![
+                    at(8.0, 3.0),
+                    at(2.5, 3.0),
+                    at(2.5, 17.0),
+                    at(8.0, 17.0),
+                    at(9.5, 14.0),
+                    at(8.0, 11.0),
+                    at(9.5, 8.0),
+                    at(8.0, 5.0),
+                    at(8.0, 3.0),
+                ],
+                false,
+            );
+            poly(
+                vec![
+                    at(12.0, 3.0),
+                    at(17.5, 3.0),
+                    at(17.5, 17.0),
+                    at(12.0, 17.0),
+                    at(13.5, 14.0),
+                    at(12.0, 11.0),
+                    at(13.5, 8.0),
+                    at(12.0, 5.0),
+                    at(12.0, 3.0),
+                ],
+                false,
+            );
         }
         Icon::Crop => {
             poly(vec![at(6.0, 2.0), at(6.0, 14.0), at(18.0, 14.0)], false);

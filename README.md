@@ -196,6 +196,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
+- **Cut Out** (U): drag across the picture over what to take out (columns, or rows) and the rest
+  is joined, straight or with a saw or a wave and a thin see-through gap. Annotations past the strip
+  move with the picture. An area chosen with the Selection tool can be cut out from its right-click
+  menu too.
 - **Properties and Effects, docked at the right**: Properties (the quick styles and the tool
   properties) over Effects (border, drop shadow, torn edge, round corners, brightness and
   contrast, each opened with its settings and Apply; greyscale and invert under Colours). Drag
