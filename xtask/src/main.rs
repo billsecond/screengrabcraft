@@ -7,6 +7,7 @@ mod assets;
 mod ico;
 mod icon;
 mod layers;
+mod names;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -17,9 +18,12 @@ usage: cargo xtask <command>
 
 commands:
   assets          check that every icon/image/font/asset is attributed in ATTRIBUTION.md
+  names [hash <word>]
+                  check that no file names the products ScreenGrabCraft is modelled on, or their
+                  maker (hash: print the entry for another word)
   layers          enforce the crate dependency layering (docs/architecture.md)
   wasm            cargo check --target wasm32-unknown-unknown for the crates the browser build uses
-  ci              fmt --check, clippy -D warnings, test, assets, layers, wasm (stops at first failure)
+  ci              fmt --check, clippy -D warnings, test, assets, names, layers, wasm (stops at first failure)
   icon            draw both app icons (original artwork, in code) into assets/app-icon
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico
@@ -34,6 +38,7 @@ fn main() -> ExitCode {
     let rest: Vec<&str> = args.iter().skip(1).map(String::as_str).collect();
     let result = match args.first().map(String::as_str) {
         Some("assets") => assets::run(&root()),
+        Some("names") => names::run(&root(), &rest),
         Some("layers") => cmd_layers(),
         Some("wasm") => cmd_wasm(),
         Some("ci") => cmd_ci(),
@@ -163,6 +168,7 @@ fn cmd_ci() -> Result<(), String> {
             }),
         ),
         ("assets", Box::new(|| assets::run(&root()))),
+        ("names", Box::new(|| names::run(&root(), &[]))),
         ("layers", Box::new(cmd_layers)),
         ("wasm", Box::new(cmd_wasm)),
     ];

@@ -2,7 +2,7 @@
 
 Every non-code asset in this repository (fonts, icons, images, example files) is listed here with its author, source and licence. `cargo xtask assets` (part of `cargo xtask ci`) fails if an asset file is missing from this table.
 
-**Policy (mandatory):** ScreenGrabCraft contains **no TechSmith, Microsoft, Apple, Google or other vendor's iconography, images, templates, themes, sounds, fonts or other assets**. Every asset is original work by ScreenGrabCraft contributors or third-party material under an open licence (OSI open source, public domain / CC0, or a Creative Commons licence that allows redistribution). Screenshots of other vendors' software are never committed.
+**Policy (mandatory):** ScreenGrabCraft contains **no Microsoft, Apple, Google or other vendor's iconography, images, templates, themes, sounds, fonts or other assets**. Every asset is original work by ScreenGrabCraft contributors or third-party material under an open licence (OSI open source, public domain / CC0, or a Creative Commons licence that allows redistribution). Screenshots of other vendors' software are never committed.
 
 Generated-in-code art is original and has no file to list: the tool icons of the editor and the capture overlay (`crates/ui/src/icons.rs`), the tray and menu-bar icons (`crates/desktop/src/tray_icon.rs`), the stamps (`crates/render/src/stamp.rs`) and the theme colours (`crates/ui/src/theme.rs`). The app icon files below are written by `cargo xtask icon` from the drawings in `xtask/src/art.rs`.
 

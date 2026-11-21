@@ -1,10 +1,10 @@
-# The editor's tools, compared with Snagit's
+# The editor's tools
 
-Snagit's editor was observed black-box (from a labelled picture of its window); nothing of it is
-copied beyond feature names. This page lists what its tool area has, what ScreenGrabCraft's editor
+A widely used capture editor was observed black-box (from a labelled picture of its window);
+nothing of it is copied beyond feature names. This page lists what its tool area has, what ScreenGrabCraft's editor
 had before 0.1.19, and what is still missing.
 
-## What Snagit's editor has
+## What a typical capture editor has
 
 | Area | What's there |
 |---|---|
