@@ -30,6 +30,7 @@ const USAGE: &str = "usage:
   screengrabcraft-cli monitors
   screengrabcraft-cli windows
   screengrabcraft-cli render IN [-o OUT]
+  screengrabcraft-cli text IN [--json]
   screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [-o OUT]
   screengrabcraft-cli commands
   screengrabcraft-cli stitch FRAME... -o OUT
@@ -52,6 +53,7 @@ fn main() -> ExitCode {
         Some("monitors") => cmd_monitors(),
         Some("windows") => cmd_windows(),
         Some("render") => cmd_render(&args[1..]),
+        Some("text") => cmd_text(&args[1..]),
         Some("run") => cmd_run(&args[1..]),
         Some("commands") => {
             println!("{}", serde_json::to_string_pretty(&screengrabcraft_engine::describe()).unwrap_or_default());
@@ -235,6 +237,22 @@ fn cmd_render(args: &[String]) -> R<()> {
     let out = output(args).unwrap_or_else(|| input.with_extension("png"));
     write_doc(&doc, &out)?;
     println!("{}", out.display());
+    Ok(())
+}
+
+/// Grab Text: the text in a picture (as drawn, annotations included), read on this computer.
+fn cmd_text(args: &[String]) -> R<()> {
+    let ins = positional(args, &[]);
+    let input = PathBuf::from(ins.first().ok_or("text needs an input file")?);
+    let doc = read_doc(&input)?;
+    let pic = screengrabcraft_render::render(&doc).ok_or("the picture couldn't be drawn")?;
+    let lines = screengrabcraft_desktop::text::read(&pic)?;
+    if args.iter().any(|a| a == "--json") {
+        let v: Vec<Value> = lines.iter().map(|l| json!({"text": l.text, "x": l.x, "y": l.y, "width": l.w, "height": l.h})).collect();
+        println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+    } else {
+        println!("{}", screengrabcraft_desktop::text::joined(&lines));
+    }
     Ok(())
 }
 

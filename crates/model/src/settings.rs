@@ -174,10 +174,12 @@ pub enum CaptureMode {
     /// An area recorded with the computer's sound, the microphone and the camera, each on a
     /// track of its own, to edit in the editor.
     Production,
+    /// An area whose text is read and put on the clipboard (Grab Text).
+    Text,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 10] = [
+    pub const ALL: [CaptureMode; 11] = [
         CaptureMode::Region,
         CaptureMode::Adjust,
         CaptureMode::Window,
@@ -188,6 +190,7 @@ impl CaptureMode {
         CaptureMode::Gif,
         CaptureMode::Video,
         CaptureMode::Production,
+        CaptureMode::Text,
     ];
 
     pub fn label(self) -> &'static str {
@@ -202,6 +205,7 @@ impl CaptureMode {
             CaptureMode::Scrolling => "Scrolling Capture",
             CaptureMode::Video => "Record Video",
             CaptureMode::Production => "Video Production",
+            CaptureMode::Text => "Grab Text",
         }
     }
 
@@ -218,6 +222,7 @@ impl CaptureMode {
             CaptureMode::Scrolling => "scrolling",
             CaptureMode::Video => "video",
             CaptureMode::Production => "production",
+            CaptureMode::Text => "text",
         }
     }
 
@@ -250,6 +255,8 @@ pub struct Hotkeys {
     pub gif: Option<Hotkey>,
     pub video: Option<Hotkey>,
     pub production: Option<Hotkey>,
+    /// Grab Text: none by default (Print Screen and its variants are taken; macOS has no reader yet).
+    pub text: Option<Hotkey>,
     pub editor: Option<Hotkey>,
     /// While a recording runs (only then are they taken from other programs): pause it or go on,
     /// and stop it. F9 and F10, as screen recorders have them.
@@ -275,6 +282,7 @@ impl Hotkeys {
                 gif: k("G"),
                 video: k("V"),
                 production: k("P"),
+                text: None,
                 editor: k("E"),
                 // A Mac's top row is its media keys, so with Control and Shift there.
                 pause: k("F9"),
@@ -293,6 +301,7 @@ impl Hotkeys {
                 gif: Some(Hotkey::new(true, true, false, false, "PrintScreen")),
                 video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
                 production: None,
+                text: None,
                 editor: None,
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
@@ -312,6 +321,7 @@ impl Hotkeys {
             CaptureMode::Scrolling => self.scrolling.as_ref(),
             CaptureMode::Video => self.video.as_ref(),
             CaptureMode::Production => self.production.as_ref(),
+            CaptureMode::Text => self.text.as_ref(),
         }
     }
 
@@ -342,6 +352,7 @@ impl Hotkeys {
             CaptureMode::Scrolling => &mut self.scrolling,
             CaptureMode::Video => &mut self.video,
             CaptureMode::Production => &mut self.production,
+            CaptureMode::Text => &mut self.text,
         };
         *slot = key;
     }

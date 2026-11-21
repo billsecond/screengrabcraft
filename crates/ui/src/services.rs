@@ -10,6 +10,19 @@ use screengrabcraft_render::matte::Matting;
 
 pub use crate::autosave::{SaveJob, Saved};
 
+/// A line of text read off a picture, and where it is on it (in the picture's pixels).
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextLine {
+    pub text: String,
+    pub rect: screengrabcraft_model::Rect,
+}
+
+/// Reads the text in a picture (Grab Text). It runs on a thread of the editor's own.
+pub trait ReadText: Send + Sync {
+    /// The lines of text in `picture`, in reading order; none if it has no text.
+    fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String>;
+}
+
 /// A file the owner picked to open (or dropped on the window).
 #[derive(Clone, Debug)]
 pub struct OpenedFile {
@@ -339,6 +352,11 @@ pub trait Services {
     /// left to the model's first use), or why there is none here.
     fn background_model(&self) -> Result<std::sync::Arc<dyn Matting>, String> {
         Err("Remove Background needs ScreenGrabCraft Editor on the desktop: its model doesn't run in the browser".to_string())
+    }
+
+    /// What reads the text in a picture (Grab Text), on this computer, or why there is none here.
+    fn text_reader(&self) -> Result<std::sync::Arc<dyn ReadText>, String> {
+        Err("Grab Text needs ScreenGrabCraft on the desktop: the browser has no text reader".to_string())
     }
 }
 

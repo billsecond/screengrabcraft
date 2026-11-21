@@ -123,6 +123,7 @@ pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<
         CaptureMode::Scrolling,
         CaptureMode::Gif,
         CaptureMode::Repeat,
+        CaptureMode::Text,
     ]
     .into_iter()
     .map(capture)

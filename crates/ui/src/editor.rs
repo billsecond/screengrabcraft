@@ -253,6 +253,10 @@ pub struct Editor {
     pub(crate) pointer_px: Option<(i32, i32)>,
     /// Remove Background at work, and the Make a Colour Transparent window.
     pub(crate) background: crate::background::State,
+    /// Grab Text at work, and the text it read.
+    pub(crate) grab_text: crate::grab_text::State,
+    /// What Grab Text is reading is the selected area (not all of the picture).
+    pub(crate) grab_text_area: bool,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -333,6 +337,8 @@ impl Editor {
             theme_applied: None,
             pointer_px: None,
             background: crate::background::State::default(),
+            grab_text: crate::grab_text::State::default(),
+            grab_text_area: false,
         }
     }
 
@@ -352,6 +358,11 @@ impl Editor {
         self.view.grew(shift, &self.session.doc.base);
         self.area = self.area.map(|a| a.translate(shift));
         self.crop = self.crop.map(|c| c.translate(shift));
+    }
+
+    /// The notice showing at the bottom, if any (for tests).
+    pub fn toast_text(&self) -> Option<&str> {
+        self.toast.as_ref().map(|(t, ..)| t.as_str())
     }
 
     pub fn toast(&mut self, ctx: &egui::Context, text: impl Into<String>) {
@@ -1279,13 +1290,19 @@ impl Editor {
         crate::dialogs::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
+        crate::grab_text::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.dialog.is_some() || self.save_problem.is_some() || (self.pending.is_some() && !self.autosaves()) || self.background.busy() {
+        if self.dialog.is_some()
+            || self.save_problem.is_some()
+            || (self.pending.is_some() && !self.autosaves())
+            || self.background.busy()
+            || self.grab_text.busy()
+        {
             return;
         }
         let typing = ctx.egui_wants_keyboard_input() || self.editing.is_some();
@@ -1305,6 +1322,9 @@ impl Editor {
         }
         if pressed(cmd_shift(Key::N)) {
             let _ = self.services.new_capture(CaptureMode::Region);
+        }
+        if pressed(cmd_shift(Key::T)) {
+            crate::grab_text::start(self, ctx);
         }
         if typing {
             return;
@@ -1651,6 +1671,8 @@ impl Editor {
                     }
                     ui.separator();
                     crate::background::menu(self, ui);
+                    ui.separator();
+                    crate::grab_text::item(self, ui);
                 });
                 ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {
