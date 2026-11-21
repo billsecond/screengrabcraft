@@ -268,6 +268,11 @@ pub fn item_rect(item: &Item, timeline: &Timeline, store: &dyn MediaStore, w: f3
         }
         What::Text { style, title, subtitle, color } => Some(text_item(None, *style, title, subtitle, color, item.place, w, h)),
         What::Transition { .. } => None,
+        // The frame it zooms into: the video's shape, kept on the picture.
+        What::Zoom => {
+            let v = crate::zoom::frame(item);
+            Some(Rect::new(v.x * w, v.y * h, v.w * w, v.h * h))
+        }
     }
 }
 
@@ -523,6 +528,8 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
         .iter()
         .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
         .filter_map(|l| l.items.iter().find(|i| i.at <= t && t < i.end()))
+        // A zoom draws nothing of its own.
+        .filter(|i| !matches!(i.what, What::Zoom))
         .collect();
     if showing.is_empty() {
         return;
@@ -579,6 +586,8 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                 let p = (t - item.at) as f32 / item.len.max(1) as f32;
                 transition(&mut pix, *kind, p);
             }
+            // It zooms the screen under everything (see `crate::zoom`); it draws nothing itself.
+            What::Zoom => {}
         }
     }
     if let Some(r) = canvas::from_pixmap(&pix) {
@@ -680,7 +689,13 @@ mod tests {
             let mut out = back();
             let mid = t.item.len / 2;
             draw_layers(&mut out, &tl, &NoMedia, mid, &mut TextCache::default(), &mut PictureCache::default());
-            assert_ne!(out, back(), "{} changes the picture", t.key);
+            if matches!(t.item.what, What::Zoom) {
+                // A zoom draws nothing: it zooms the screen under everything (see `crate::zoom`).
+                assert_eq!(out, back(), "{} draws nothing itself", t.key);
+                assert!(!crate::zoom::view_at(&tl, mid).is_whole(), "{} zooms", t.key);
+            } else {
+                assert_ne!(out, back(), "{} changes the picture", t.key);
+            }
             let item = &tl.layers[0].items[0];
             let rect = item_rect(item, &tl, &NoMedia, 320.0, 180.0);
             assert_eq!(rect.is_none(), matches!(item.what, What::Transition { .. }), "{}", t.key);

@@ -2039,3 +2039,55 @@ fn layers_move_in_front_and_behind_and_are_renamed() {
     h.run_steps(3);
     assert_eq!(names(&h), vec!["Layer 2", "Titles"]);
 }
+
+#[test]
+fn a_zoom_from_the_library_is_placed_on_the_whole_screen_and_zooms_once_let_go() {
+    use screengrabcraft_media::layers::What;
+    let mut h = media_harness(MediaHost::default());
+    // Its section of the library, opened by its heading.
+    h.get_by_label("Zoom and Pan").click();
+    h.run_steps(3);
+    for label in ["Zoom in", "Zoom in close", "Zoom in at once"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // Its card shows the made-up screen zoomed: closer is another picture.
+    let half = crate::video::VideoView::template_card_picture("zoom").unwrap();
+    let close = crate::video::VideoView::template_card_picture("zoom-close").unwrap();
+    assert_ne!(half.pixels(), close.pixels());
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 500_000;
+    }
+    h.run_steps(1);
+    h.get_by_label("Add Zoom in").click();
+    h.run_steps(3);
+    shot(&mut h, "video-zoom-chosen");
+    let (layer, item) = {
+        let v = h.state().video.as_ref().unwrap();
+        let (layer, item) = v.item.expect("the zoom is chosen");
+        let it = v.session.timeline.item(layer, item).unwrap();
+        assert!(matches!(it.what, What::Zoom));
+        assert_eq!(it.at, 500_000, "at the playhead");
+        assert!(!v.zooms_shown(), "while it's chosen the whole screen shows, to place it");
+        (layer, item)
+    };
+    for label in ["Zoom", "Shows of the screen", "Across", "Down", "In", "Out", "Delete"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    // Closer, by its panel's numbers (as its slider does), one undo step.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "w": 0.25, "x": 0.8, "outro": "none"})).unwrap();
+    }
+    h.run_steps(2);
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let it = v.session.timeline.item(layer, item).unwrap().clone();
+        assert_eq!((it.place.w, it.place.x), (0.25, 0.8));
+        assert_eq!(it.outro.kind, screengrabcraft_media::layers::AnimKind::None);
+        let view = screengrabcraft_media::zoom::view_at(&v.session.timeline, 2_000_000);
+        assert!((view.w - 0.25).abs() < 1e-6 && (view.x - 0.675).abs() < 1e-6, "{view:?}");
+        // Let go: the picture zooms again.
+        v.item = None;
+    }
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().zooms_shown());
+}

@@ -45,6 +45,9 @@ pub struct Composer {
     pictures: crate::layer_draw::PictureCache,
     pub width: u32,
     pub height: u32,
+    /// Whether the zooms are shown (they are left out while one is being placed, so the whole
+    /// screen shows with its frame).
+    pub zoom: bool,
 }
 
 impl Composer {
@@ -64,6 +67,7 @@ impl Composer {
             pictures: Default::default(),
             width: width.max(2),
             height: height.max(2),
+            zoom: true,
         }
     }
 
@@ -81,22 +85,34 @@ impl Composer {
             || Raster::filled(w, h, screengrabcraft_model::Color::BLACK).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::BLACK));
         let shown = |i: usize| timeline.tracks.get(i).is_some_and(|tr| !tr.muted);
         let screen_shown = self.screen.as_ref().is_some_and(|(i, _)| shown(*i));
+        // The part of the screen shown (a zoom), unless zooms are left out (one being placed).
+        let view = if self.zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
         let mut out = match &mut self.screen {
             Some((i, dec)) if screen_shown => timeline
                 .source_time(*i, t)
                 .and_then(|src| dec.frame_at(&self.rec, src))
-                .and_then(|pic| if (pic.width(), pic.height()) == (w, h) { Some(pic) } else { scale(&pic, w, h) })
+                .and_then(|pic| {
+                    if !view.is_whole() {
+                        zoomed(&pic, view, w, h)
+                    } else if (pic.width(), pic.height()) == (w, h) {
+                        Some(pic)
+                    } else {
+                        scale(&pic, w, h)
+                    }
+                })
                 .unwrap_or_else(black),
             _ => black(),
         };
-        // The mouse pointer on the screen, as it was then (larger, smoothed, its clicks ringed).
+        // The mouse pointer on the screen, as it was then (larger, smoothed, its clicks ringed),
+        // zoomed with it.
         if screen_shown
             && let Some((i, dec)) = &self.screen
             && let Some(src) = timeline.source_time(*i, t)
             && let Some(s) = self.rec.stream(dec.stream())
         {
-            let f = w as f32 / (s.width as f32).max(1.0);
-            crate::pointer::draw(&mut out, &self.rec.pointer, timeline.pointer, src, f, self.arrow.as_ref());
+            let (left, top, vw, _) = view.pixels(s.width, s.height);
+            let f = w as f32 / vw.max(1.0);
+            crate::pointer::draw_view(&mut out, &self.rec.pointer, timeline.pointer, src, (f, left, top), self.arrow.as_ref());
         }
         if let Some((i, stream)) = self.camera
             && shown(i)
@@ -149,6 +165,52 @@ pub fn fit(width: u32, height: u32, max_w: u32, max_h: u32) -> (u32, u32) {
     let f = (f64::from(max_w) / f64::from(width.max(1))).min(f64::from(max_h) / f64::from(height.max(1))).min(1.0);
     let even = |v: f64| (((v.round() as u32).max(16)) / 2) * 2;
     (even(f64::from(width) * f), even(f64::from(height) * f))
+}
+
+/// The part `view` of `src`, made `w × h`: averaged where it's made smaller, smoothly blended
+/// between pixels where it's made larger (a close zoom isn't blocky).
+pub fn zoomed(src: &Raster, view: crate::zoom::View, w: u32, h: u32) -> Option<Raster> {
+    let (sw, sh) = (src.width(), src.height());
+    if sw == 0 || sh == 0 || w == 0 || h == 0 {
+        return None;
+    }
+    let (left, top, vw, vh) = view.pixels(sw, sh);
+    if vw >= w as f32 && vh >= h as f32 {
+        // Made smaller: cut out the whole pixels of the view, then averaged down.
+        let (x, y) = (left.floor() as u32, top.floor() as u32);
+        let cw = (vw.round() as u32).clamp(1, sw.saturating_sub(x).max(1));
+        let ch = (vh.round() as u32).clamp(1, sh.saturating_sub(y).max(1));
+        let part = src.crop(x, y, cw, ch)?;
+        return scale(&part, w, h);
+    }
+    let px = src.pixels();
+    let (fx, fy) = (vw / w as f32, vh / h as f32);
+    let at = |x: usize, y: usize| -> [f32; 4] {
+        let i = (y * sw as usize + x) * 4;
+        match px.get(i..i + 4) {
+            Some(&[r, g, b, a]) => [f32::from(r), f32::from(g), f32::from(b), f32::from(a)],
+            _ => [0.0; 4],
+        }
+    };
+    let (mx, my) = (sw as usize - 1, sh as usize - 1);
+    let mut out = Vec::with_capacity(w as usize * h as usize * 4);
+    for oy in 0..h {
+        let sy = (top + (oy as f32 + 0.5) * fy - 0.5).clamp(0.0, my as f32);
+        let (y0, ty) = (sy.floor() as usize, sy - sy.floor());
+        let y1 = (y0 + 1).min(my);
+        for ox in 0..w {
+            let sx = (left + (ox as f32 + 0.5) * fx - 0.5).clamp(0.0, mx as f32);
+            let (x0, tx) = (sx.floor() as usize, sx - sx.floor());
+            let x1 = (x0 + 1).min(mx);
+            let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+            for k in 0..4 {
+                let top_row = a[k] + (b[k] - a[k]) * tx;
+                let bottom_row = c[k] + (d[k] - c[k]) * tx;
+                out.push((top_row + (bottom_row - top_row) * ty).round().clamp(0.0, 255.0) as u8);
+            }
+        }
+    }
+    Raster::new(w, h, out).ok()
 }
 
 /// Resizes by averaging the pixels each new one covers (sharp text stays readable when made
@@ -493,6 +555,57 @@ mod tests {
         let tl = Timeline::new(&plain);
         assert!(plain.pointer.is_empty());
         let _ = Composer::new(plain, &tl, 64, 48).frame(&tl, 0);
+    }
+
+    /// A screen 64 × 48 with its right half blue, the rest red, for 2 s.
+    fn rec_halves() -> Arc<Recording> {
+        let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let px: Vec<u8> = (0..48).flat_map(|_| (0..64).flat_map(|x| if x >= 32 { [0, 0, 255, 255] } else { [255, 0, 0, 255] })).collect();
+        let pic = Raster::new(64, 48, px).unwrap();
+        for t in 0..20u64 {
+            w.video_frame(0, t * 100_000, &pic).unwrap();
+        }
+        Arc::new(Recording::open(Box::new(w.finish(2_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn a_zoom_fills_the_video_with_its_frame_and_lets_go_after() {
+        use crate::layers::{Anim, AnimKind, Item, Placement, What};
+        let r = rec_halves();
+        let mut tl = Timeline::new(&r);
+        // Into the right half's middle, at once, from 0.5 s to 1.5 s.
+        let cut = Anim { kind: AnimKind::None, len: 0 };
+        let zoom = Item {
+            at: 500_000,
+            len: 1_000_000,
+            what: What::Zoom,
+            place: Placement { x: 0.75, y: 0.5, w: 0.4, opacity: 1.0 },
+            intro: cut,
+            outro: cut,
+            ..Item::default()
+        };
+        tl.place(zoom, None, 500_000).unwrap();
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let blue = Color::rgb(0, 0, 255);
+        let zoomed = c.frame(&tl, 1_000_000);
+        assert_eq!((zoomed.pixel(1, 1).unwrap(), zoomed.pixel(62, 46).unwrap()), (blue, blue), "all of it is the blue half");
+        let whole = c.frame(&tl, 1_700_000);
+        assert_eq!((whole.pixel(1, 1).unwrap(), whole.pixel(62, 1).unwrap()), (Color::rgb(255, 0, 0), blue), "the whole screen again");
+        // Left out while one is being placed.
+        c.zoom = false;
+        assert_eq!(c.frame(&tl, 1_000_000).pixel(1, 1).unwrap(), Color::rgb(255, 0, 0));
+        // A larger video of a zoom is smooth, not blocky: the edge between the halves is blended.
+        let big = zoomed_edge();
+        assert!(big.0 > 0 && big.1 > 0, "{big:?}");
+    }
+
+    /// The red and blue of the pixel at the halves' edge when a 4 × 2 picture is zoomed 8 times.
+    fn zoomed_edge() -> (u8, u8) {
+        let pic = Raster::new(4, 2, [[255u8, 0, 0, 255]; 2].into_iter().chain([[0, 0, 255, 255]; 2]).flatten().cycle().take(32).collect()).unwrap();
+        let out = zoomed(&pic, crate::zoom::View { x: 0.25, y: 0.0, w: 0.5, h: 1.0 }, 16, 2).unwrap();
+        let p = out.pixel(8, 0).unwrap();
+        (p.r, p.b)
     }
 
     #[test]

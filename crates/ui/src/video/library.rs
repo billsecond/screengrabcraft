@@ -163,6 +163,11 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
+    // A zoom shows the made-up screen as it zooms it.
+    if matches!(t.item.what, What::Zoom) {
+        let view = screengrabcraft_media::zoom::view_at(&tl, at.min(t.item.len.saturating_sub(1)));
+        pic = screengrabcraft_media::compose::zoomed(&pic, view, w, h).unwrap_or(pic);
+    }
     Some(pic)
 }
 
@@ -635,6 +640,15 @@ impl VideoView {
                         }
                     };
                     let mut first = true;
+                    if matches!(item.what, What::Zoom) {
+                        self.zoom_panel(ui, &item, &set);
+                        ui.add_space(16.0);
+                        if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
+                            self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
+                            self.item = None;
+                        }
+                        return;
+                    }
                     let on_picture = !matches!(item.what, What::Transition { .. }) && item.layer_kind(&media) == layers::LayerKind::Picture;
                     if let What::Text { style, title, subtitle, .. } = &item.what
                         && style.has_words()
@@ -711,6 +725,53 @@ impl VideoView {
                 });
             });
         true
+    }
+
+    /// A zoom's settings: how close, where, and how it goes in and out.
+    fn zoom_panel(&mut self, ui: &mut Ui, item: &Item, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        let t = Tokens::get(ui.ctx());
+        let mut first = true;
+        super::section(ui, "Zoom", &mut first);
+        ui.label(RichText::new("While it's chosen the picture shows all of the screen and the zoom's frame: drag the frame to where it zooms, and its corners to zoom closer or less.").size(12.0).color(t.muted));
+        ui.add_space(6.0);
+        self.slider(
+            ui,
+            "Shows of the screen",
+            screengrabcraft_media::zoom::share(item.place.w),
+            screengrabcraft_media::zoom::MIN_SHARE,
+            1.0,
+            "w",
+            set,
+        );
+        super::section(ui, "Position", &mut first);
+        self.slider(ui, "Across", item.place.x, 0.0, 1.0, "x", set);
+        self.slider(ui, "Down", item.place.y, 0.0, 1.0, "y", set);
+        super::section(ui, "Going in and out", &mut first);
+        egui::Grid::new("zoom-ease").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            for (label, key, anim) in [("In", "intro", item.intro), ("Out", "outro", item.outro)] {
+                ui.label(RichText::new(label).size(12.0).color(t.muted));
+                let smooth = anim.kind != AnimKind::None;
+                egui::ComboBox::from_id_salt(("zoom-ease", key)).width(150.0).selected_text(if smooth { "Smoothly" } else { "At once" }).show_ui(
+                    ui,
+                    |ui| {
+                        if ui.selectable_label(smooth, "Smoothly").clicked() {
+                            set(self, json!({ key: AnimKind::Fade }), false);
+                        }
+                        if ui.selectable_label(!smooth, "At once").clicked() {
+                            set(self, json!({ key: AnimKind::None }), false);
+                        }
+                    },
+                );
+                ui.end_row();
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(RichText::new("A zoom that starts where another ends pans straight from one to the other.").size(12.0).color(t.muted));
+    }
+
+    /// Whether the item chosen is a zoom (the picture then shows all of the screen, to place it).
+    pub(super) fn zoom_chosen(&self) -> bool {
+        self.item.and_then(|(l, i)| self.session.timeline.item(l, i)).is_some_and(|it| matches!(it.what, What::Zoom))
     }
 
     /// A text being typed: each change one step of a single undo step, kept when typing stops.
@@ -968,6 +1029,7 @@ pub fn item_colour(item: &Item, media: &[layers::MediaItem]) -> Color32 {
         },
         What::Text { .. } => Color32::from_rgb(0xD9, 0x7B, 0x29),
         What::Transition { .. } => Color32::from_rgb(0x8A, 0x8A, 0x96),
+        What::Zoom => Color32::from_rgb(0x3B, 0x8E, 0xD0),
     }
 }
 
@@ -976,6 +1038,11 @@ impl VideoView {
     /// The video's picture at `t`, as it's made (for tests).
     pub fn frame_at(&mut self, t: u64) -> Raster {
         self.composer.frame(&self.session.timeline, t)
+    }
+
+    /// Whether the picture shown has the zooms in it (not while one is being placed).
+    pub fn zooms_shown(&self) -> bool {
+        self.composer.zoom
     }
 
     /// Where a layer's item is on the timeline, as last drawn (for tests).
