@@ -1,3 +1,12 @@
+## What's new in 0.1.56
+
+New since 0.1.53:
+
+- **Grab Text.** A new capture: drag over part of the screen (or click a window) and its text goes straight to the clipboard, with a notice showing how it begins. In the Image Editor, **Image › Grab Text**, the right-click menu or **Ctrl+Shift+T** reads the picture, or just the area picked with the Selection tool, into a window where the text can be put right before **Copy**. On the command line, `screengrabcraft-cli text shot.png` prints it. It uses Windows' own text reader on this computer, so nothing is sent anywhere. Windows only for now (greyed out on macOS and Linux). There's no shortcut by default; set one in Settings.
+- **Zoom and pan in the Video Editor.** A new **Zoom and Pan** section in the Library zooms into part of the screen and back out. While a zoom is selected you see the whole screen, with the zoom's frame to drag and resize. Two zooms that touch pan straight from one to the other. The camera, titles and captions don't zoom.
+- **Cut Out in the Image Editor.** A new tool next to Crop (key **U**): drag across the picture and that strip is taken out and the rest joined, with a straight, saw or wave edge.
+- **A feature list** in the repository (`docs/parity.md`): every capture, picture editing, recording and video editing feature, what ScreenGrabCraft has, and the rest ranked by how much it would be missed.
+
 **Early alpha.** The foundations are in place and tested, but much of what a daily screen capture tool needs is not there yet, and some platforms have only been checked by the build machines. What works is in the [README](https://github.com/GITHUB_REPOSITORY#readme).
 
 ScreenGrabCraft for Windows, macOS, Linux, FreeBSD and the web. Every file is listed with its SHA-256 in `SHA256SUMS.txt`.
