@@ -8,7 +8,7 @@ use screengrabcraft_model::Raster;
 
 use crate::captions::{self, Cue, Speaker};
 use crate::recording::{FrameEntry, Recording, ScreenDecoder, StreamKind};
-use crate::timeline::{CameraShape, Corner, Timeline};
+use crate::timeline::{Blend, CameraShape, Corner, Timeline};
 
 /// Samples a second.
 pub const RATE: u64 = 48_000;
@@ -32,9 +32,13 @@ pub fn to_us(samples: u64) -> u64 {
 pub struct Composer {
     rec: Arc<Recording>,
     screen: Option<(usize, ScreenDecoder)>,
+    /// The screen's other clip while a transition turns one into the other (decoded on its own,
+    /// so the one playing goes on forward).
+    screen_other: Option<ScreenDecoder>,
     camera: Option<(usize, u8)>,
-    /// The last camera picture decoded, and which it was.
+    /// The last camera picture decoded, and which it was (and the other clip's, in a transition).
     camera_frame: Option<(usize, Raster)>,
+    camera_other: Option<(usize, Raster)>,
     /// Captions drawn on the picture (in timeline time), if any.
     captions: Option<Arc<Vec<Cue>>>,
     /// The media bin's pictures, for the layers' items.
@@ -55,11 +59,14 @@ impl Composer {
     pub fn new(rec: Arc<Recording>, timeline: &Timeline, width: u32, height: u32) -> Composer {
         let screen = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i).map(|t| (i, ScreenDecoder::new(t.stream))));
         let camera = timeline.find(StreamKind::Camera).and_then(|i| timeline.tracks.get(i).map(|t| (i, t.stream)));
+        let screen_other = screen.as_ref().map(|(_, d)| ScreenDecoder::new(d.stream()));
         Composer {
             rec,
             screen,
+            screen_other,
             camera,
             camera_frame: None,
+            camera_other: None,
             captions: None,
             media: Arc::new(crate::layer_draw::NoMedia),
             arrow: crate::pointer::arrow(),
@@ -87,20 +94,33 @@ impl Composer {
         let screen_shown = self.screen.as_ref().is_some_and(|(i, _)| shown(*i));
         // The part of the screen shown (a zoom), unless zooms are left out (one being placed).
         let view = if self.zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
+        let fit = |pic: Raster| {
+            if !view.is_whole() {
+                zoomed(&pic, view, w, h)
+            } else if (pic.width(), pic.height()) == (w, h) {
+                Some(pic)
+            } else {
+                scale(&pic, w, h)
+            }
+        };
         let mut out = match &mut self.screen {
-            Some((i, dec)) if screen_shown => timeline
-                .source_time(*i, t)
-                .and_then(|src| dec.frame_at(&self.rec, src))
-                .and_then(|pic| {
-                    if !view.is_whole() {
-                        zoomed(&pic, view, w, h)
-                    } else if (pic.width(), pic.height()) == (w, h) {
-                        Some(pic)
-                    } else {
-                        scale(&pic, w, h)
+            Some((i, dec)) if screen_shown => {
+                let pic = timeline.source_time(*i, t).and_then(|src| dec.frame_at(&self.rec, src)).and_then(fit).unwrap_or_else(black);
+                // In a transition between two of its clips, the other one's picture with it: the
+                // one going before the cut, the one coming after it.
+                match (timeline.blend_at(*i, t), &mut self.screen_other) {
+                    (Some(b), Some(other)) => {
+                        let coming_plays = t >= b.cut;
+                        let src = if coming_plays { b.going } else { b.coming };
+                        match other.frame_at(&self.rec, src).and_then(fit) {
+                            Some(o) if coming_plays => blend_pictures(&o, &pic, b.kind, b.p),
+                            Some(o) => blend_pictures(&pic, &o, b.kind, b.p),
+                            None => pic,
+                        }
                     }
-                })
-                .unwrap_or_else(black),
+                    _ => pic,
+                }
+            }
             _ => black(),
         };
         // The mouse pointer on the screen, as it was then (larger, smoothed, its clicks ringed),
@@ -117,8 +137,20 @@ impl Composer {
         if let Some((i, stream)) = self.camera
             && shown(i)
             && let Some(src) = timeline.source_time(i, t)
-            && let Some(cam) = self.camera_at(stream, src)
+            && let Some(cam) = self.camera_at(stream, src, false)
         {
+            // A transition between two of its clips: the other one's picture blended in.
+            let cam = match timeline.blend_at(i, t) {
+                Some(b) => {
+                    let coming_plays = t >= b.cut;
+                    match self.camera_at(stream, if coming_plays { b.going } else { b.coming }, true) {
+                        Some(o) if coming_plays => blend_pictures(&o, &cam, b.kind, b.p),
+                        Some(o) => blend_pictures(&cam, &o, b.kind, b.p),
+                        None => cam,
+                    }
+                }
+                None => cam,
+            };
             let plate = self.rec.plate();
             if screen_shown {
                 overlay_camera_keyed(&mut out, &cam, timeline, plate.as_deref());
@@ -150,22 +182,92 @@ impl Composer {
 
     /// The camera's picture at `src`: the last one up to then, unless the camera had stopped
     /// sending (none for over two seconds), when there's none.
-    fn camera_at(&mut self, stream: u8, src: u64) -> Option<Raster> {
+    fn camera_at(&mut self, stream: u8, src: u64, other: bool) -> Option<Raster> {
         let frames: &[FrameEntry] = self.rec.frames(stream);
         let i = frames.partition_point(|f| f.pts <= src).checked_sub(1)?;
         if frames.get(i).is_some_and(|f| src.saturating_sub(f.pts) > CAMERA_STALE_US) {
             return None;
         }
-        if let Some((at, pic)) = &self.camera_frame
+        let slot = if other { &mut self.camera_other } else { &mut self.camera_frame };
+        if let Some((at, pic)) = slot
             && *at == i
         {
             return Some(pic.clone());
         }
         let jpeg = self.rec.jpeg(frames.get(i)?).ok()?;
         let pic = screengrabcraft_render::decode(&jpeg).ok()?;
-        self.camera_frame = Some((i, pic.clone()));
+        let slot = if other { &mut self.camera_other } else { &mut self.camera_frame };
+        *slot = Some((i, pic.clone()));
         Some(pic)
     }
+}
+
+/// The picture `p` of the way (0 to 1) through a transition from `going` to `coming` (made the
+/// size of `going` if it isn't).
+pub fn blend_pictures(going: &Raster, coming: &Raster, kind: Blend, p: f32) -> Raster {
+    let (w, h) = (going.width(), going.height());
+    let resized;
+    let coming = if (coming.width(), coming.height()) == (w, h) {
+        coming
+    } else {
+        match scale(coming, w, h) {
+            Some(c) => {
+                resized = c;
+                &resized
+            }
+            None => return going.clone(),
+        }
+    };
+    let p = if p.is_finite() { p.clamp(0.0, 1.0) } else { 1.0 };
+    // Slow at its ends.
+    let e = p * p * (3.0 - 2.0 * p);
+    let (a, b) = (going.pixels(), coming.pixels());
+    let (wf, hf) = (w as f32, h as f32);
+    // How much of the coming picture a pixel shows: 0 to 1, soft over a few pixels at an edge.
+    let soft = (wf.max(hf) * 0.012).max(1.0);
+    let edge = |d: f32| (d / soft + 0.5).clamp(0.0, 1.0);
+    let (cx, cy, reach) = (wf / 2.0, hf / 2.0, (wf * wf + hf * hf).sqrt() / 2.0 + soft);
+    let mut out = Vec::with_capacity(a.len());
+    let pixel = |px: &[u8], x: i64, y: i64| -> [u8; 4] {
+        let (x, y) = (x.clamp(0, i64::from(w) - 1) as usize, y.clamp(0, i64::from(h) - 1) as usize);
+        let i = (y * w as usize + x) * 4;
+        match px.get(i..i + 4) {
+            Some(&[r, g, bl, al]) => [r, g, bl, al],
+            _ => [0, 0, 0, 255],
+        }
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let (xi, yi) = (i64::from(x), i64::from(y));
+            let mix = |k: f32| -> [u8; 4] {
+                let (s, t) = (pixel(a, xi, yi), pixel(b, xi, yi));
+                std::array::from_fn(|c| (f32::from(s[c]) * (1.0 - k) + f32::from(t[c]) * k).round() as u8)
+            };
+            let px = match kind {
+                Blend::CrossFade => mix(e),
+                Blend::DipBlack => {
+                    let (s, k) = if p < 0.5 { (pixel(a, xi, yi), 1.0 - 2.0 * p) } else { (pixel(b, xi, yi), 2.0 * p - 1.0) };
+                    [(f32::from(s[0]) * k) as u8, (f32::from(s[1]) * k) as u8, (f32::from(s[2]) * k) as u8, s[3]]
+                }
+                Blend::WipeLeft => mix(edge(fx - wf * (1.0 - e))),
+                Blend::WipeRight => mix(edge(wf * e - fx)),
+                Blend::WipeUp => mix(edge(fy - hf * (1.0 - e))),
+                Blend::WipeDown => mix(edge(hf * e - fy)),
+                Blend::Push => {
+                    let shift = (wf * e).round() as i64;
+                    let split = i64::from(w) - shift;
+                    if xi < split { pixel(a, xi + shift, yi) } else { pixel(b, xi - split, yi) }
+                }
+                Blend::Circle => {
+                    let d = ((fx - cx).powi(2) + (fy - cy).powi(2)).sqrt();
+                    mix(edge(reach * e - d))
+                }
+            };
+            out.extend_from_slice(&px);
+        }
+    }
+    Raster::new(w, h, out).unwrap_or_else(|_| going.clone())
 }
 
 /// The size a video of this picture is made at: no larger than `max_w × max_h`, sides even.
@@ -486,7 +588,7 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
     let mut out = vec![0f32; count * 2];
     crate::layer_draw::mix_layers(&mut out, timeline, media, first, count);
     let end = first.saturating_add(count as u64);
-    for t in &timeline.tracks {
+    for (ti, t) in timeline.tracks.iter().enumerate() {
         if t.muted || t.kind.is_video() || t.volume <= 0.0 {
             continue;
         }
@@ -521,14 +623,21 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 None => raw(start, n),
             }
         };
-        for c in &t.clips {
-            let (at, from, len) = (to_samples(c.at), to_samples(c.from), to_samples(c.len));
+        for (ci, c) in t.clips.iter().enumerate() {
+            // Cross-faded with the clip before and the one after where they meet: it plays on
+            // into them for half of each cross-fade, coming up as the other goes down.
+            let lead = timeline.transition_span(ti, ci).map_or(0, |(s, _, _)| c.at - s);
+            let tail = timeline.transition_span(ti, ci + 1).map_or(0, |(_, e, _)| e - c.end());
+            let (at, len) = (to_samples(c.at.saturating_sub(lead)), to_samples(c.len + lead + tail));
             let (a, b) = (first.max(at), end.min(at.saturating_add(len)));
             if a >= b {
                 continue;
             }
             let n = (b - a) as usize;
-            let from = i64::try_from(from).unwrap_or(i64::MAX / 4);
+            // Where it starts in the recording, the cross-fade's lead in (before the recording's
+            // start: silence).
+            let lead_src = c.source_at(lead).saturating_sub(c.from);
+            let from = i64::try_from(to_samples(c.from)).unwrap_or(i64::MAX / 4) - i64::try_from(to_samples(lead_src)).unwrap_or(0);
             let sound = if c.speed == crate::timeline::NORMAL_SPEED {
                 source(from.saturating_add_unsigned(a - at), n)
             } else {
@@ -536,9 +645,22 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 crate::stretch::stretched(&|start, n| source(from.saturating_add(start), n), c.rate(), a - at, n)
             };
             let base = (a - first) as usize * 2;
-            let faded = c.fade_in > 0 || c.fade_out > 0;
+            let faded = c.fade_in > 0 || c.fade_out > 0 || lead > 0 || tail > 0;
+            let (cs, ce) = (c.at, c.end());
             for (k, [l, r]) in sound.iter().enumerate() {
-                let gain = if faded { t.volume * c.fade_at(to_us(a - at + k as u64)) } else { t.volume };
+                let gain = if faded {
+                    let u = to_us(a + k as u64);
+                    let x = if u < cs.saturating_add(lead) && lead > 0 {
+                        cross_rise((u + lead).saturating_sub(cs) as f32 / (2 * lead) as f32)
+                    } else if u >= ce.saturating_sub(tail) && tail > 0 {
+                        cross_rise((ce + tail).saturating_sub(u) as f32 / (2 * tail) as f32)
+                    } else {
+                        1.0
+                    };
+                    t.volume * c.fade_at(u.saturating_sub(cs).min(c.len)) * x
+                } else {
+                    t.volume
+                };
                 if let Some(o) = out.get_mut(base + k * 2..base + k * 2 + 2) {
                     o[0] += l * gain;
                     o[1] += r * gain;
@@ -551,6 +673,12 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         *s = s.clamp(-1.0, 1.0);
     }
     out
+}
+
+/// How loud a clip is `x` of the way (0 to 1) into a cross-fade it comes up in: the two together
+/// keep the same loudness (a quarter of a sine wave).
+fn cross_rise(x: f32) -> f32 {
+    (x.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2).sin()
 }
 
 /// The pointer's clicks heard (when its look says so), where the screen's clips play them: each
@@ -752,6 +880,70 @@ mod tests {
         assert_eq!(c.frame(&tl, 100_000).pixel(3, 3).unwrap().r, 10);
         // Past the end, black.
         assert_eq!(c.frame(&tl, 5_000_000).pixel(3, 3).unwrap(), Color::BLACK);
+    }
+
+    #[test]
+    fn a_transition_between_two_clips_blends_them_across_the_cut() {
+        use crate::timeline::Blend;
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        // 0.5 s to 1.5 s cut out: at 0.5 s the picture recorded at 0.5 s turns into that at 1.5 s.
+        tl.cut(500_000, 1_500_000).unwrap();
+        assert!(tl.set_transition(0, 0, Some(Blend::CrossFade), None).is_err(), "the first clip has none before it");
+        tl.set_transition(0, 1, Some(Blend::CrossFade), Some(400_000)).unwrap();
+        assert_eq!(tl.transition_span(0, 1).map(|(a, b, _)| (a, b)), Some((300_000, 700_000)));
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let red = |c: &mut Composer, tl: &Timeline, t: u64| c.frame(tl, t).pixel(3, 3).unwrap().r;
+        // Before and after it, each clip as it is.
+        assert_eq!(red(&mut c, &tl, 200_000), 20);
+        assert_eq!(red(&mut c, &tl, 800_000), 180);
+        // At the cut, halfway: between the one going (0.5 s: 50) and the one coming (1.5 s: 150).
+        let mid = red(&mut c, &tl, 500_000);
+        assert!((90..=110).contains(&mid), "{mid}");
+        // Played back from before it, each moment is the same picture as asked for on its own.
+        let mut fresh = Composer::new(r.clone(), &tl, 64, 48);
+        assert_eq!(red(&mut fresh, &tl, 600_000), red(&mut c, &tl, 600_000));
+        // A wipe to the right: the coming clip on the left, the going one still on the right.
+        tl.set_transition(0, 1, Some(Blend::WipeRight), None).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert_eq!((f.pixel(2, 20).unwrap().r, f.pixel(61, 20).unwrap().r), (150, 50));
+        // Moved apart, they don't meet: a plain cut again.
+        tl.move_clip(0, 1, 600_000).unwrap();
+        assert_eq!(tl.transition_span(0, 1), None);
+        assert_eq!(red(&mut c, &tl, 450_000), 40);
+    }
+
+    #[test]
+    fn sound_cross_fades_where_two_clips_meet() {
+        use crate::timeline::Blend;
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        tl.set_muted(2, true).unwrap();
+        tl.split(1_000_000, Some(1)).unwrap();
+        tl.set_transition(1, 1, Some(Blend::Push), Some(400_000)).unwrap();
+        assert_eq!(tl.tracks[1].clips[1].transition.map(|x| x.kind), Some(Blend::CrossFade), "sound only cross-fades");
+        // Across the cut the microphone's steady sound stays about as loud (the two together).
+        let m = 1000.0 / 32768.0;
+        for t in [850_000u64, 1_000_000, 1_150_000] {
+            let s = mix(&r, &tl, to_samples(t), 1);
+            assert!(s[0] > m * 0.95 && s[0] < m * 1.45, "{t}: {}", s[0]);
+        }
+        // Away from it, as it was.
+        assert!((mix(&r, &tl, to_samples(500_000), 1)[0] - m).abs() < 1e-6);
+    }
+
+    #[test]
+    fn every_blend_goes_from_one_picture_to_the_other() {
+        use crate::timeline::Blend;
+        let a = Raster::filled(40, 30, Color::rgb(200, 0, 0)).unwrap();
+        let b = Raster::filled(40, 30, Color::rgb(0, 0, 200)).unwrap();
+        for kind in Blend::ALL {
+            assert_eq!(blend_pictures(&a, &b, kind, 0.0).pixels(), a.pixels(), "{kind:?} starts on the one going");
+            assert_eq!(blend_pictures(&a, &b, kind, 1.0).pixels(), b.pixels(), "{kind:?} ends on the one coming");
+            // Of another size, or junk: no panic.
+            let small = Raster::filled(7, 3, Color::WHITE).unwrap();
+            assert_eq!(blend_pictures(&a, &small, kind, f32::NAN).width(), 40);
+        }
     }
 
     #[test]

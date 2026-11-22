@@ -211,10 +211,10 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Items come and go: fade, slide, pop | Has | |
 | **Zoom into part of the screen and back (zoom and pan)** | Has (0.1.55) | smooth or at once; touching zooms pan from one to the next |
 | Zoom that follows the clicks by itself | Missing | |
-| Keyframe animation (place, size, opacity over time) | Missing | |
+| **Keyframe animation (place, size, opacity over time)** | Has | keyframes added at the playhead from the item's panel (Motion), eased from one to the next; moving or resizing it then changes the keyframe there; a zoom's keyframes pan it |
 | Motion along a path | Missing | |
 | Transitions as items (fades, dips, wipes, stingers) | Has | |
-| Transitions between two clips | Missing | |
+| **Transitions between two clips** | Has | a cross-fade, through black, wipes four ways, a push and a circle where two clips of a track meet, across the cut; sound clips cross-fade. From the clip's panel, the right button, or the Library's Between Clips dropped on the cut |
 | Words that draw themselves on | Part | the highlight and circle do |
 | **Keys pressed shown as a callout** | Has | the Keys Pressed section: shown or not, where, how large, light or dark keys |
 | Progress bar, countdown | Has | |
@@ -285,6 +285,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 10. Hold a frame: the picture held while every track waits (#73).
 11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed (#76).
 12. The camera's background removed, with or without a green screen (#79).
+13. Transitions between clips; keyframe animation of an item's place, size and opacity.
 
 **Still to build, in this order**
 
@@ -298,15 +299,14 @@ By how much someone using it every day would miss each one. Built ones move to a
     curl, reflection, watermark, capture details.
 8. Rotate, group and align annotations; select all of one kind.
 9. Magic wand, eraser, ellipse and freehand selections.
-10. Transitions between clips; keyframe animation.
-11. Drawing on the screen while recording.
-12. Volume along a clip; music lowered under the voice; levels evened out.
-13. Tags, favourites, and captures sorted by program.
-14. Templates; several pictures combined into one.
-15. A picture per click made into a how-to guide.
-16. Groups, pushing later clips along, locked and solo tracks, clip colours.
-17. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-18. Print; batch changes; captures on a timer or at a set time.
-19. Cutting words from the transcript; filler words taken out.
-20. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+10. Drawing on the screen while recording.
+11. Volume along a clip; music lowered under the voice; levels evened out.
+12. Tags, favourites, and captures sorted by program.
+13. Templates; several pictures combined into one.
+14. A picture per click made into a how-to guide.
+15. Groups, pushing later clips along, locked and solo tracks, clip colours.
+16. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+17. Print; batch changes; captures on a timer or at a set time.
+18. Cutting words from the transcript; filler words taken out.
+19. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

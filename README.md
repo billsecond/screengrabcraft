@@ -170,6 +170,13 @@ the picture editor to the video editor. Its timeline has a row for each track:
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
   starts where another ends pans straight from one to the other. Only the screen and the pointer
   are zoomed; the camera, titles and captions stay where they are.
+- **Transitions between clips**: where two clips of a track meet, one can turn into the other (a
+  cross-fade, through black, a wipe four ways, a push or a circle), from the clip's panel, its
+  right button, or the Library's Between Clips section dropped on the cut. It plays across the
+  cut, 0.5 to 3 s; where sound clips meet it's a cross-fade of their sound.
+- **Keyframes**: an item's panel adds a keyframe at the playhead (Motion); move the playhead on and
+  move, resize or fade the item (on the picture or in the panel) and it goes there smoothly. A
+  zoom's keyframes pan it along. The timeline shows each as a diamond on the item.
 - **Text** (T) puts words on the video at the playhead, ready to type over. The **Library** at
   the left has titles, lower thirds, news graphics, callouts, arrows, a countdown, an end card, a
   checklist, a click and a **blur** that hides what's under it (a password, an address), and

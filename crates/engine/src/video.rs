@@ -607,6 +607,52 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// The transition from the clip before into a clip, where they meet (or none).
+fn transition(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::timeline::Blend;
+    let kind = match p.get("kind") {
+        None => {
+            return Err(EngineError::Params(
+                "`kind` is missing: crossFade, dipBlack, wipeLeft, wipeRight, wipeUp, wipeDown, push, circle or none".to_string(),
+            ));
+        }
+        Some(Value::String(k)) if k == "none" => None,
+        Some(v) => Some(serde_json::from_value::<Blend>(v.clone()).map_err(|_| {
+            EngineError::Params("`kind` is crossFade, dipBlack, wipeLeft, wipeRight, wipeUp, wipeDown, push, circle or none".to_string())
+        })?),
+    };
+    let len = if p.get("len").is_some_and(|v| !v.is_null()) { Some(int(p, "len")?) } else { None };
+    let (track, clip) = (index(p, "track")?, index(p, "clip")?);
+    s.timeline.set_transition(track, clip, kind, len).map_err(edit_err)?;
+    let x = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).and_then(|c| c.transition);
+    Ok(json!({"kind": x.map(|x| x.kind), "len": x.map(|x| x.len)}))
+}
+
+/// A keyframe of a layer item at a moment: its place, size and opacity then.
+fn keyframe(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
+    let (layer, item) = (id(p, "layer")?, id(p, "item")?);
+    let key = s
+        .timeline
+        .set_key(layer, item, int(p, "at")?, |place| {
+            for (slot, v) in [(&mut place.x, x), (&mut place.y, y), (&mut place.w, w), (&mut place.opacity, opacity)] {
+                if let Some(v) = v {
+                    *slot = v;
+                }
+            }
+        })
+        .map_err(edit_err)?;
+    let keys = s.timeline.item(layer, item).map_or(0, |i| i.keys.len());
+    Ok(json!({"key": key, "keys": keys}))
+}
+
+fn remove_keyframe(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let key = if all { None } else { Some(index(p, "key")?) };
+    s.timeline.remove_key(id(p, "layer")?, id(p, "item")?, key).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 fn layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let hidden = match p.get("hidden") {
         None => None,
@@ -829,6 +875,24 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Change",
         params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs}"##,
         run: set_item,
+    },
+    VideoCommand {
+        id: "video.transition",
+        label: "Transition",
+        params: r#"{"track": n, "clip": n, "kind": "crossFade"|"dipBlack"|"wipeLeft"|"wipeRight"|"wipeUp"|"wipeDown"|"push"|"circle"|"none", "len"?: µs}: how the clip before turns into this one where they meet (0.1 to 5 s, across the cut; on a sound track a cross-fade)"#,
+        run: transition,
+    },
+    VideoCommand {
+        id: "video.keyframe",
+        label: "Keyframe",
+        params: r#"{"layer": id, "item": id, "at": µs, "x"?, "y"?, "w"?, "opacity"?: 0..1}: a keyframe of the item at that moment of the timeline (in it): where it is, how large and how see-through then (what isn't given: as it is there now); one there already is changed. It moves eased from one keyframe to the next"#,
+        run: keyframe,
+    },
+    VideoCommand {
+        id: "video.removeKeyframe",
+        label: "Remove Keyframe",
+        params: r#"{"layer": id, "item": id, "key": n} or {"layer", "item", "all": true}: with none left it stays where the last had it"#,
+        run: remove_keyframe,
     },
     VideoCommand { id: "video.layer", label: "Layer", params: r#"{"layer": id, "hidden"?: bool, "volume"?: 0..2, "name"?: text}"#, run: layer },
     VideoCommand { id: "video.deleteLayer", label: "Delete Layer", params: r#"{"layer": id}"#, run: delete_layer },
@@ -1234,5 +1298,41 @@ mod layer_tests {
             s.execute("edit.undo", &json!({})).unwrap();
         }
         assert!(s.timeline.layers.is_empty() && s.timeline.media.is_empty());
+    }
+
+    #[test]
+    fn clips_turn_into_each_other_where_they_meet_and_items_move_by_keyframes() {
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut s = VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap());
+        s.execute("video.split", &json!({"at": 2_500_000})).unwrap();
+        let v = s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "wipeLeft", "len": 800_000})).unwrap();
+        assert_eq!((v["kind"].as_str(), v["len"].as_u64()), (Some("wipeLeft"), Some(800_000)));
+        assert_eq!(s.undo_label(), Some("Transition"));
+        // The microphone only cross-fades; the first clip has nothing before it; a made-up kind is refused.
+        let v = s.execute("video.transition", &json!({"track": 1, "clip": 1, "kind": "circle"})).unwrap();
+        assert_eq!(v["kind"].as_str(), Some("crossFade"));
+        assert!(s.execute("video.transition", &json!({"track": 0, "clip": 0, "kind": "push"})).is_err());
+        assert!(s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "spin"})).is_err());
+        s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "none"})).unwrap();
+        assert_eq!(s.timeline.tracks[0].clips[1].transition, None);
+        // A title moved from the left to the right by two keyframes.
+        let placed = s.execute("video.place", &json!({"template": "title", "at": 0, "len": 4_000_000})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 0, "x": 0.2})).unwrap();
+        let v = s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 4_000_000, "x": 0.8})).unwrap();
+        assert_eq!((v["key"].as_u64(), v["keys"].as_u64()), (Some(1), Some(2)));
+        assert!((s.timeline.item(layer, item).unwrap().place_at(2_000_000).x - 0.5).abs() < 1e-4);
+        assert!(s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 9_000_000})).is_err());
+        s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "all": true})).unwrap();
+        assert!(s.timeline.item(layer, item).unwrap().keys.is_empty());
+        assert!(s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "key": 0})).is_err());
     }
 }

@@ -92,10 +92,11 @@ pub fn view_at(timeline: &Timeline, t: u64) -> View {
     // The zoom that began last of those under the playhead.
     let Some(i) = zs.iter().rposition(|z| z.at <= t && t < z.end()) else { return View::WHOLE };
     let Some(z) = zs.get(i) else { return View::WHOLE };
-    let target = frame(z);
+    // Where its keyframes have it then (a zoom with them pans along them).
+    let target = frame(&z.placed_at(t));
     // Touching (or under) the one before, it pans from there; touching the next, it stays in
     // until that one takes over.
-    let before = i.checked_sub(1).and_then(|p| zs.get(p)).filter(|p| p.end() >= z.at).map(|p| frame(p));
+    let before = i.checked_sub(1).and_then(|p| zs.get(p)).filter(|p| p.end() >= z.at).map(|p| frame(&p.placed_at(p.end())));
     let after = zs.get(i + 1).is_some_and(|n| n.at <= z.end());
     let (into, left) = (t.saturating_sub(z.at), z.end().saturating_sub(t));
     let len_in = ease_len(z, z.intro.kind, z.intro.len);

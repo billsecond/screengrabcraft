@@ -523,20 +523,23 @@ impl PictureCache {
 /// Draws every picture layer's items at timeline time `t` over `out` (the recording's picture),
 /// the later layers on top.
 pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore, t: u64, texts: &mut TextCache, pictures: &mut PictureCache) {
-    let showing: Vec<&Item> = timeline
+    let showing: Vec<std::borrow::Cow<Item>> = timeline
         .layers
         .iter()
         .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
         .filter_map(|l| l.items.iter().find(|i| i.at <= t && t < i.end()))
         // A zoom draws nothing of its own.
         .filter(|i| !matches!(i.what, What::Zoom))
+        // Where its keyframes have it then.
+        .map(|i| i.placed_at(t))
         .collect();
     if showing.is_empty() {
         return;
     }
     let Some(mut pix) = canvas::to_pixmap(out) else { return };
     let (w, h) = (pix.width() as f32, pix.height() as f32);
-    for item in showing {
+    for item in &showing {
+        let item: &Item = item;
         let m = motion(item, t, w, h);
         match &item.what {
             What::Media { id } => {

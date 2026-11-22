@@ -330,7 +330,22 @@ pub struct Item {
     pub place: Placement,
     pub intro: Anim,
     pub outro: Anim,
+    /// Its motion: where it is, how large and how see-through at moments of it, in order (µs
+    /// into it); eased from one to the next. None: it stays at `place`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<Key>,
 }
+
+/// A moment of an item's motion (a keyframe): its place then, `at` µs into it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Key {
+    pub at: u64,
+    pub place: Placement,
+}
+
+/// The most keyframes an item keeps.
+pub const MAX_KEYS: usize = 200;
 
 impl Default for Item {
     fn default() -> Item {
@@ -343,13 +358,59 @@ impl Default for Item {
             place: Placement::default(),
             intro: Anim::default(),
             outro: Anim::default(),
+            keys: Vec::new(),
         }
     }
+}
+
+/// `a` to `b`, `f` of the way (0 to 1).
+fn between(a: Placement, b: Placement, f: f32) -> Placement {
+    let l = |x: f32, y: f32| x + (y - x) * f;
+    Placement { x: l(a.x, b.x), y: l(a.y, b.y), w: l(a.w, b.w), opacity: l(a.opacity, b.opacity) }
 }
 
 impl Item {
     pub fn end(&self) -> u64 {
         self.at.saturating_add(self.len)
+    }
+
+    /// Where it is at timeline time `t`: its place, or with keyframes, eased from the one
+    /// before to the one after (before the first, the first's; after the last, the last's).
+    pub fn place_at(&self, t: u64) -> Placement {
+        let d = t.saturating_sub(self.at);
+        let k = self.keys.partition_point(|k| k.at <= d);
+        match (k.checked_sub(1).and_then(|p| self.keys.get(p)), self.keys.get(k)) {
+            (None, None) => self.place,
+            (Some(a), None) => a.place,
+            (None, Some(b)) => b.place,
+            (Some(a), Some(b)) => {
+                let f = (d - a.at) as f32 / b.at.saturating_sub(a.at).max(1) as f32;
+                // Slow away from one and into the next.
+                let f = f.clamp(0.0, 1.0);
+                between(a.place, b.place, f * f * (3.0 - 2.0 * f)).clamped()
+            }
+        }
+    }
+
+    /// Itself as it is at `t`: with keyframes, a copy placed where they put it then.
+    pub fn placed_at(&self, t: u64) -> std::borrow::Cow<'_, Item> {
+        if self.keys.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        std::borrow::Cow::Owned(Item { place: self.place_at(t), keys: Vec::new(), ..self.clone() })
+    }
+
+    /// Its keyframes as they are for a part of it starting `skip` µs into it: those before that
+    /// go, with one at its start where they had it then.
+    fn keys_from(&self, skip: u64) -> Vec<Key> {
+        if self.keys.is_empty() || skip == 0 {
+            return self.keys.clone();
+        }
+        let mut out: Vec<Key> = self.keys.iter().filter(|k| k.at >= skip).map(|k| Key { at: k.at - skip, ..*k }).collect();
+        if out.first().is_none_or(|k| k.at > 0) {
+            out.insert(0, Key { at: 0, place: self.place_at(self.at.saturating_add(skip)) });
+        }
+        out
     }
 
     /// The kind of layer it goes on.
@@ -833,7 +894,64 @@ impl Timeline {
             None => u64::MAX / 8,
         };
         let end = end.clamp(start + MIN_CLIP_US, ceiling.min(most_end).max(start + MIN_CLIP_US));
-        *i = Item { at: start, len: end - start, from, ..i.clone() };
+        // Its keyframes stay where they were on the timeline.
+        let keys = if start >= i.at {
+            i.keys_from(start - i.at)
+        } else {
+            i.keys.iter().map(|k| Key { at: k.at.saturating_add(i.at - start), ..*k }).collect()
+        };
+        *i = Item { at: start, len: end - start, from, keys, ..i.clone() };
+        Ok(())
+    }
+
+    /// A keyframe of an item at timeline time `at` (in it): where it is then, changed by
+    /// `change`; one already there is changed. Its place among the keyframes.
+    pub fn set_key(&mut self, layer: u32, item: u32, at: u64, change: impl FnOnce(&mut Placement)) -> Result<usize, EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        if at < i.at || at > i.end() {
+            return Err(bad("a keyframe goes in the item's own time: move the playhead onto it"));
+        }
+        let d = at - i.at;
+        // One within a moment of it is the one changed.
+        let near = i.keys.iter().position(|k| k.at.abs_diff(d) < MIN_CLIP_US);
+        let key_at = near.and_then(|n| i.keys.get(n)).map_or(d, |k| k.at);
+        let mut place = match near.and_then(|n| i.keys.get(n)) {
+            Some(k) => k.place,
+            None => i.place_at(at),
+        };
+        change(&mut place);
+        let place = place.clamped();
+        match near.and_then(|n| i.keys.get_mut(n)) {
+            Some(k) => k.place = place,
+            None => {
+                if i.keys.len() >= MAX_KEYS {
+                    return Err(bad(&format!("an item has at most {MAX_KEYS} keyframes")));
+                }
+                i.keys.push(Key { at: d, place });
+                i.keys.sort_by_key(|k| k.at);
+            }
+        }
+        // The first keyframe made: its place is what it had.
+        i.place = i.keys.first().map_or(i.place, |k| k.place);
+        Ok(i.keys.iter().position(|k| k.at == key_at).unwrap_or(0))
+    }
+
+    /// Takes keyframe `key` of an item away (`None`: all of them). With none left it stays
+    /// where the last one taken away had it.
+    pub fn remove_key(&mut self, layer: u32, item: u32, key: Option<usize>) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        let gone = match key {
+            Some(k) if k < i.keys.len() => vec![i.keys.remove(k)],
+            Some(_) => return Err(bad("there's no such keyframe")),
+            None => std::mem::take(&mut i.keys),
+        };
+        if i.keys.is_empty()
+            && let Some(last) = gone.last()
+        {
+            i.place = last.place;
+        }
         Ok(())
     }
 
@@ -854,12 +972,26 @@ impl Timeline {
     pub fn set_item(&mut self, layer: u32, item: u32, change: impl FnOnce(&mut Item)) -> Result<(), EditError> {
         let l = self.layer_mut(layer)?;
         let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
-        let (id, at, len, from) = (i.id, i.at, i.len, i.from);
+        let (id, at, len, from, was) = (i.id, i.at, i.len, i.from, i.place);
         change(i);
         // Its place on the timeline is the trims' and moves' to change.
         i.id = id;
         (i.at, i.len, i.from) = (at, len, from);
         i.place = i.place.clamped();
+        // With keyframes, its whole motion moves (and grows, and fades) as its place did.
+        let now = i.place;
+        if now != was {
+            let ratio = |a: f32, b: f32| if b > 1.0e-4 { a / b } else { 1.0 };
+            for k in &mut i.keys {
+                k.place = Placement {
+                    x: k.place.x + now.x - was.x,
+                    y: k.place.y + now.y - was.y,
+                    w: k.place.w * ratio(now.w, was.w),
+                    opacity: k.place.opacity * ratio(now.opacity, was.opacity),
+                }
+                .clamped();
+            }
+        }
         if let What::Text { title, subtitle, color, .. } = &mut i.what {
             *title = clip_text(title, MAX_TEXT);
             *subtitle = clip_text(subtitle, MAX_TEXT);
@@ -900,7 +1032,9 @@ impl Timeline {
                 if i.end() > to {
                     let skip = to.saturating_sub(i.at);
                     let from_media = if plays { i.from + skip } else { i.from };
-                    let mut after = Item { at: i.at.max(to) - gap, from: from_media, len: i.len - skip, ..i.clone() };
+                    // Its motion goes on from where it was after the stretch cut.
+                    let keys = i.keys_from(skip);
+                    let mut after = Item { at: i.at.max(to) - gap, from: from_media, len: i.len - skip, keys, ..i.clone() };
                     // Both halves of one item: the second gets a number of its own below.
                     if i.at < from {
                         after.id = 0;
@@ -935,13 +1069,23 @@ impl Timeline {
                     out.push(Item { at: i.at.saturating_add(len), ..i.clone() });
                 } else if i.end() > at {
                     let plays = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture));
+                    let first = at - i.at;
                     if plays {
-                        let first = at - i.at;
                         out.push(Item { len: first, ..i.clone() });
                         // The rest, a number of its own below.
-                        out.push(Item { id: 0, at: at.saturating_add(len), from: i.from.saturating_add(first), len: i.len - first, ..i.clone() });
+                        let keys = i.keys_from(first);
+                        out.push(Item {
+                            id: 0,
+                            at: at.saturating_add(len),
+                            from: i.from.saturating_add(first),
+                            len: i.len - first,
+                            keys,
+                            ..i.clone()
+                        });
                     } else {
-                        out.push(Item { len: i.len.saturating_add(len), ..i.clone() });
+                        // It waits through the gap, its motion with it.
+                        let keys = i.keys.iter().map(|k| if k.at > first { Key { at: k.at.saturating_add(len), ..*k } } else { *k }).collect();
+                        out.push(Item { len: i.len.saturating_add(len), keys, ..i.clone() });
                     }
                 } else {
                     out.push(i.clone());
@@ -977,6 +1121,11 @@ impl Timeline {
                     && let Some(m) = media.iter().find(|m| m.id == *id && m.kind != MediaKind::Picture && m.duration > 0)
                 {
                     len = len.min(m.duration.saturating_sub(i.from)).max(i.len);
+                }
+                // Its keyframes where the moments they were at went.
+                let start = i.at;
+                for k in &mut i.keys {
+                    k.at = map(start.saturating_add(k.at)).saturating_sub(a);
                 }
                 i.at = a;
                 i.len = len;
@@ -1022,6 +1171,13 @@ impl Timeline {
                 i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
                 i.from = i.from.min(u64::MAX / 8);
                 i.place = i.place.clamped();
+                i.keys.truncate(MAX_KEYS);
+                for k in &mut i.keys {
+                    k.at = k.at.min(u64::MAX / 8);
+                    k.place = k.place.clamped();
+                }
+                i.keys.sort_by_key(|k| k.at);
+                i.keys.dedup_by_key(|k| k.at);
                 i.intro.len = i.intro.len.min(10_000_000);
                 i.outro.len = i.outro.len.min(10_000_000);
                 if let What::Text { title, subtitle, color, .. } = &mut i.what {
@@ -1223,5 +1379,68 @@ mod tests {
         assert_eq!(i.anim_at(4_500_000).1, 0.5);
         let still = Item { intro: Anim { kind: AnimKind::None, len: 0 }, ..i };
         assert_eq!(still.anim_at(1_000_000).0, 1.0);
+    }
+
+    fn at(x: f32) -> Placement {
+        Placement { x, ..Placement::default() }
+    }
+
+    #[test]
+    fn keyframes_move_an_item_eased_from_one_to_the_next_and_follow_the_edits() {
+        let mut t = timeline();
+        let (l, i) = t.place(Item { len: 4_000_000, ..lower() }, None, 2_000_000).unwrap();
+        assert!(t.set_key(l, i, 1_000_000, |_| {}).is_err(), "a keyframe goes in the item's own time");
+        // From the left at 2 s to the right at 4 s; a key set again near one changes that one.
+        assert_eq!(t.set_key(l, i, 2_000_000, |p| p.x = 0.1).unwrap(), 0);
+        assert_eq!(t.set_key(l, i, 4_000_000, |p| p.x = 0.9).unwrap(), 1);
+        assert_eq!(t.set_key(l, i, 4_005_000, |p| p.opacity = 0.5).unwrap(), 1);
+        let it = t.item(l, i).unwrap().clone();
+        assert_eq!(it.keys.len(), 2);
+        assert_eq!(it.place_at(1_000_000).x, 0.1, "before the first: the first's");
+        assert!((it.place_at(3_000_000).x - 0.5).abs() < 1e-4, "halfway, half way");
+        assert!(it.place_at(2_500_000).x < 0.3, "eased: slow away from the first");
+        let end = it.place_at(5_500_000);
+        assert_eq!((end.x, end.opacity), (0.9, 0.5));
+        // Trimmed at its start, the motion stays where it was on the timeline.
+        t.trim_item(l, i, 3_000_000, 6_000_000).unwrap();
+        let it = t.item(l, i).unwrap().clone();
+        assert!((it.place_at(3_000_000).x - 0.5).abs() < 1e-4);
+        assert!((it.place_at(4_000_000).x - 0.9).abs() < 1e-4);
+        // Twice as fast from 3 s on: the last keyframe comes at 3.5 s.
+        t.set_speed(3_000_000, 6_000_000, 200, None).unwrap();
+        let it = t.item(l, i).unwrap().clone();
+        assert!((it.place_at(3_500_000).x - 0.9).abs() < 1e-4, "{:?}", it.keys);
+        // Moved with setItem, the whole motion moves; taken away, it stays where the last was.
+        t.set_item(l, i, |it| it.place.x += 0.05).unwrap();
+        assert!((t.item(l, i).unwrap().place_at(3_500_000).x - 0.95).abs() < 1e-4);
+        t.remove_key(l, i, Some(0)).unwrap();
+        assert!(t.remove_key(l, i, Some(5)).is_err());
+        t.remove_key(l, i, None).unwrap();
+        let it = t.item(l, i).unwrap();
+        assert!(it.keys.is_empty() && (it.place.x - 0.95).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_cut_through_an_animated_item_keeps_each_part_moving_as_it_did() {
+        let mut t = timeline();
+        let (l, i) = t
+            .place(Item { len: 4_000_000, keys: vec![Key { at: 0, place: at(0.0) }, Key { at: 4_000_000, place: at(1.0) }], ..lower() }, None, 0)
+            .unwrap();
+        t.cut(1_000_000, 2_000_000).unwrap();
+        let items = &t.layer(l).unwrap().items;
+        assert_eq!(items.len(), 2);
+        let after = items.iter().find(|x| x.id != i).unwrap();
+        assert_eq!(after.at, 1_000_000);
+        // Where it was at 2 s before the cut, it is at 1 s after it; it still ends on the right.
+        assert!((after.place_at(1_000_000).x - t.item(l, i).unwrap().place_at(2_000_000).x).abs() < 0.3);
+        assert!((after.place_at(3_000_000).x - 1.0).abs() < 1e-4);
+        // Junk keyframes from a file are made safe.
+        let mut junk = t.clone();
+        if let Some(it) = junk.layers[0].items.get_mut(0) {
+            it.keys = vec![Key { at: u64::MAX, place: Placement { x: f32::NAN, ..at(0.0) } }; MAX_KEYS + 9];
+        }
+        junk.check_layers();
+        let it = &junk.layers[0].items[0];
+        assert!(it.keys.len() == 1 && it.keys[0].place.x.is_finite());
     }
 }
