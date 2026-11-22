@@ -179,6 +179,9 @@ struct Playing {
     /// When it started (egui's clock) and from where.
     since: f64,
     from: u64,
+    /// How fast and which way: 1 as recorded (with its sound), 2, 4 or 8 times as fast, and
+    /// below 0 backwards (J and L); any but 1 plays without sound.
+    rate: i32,
     /// It started in the chosen stretch: it stops at its end.
     in_range: bool,
     sound: Option<Box<dyn SoundOut>>,
@@ -935,14 +938,63 @@ impl VideoView {
         if self.playhead >= self.length() {
             self.playhead = 0;
         }
-        self.start_playing(ed, now);
+        self.play_at_rate(ed, now, 1);
     }
 
-    /// Plays from the playhead as it is.
+    /// Plays from the playhead as it is (as fast, and the same way, as it was playing).
     fn start_playing(&mut self, ed: &Editor, now: f64) {
-        let sound = ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead);
-        let in_range = self.range.is_some_and(|(a, b)| (a..b).contains(&self.playhead));
-        self.playing = Some(Playing { since: now, from: self.playhead, in_range, sound });
+        let rate = self.playing.as_ref().map_or(1, |p| p.rate);
+        self.play_at_rate(ed, now, rate);
+    }
+
+    /// Plays from the playhead, `rate` times as fast as recorded (below 0, backwards): with its
+    /// sound only as recorded.
+    fn play_at_rate(&mut self, ed: &Editor, now: f64, rate: i32) {
+        // The sound that was playing stops first.
+        self.playing = None;
+        let sound = if rate == 1 {
+            ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead)
+        } else {
+            None
+        };
+        let in_range = self.range.is_some_and(|(a, b)| (a..b).contains(&self.playhead) || (rate < 0 && self.playhead == b));
+        self.playing = Some(Playing { since: now, from: self.playhead, rate, in_range, sound });
+    }
+
+    /// The fastest J and L play.
+    const MOST_RATE: i32 = 8;
+
+    /// L (`forward`) or J: plays that way as recorded, or, playing that way already, twice as
+    /// fast (up to 8 times). Backwards, and faster, it plays without sound.
+    pub fn shuttle(&mut self, ed: &Editor, now: f64, forward: bool) {
+        let rate = match &self.playing {
+            Some(p) if (p.rate > 0) == forward => (p.rate * 2).clamp(-Self::MOST_RATE, Self::MOST_RATE),
+            _ if forward => 1,
+            _ => -1,
+        };
+        if forward && self.playhead >= self.length() {
+            self.playhead = 0;
+        }
+        if !forward && self.playhead == 0 {
+            self.playhead = self.length();
+        }
+        self.play_at_rate(ed, now, rate);
+    }
+
+    /// How fast and which way it's playing, when not as recorded: `2×`, `Backwards 4×`.
+    pub fn rate_label(&self) -> Option<String> {
+        let rate = self.playing.as_ref().map(|p| p.rate).filter(|r| *r != 1)?;
+        let x = rate.unsigned_abs();
+        Some(if rate < 0 { format!("Backwards {x}×") } else { format!("{x}×") })
+    }
+
+    /// The time under the picture: where the playhead is, how long the video is, and how fast
+    /// it's playing when that isn't as recorded.
+    fn time_words(&self, length: u64) -> String {
+        match self.rate_label() {
+            Some(r) => format!("{} / {}  {r}", clock(self.playhead), clock(length)),
+            None => [clock(self.playhead), clock(length)].join(" / "),
+        }
     }
 
     pub fn pause(&mut self) {
@@ -1222,18 +1274,30 @@ impl VideoView {
             }
         }
         if let Some(p) = &self.playing {
-            let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from + ((now - p.since).max(0.0) * 1e6) as u64);
-            // Started in the chosen stretch: it stops at its end (as it is now).
-            let end = match self.range {
-                Some((_, b)) if p.in_range => b.min(self.length()),
-                _ => self.length(),
+            let gone = ((now - p.since).max(0.0) * 1e6 * f64::from(p.rate.unsigned_abs())) as u64;
+            // Started in the chosen stretch: it stops at its end (or, backwards, its start).
+            let (start, end) = match self.range {
+                Some((a, b)) if p.in_range => (a, b.min(self.length())),
+                _ => (0, self.length()),
             };
-            if at >= end {
-                self.playhead = end;
-                self.playing = None;
+            if p.rate < 0 {
+                let at = p.from.saturating_sub(gone);
+                if at <= start {
+                    self.playhead = start;
+                    self.playing = None;
+                } else {
+                    self.playhead = at;
+                    ctx.request_repaint();
+                }
             } else {
-                self.playhead = at;
-                ctx.request_repaint();
+                let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from.saturating_add(gone));
+                if at >= end {
+                    self.playhead = end;
+                    self.playing = None;
+                } else {
+                    self.playhead = at;
+                    ctx.request_repaint();
+                }
             }
         }
         if self.session.revision() != self.seen {
@@ -1270,6 +1334,7 @@ impl VideoView {
             if plain(Key::Space) {
                 if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
             }
+            self.shuttle_keys(ed, ctx, now);
             let frame = 1_000_000 / self.fps();
             if plain(Key::ArrowLeft) {
                 self.seek(ed, self.playhead.saturating_sub(frame), now);
@@ -1317,6 +1382,7 @@ impl VideoView {
         if plain(Key::Space) {
             if self.playing.is_some() { self.pause() } else { self.play(ed, now) }
         }
+        self.shuttle_keys(ed, ctx, now);
         if plain(Key::S) {
             self.split(ed, ctx);
         }
@@ -1348,6 +1414,20 @@ impl VideoView {
         }
         if plain(Key::End) {
             self.seek(ed, self.length(), now);
+        }
+    }
+
+    /// J plays backwards, K pauses, L plays on; J or L again plays faster that way.
+    fn shuttle_keys(&mut self, ed: &Editor, ctx: &egui::Context, now: f64) {
+        let plain = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        if plain(Key::K) {
+            self.pause();
+        }
+        if plain(Key::J) {
+            self.shuttle(ed, now, false);
+        }
+        if plain(Key::L) {
+            self.shuttle(ed, now, true);
         }
     }
 
@@ -1535,6 +1615,27 @@ impl VideoView {
                         self.seek(ed, self.length(), now);
                         ui.close();
                     }
+                    ui.separator();
+                    if ui
+                        .add(egui::Button::new("Play Backwards").shortcut_text("J"))
+                        .on_hover_text("Again plays faster backwards (2, 4, 8 times); without sound")
+                        .clicked()
+                    {
+                        self.shuttle(ed, now, false);
+                        ui.close();
+                    }
+                    if ui.add_enabled(self.playing.is_some(), egui::Button::new("Pause").shortcut_text("K")).clicked() {
+                        self.pause();
+                        ui.close();
+                    }
+                    if ui
+                        .add(egui::Button::new("Play Faster").shortcut_text("L"))
+                        .on_hover_text("Plays on; again plays faster (2, 4, 8 times, without sound)")
+                        .clicked()
+                    {
+                        self.shuttle(ed, now, true);
+                        ui.close();
+                    }
                 });
                 ui.menu_button("View", |ui| {
                     ui.checkbox(&mut self.library_open, "Library and Media Bin");
@@ -1717,7 +1818,7 @@ impl VideoView {
             let track = self.session.timeline.tracks.get(ti)?;
             let c = track.clips.get(ci)?;
             let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
-            Some((name, c.at, c.len, c.end(), c.speed, !track.kind.is_video()))
+            Some((name, c.at, c.len, c.end(), c.speed, !track.kind.is_video(), c.reverse))
         });
         let stretch = self.range;
         let ctx = ui.ctx().clone();
@@ -1772,7 +1873,7 @@ impl VideoView {
                             self.run(ed, &ctx, "video.cut", json!({"from": c.at, "to": c.end()}));
                         }
                         first = false;
-                    } else if let Some((name, at, len, end, speed, sound)) = clip {
+                    } else if let Some((name, at, len, end, speed, sound, backwards)) = clip {
                         // What's chosen, said, with what's most often done to it.
                         ui.label(RichText::new(format!("{name} clip")).size(16.0).color(t.text));
                         let pace = if speed == screengrabcraft_media::timeline::NORMAL_SPEED {
@@ -1780,7 +1881,8 @@ impl VideoView {
                         } else {
                             format!(", playing at {}", speed_label(speed))
                         };
-                        note(ui, format!("Starts at {}, {} long{pace}.", clock(at), clock(len)));
+                        let way = if backwards { ", backwards" } else { "" };
+                        note(ui, format!("Starts at {}, {} long{pace}{way}.", clock(at), clock(len)));
                         ui.add_space(8.0);
                         let on_it = self.playhead > at && self.playhead < end;
                         let (mut split, mut delete) = (false, false);
@@ -1804,6 +1906,19 @@ impl VideoView {
                         self.speed_buttons(ed, ui);
                         ui.add_space(4.0);
                         note(ui, "Every track plays this stretch at the speed, so they stay together; voices keep their pitch.".to_string());
+                        if let Some((ti, ci)) = self.selected {
+                            ui.add_space(4.0);
+                            let mut back = backwards;
+                            if ui
+                                .checkbox(&mut back, "Play backwards")
+                                .on_hover_text(
+                                    "It plays from its end to its start, the picture and the sound turned round (with the clips grouped with it)",
+                                )
+                                .changed()
+                            {
+                                self.run(ed, &ctx, "video.reverse", json!({"track": ti, "clip": ci, "reverse": back}));
+                            }
+                        }
                         if let Some((ti, ci)) = self.selected.filter(|(_, ci)| *ci > 0) {
                             section(ui, if sound { "Cross-fade" } else { "Transition" }, &mut false);
                             self.transition_section(ed, ui, ti, ci);
@@ -1880,6 +1995,7 @@ impl VideoView {
                             ("Shift-drag", "a clip to push the clips after it along with it."),
                             ("Handles", "either side of the playhead on the ruler: drag one out to choose a stretch. Play then plays just that."),
                             ("S", "splits at the playhead."),
+                            ("J, K, L", "play backwards, pause, play on; again, faster."),
                             ("T", "puts words on the video at the playhead."),
                             ("Delete", "takes out what's selected, or the chosen stretch from every track."),
                             ("Right-click", "a track to split or cut it alone; the ruler for every track."),
@@ -2246,7 +2362,7 @@ impl VideoView {
                 return;
             }
             // The time, and between it and the way back the whole video to seek along.
-            let clock_text = format!("{} / {}", clock(self.playhead), clock(length));
+            let clock_text = self.time_words(length);
             let words =
                 painter.text(pos2(play.max.x + 14.0, mid), egui::Align2::LEFT_CENTER, clock_text, egui::FontId::monospace(14.0), Color32::WHITE);
             let track = Rect::from_min_max(pos2(words.max.x + 18.0, mid - 3.0), pos2(exit.min.x - 18.0, mid + 3.0));
@@ -2298,8 +2414,7 @@ impl VideoView {
             let length = self.length();
             // The buttons in the middle under the picture, and the time after them; moved left
             // as far as it takes for the time to be seen whole in a narrow preview.
-            let time_w =
-                ui.painter().layout_no_wrap(format!("{} / {}", clock(self.playhead), clock(length)), egui::FontId::monospace(14.0), t.text).size().x;
+            let time_w = ui.painter().layout_no_wrap(self.time_words(length), egui::FontId::monospace(14.0), t.text).size().x;
             let (left_reach, right_reach) = (PLAY / 2.0 + 58.0 + 15.0, PLAY / 2.0 + 58.0 + 40.0 + 15.0 + 16.0 + time_w);
             let room = (whole.min.x - 24.0, whole.max.x + 24.0);
             let cx = area.center().x.min(room.1 - right_reach).max(room.0 + left_reach);
@@ -2367,7 +2482,7 @@ impl VideoView {
             ui.painter().text(
                 pos2(full.max.x + 16.0, mid),
                 egui::Align2::LEFT_CENTER,
-                format!("{} / {}", clock(self.playhead), clock(length)),
+                self.time_words(length),
                 egui::FontId::monospace(14.0),
                 t.text,
             );
@@ -3192,11 +3307,16 @@ impl VideoView {
                             ));
                             painter.line_segment([pos2(edge, r.max.y), pos2(inner, r.min.y)], Stroke::new(1.5, Color32::WHITE));
                         }
-                        // Faster or slower than recorded: its speed in its top right corner (a
-                        // held frame says so).
-                        if (clip.hold || clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED) && r.width() > 34.0 {
+                        // Faster or slower than recorded, or backwards: its speed in its top right
+                        // corner (a held frame says so).
+                        if (clip.hold || clip.reverse || clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED) && r.width() > 34.0 {
                             let font = egui::FontId::proportional(11.0);
-                            let words = if clip.hold { "Held".to_string() } else { speed_label(clip.speed) };
+                            let words = match (clip.hold, clip.reverse) {
+                                (true, _) => "Held".to_string(),
+                                (false, true) if clip.speed == screengrabcraft_media::timeline::NORMAL_SPEED => "Backwards".to_string(),
+                                (false, true) => format!("Backwards {}", speed_label(clip.speed)),
+                                (false, false) => speed_label(clip.speed),
+                            };
                             let size = painter.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size();
                             let right = r.max.x.min(lane.max.x);
                             let tag = Rect::from_min_size(pos2((right - size.x - 10.0).max(r.min.x + 2.0), r.min.y + 3.0), size + vec2(6.0, 2.0));

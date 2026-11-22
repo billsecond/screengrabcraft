@@ -2804,6 +2804,7 @@ fn a_transition_from_the_library_goes_where_two_clips_meet_and_its_panel_changes
         assert_eq!(v.session.timeline.tracks[0].clips[1].transition.map(|x| (x.kind, x.len)), Some((Blend::CrossFade, 1_000_000)));
     }
     // Its panel makes it longer.
+    scroll_side_panel_to(&mut h, "2 s");
     h.get_by_label("2 s").click();
     h.run_steps(2);
     assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[1].transition.map(|x| x.len), Some(2_000_000));
@@ -3018,4 +3019,53 @@ fn clips_are_grouped_coloured_and_tracks_locked_or_played_alone() {
     h.run_steps(2);
     assert!(tl(&h).tracks[mic].solo);
     shot(&mut h, "video-groups-and-locks");
+}
+
+#[test]
+fn j_k_and_l_play_backwards_pause_and_faster_and_a_clip_plays_backwards() {
+    let mut h = harness();
+    let rate = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().rate_label();
+    // L plays on as recorded; again, twice as fast.
+    h.key_press(egui::Key::L);
+    h.run_steps(1);
+    assert!(h.state().video.as_ref().unwrap().is_playing() && rate(&h).is_none());
+    h.key_press(egui::Key::L);
+    h.run_steps(1);
+    assert_eq!(rate(&h).as_deref(), Some("2×"));
+    // K stops; J plays backwards, then faster backwards.
+    h.key_press(egui::Key::K);
+    h.run_steps(1);
+    assert!(!h.state().video.as_ref().unwrap().is_playing());
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(rate(&h).as_deref(), Some("Backwards 2×"));
+    shot(&mut h, "video-playing-backwards");
+    h.run_steps(1);
+    let at = h.state().video.as_ref().unwrap().playhead;
+    assert!(at < 3_000_000 && at > 1_000_000, "{at}");
+    // It stops at the start.
+    h.run_steps(8);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(!v.is_playing() && v.playhead == 0);
+    // The screen's clip played backwards from its right button, and forwards again.
+    let (lane, rows_top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 60.0, rows_top + 20.0));
+    h.get_by_label("Play Backwards").click();
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.session.timeline.tracks[0].clips[0].reverse);
+        assert_eq!(v.session.undo_label(), Some("Play Backwards"));
+        assert_eq!(v.session.timeline.source_time(0, 0), Some(3_999_999), "it starts with the recording's last moment");
+    }
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(2);
+    shot(&mut h, "video-clip-backwards");
+    scroll_side_panel_to(&mut h, "Play backwards");
+    h.get_by_label("Play backwards").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].reverse);
 }

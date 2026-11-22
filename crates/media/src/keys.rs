@@ -110,7 +110,7 @@ pub fn showing<'a>(presses: &'a [Press], timeline: &Timeline, t: u64) -> Option<
     let lo = t.saturating_sub(SHOWN_US);
     let mut best: Option<(u64, &Press)> = None;
     for c in &track.clips {
-        if c.hold || c.end() <= lo || c.at > t {
+        if c.hold || c.reverse || c.end() <= lo || c.at > t {
             continue;
         }
         // The part of the recording this clip plays between `lo` and `t`.

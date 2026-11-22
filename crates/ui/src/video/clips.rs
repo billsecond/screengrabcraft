@@ -1,5 +1,6 @@
 //! Clips together and apart in the video editor: groups of clips that move together, clip
-//! colours, and tracks locked or played alone (the toggles in their headers).
+//! colours, clips played backwards, and tracks locked or played alone (the toggles in their
+//! headers).
 
 use egui::{Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
 use screengrabcraft_media::timeline::Track;
@@ -101,6 +102,17 @@ impl VideoView {
     /// The right button's clip items: its colour, and its group.
     pub(super) fn clip_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, ti: usize, ci: usize) {
         let Some(clip) = self.session.timeline.tracks.get(ti).and_then(|t| t.clips.get(ci)).copied() else { return };
+        if !clip.hold {
+            let words = if clip.reverse { "Play Forwards Again" } else { "Play Backwards" };
+            if ui
+                .button(words)
+                .on_hover_text("From its end to its start, the picture and the sound turned round (the clips grouped with it too)")
+                .clicked()
+            {
+                self.run(ed, ctx, "video.reverse", json!({"track": ti, "clip": ci, "reverse": !clip.reverse}));
+                ui.close();
+            }
+        }
         ui.menu_button("Clip Colour", |ui| {
             if ui.add(egui::Button::new("As Its Track").selected(clip.colour.is_none())).clicked() {
                 self.run(ed, ctx, "video.clipColour", json!({"track": ti, "clip": ci, "colour": null}));
