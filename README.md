@@ -207,7 +207,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   clipboard. **Put a line right**: double-click it to change its words (and split it at the
   cursor); its right button splits it, joins it to the speaker's next line, moves its start or end
   to the playhead, or deletes it. The lines put right are what the picture, Export Video and the
-  subtitles show; All Captions as Heard takes them back.
+  subtitles show; All Captions as Heard takes them back. **Cut words out of the video**: a line's
+  right button, Cut Words from the Video, shows its words: click those to take out and press
+  Delete, and where they're said goes from every track. **Take Out Filler Words** (in the pane,
+  or Edit) cuts every um, uh and er the transcript has. Each word's time is worked out from its
+  line's by its length, so check the cut by playing it (undo puts it back).
 - Undo and redo everything. The edits are saved into the recording file a moment after each
   change (the recording itself is never changed), and File › Revert to Recording brings every
   track back whole.

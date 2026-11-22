@@ -416,6 +416,54 @@ fn caption_times(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// Words of the recording's captions cut out of the video, and out of their lines.
+fn cut_picks(s: &mut VideoSession, picks: &[(usize, Vec<usize>)]) -> Result<Value> {
+    let mut cues = corrected(s).clone();
+    let done = screengrabcraft_media::captions::cut_words(&mut s.timeline, &mut cues, picks).map_err(EngineError::Failed)?;
+    s.timeline.corrected = Some(cues);
+    Ok(json!({"words": done.words, "cut": done.cut, "at": done.at, "length": s.timeline.length()}))
+}
+
+/// Words of a line cut out of the video, by their places in it.
+fn cut_words(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let list = p
+        .get("words")
+        .and_then(Value::as_array)
+        .ok_or_else(|| EngineError::Params("`words` is a list of the words' places in the line, from 0".to_string()))?;
+    let mut picks = Vec::new();
+    for v in list.iter().take(screengrabcraft_media::captions::MAX_TEXT) {
+        picks.push(
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| EngineError::Params("each of `words` is a word's place in the line, from 0".to_string()))?,
+        );
+    }
+    cut_picks(s, &[(line, picks)])
+}
+
+/// The filler words (um, uh, er…, or those given) cut out of the video wherever they're said.
+fn cut_fillers(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::captions::{FILLERS, bare, fillers};
+    let list: Vec<String> = match p.get("words") {
+        None | Some(Value::Null) => FILLERS.iter().map(|w| w.to_string()).collect(),
+        Some(Value::Array(a)) => {
+            let mut out = Vec::new();
+            for v in a.iter().take(100) {
+                out.push(bare(v.as_str().ok_or_else(|| EngineError::Params("each of `words` is a word".to_string()))?));
+            }
+            out
+        }
+        Some(_) => return Err(EngineError::Params("`words` is a list of words".to_string())),
+    };
+    let cues = corrected(s).clone();
+    let picks = fillers(&cues, &s.timeline, &list);
+    if picks.is_empty() {
+        return Err(EngineError::Failed("there are no filler words (um, uh, er…) in the transcript".to_string()));
+    }
+    cut_picks(s, &picks)
+}
+
 // ---- markers: moments marked on the timeline, the chapters of the video made ----
 
 fn add_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -994,6 +1042,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: caption_times,
     },
     VideoCommand {
+        id: "video.cutWords",
+        label: "Cut Words",
+        params: r#"{"line": n, "words": [n, …]}: words of a line of the recording's captions (their places in it, from 0) cut out of the video: where they're said is taken out of every track, closing the gap, and the words out of the line. A line's words are timed by their length (the speech model times lines only). Says how many words, how long was cut (µs) and where the first cut is"#,
+        run: cut_words,
+    },
+    VideoCommand {
+        id: "video.cutFillers",
+        label: "Take Out Filler Words",
+        params: r#"{"words"?: [text, …]}: every filler word (um, uh, er and the like, or the words given) said in the video cut out of it, as Cut Words does"#,
+        run: cut_fillers,
+    },
+    VideoCommand {
         id: "video.addMarker",
         label: "Add Marker",
         params: r#"{"at": µs, "name"?: text}: marks a moment on the timeline (a chapter of the video made); its place among the markers"#,
@@ -1381,6 +1441,59 @@ mod tests {
         // Captions that came later are what's put right from then on.
         s.set_heard(None);
         assert!(s.execute("video.captionJoin", &json!({"line": 0})).is_err());
+    }
+
+    #[test]
+    fn words_and_filler_words_are_cut_from_the_transcript_one_undo_step_each() {
+        use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut bytes = w.finish(5_000_000).unwrap();
+        let heard = Captions {
+            cues: vec![
+                Cue { start: 0, end: 1_100_000, speaker: Speaker::You, text: "So um this works".into() },
+                Cue { start: 2_000_000, end: 3_000_000, speaker: Speaker::You, text: "Uh, the old page.".into() },
+            ],
+            model: String::new(),
+        };
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&heard).unwrap());
+        let mut s = VideoSession::new(&Recording::open(Box::new(bytes)).unwrap());
+        // "old" (the third of four words, 8/18 to 12/18 of the line) out of the video and the line.
+        let v = s.execute("video.cutWords", &json!({"line": 1, "words": [2]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Cut Words"));
+        assert_eq!((v["words"].as_u64(), v["cut"].as_u64(), v["at"].as_u64()), (Some(1), Some(222_222), Some(2_444_444)));
+        assert_eq!(s.timeline.length(), 5_000_000 - 222_222);
+        let texts = |s: &VideoSession| s.timeline.corrected.as_ref().unwrap().iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&s), ["So um this works", "Uh, the", "page."]);
+        // Every filler: "um" and "Uh,", one undo step.
+        let v = s.execute("video.cutFillers", &json!({})).unwrap();
+        assert_eq!(v["words"].as_u64(), Some(2));
+        assert_eq!(texts(&s), ["So", "this works", "the", "page."]);
+        assert!(s.execute("video.cutFillers", &json!({})).is_err(), "none left");
+        // Words of one's own: "this".
+        s.execute("video.cutFillers", &json!({"words": ["THIS"]})).unwrap();
+        assert_eq!(texts(&s), ["So", "works", "the", "page."]);
+        for (id, bad) in [
+            ("video.cutWords", json!({"line": 0})),
+            ("video.cutWords", json!({"line": 0, "words": [9]})),
+            ("video.cutWords", json!({"line": 9, "words": [0]})),
+            ("video.cutWords", json!({"line": 0, "words": ["first"]})),
+            ("video.cutFillers", json!({"words": "um"})),
+            ("video.cutFillers", json!({"words": [5]})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        for _ in 0..3 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.corrected.is_none() && s.timeline.length() == 5_000_000);
     }
 
     #[test]

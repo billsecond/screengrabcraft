@@ -311,6 +311,8 @@ pub struct VideoView {
     pub line_sources: Arc<Vec<Option<usize>>>,
     /// A line's words being put right in the transcript.
     pub(crate) caption_edit: Option<transcript::CaptionEdit>,
+    /// A line's words being chosen in the transcript, to cut out of the video.
+    pub(crate) word_cut: Option<transcript::WordCut>,
     /// A marker's name being typed in the panel (its place, the words so far).
     marker_edit: Option<(usize, String)>,
     lines_rev: u64,
@@ -597,6 +599,7 @@ impl VideoView {
             lines: Arc::new(Vec::new()),
             line_sources: Arc::new(Vec::new()),
             caption_edit: None,
+            word_cut: None,
             marker_edit: None,
             lines_rev: 0,
             transcript_follow: None,
@@ -1170,9 +1173,12 @@ impl VideoView {
         self.run(ed, ctx, "video.split", p);
     }
 
-    /// Delete: the chosen stretch out of every track, else the selected clip.
+    /// Delete: the words chosen in the transcript out of the video, else the chosen stretch out
+    /// of every track, else the selected clip.
     pub fn delete(&mut self, ed: &mut Editor, ctx: &egui::Context) {
-        if self.range.is_some() {
+        if self.word_cut.as_ref().is_some_and(|w| !w.chosen.is_empty()) {
+            self.cut_chosen_words(ed, ctx);
+        } else if self.range.is_some() {
             self.cut_stretch(ed, ctx);
         } else if let Some((layer, item)) = self.item.take() {
             self.run(ed, ctx, "video.deleteItem", json!({"layer": layer, "item": item}));
@@ -1326,7 +1332,7 @@ impl VideoView {
         if plain(Key::Delete) || plain(Key::Backspace) {
             self.delete(ed, ctx);
         }
-        if plain(Key::Escape) {
+        if plain(Key::Escape) && self.word_cut.take().is_none() {
             self.range = None;
             self.selected = None;
         }
@@ -1484,6 +1490,15 @@ impl VideoView {
                         ui.close();
                     }
                     self.speed_menu(ed, ui, &ctx);
+                    if self.line_sources.iter().any(Option::is_some)
+                        && ui
+                            .button("Take Out Filler Words")
+                            .on_hover_text("Cuts um, uh, er and the like out of the video wherever the transcript has them")
+                            .clicked()
+                    {
+                        self.take_out_fillers(ed, &ctx);
+                        ui.close();
+                    }
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Select All").shortcut_text("Ctrl+A"))

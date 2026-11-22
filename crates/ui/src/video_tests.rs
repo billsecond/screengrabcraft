@@ -2103,6 +2103,62 @@ fn a_caption_is_put_right_split_joined_and_moved_from_the_transcript() {
 }
 
 #[test]
+fn words_are_cut_from_the_transcript_and_filler_words_taken_out() {
+    use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+    let mut bytes = meeting();
+    let said = Captions {
+        cues: vec![
+            Cue { start: 200_000, end: 1_800_000, speaker: Speaker::You, text: "So, um, here's the old login page.".into() },
+            Cue { start: 2_000_000, end: 3_600_000, speaker: Speaker::Others, text: "Uh, it looks good to me.".into() },
+        ],
+        model: "test".into(),
+    };
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&said).unwrap());
+    let mut h = caption_harness_stepping(bytes, CaptionHost::default(), 0.02);
+    h.state_mut().video.as_mut().unwrap().transcript_open = true;
+    h.run_steps(3);
+    let texts = |h: &Harness<'_, Editor>| {
+        h.state().video.as_ref().unwrap().session.timeline.corrected.clone().unwrap_or_default().into_iter().map(|c| c.text).collect::<Vec<_>>()
+    };
+    // Your line's right button: its words to choose; "old" chosen, cut with Delete.
+    let at = h.get_by_label_contains("here's the old login page.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Cut Words from the Video…").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().word_cut.is_some());
+    h.get_by_label("old").click();
+    h.run_steps(2);
+    shot(&mut h, "video-cut-words");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.word_cut.is_none());
+        assert_eq!(v.session.undo_label(), Some("Cut Words"));
+        assert!(v.session.timeline.length() < 4_000_000, "the time it was said is out of every track");
+        assert_eq!(v.session.timeline.tracks[0].clips.len(), 2, "the screen too");
+    }
+    assert_eq!(texts(&h), ["So, um, here's the", "login page.", "Uh, it looks good to me."]);
+    let before = length(&h);
+    // Take Out Filler Words: your "um," and their "Uh,".
+    h.get_by_label("Take Out Filler Words").click();
+    h.run_steps(3);
+    assert_eq!(texts(&h), ["So,", "here's the", "login page.", "it looks good to me."]);
+    assert!(length(&h) < before);
+    assert_eq!(h.state().toast_text(), Some("2 filler words cut out of the video (0.4 s)"));
+    shot(&mut h, "video-fillers-cut");
+    // None left: said so; undone, both come back.
+    h.get_by_label("Take Out Filler Words").click();
+    h.run_steps(3);
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("no filler words")));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.corrected.is_none());
+    assert_eq!(length(&h), 4_000_000);
+}
+
+#[test]
 fn markers_are_added_with_m_named_in_the_panel_and_deleted() {
     let mut h = harness();
     h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;

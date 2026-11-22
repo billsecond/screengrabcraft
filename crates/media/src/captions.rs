@@ -493,6 +493,179 @@ pub mod edit {
     }
 }
 
+/// Words said while thinking, that mean nothing: what Take Out Filler Words cuts.
+pub const FILLERS: &[&str] = &["um", "umm", "uh", "uhh", "uhm", "er", "erm", "err", "ah", "ahh", "hmm", "hm", "mm", "mmm"];
+
+/// A word of a line, and when it's said (µs, in the line's own time: the recording's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Word {
+    pub start: u64,
+    pub end: u64,
+    pub text: String,
+}
+
+/// `v × num / den`, without overflowing (`num` at most `den`: never more than `v`).
+fn share(v: u64, num: u64, den: u64) -> u64 {
+    u64::try_from(u128::from(v) * u128::from(num.min(den)) / u128::from(den.max(1))).unwrap_or(v)
+}
+
+/// A line's words, each with when it's said. The speech model gives only when each line starts
+/// and ends, so these are estimated: each word is given a share of the line as long as it is
+/// (its letters, and the space after it).
+pub fn words(cue: &Cue) -> Vec<Word> {
+    let list: Vec<&str> = cue.text.split_whitespace().take(MAX_TEXT).collect();
+    let weight = |w: &str| w.chars().count() as u64 + 1;
+    let total: u64 = list.iter().map(|w| weight(w)).sum();
+    let len = cue.end.saturating_sub(cue.start);
+    let mut so_far = 0u64;
+    list.into_iter()
+        .map(|w| {
+            let start = cue.start.saturating_add(share(len, so_far, total));
+            so_far += weight(w);
+            Word { start, end: cue.start.saturating_add(share(len, so_far, total)), text: w.to_string() }
+        })
+        .collect()
+}
+
+/// A word as it's compared with the filler words: small letters, without the marks round it.
+pub fn bare(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase()
+}
+
+/// The filler words (any of `list`, bare) in the lines heard on tracks that are in the video (not
+/// muted): each line's place and the places of its filler words.
+pub fn fillers(cues: &[Cue], timeline: &Timeline, list: &[String]) -> Vec<(usize, Vec<usize>)> {
+    let heard = |s: Speaker| timeline.find(s.source()).and_then(|i| timeline.tracks.get(i)).is_some_and(|t| !t.muted);
+    cues.iter()
+        .enumerate()
+        .filter(|(_, c)| heard(c.speaker))
+        .filter_map(|(k, c)| {
+            let found: Vec<usize> = words(c).iter().enumerate().filter(|(_, w)| list.contains(&bare(&w.text))).map(|(i, _)| i).collect();
+            (!found.is_empty()).then_some((k, found))
+        })
+        .collect()
+}
+
+/// What cutting words out took: how many words, how much shorter the video is (µs), and where
+/// the first stretch taken out was on the timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WordsCut {
+    pub words: usize,
+    pub cut: u64,
+    pub at: u64,
+}
+
+/// Where a stretch of a speaker's recording (`from..to`) plays on the edited video: on each clip
+/// of their track that plays it, unless the track is muted.
+fn played_at(timeline: &Timeline, speaker: Speaker, from: u64, to: u64) -> Vec<(u64, u64)> {
+    let Some(track) = timeline.find(speaker.source()).and_then(|i| timeline.tracks.get(i)) else { return Vec::new() };
+    if track.muted {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for clip in track.clips.iter().filter(|c| !c.hold) {
+        let (a, b) = (from.max(clip.from), to.min(clip.from.saturating_add(clip.source_len())));
+        if b <= a {
+            continue;
+        }
+        let start = clip.at.saturating_add(clip.played(a - clip.from));
+        let end = clip.at.saturating_add(clip.played(b - clip.from)).min(clip.end());
+        if end > start {
+            out.push((start, end));
+        }
+    }
+    out
+}
+
+/// Words of the recording's lines cut out of the video: where each is said (on its speaker's
+/// track) is taken out of every track, closing the gap, and the words out of their line (a line
+/// with words cut from its middle becomes two). `picks` are lines' places in `cues` (the
+/// recording's lines, in order) with the places of their words (as [`words`] has them); words no
+/// longer in the video (cut already, or muted) are left as they are. Nothing in the video: an
+/// error, and nothing changes.
+pub fn cut_words(timeline: &mut Timeline, cues: &mut Vec<Cue>, picks: &[(usize, Vec<usize>)]) -> Result<WordsCut, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    // Each line once, its words in order.
+    let mut by_line: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (line, chosen) in picks.iter().take(MAX_CUES) {
+        let cue = cues.get(*line).ok_or_else(|| format!("there's no line {line} in the captions"))?;
+        let n = words(cue).len();
+        let set = by_line.entry(*line).or_default();
+        for w in chosen.iter().take(MAX_TEXT) {
+            if *w >= n {
+                return Err(format!("line {line} has no word {w} (it has {n})"));
+            }
+            set.insert(*w);
+        }
+    }
+    by_line.retain(|_, set| !set.is_empty());
+    if by_line.is_empty() {
+        return Err("no words were chosen".to_string());
+    }
+    // Where the words of each run are said in the video; the words found there are cut.
+    let mut stretches: Vec<(u64, u64)> = Vec::new();
+    let mut hit: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for (line, set) in &by_line {
+        let Some(cue) = cues.get(*line) else { continue };
+        let ws = words(cue);
+        let list: Vec<usize> = set.iter().copied().collect();
+        for run in list.chunk_by(|a, b| a + 1 == *b) {
+            let (Some(first), Some(last)) = (run.first().and_then(|k| ws.get(*k)), run.last().and_then(|k| ws.get(*k))) else { continue };
+            let found = played_at(timeline, cue.speaker, first.start, last.end);
+            if !found.is_empty() {
+                hit.entry(*line).or_default().extend(run.iter().copied());
+                stretches.extend(found);
+            }
+        }
+    }
+    // Overlapping or touching stretches taken out as one.
+    stretches.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (a, b) in stretches {
+        match merged.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => merged.push((a, b)),
+        }
+    }
+    let Some(&(at, _)) = merged.first() else {
+        return Err("those words aren't in the video as edited: they were cut, or their sound is muted".to_string());
+    };
+    // The last first, so the places of the others hold.
+    let mut cut = 0u64;
+    for (a, b) in merged.iter().rev() {
+        timeline.cut(*a, *b).map_err(|e| e.to_string())?;
+        cut = cut.saturating_add(b - a);
+    }
+    // The words out of their lines: what's left of each in pieces, each said when its words are.
+    let old = std::mem::take(cues);
+    for (k, cue) in old.into_iter().enumerate() {
+        let Some(gone) = hit.get(&k) else {
+            cues.push(cue);
+            continue;
+        };
+        let mut piece: Vec<Word> = Vec::new();
+        let flush = |piece: &mut Vec<Word>, cues: &mut Vec<Cue>| {
+            if let (Some(first), Some(last)) = (piece.first(), piece.last()) {
+                let text = clean_text(&piece.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "));
+                if last.end > first.start && !text.is_empty() {
+                    cues.push(Cue { start: first.start, end: last.end, speaker: cue.speaker, text });
+                }
+            }
+            piece.clear();
+        };
+        for (i, w) in words(&cue).into_iter().enumerate() {
+            if gone.contains(&i) {
+                flush(&mut piece, cues);
+            } else {
+                piece.push(w);
+            }
+        }
+        flush(&mut piece, cues);
+    }
+    cues.sort_by_key(|c| (c.start, c.speaker));
+    Ok(WordsCut { words: hit.values().map(BTreeSet::len).sum(), cut, at })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,6 +775,60 @@ mod tests {
         assert_eq!((now.cues[0].text.as_str(), now.model.as_str()), ("A longer line.", "m"));
         let lines = transcript_from(Some(&now), &tl, &Default::default());
         assert!(lines.iter().all(|(c, _, k)| c.text == "A longer line." && *k == Some(0)));
+    }
+
+    #[test]
+    fn a_lines_words_are_given_times_by_their_length() {
+        let ws = words(&cue(1_000_000, 2_000_000, Speaker::You, "So um this"));
+        // "So " 3, "um " 3, "this " 5 of 11.
+        let times: Vec<(u64, u64)> = ws.iter().map(|w| (w.start, w.end)).collect();
+        assert_eq!(times, vec![(1_000_000, 1_272_727), (1_272_727, 1_545_454), (1_545_454, 2_000_000)]);
+        assert_eq!(ws[1].text, "um");
+        assert!(words(&cue(5, 5, Speaker::You, "")).is_empty());
+        assert_eq!(bare("Um,"), "um");
+        assert_eq!(bare("“UH…”"), "uh");
+        assert_eq!(bare("uh-huh"), "uh-huh", "only the marks round it go");
+    }
+
+    #[test]
+    fn words_are_cut_out_of_the_video_and_their_line() {
+        let mut tl = timeline();
+        let mut cues = vec![
+            cue(1_000_000, 2_000_000, Speaker::You, "So um this"),
+            cue(1_500_000, 3_000_000, Speaker::Others, "Uh, fine."),
+            cue(4_000_000, 5_000_000, Speaker::You, "Hello there"),
+        ];
+        // "um": 1.272727 s to 1.545454 s, out of every track.
+        let done = cut_words(&mut tl, &mut cues, &[(0, vec![1])]).unwrap();
+        assert_eq!(done, WordsCut { words: 1, cut: 272_727, at: 1_272_727 });
+        assert_eq!(tl.length(), 20_000_000 - 272_727);
+        assert_eq!(tl.tracks[0].clips.len(), 2, "the screen too");
+        let texts: Vec<&str> = cues.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, ["So", "Uh, fine.", "this", "Hello there"], "in order of their start");
+        assert_eq!((cues[0].start, cues[0].end, cues[2].start, cues[2].end), (1_000_000, 1_272_727, 1_545_454, 2_000_000));
+        // On the timeline the two halves meet where the word was.
+        let on = Captions { cues: cues.clone(), model: String::new() }.on_timeline(&tl);
+        let mine: Vec<(u64, u64)> = on.iter().filter(|c| c.speaker == Speaker::You).map(|c| (c.start, c.end)).take(2).collect();
+        assert_eq!(mine, vec![(1_000_000, 1_272_727), (1_272_727, 1_727_273)]);
+        // The filler words of every line heard: the others' "Uh," (their first word), none of mine left.
+        let list: Vec<String> = FILLERS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(fillers(&cues, &tl, &list), vec![(1, vec![0])]);
+        // Muted, a track's words aren't in the video: none to find or cut.
+        tl.set_muted(1, true).unwrap();
+        assert!(fillers(&cues, &tl, &list).is_empty());
+        let before = (tl.clone(), cues.clone());
+        assert!(cut_words(&mut tl, &mut cues, &[(1, vec![0])]).is_err());
+        assert_eq!((tl.clone(), cues.clone()), before);
+        // Two words side by side are one stretch; the line's end goes.
+        let line = cues.iter().position(|c| c.text == "Hello there").unwrap();
+        let done = cut_words(&mut tl, &mut cues, &[(line, vec![1, 0])]).unwrap();
+        assert_eq!((done.words, done.cut), (2, 1_000_000));
+        assert!(!cues.iter().any(|c| c.text.contains("Hello")));
+        // Junk: lines and words that aren't there are errors.
+        for bad in [vec![(99, vec![0])], vec![(0, vec![9])]] {
+            assert!(cut_words(&mut tl, &mut cues, &bad).is_err());
+        }
+        assert!(cut_words(&mut tl, &mut cues, &[]).is_err(), "nothing chosen");
     }
 
     #[test]
