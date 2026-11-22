@@ -5463,6 +5463,7 @@ dependencies = [
  "lz4_flex",
  "proptest",
  "rav1e",
+ "rustfft",
  "rusty-opus",
  "screengrabcraft-model",
  "screengrabcraft-render",

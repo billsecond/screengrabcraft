@@ -20,6 +20,8 @@ thiserror = { workspace = true }
 log = { workspace = true }
 lz4_flex = { workspace = true }
 crc32fast = { workspace = true }
+# Background noise taken out of a sound track (its frequencies, window by window).
+rustfft = { workspace = true }
 
 # The encoders: Rust all the way down, royalty-free. Not in the browser build.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

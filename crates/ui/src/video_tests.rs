@@ -1557,6 +1557,43 @@ fn a_chosen_stretch_is_sped_up_from_the_panel_and_a_clip_slowed_down_from_the_me
 }
 
 #[test]
+fn a_sound_clip_fades_and_its_tracks_steady_hum_is_taken_out() {
+    let mut h = harness();
+    // The screen's clip has no sound to fade; the microphone's has, and its track's noise.
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(3);
+    assert!(h.query_by_label("Fade in").is_none());
+    h.state_mut().video.as_mut().unwrap().selected = Some((1, 0));
+    h.run_steps(3);
+    for label in ["Fade in", "Fade out", "Background noise taken out"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    // A second's fade in and half a second's fade out (as the sliders set them): silent at the
+    // start, drawn on the clip.
+    let v = h.state_mut().video.as_mut().unwrap();
+    v.session.execute("video.fade", &serde_json::json!({"track": 1, "clip": 0, "in": 1_000_000, "out": 500_000})).unwrap();
+    let start = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 0, 480);
+    assert!(start.iter().all(|s| s.abs() < 0.01));
+    h.run_steps(3);
+    shot(&mut h, "video-sound-fades");
+    // The microphone's row, right button: Take Out Background Noise. Its hum never changes, so
+    // it's learnt as the noise and goes.
+    let loud = |h: &Harness<'_, Editor>| {
+        let v = h.state().video.as_ref().unwrap();
+        let s = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 96_000, 9600);
+        (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt()
+    };
+    let before = loud(&h);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 48.0 + 20.0));
+    h.get_by_label("Take Out Background Noise").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].denoise, 0.6);
+    let after = loud(&h);
+    assert!(before > 0.05 && after < before / 2.0, "{before} then {after}");
+}
+
+#[test]
 fn add_text_puts_words_at_the_playhead_ready_to_be_typed_over() {
     let mut h = harness();
     let half = length(&h) / 2;

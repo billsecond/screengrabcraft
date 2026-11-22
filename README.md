@@ -124,6 +124,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   ruler's right button) plays it from a quarter as fast to eight times as fast, on every track so
   they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
   that isn't as recorded says its speed on the timeline.
+- **Fades and noise**: click a sound clip and its panel fades its sound in at its start and out at
+  its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
+  track itself, on this computer; voices stay). The track's right button turns the noise off and
+  on too.
 - **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
