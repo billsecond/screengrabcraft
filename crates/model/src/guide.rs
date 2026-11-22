@@ -1,7 +1,8 @@
 //! A how-to guide made by step capture: each click while it ran took a picture of the window
 //! clicked, with the click marked, and is a numbered step with words of its own. The guide is a
 //! small file (`.sgguide`, JSON) beside a folder holding the steps' pictures; it's edited
-//! (reordered, steps taken out, words changed) and saved as a PDF, a web page or Markdown.
+//! (reordered, steps taken out, words changed) and saved as a PDF, a word-processor document,
+//! slides, a web page or Markdown.
 //!
 //! Everything in it may come from a file, so everything is clamped as it's read.
 

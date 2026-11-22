@@ -37,7 +37,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Scrolling capture that scrolls by itself** | Has | Windows: it turns the mouse wheel over the area and stops at the end of the page or at the longest picture; elsewhere, by hand |
 | Captures again and again on a timer (time-lapse), or at a set time | Has | the Capture page: one every so many seconds of the screen with the pointer, all screens or the last area, skipping those where nothing changed; one at a time of day; saved straight to the captures folder, stopped from the tray |
 | A picture for each click, made into a numbered how-to guide | Has | Record Steps (the Capture page or the tray): each left click takes the window clicked with a red ring where the click was; Stop opens the guide, its steps to reorder, take out and word |
-| The guide saved as a document, slides, PDF, web page or Markdown | Part | a PDF (a page a step), a web page and Markdown, the pictures in a folder beside them; not a word-processor document or slides |
+| The guide saved as a document, slides, PDF, web page or Markdown | Has | a PDF (a page a step), a word-processor document (`.docx`) and slides (`.pptx`, a slide a step) with the pictures in them, a web page and Markdown with the pictures in a folder beside them |
 | A still from the camera | Part | Picture from the Camera (the tray, the Capture page, a shortcut, after a wait if asked): Video Production's camera; at most 640 × 480, as the camera is read for recordings; Windows and macOS |
 | A whole web page from its address | Missing | |
 | Printing from any program into the editor | Missing | |
@@ -292,7 +292,8 @@ By how much someone using it every day would miss each one. Built ones move to a
     `--preset <name>` (#93).
 17. Open With: a capture in a program of the owner's choosing (Windows; #94).
 18. The camera full screen, swapped with the screen while recording (#98).
-19. Captures kept in a preset's own folder listed in the Recent strip and All captures.
+19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
+20. The how-to guide saved as a word-processor document and as slides.
 
 **Still to build, in this order**
 

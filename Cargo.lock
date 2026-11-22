@@ -5546,6 +5546,7 @@ version = "0.1.56"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
+ "crc32fast",
  "flate2",
  "gif",
  "image",
