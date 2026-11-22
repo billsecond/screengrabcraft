@@ -3246,3 +3246,64 @@ fn a_picture_item_is_masked_and_blended_and_a_clip_given_a_look_from_their_panel
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
 }
+
+#[test]
+fn the_screen_is_framed_in_a_device_and_a_picture_put_in_a_phone_from_their_panels() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::frame::Device;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.run_steps(2);
+    // The side panel's Screen Frame: a laptop round the screen, with a shadow.
+    scroll_side_panel_to(&mut h, "Screen Frame");
+    h.get_by_value("No device").click();
+    h.run_steps(2);
+    h.get_by_label("Laptop").click();
+    h.run_steps(3);
+    let frame = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.frame.clone();
+    assert_eq!(frame(&h).device, Device::Laptop);
+    scroll_side_panel_to(&mut h, "Shadow");
+    h.get_by_label("Shadow").click();
+    h.run_steps(3);
+    assert!(frame(&h).shadow);
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.screenFrame", &serde_json::json!({"background": "#204060", "radius": 0.03})).unwrap();
+        // The video's corner is the background now; its middle still the screen.
+        let pic = v.frame_at(1_000_000);
+        let c = pic.pixel(2, 2).unwrap();
+        assert_eq!((c.r, c.g, c.b), (0x20, 0x40, 0x60));
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Screen Frame");
+    shot(&mut h, "video-screen-frame");
+    scroll_side_panel_to(&mut h, "Fill the Video Again");
+    h.get_by_label("Fill the Video Again").click();
+    h.run_steps(2);
+    assert!(frame(&h).is_plain());
+    // A picture on a layer, put in a phone from its panel.
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let l = &v.session.timeline.layers[0];
+        let key = (l.id, l.items[0].id);
+        v.item = Some(key);
+        v.playhead = 1_000_000;
+        key
+    };
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Device round it");
+    h.get_by_value("No device").click();
+    h.run_steps(2);
+    h.get_by_label("Phone").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.device, Device::Phone);
+    shot(&mut h, "video-item-device");
+}

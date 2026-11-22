@@ -740,6 +740,7 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
         None => None,
         Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`maskCut` must be true or false".to_string()))?),
     };
+    let device = device_param(p)?;
     s.timeline
         .set_item(id(p, "layer")?, id(p, "item")?, |i| {
             if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
@@ -797,9 +798,61 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             if let Some(c) = mask_cut {
                 look.mask.cut = c;
             }
+            if let Some(d) = device {
+                look.device = d;
+            }
             i.look = std::mem::take(&mut i.look).checked();
         })
         .map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A device to draw round a picture: `"device"` if it's given.
+fn device_param(p: &Value) -> Result<Option<screengrabcraft_media::frame::Device>> {
+    match p.get("device") {
+        None => Ok(None),
+        Some(v) => {
+            serde_json::from_value(v.clone()).map(Some).map_err(|_| EngineError::Params("`device` is none, laptop, phone or browser".to_string()))
+        }
+    }
+}
+
+/// A colour given as `#rrggbb`, if it's given.
+fn colour_param(p: &Value, key: &str) -> Result<Option<String>> {
+    match text(p, key)? {
+        None => Ok(None),
+        Some(c) => {
+            let t = c.trim().trim_start_matches('#');
+            if t.len() != 6 || !t.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(EngineError::Params(format!("`{key}` is a colour, #rrggbb")));
+            }
+            Ok(Some(format!("#{}", t.to_ascii_lowercase())))
+        }
+    }
+}
+
+/// How the recording's own screen is framed: smaller on a background, rounded, bordered,
+/// shadowed, a device round it.
+fn screen_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("the screen's frame is given as an object".to_string()));
+    }
+    let (size, radius, border) = (number(p, "size")?, number(p, "radius")?, number(p, "border")?);
+    let (background, border_colour) = (colour_param(p, "background")?, colour_param(p, "borderColour")?);
+    let shadow = match p.get("shadow") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`shadow` must be true or false".to_string()))?),
+    };
+    let device = device_param(p)?;
+    let mut f = s.timeline.frame.clone();
+    f.size = size.unwrap_or(f.size);
+    f.radius = radius.unwrap_or(f.radius);
+    f.border = border.unwrap_or(f.border);
+    f.background = background.unwrap_or(f.background);
+    f.border_colour = border_colour.unwrap_or(f.border_colour);
+    f.shadow = shadow.unwrap_or(f.shadow);
+    f.device = device.unwrap_or(f.device);
+    s.timeline.frame = f.checked();
     Ok(json!({}))
 }
 
@@ -1150,6 +1203,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: move_clip,
     },
     VideoCommand {
+        id: "video.screenFrame",
+        label: "Screen Frame",
+        params: r##"{"size"?: 0.5..1 of the video, "background"?: "#rrggbb", "radius"?: 0..0.2 of its shorter side, "border"?: 0..0.05 of its width, "borderColour"?: "#rrggbb", "shadow"?: bool, "device"?: "none"|"laptop"|"phone"|"browser"}: the recording's own screen made smaller on a background colour, its corners rounded, a border round it, a soft shadow under it, a device drawn round it (the screen made small enough for it to fit)"##,
+        run: screen_frame,
+    },
+    VideoCommand {
         id: "video.clipLook",
         label: "Colour and Crop",
         params: r##"{"track": n, "clip": n, "look"?: "plain"|"warm"|"cool"|"vivid"|"faded"|"dramatic"|"blackAndWhite"|"sepia"|"night", "brightness"?: -100..100, "contrast"?: -100..100, "saturation"?: -100..100, "tint"?: "#rrggbb", "tintAmount"?: 0..100, "crop"?: [left, top, right, bottom] 0..450 thousandths}: a picture track's clip lighter or darker, with more or less contrast and colour, tinted towards a colour, and its edges cut off (what's left fills the picture, its shape kept); a ready-made `look` sets all its colours first"##,
@@ -1334,7 +1393,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool} (a picture or a video is cut down, bordered, rounded and shadowed; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser"} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -2036,6 +2095,29 @@ mod layer_tests {
         s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "plain"})).unwrap();
         let c = s.timeline.tracks[0].clips[0].look;
         assert!(c.colours_plain() && c.crop[0] == 100);
+    }
+
+    #[test]
+    fn the_screen_is_framed_and_an_item_given_a_device() {
+        use screengrabcraft_media::frame::Device;
+        let mut s = session();
+        s.execute("video.screenFrame", &json!({"size": 0.2, "background": "#ABCDEF", "radius": 0.05, "shadow": true, "device": "laptop"})).unwrap();
+        assert_eq!(s.undo_label(), Some("Screen Frame"));
+        let f = s.timeline.frame.clone();
+        assert_eq!((f.size, f.background.as_str(), f.radius, f.shadow, f.device), (0.5, "#abcdef", 0.05, true, Device::Laptop));
+        for bad in [json!({"device": "tablet"}), json!({"background": "blue"}), json!({"shadow": 1}), json!({"size": "half"}), json!([1, 2])] {
+            assert!(s.execute("video.screenFrame", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.timeline.frame.is_plain());
+        // A picture on a layer, in a phone.
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Shot.png", "path": "C:/Shot.png", "width": 90, "height": 160})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute("video.setItem", &json!({"layer": layer, "item": item, "device": "phone"})).unwrap();
+        assert_eq!(s.timeline.item(layer, item).unwrap().look.device, Device::Phone);
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "device": 7})).is_err());
     }
 
     #[test]

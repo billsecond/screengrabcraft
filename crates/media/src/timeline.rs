@@ -643,6 +643,10 @@ pub struct Timeline {
     /// Words or a picture on every frame, in a corner (see [`crate::watermark`]).
     #[serde(default)]
     pub watermark: crate::watermark::Watermark,
+    /// The recording's screen framed: smaller on a background, rounded, bordered, shadowed, a
+    /// device round it (see [`crate::frame`]).
+    #[serde(default, skip_serializing_if = "crate::frame::ScreenFrame::is_plain")]
+    pub frame: crate::frame::ScreenFrame,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -701,6 +705,7 @@ impl Timeline {
             keys: Default::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 
@@ -804,6 +809,7 @@ impl Timeline {
             keys: self.keys.checked(),
             ducking: Ducking { on: self.ducking.on, level: if self.ducking.level.is_finite() { self.ducking.level.clamp(0.0, 1.0) } else { 0.3 } },
             watermark: self.watermark.checked(),
+            frame: self.frame.checked(),
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -1656,6 +1662,7 @@ mod tests {
             keys: Default::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 

@@ -204,6 +204,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   panel (Mask and Blend) shows it only inside a shape (a rectangle, rounded rectangle, oval,
   diamond, star or heart), or cuts the shape out of it, and lays it on what's under it as
   multiply, screen, overlay, darken or lighten.
+- **Screen frame and devices**: the side panel's Screen Frame makes the recording's screen smaller
+  on a background colour, rounds its corners and gives it a border and a shadow, and can draw a
+  plain laptop, phone or browser window round it. A picture or a video on a layer can have one
+  round it too (its panel, Device round it). The devices are simple shapes drawn in code.
 - **Keyframes**: an item's panel adds a keyframe at the playhead (Motion); move the playhead on and
   move, resize or fade the item (on the picture or in the panel) and it goes there smoothly. A
   zoom's keyframes pan it along. The timeline shows each as a diamond on the item.

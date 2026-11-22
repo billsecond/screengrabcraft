@@ -249,6 +249,7 @@ mod tests {
             keys: Look::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 
