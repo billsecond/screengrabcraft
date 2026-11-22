@@ -3,9 +3,10 @@
 //! curl, a reflection, a watermark and the capture's details. Their entries are in
 //! [`crate::registry::COMMANDS`].
 
-use screengrabcraft_model::{Color, FontName, Raster, RasterError, Rect};
-use screengrabcraft_render::adjust::{self, Area};
+use screengrabcraft_model::{Color, FontName, Raster, RasterError};
+use screengrabcraft_render::adjust;
 use screengrabcraft_render::effects::{self, Edges};
+use screengrabcraft_render::region::{self, Region};
 use screengrabcraft_render::{frame, marks};
 use serde_json::{Value, json};
 
@@ -23,23 +24,28 @@ fn or(p: &Value, key: &str, default: f32) -> f32 {
 
 /// The area an effect is kept to (`"area": {"x", "y", "w", "h"}`), in whole pixels on the
 /// picture; none for all of it.
-pub(crate) fn area(s: &Session, p: &Value) -> Result<Option<Area>> {
-    let bad = || EngineError::Params("`area` is {\"x\", \"y\", \"w\", \"h\"} on the picture".to_string());
+pub(crate) fn area(s: &Session, p: &Value) -> Result<Option<Region>> {
     match p.get("area") {
         None | Some(Value::Null) => Ok(None),
-        Some(a @ Value::Object(_)) => {
-            let n = |k: &str| num(a, k).ok_or_else(bad);
-            let r = Rect::new(n("x")?, n("y")?, n("w")?, n("h")?).finite();
-            r.pixel_bounds(s.doc.width(), s.doc.height()).map(Some).ok_or_else(bad)
-        }
-        Some(_) => Err(bad()),
+        Some(a @ Value::Object(_)) => crate::registry::region_param(s, a).map(Some),
+        Some(_) => Err(EngineError::Params("`area` is {\"x\", \"y\", \"w\", \"h\"} on the picture (with a \"shape\", as image.lift's)".to_string())),
     }
 }
 
-/// Grayscale, invert, brightness and the rest of the colour changes, on the area if one is given.
+/// Grayscale, invert, brightness and the rest of the colour changes, on the area if one is given
+/// (blended in at a shape's soft edges).
 pub(crate) fn colours(s: &mut Session, p: &Value, f: impl FnOnce(&Raster) -> std::result::Result<Raster, RasterError>) -> Result<Value> {
-    let a = area(s, p)?;
-    s.doc.base = adjust::within(&s.doc.base, a, f)?;
+    s.doc.base = match area(s, p)? {
+        None => f(&s.doc.base)?,
+        Some(reg) => {
+            let done = adjust::within(&s.doc.base, Some((reg.x, reg.y, reg.w, reg.h)), f)?;
+            if reg.is_box() {
+                done
+            } else {
+                region::blend_in(&s.doc.base, &done.crop(reg.x, reg.y, reg.w, reg.h).ok_or(RasterError::Empty(reg.w, reg.h))?, &reg)
+            }
+        }
+    };
     Ok(Value::Null)
 }
 

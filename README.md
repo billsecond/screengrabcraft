@@ -174,7 +174,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   right first). On macOS and Linux it isn't there yet.
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
-- **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
+- **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a
+  box, an ellipse, a freehand outline, or a colour with the magic wand; Invert Selection
+  (Ctrl+Shift+I) takes everything else. **Eraser** (E): rubs the picture out to see-through or
+  to a colour.
   **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
   these and the rest. Copy with annotations selected copies just them.
 - **Arrow** (one or two heads, notched, solid, an open V, a dot or a bar, any thickness; straight

@@ -150,6 +150,14 @@ pub enum Drag {
         start: Pt,
         now: Pt,
     },
+    /// A freehand outline being drawn round an area with the Selection tool.
+    AreaFree {
+        points: Vec<Pt>,
+    },
+    /// The eraser being dragged over the picture.
+    Erase {
+        points: Vec<Pt>,
+    },
     /// The selection being turned by its handle: round `pivot`, from where the press was, the
     /// annotations as they were before.
     Rotate {
@@ -661,6 +669,17 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 CursorIcon::None
             }
             Tool::Fill => CursorIcon::Default,
+            // The eraser's size round the pointer.
+            Tool::Eraser if on_picture => {
+                if resp.hovered() {
+                    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tool-pointer")));
+                    let r = (ed.eraser_width * ed.view.scale() / 2.0).max(2.0);
+                    p.circle_stroke(h, r, Stroke::new(2.5, Color32::from_black_alpha(160)));
+                    p.circle_stroke(h, r, Stroke::new(1.0, Color32::WHITE));
+                }
+                CursorIcon::Crosshair
+            }
+            Tool::Eraser => CursorIcon::Default,
             // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
             Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
             Tool::Draw(k) if k != Kind::Pen && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
@@ -754,6 +773,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Tool::Hand => {}
             // A fill happens where the button went down; moving on before letting go is no drag.
             Tool::Fill => fill_at(ed, &ctx, start),
+            Tool::Eraser => ed.drag = Some(Drag::Erase { points: vec![start] }),
             Tool::Area => {
                 if lift_area(ed, &ctx, start) {
                     // Inside the selected area: that part of the picture is moved.
@@ -766,7 +786,13 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 } else {
                     ed.area = None;
                     ed.session.select(Vec::new());
-                    ed.drag = Some(Drag::AreaNew { start });
+                    ed.chosen = None;
+                    match ed.area_mode {
+                        crate::selection::AreaMode::Freehand => ed.drag = Some(Drag::AreaFree { points: vec![start] }),
+                        // The wand takes a colour where the press was; moving on is no drag.
+                        crate::selection::AreaMode::Wand => ed.select_by_colour(start),
+                        _ => ed.drag = Some(Drag::AreaNew { start }),
+                    }
                 }
             }
             Tool::Draw(kind) => {
@@ -899,6 +925,29 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.doc.rotate_objects(&ids, by, pivot);
                 ed.session.touch();
             }
+            Some(Drag::AreaFree { mut points }) => {
+                if points.last().is_none_or(|l| l.distance(inside) * ed.view.scale() >= 2.0)
+                    && points.len() < screengrabcraft_render::region::MAX_OUTLINE
+                {
+                    points.push(inside);
+                }
+                ed.area = Rect::bounding(&points).intersect(bounds);
+                ed.chosen = ed.area.map(|bbox| crate::selection::Chosen {
+                    bbox,
+                    rect: bbox,
+                    shape: screengrabcraft_render::region::AreaShape::Freehand { points: points.clone() },
+                    invert: false,
+                });
+                ed.drag = Some(Drag::AreaFree { points });
+            }
+            Some(Drag::Erase { mut points }) => {
+                if points.last().is_none_or(|l| l.distance(now) * ed.view.scale() >= 1.5)
+                    && points.len() < screengrabcraft_render::region::MAX_OUTLINE
+                {
+                    points.push(now);
+                }
+                ed.drag = Some(Drag::Erase { points });
+            }
             Some(Drag::Rubber { start, .. }) => ed.drag = Some(Drag::Rubber { start, now: inside }),
             Some(Drag::CutNew { start, .. }) => ed.drag = Some(Drag::CutNew { start, now: inside }),
             Some(Drag::CropNew { start }) => {
@@ -908,6 +957,15 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::AreaNew { start }) => {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.area = Rect::from_points(start, end).intersect(bounds);
+                ed.chosen = match (ed.area_mode, ed.area) {
+                    (crate::selection::AreaMode::Ellipse, Some(bbox)) => Some(crate::selection::Chosen {
+                        bbox,
+                        rect: Rect::from_points(start, end),
+                        shape: screengrabcraft_render::region::AreaShape::Ellipse,
+                        invert: false,
+                    }),
+                    _ => None,
+                };
             }
             Some(Drag::CropHandle { handle }) => {
                 if let Some(c) = ed.crop {
@@ -980,6 +1038,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.commit()
             }
             Some(Drag::CutNew { start, now }) => cut_strip(ed, &ctx, start, now),
+            Some(Drag::AreaFree { points }) => {
+                // Round too little to be an area: none.
+                if points.len() < 3 || ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
+                    ed.area = None;
+                    ed.chosen = None;
+                }
+            }
+            Some(Drag::Erase { points }) => ed.erase_along(&ctx, &points),
             // Too small to be an area: none.
             Some(Drag::AreaNew { .. }) => {
                 if ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
@@ -989,6 +1055,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::Rubber { start, now }) => {
                 let area = Rect::from_points(start, now);
                 let mut ids = ed.session.doc.objects_in(area);
+                ed.chosen = None;
                 // Round no annotation, it selects that part of the picture itself, as the
                 // Selection tool does: to move, copy, cut, delete or crop to.
                 if ids.is_empty() && !shift {
@@ -1251,10 +1318,21 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                 fill_at(ed, ctx, p);
             }
         }
+        // A click rubs out a dab.
+        Tool::Eraser => {
+            if ed.session.doc.bounds().contains(p) {
+                ed.erase_along(ctx, &[p]);
+            }
+        }
         // A click lets go of the area; on a piece taken out of the picture it selects that.
         Tool::Area => {
             ed.area = None;
-            ed.session.select(hit.into_iter().collect());
+            ed.chosen = None;
+            if ed.area_mode == crate::selection::AreaMode::Wand && hit.is_none() && ed.session.doc.bounds().contains(p) {
+                ed.select_by_colour(p);
+            } else {
+                ed.session.select(hit.into_iter().collect());
+            }
         }
         Tool::Draw(kind) => {
             // A click on an annotation selects it (and types into text with the text tools).
@@ -1446,7 +1524,12 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     // on any picture), and its size.
     if let Some(a) = ed.area {
         let r = ed.view.rect_to_screen(a);
-        painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.08));
+        // A shape (an ellipse, an outline, a colour, turned inside out) is tinted where it is.
+        if ed.area_shape().is_some() {
+            crate::selection::paint_tint(ed, &ui.ctx().clone(), &painter);
+        } else {
+            painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.08));
+        }
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Middle);
         dashed_rect(&painter, r, Color32::WHITE);
         let label = format!("{:.0} × {:.0}", a.w, a.h);
@@ -1455,6 +1538,11 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let bg = egui::Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
         painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
         painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    }
+
+    // The eraser's stroke while it is drawn.
+    if let Some(Drag::Erase { points }) = &ed.drag {
+        crate::selection::paint_stroke(ed, &painter, points);
     }
 
     // Cut Out: the strip being chosen, all the way across the picture, with its width.

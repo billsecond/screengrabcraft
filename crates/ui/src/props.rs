@@ -365,6 +365,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             cut_out_panel(ed, ui);
             return;
         }
+        (None, Tool::Eraser) => {
+            crate::selection::eraser_panel(ed, ui);
+            return;
+        }
         (None, Tool::Fill) => {
             ui.heading("Fill");
             ui.add_space(6.0);
@@ -483,7 +487,9 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.heading("Selection");
     ui.add_space(6.0);
-    ui.label("Drag on the picture to select an area of it. Drag inside the area to move that part of the picture.");
+    crate::selection::mode_panel(ed, ui);
+    ui.add_space(6.0);
+    ui.label("Select an area of the picture, then drag inside it to move that part of the picture.");
     ui.add_space(8.0);
     let ctx = ui.ctx().clone();
     let any = ed.area.is_some();
@@ -503,6 +509,9 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
         }
         if ui.button("Select All").on_hover_text("The whole picture (Ctrl+A)").clicked() {
             ed.select_whole_area();
+        }
+        if ui.add_enabled(any, egui::Button::new("Invert")).on_hover_text("Everything but the area (Ctrl+Shift+I)").clicked() {
+            ed.invert_area();
         }
     });
     ui.add_space(8.0);

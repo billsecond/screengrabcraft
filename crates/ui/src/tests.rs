@@ -2587,3 +2587,78 @@ fn a_box_is_turned_by_its_handle_and_a_group_moves_as_one() {
     h.run_steps(3);
     assert_eq!(h.state().session.doc.get(a).unwrap().group, None, "ungrouped");
 }
+
+/// The Selection tool selects an ellipse, a freehand outline or a colour (the magic wand), the
+/// selection turns inside out, and what is done to it keeps to its shape; the eraser rubs out.
+#[test]
+fn ellipse_freehand_and_wand_selections_and_the_eraser() {
+    let mut ed = editor();
+    // White with a blue square.
+    let mut pic = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..180 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            pic.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 220, 255]);
+        }
+    }
+    ed.session.replace(Document::new(pic));
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Area);
+    h.run_steps(2);
+    let alpha = |h: &Harness<'_, Editor>, x, y| h.state().session.doc.base.pixel(x, y).map_or(0, |c| c.a);
+    // The magic wand: a click on the blue takes the square.
+    h.state_mut().area_mode = crate::selection::AreaMode::Wand;
+    let blue = at(&h, 200.0, 140.0);
+    click_at(&mut h, blue);
+    assert_eq!(h.state().area, Some(screengrabcraft_model::Rect::new(150.0, 100.0, 100.0, 80.0)));
+    crate::quick_tests::shot(&mut h, "magic-wand");
+    // Inverted, then deleted: the white goes, the blue stays.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::I);
+    h.run_steps(3);
+    assert_eq!(h.state().area, Some(h.state().session.doc.bounds()));
+    crate::quick_tests::shot(&mut h, "selection-inverted");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 10, 10), alpha(&h, 200, 140)), (0, 255));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+    // An ellipse dragged out, then deleted: its box's corner stays.
+    h.state_mut().area_mode = crate::selection::AreaMode::Ellipse;
+    let (a, b) = (at(&h, 20.0, 20.0), at(&h, 120.0, 100.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area_shape().is_some());
+    crate::quick_tests::shot(&mut h, "ellipse-selection");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 70, 60), alpha(&h, 22, 22)), (0, 255));
+    // A freehand outline round a corner.
+    h.state_mut().area_mode = crate::selection::AreaMode::Freehand;
+    for (x, y) in [(300.0, 200.0), (390.0, 200.0), (390.0, 290.0), (300.0, 290.0)] {
+        let p = at(&h, x, y);
+        if (x, y) == (300.0, 200.0) {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+        } else {
+            h.hover_at(p);
+        }
+        h.run_steps(1);
+    }
+    let end = at(&h, 300.0, 210.0);
+    h.drop_at(end);
+    h.run_steps(3);
+    assert!(matches!(h.state().area_shape().map(|c| &c.shape), Some(screengrabcraft_render::region::AreaShape::Freehand { .. })));
+    // The eraser: a drag rubs out a line.
+    h.state_mut().set_tool(Tool::Eraser);
+    h.state_mut().eraser_width = 10.0;
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "eraser-panel");
+    let (a, b) = (at(&h, 20.0, 250.0), at(&h, 280.0, 250.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.undo_label(), Some("Erase"));
+    assert_eq!((alpha(&h, 150, 250), alpha(&h, 150, 240)), (0, 255));
+}

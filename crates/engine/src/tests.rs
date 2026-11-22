@@ -835,3 +835,58 @@ fn every_one_of_a_kind_is_selected_and_old_annotations_still_read() {
     let v = serde_json::to_value(&turned).unwrap();
     assert_eq!((v["rotation"].as_f64(), v["group"].as_u64()), (Some(12.5), Some(3)));
 }
+
+/// An ellipse, a freehand outline, the magic wand and an inverted area are moved, deleted and
+/// cropped as their shapes; the eraser rubs out what it passes over.
+#[test]
+fn shaped_areas_the_magic_wand_and_the_eraser() {
+    // White with a blue square in the middle.
+    let blue_square = || {
+        let mut r = Raster::filled(100, 80, Color::WHITE).unwrap();
+        for y in 30..50 {
+            for x in 40..60 {
+                let i = (y * 100 + x) * 4;
+                r.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+        Session::new(Document::new(r))
+    };
+    let alpha = |s: &Session, x, y| s.doc.base.pixel(x, y).map_or(0, |c| c.a);
+    // An ellipse: its box's corners stay.
+    let mut s = blue_square();
+    s.execute("image.erase", &json!({"x": 10, "y": 10, "w": 40, "h": 30, "shape": "ellipse"})).unwrap();
+    assert_eq!((alpha(&s, 30, 25), alpha(&s, 11, 11)), (0, 255));
+    // The wand takes the blue square, joined to the pixel, and lifts it out as a piece.
+    let mut s = blue_square();
+    let out = s.execute("image.lift", &json!({"shape": "wand", "seed": {"x": 45, "y": 35}, "tolerance": 10})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.doc.get(id).unwrap().shape.rect(), Some(Rect::new(40.0, 30.0, 20.0, 20.0)));
+    assert_eq!((alpha(&s, 45, 35), alpha(&s, 10, 10)), (0, 255));
+    // Inverted: everything but the square goes.
+    let mut s = blue_square();
+    s.execute("image.erase", &json!({"shape": "wand", "seed": {"x": 45, "y": 35}, "invert": true})).unwrap();
+    assert_eq!((alpha(&s, 45, 35), alpha(&s, 10, 10)), (255, 0));
+    // A freehand triangle cropped to: the box round it, see-through outside it.
+    let mut s = blue_square();
+    let tri = json!({"shape": "freehand", "points": [{"x": 0, "y": 0}, {"x": 60, "y": 0}, {"x": 0, "y": 60}]});
+    let out = s.execute("image.crop", &tri).unwrap();
+    assert!(out["width"].as_u64().unwrap() <= 62 && out["height"].as_u64().unwrap() <= 62);
+    assert_eq!((alpha(&s, 5, 5), alpha(&s, 55, 55)), (255, 0));
+    // A colour change kept to an ellipse.
+    let mut s = blue_square();
+    s.execute("effect.invert", &json!({"area": {"x": 0, "y": 0, "w": 100, "h": 80, "shape": "ellipse"}})).unwrap();
+    assert_eq!((s.doc.base.pixel(50, 5), s.doc.base.pixel(1, 1)), (Some(Color::BLACK), Some(Color::WHITE)));
+    // Nonsense changes nothing.
+    let mut s = blue_square();
+    assert!(s.execute("image.erase", &json!({"shape": "teapot", "x": 0, "y": 0, "w": 5, "h": 5})).is_err());
+    assert!(s.execute("image.erase", &json!({"shape": "wand", "seed": {"x": -5, "y": 0}})).is_err());
+    assert!(!s.can_undo());
+    // The eraser: see-through along the stroke, or a colour.
+    let mut s = blue_square();
+    s.execute("image.eraseStroke", &json!({"points": [{"x": 5, "y": 70}, {"x": 95, "y": 70}], "width": 8})).unwrap();
+    assert_eq!((alpha(&s, 50, 70), alpha(&s, 50, 60)), (0, 255));
+    s.execute("image.eraseStroke", &json!({"points": [{"x": 50, "y": 40}], "width": 10, "color": "#FF0000"})).unwrap();
+    assert_eq!(s.doc.base.pixel(50, 40), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(s.undo_label(), Some("Erase"));
+    assert!(s.execute("image.eraseStroke", &json!({"points": [{"x": 500, "y": 500}]})).is_err());
+}

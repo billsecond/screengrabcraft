@@ -5,9 +5,9 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Raster, Rect, Shape, ShapeOptions, Style};
-use screengrabcraft_render::effects;
+use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::matte::{self, Region};
+use screengrabcraft_render::{effects, region};
 use serde_json::{Value, json};
 
 use crate::arrange;
@@ -195,7 +195,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Move Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — takes that area out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: "rect"|"ellipse"|"freehand"|"wand", "points"?: [{"x", "y"}] (freehand), "seed"?: {"x", "y"}, "tolerance"?: 32, "contiguous"?: true (wand), "invert"?: false} — takes that part out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
         always,
         lift
     ),
@@ -204,11 +204,28 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Delete Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — makes that area of the picture see-through"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false} (as image.lift) — makes that part of the picture see-through"#,
         always,
         erase
     ),
-    cmd!("image.crop", "Crop", "Image", None, r#"{"x": 0, "y": 0, "w": 100, "h": 100}"#, always, crop),
+    cmd!(
+        "image.crop",
+        "Crop",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false} (as image.lift: a shape is cropped to the box round it, see-through outside it)"#,
+        always,
+        crop
+    ),
+    cmd!(
+        "image.eraseStroke",
+        "Erase",
+        "Image",
+        None,
+        r##"{"points": [{"x", "y"}], "width"?: 20, "color"?: "#RRGGBB"} — the eraser: what the stroke passes over becomes see-through (or the colour)"##,
+        always,
+        erase_stroke
+    ),
     cmd!(
         "image.resize",
         "Resize Image",
@@ -728,40 +745,59 @@ fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
-/// An area of the picture from `x`, `y`, `w`, `h`, in whole pixels inside it.
-fn area_param(s: &Session, p: &Value) -> Result<(u32, u32, u32, u32)> {
-    let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
-    area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))
-}
-
-/// Makes an area of a picture see-through.
-fn clear_area(r: &mut Raster, x: u32, y: u32, w: u32, h: u32) {
-    let width = r.width() as usize;
-    let px = r.pixels_mut();
-    for row in y..y.saturating_add(h) {
-        let Some(start) = (row as usize).checked_mul(width).and_then(|v| v.checked_add(x as usize)).and_then(|v| v.checked_mul(4)) else { return };
-        let Some(end) = (w as usize).checked_mul(4).and_then(|n| start.checked_add(n)) else { return };
-        if let Some(line) = px.get_mut(start..end) {
-            line.fill(0);
-        }
-    }
+/// The part of the picture a command works on: the box `x`, `y`, `w`, `h`, or with `"shape"`
+/// an ellipse in that box, a freehand outline (`"points"`) or the pixels of a colour (the magic
+/// wand: `"seed"`, `"tolerance"`, `"contiguous"`); with `"invert"` everything else.
+pub(crate) fn region_param(s: &Session, p: &Value) -> Result<region::Region> {
+    let shape = match p.get("shape") {
+        None | Some(Value::Null) => region::AreaShape::Rect,
+        Some(_) => serde_json::from_value::<region::AreaShape>(p.clone())
+            .map_err(|e| {
+                EngineError::Params(format!("`shape` is \"rect\", \"ellipse\", \"freehand\" (with \"points\") or \"wand\" (with \"seed\"): {e}"))
+            })?
+            .sanitized(),
+    };
+    let area = match shape {
+        region::AreaShape::Rect | region::AreaShape::Ellipse => Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite(),
+        _ => Rect::default(),
+    };
+    region::region(&s.doc.base, area, &shape, boolean(p, "invert", false))
+        .ok_or_else(|| EngineError::Params("the area is outside the picture, or nothing is in it".to_string()))
 }
 
 fn lift(s: &mut Session, p: &Value) -> Result<Value> {
-    let (x, y, w, h) = area_param(s, p)?;
-    let piece = s.doc.base.crop(x, y, w, h).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    let reg = region_param(s, p)?;
+    let piece = region::piece(&s.doc.base, &reg).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
     let key = s.doc.add_image(piece)?;
-    clear_area(&mut s.doc.base, x, y, w, h);
+    s.doc.base = region::erase(&s.doc.base, &reg);
     // Where it was, looking as it did (no shadow, no border).
     let style = Style { shadow: false, ..Kind::Image.default_style() };
-    let id = s.doc.add(Shape::Image { rect: Rect::new(x as f32, y as f32, w as f32, h as f32), image: key }, style)?;
+    let id = s.doc.add(Shape::Image { rect: reg.rect(), image: key }, style)?;
     s.selection = vec![id];
     Ok(json!({ "id": id.0 }))
 }
 
 fn erase(s: &mut Session, p: &Value) -> Result<Value> {
-    let (x, y, w, h) = area_param(s, p)?;
-    clear_area(&mut s.doc.base, x, y, w, h);
+    let reg = region_param(s, p)?;
+    s.doc.base = region::erase(&s.doc.base, &reg);
+    Ok(Value::Null)
+}
+
+/// The eraser: what a stroke passes over made see-through, or a colour.
+fn erase_stroke(s: &mut Session, p: &Value) -> Result<Value> {
+    let points: Vec<Pt> = match p.get("points") {
+        Some(Value::Array(a)) => {
+            a.iter().take(region::MAX_OUTLINE).map(|v| serde_json::from_value::<Pt>(v.clone())).collect::<std::result::Result<_, _>>()
+        }
+        _ => return Err(EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string())),
+    }
+    .map_err(|_| EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string()))?;
+    let width = num(p, "width").unwrap_or(20.0);
+    let colour = color(p, "color", Color::TRANSPARENT)?;
+    let Some(reg) = region::stroke(s.doc.width(), s.doc.height(), &points, width)? else {
+        return Err(EngineError::Params("the stroke doesn't pass over the picture".to_string()));
+    };
+    s.doc.base = region::paint(&s.doc.base, &reg, colour);
     Ok(Value::Null)
 }
 
@@ -772,12 +808,11 @@ fn shift_all(doc: &mut Document, dx: f32, dy: f32) {
     doc.map_objects(&|q| Pt::new(q.x + dx, q.y + dy), 1.0);
 }
 
+/// Crop: to the box (or the box round a shape, see-through outside it).
 fn crop(s: &mut Session, p: &Value) -> Result<Value> {
-    let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
-    let (x, y, _, _) =
-        area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
-    s.doc.base = effects::crop(&s.doc.base, area)?;
-    shift_all(&mut s.doc, -(x as f32), -(y as f32));
+    let reg = region_param(s, p)?;
+    s.doc.base = region::piece(&s.doc.base, &reg).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    shift_all(&mut s.doc, -(reg.x as f32), -(reg.y as f32));
     Ok(json!({ "width": s.doc.width(), "height": s.doc.height() }))
 }
 

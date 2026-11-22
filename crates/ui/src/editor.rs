@@ -27,6 +27,8 @@ pub enum Tool {
     Draw(Kind),
     /// Fills an area of the picture, or a shape, with a colour.
     Fill,
+    /// Rubs out what it passes over: see-through, or a colour.
+    Eraser,
     Crop,
     /// Takes a strip out of the picture, all the way across, and joins the rest.
     CutOut,
@@ -39,7 +41,7 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool with a key: the tool, its icon, its name and its key.
-    pub const ALL: [(Tool, Icon, &'static str, Key); 20] = [
+    pub const ALL: [(Tool, Icon, &'static str, Key); 21] = [
         (Tool::Select, Icon::Move, "Move", Key::V),
         (Tool::Hand, Icon::Hand, "Hand", Key::D),
         (Tool::Area, Icon::Marquee, "Selection", Key::Q),
@@ -58,6 +60,7 @@ impl Tool {
         (Tool::Draw(Kind::Magnify), Icon::Magnify, "Magnify", Key::M),
         (Tool::Draw(Kind::Stamp), Icon::Stamp, "Stamp", Key::G),
         (Tool::Fill, Icon::Fill, "Fill", Key::F),
+        (Tool::Eraser, Icon::Eraser, "Eraser", Key::E),
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
         (Tool::CutOut, Icon::CutOut, "Cut Out", Key::U),
     ];
@@ -77,12 +80,12 @@ impl Tool {
             Tool::Draw(Kind::Stamp),
             Tool::Draw(Kind::Step),
         ],
-        &[Tool::Draw(Kind::Pen), Tool::Draw(Kind::Highlight), Tool::Fill],
+        &[Tool::Draw(Kind::Pen), Tool::Draw(Kind::Highlight), Tool::Fill, Tool::Eraser],
         &[Tool::Draw(Kind::Blur), Tool::Draw(Kind::Pixelate), Tool::Draw(Kind::Spotlight), Tool::Draw(Kind::Magnify)],
     ];
 
     /// Every tool on the tool bar after Favorites, in order.
-    pub const BAR: [Tool; 19] = [
+    pub const BAR: [Tool; 20] = [
         Tool::Select,
         Tool::Hand,
         Tool::Area,
@@ -98,6 +101,7 @@ impl Tool {
         Tool::Draw(Kind::Pen),
         Tool::Draw(Kind::Highlight),
         Tool::Fill,
+        Tool::Eraser,
         Tool::Draw(Kind::Blur),
         Tool::Draw(Kind::Pixelate),
         Tool::Draw(Kind::Spotlight),
@@ -211,6 +215,18 @@ pub struct Editor {
     pub(crate) crop: Option<Rect>,
     /// The area of the picture selected with the Selection tool.
     pub(crate) area: Option<Rect>,
+    /// How the Selection tool chooses: a box, an ellipse, freehand, or by colour (the wand).
+    pub(crate) area_mode: crate::selection::AreaMode,
+    /// The wand's tolerance (0 to 255 a channel), and whether it takes only what joins the pixel.
+    pub(crate) wand_tolerance: u8,
+    pub(crate) wand_contiguous: bool,
+    /// The shape of the area selected, when it isn't its box (it belongs to `area` while that is its box).
+    pub(crate) chosen: Option<crate::selection::Chosen>,
+    /// The tint over a shaped area, drawn once for each shape.
+    pub(crate) area_tint: Option<(String, egui::TextureHandle)>,
+    /// How wide the eraser is (in the picture's pixels), and its colour (none: see-through).
+    pub(crate) eraser_width: f32,
+    pub(crate) eraser_colour: Option<screengrabcraft_model::Color>,
     /// What Select All selected: while that is still the selection, everything is selected, and
     /// Copy takes the whole picture as shown.
     pub(crate) everything: Option<Vec<ObjectId>>,
@@ -336,6 +352,13 @@ impl Editor {
             last_dark: None,
             crop: None,
             area: None,
+            area_mode: crate::selection::AreaMode::default(),
+            wand_tolerance: 32,
+            wand_contiguous: true,
+            chosen: None,
+            area_tint: None,
+            eraser_width: 20.0,
+            eraser_colour: None,
             everything: None,
             dialog: None,
             effects: crate::effects::Effects::default(),
@@ -392,6 +415,9 @@ impl Editor {
     pub(crate) fn picture_moved(&mut self, shift: screengrabcraft_model::Pt) {
         self.view.grew(shift, &self.session.doc.base);
         self.area = self.area.map(|a| a.translate(shift));
+        if let Some(c) = &mut self.chosen {
+            c.translate(shift);
+        }
         self.crop = self.crop.map(|c| c.translate(shift));
     }
 
@@ -919,8 +945,9 @@ impl Editor {
             return;
         }
         let Some(pic) = self.flattened() else { return };
-        let pic = match self.area_pixels() {
-            Some((x, y, w, h)) => match pic.crop(x, y, w, h) {
+        // An area: just it, see-through outside its shape.
+        let pic = match self.area_region() {
+            Some(reg) => match screengrabcraft_render::region::piece(&pic, &reg) {
                 Some(p) => p,
                 None => return,
             },
@@ -998,17 +1025,6 @@ impl Editor {
             return None;
         }
         piece.crop(x0, y0, x1 - x0 + 1, y1 - y0 + 1)
-    }
-
-    /// The selected area in whole pixels of the picture.
-    fn area_pixels(&self) -> Option<(u32, u32, u32, u32)> {
-        self.area?.pixel_bounds(self.session.doc.width(), self.session.doc.height())
-    }
-
-    /// The selected area as a command's parameters.
-    pub(crate) fn area_params(&self) -> Option<Value> {
-        let (x, y, w, h) = self.area_pixels()?;
-        Some(json!({"x": x, "y": y, "w": w, "h": h}))
     }
 
     /// Cut: the selected area to the clipboard (as shown), and see-through in the picture.
@@ -1390,6 +1406,9 @@ impl Editor {
         if pressed(cmd(Key::D)) && !self.session.selected().is_empty() {
             self.run(ctx, "edit.duplicate", json!({}));
         }
+        if pressed(cmd_shift(Key::I)) && self.area.is_some() {
+            self.invert_area();
+        }
         if pressed(cmd_shift(Key::G)) && !self.session.selected().is_empty() {
             self.run(ctx, "object.ungroup", json!({}));
         } else if pressed(cmd(Key::G)) && self.session.selected().len() >= 2 {
@@ -1693,6 +1712,19 @@ impl Editor {
                         self.crop_to_area(&ctx);
                         ui.close();
                     }
+                    if ui.add_enabled(area, egui::Button::new("Invert Selection").shortcut_text("Ctrl+Shift+I")).clicked() {
+                        self.invert_area();
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Magic Wand")).on_hover_text("Select the pixels of a colour with a click").clicked() {
+                        self.set_tool(Tool::Area);
+                        self.area_mode = crate::selection::AreaMode::Wand;
+                        ui.close();
+                    }
+                    if ui.add(egui::Button::new("Eraser").shortcut_text("E")).clicked() {
+                        self.set_tool(Tool::Eraser);
+                        ui.close();
+                    }
                     if ui.add(egui::Button::new("Fill").shortcut_text("F")).clicked() {
                         self.set_tool(Tool::Fill);
                         ui.close();
@@ -1846,9 +1878,9 @@ impl Editor {
     /// Whether it worked.
     pub(crate) fn apply_effect(&mut self, ctx: &egui::Context, id: &str, mut params: Value) -> bool {
         if Dialog::takes_area(id)
-            && let Some((x, y, w, h)) = self.area_pixels()
+            && let Some(area) = self.area_params()
         {
-            params["area"] = json!({"x": x, "y": y, "w": w, "h": h});
+            params["area"] = area;
         }
         if id == "effect.watermark" && params.get("picture").is_some() {
             match &self.watermark_picture {
