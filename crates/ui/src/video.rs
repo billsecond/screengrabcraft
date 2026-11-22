@@ -1717,6 +1717,14 @@ impl VideoView {
                         if ui.checkbox(&mut show, "Captions on the Picture").changed() {
                             self.run(ed, &ctx, "video.captions", json!({"show": show}));
                         }
+                        let mut words = c.words;
+                        if ui
+                            .checkbox(&mut words, "Light Up Each Word as It's Said")
+                            .on_hover_text("On the picture and in the video made: each word's time is worked out from its line's by its length")
+                            .changed()
+                        {
+                            self.run(ed, &ctx, "video.captions", json!({"words": words}));
+                        }
                     }
                 });
                 ui.menu_button("Help", |ui| {

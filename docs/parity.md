@@ -60,7 +60,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Camera in a corner: square, rounded, circle | Has | |
 | Camera full screen, swapped with the screen while recording | Part | with the screen off the camera is the video |
 | Camera border, mirrored camera | Missing | |
-| Camera background blurred or replaced | Part | taken away in the video editor (a colour, or the background learnt by the model) so the screen shows round you; not blurred, not replaced by a picture |
+| **Camera background blurred or replaced** | Has | taken away in the video editor (a colour, or the background learnt by the model), then the camera panel's Behind you: the screen, your room blurred, or a picture of the Media bin as large as covers it |
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
 | Recording controls kept out of the video | Has | |
@@ -246,7 +246,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Captions shown, burned in, saved as `.srt` and `.txt` | Has | |
 | Transcript pane: who said what, click to go there | Has | |
 | **Captions edited (a word put right, split, joined, moved)** | Has | in the transcript pane; kept with the edits, undone like any edit |
-| Captions that light up word by word | Missing | |
+| **Captions that light up word by word** | Part | View › Light Up Each Word as It's Said: the word being said in bright blue, those said in the line's colour, those to come faint, on the picture and in the video made. The speech model times lines only, so each word's time is worked out from its line's by its length, not heard |
 | **Cut words by deleting them from the transcript; filler words taken out** | Part | the transcript pane: a line's words chosen and cut (its right button), Take Out Filler Words (um, uh, er and the like); where each is said goes from every track. The speech model times lines only, so a word's time is worked out from its line's by its length, not heard |
 | Computer voices, translation, dubbing | Not planned | online services |
 
@@ -304,6 +304,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 27. Motion along a curved path; a picture pinned onto a slanted surface by its corners (#119).
 28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
 29. A pointer of another look drawn in its place; the pointer's path redrawn through points dragged on the picture (#121).
+30. The camera's background blurred or replaced by a picture; captions lit up word by word (word times estimated).
 
 **Still to build, in this order**
 

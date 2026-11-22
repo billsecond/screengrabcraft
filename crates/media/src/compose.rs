@@ -209,12 +209,17 @@ impl Composer {
                 c
             };
             let plate = self.rec.plate();
+            // A picture of the media bin behind the person, if that's what shows there.
+            let picture = match timeline.camera.behind {
+                crate::timeline::Behind::Picture(id) if timeline.camera.remove != crate::keyer::Remove::Nothing => self.media.picture(id, 0),
+                _ => None,
+            };
             if screen_shown {
-                overlay_camera_keyed(&mut out, &cam, timeline, plate.as_deref());
+                overlay_camera_keyed(&mut out, &cam, timeline, plate.as_deref(), picture.as_deref());
             } else {
                 // Recorded (or shown) without the screen: the camera is the picture (what's
-                // taken away from it is black).
-                fill_camera_keyed(&mut out, &cam, &timeline.camera, plate.as_deref());
+                // taken away from it is black, unless something's put behind).
+                fill_camera_keyed(&mut out, &cam, &timeline.camera, plate.as_deref(), picture.as_deref());
             }
         }
         // The layers over it (media, titles, overlays, transitions), the shortcuts pressed, the
@@ -227,7 +232,7 @@ impl Composer {
             crate::keys::draw(&mut out, keys, timeline.keys, alpha);
         }
         if let Some(cues) = &self.captions {
-            draw_captions(&mut out, &captions::showing(cues, t));
+            draw_captions_at(&mut out, &captions::showing(cues, t), timeline.captions.words.then_some(t));
         }
         // The watermark over everything.
         crate::watermark::draw(&mut out, timeline, self.media.as_ref());
@@ -516,6 +521,34 @@ const CAPTION_LINES: usize = 3;
 /// Draws caption lines near the bottom of the picture, centred, each on a dark band (the
 /// others' above yours when both speak).
 pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
+    draw_captions_at(out, lines, None);
+}
+
+/// Where a line's words are at `t` while it's said (its time worked out from its line's by each
+/// word's length): how many of its letters (not counting spaces) were said before the word being
+/// said, and how many by its end.
+pub fn words_said(cue: &Cue, t: u64) -> (usize, usize) {
+    let words: Vec<usize> = cue.text.split_whitespace().map(|w| w.chars().count()).collect();
+    // Each word as long as its letters and a gap after it.
+    let total: usize = words.iter().map(|n| n + 1).sum();
+    let span = cue.end.saturating_sub(cue.start).max(1);
+    let p = (t.saturating_sub(cue.start) as f64 / span as f64).clamp(0.0, 1.0);
+    let at = p * total as f64;
+    let (mut gone, mut before) = (0usize, 0usize);
+    for n in &words {
+        let next = gone + n + 1;
+        if (next as f64) > at {
+            return (before, before + n);
+        }
+        gone = next;
+        before += n;
+    }
+    (before, before)
+}
+
+/// [`draw_captions`]; with `t`, each line's words lit up as they're said (see [`words_said`]):
+/// those said in its colour, the one being said in bright blue, those to come faint.
+pub fn draw_captions_at(out: &mut Raster, lines: &[&Cue], t: Option<u64>) {
     use screengrabcraft_model::{Pt, Rect, Style, TextAlign};
     use screengrabcraft_render::{draw, text};
     if lines.is_empty() || out.width() < 16 || out.height() < 16 {
@@ -532,10 +565,10 @@ pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
         lay.width = lay.lines.iter().map(|l| l.width).fold(0.0, f32::max);
         lay.height = lay.line_height * lay.lines.len() as f32;
         if !lay.lines.is_empty() && lay.width > 0.0 {
-            blocks.push((lay, style));
+            blocks.push((lay, style, *c));
         }
     }
-    let total: f32 = blocks.iter().map(|(l, _)| l.height + 2.0 * pad_y).sum::<f32>() + gap * blocks.len().saturating_sub(1) as f32;
+    let total: f32 = blocks.iter().map(|(l, _, _)| l.height + 2.0 * pad_y).sum::<f32>() + gap * blocks.len().saturating_sub(1) as f32;
     let bottom = h - (h * 0.06).max(4.0);
     let top = (bottom - total).max(0.0);
     // Only the rows the captions cover are drawn on.
@@ -547,7 +580,7 @@ pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
     let Some(mut canvas) = tiny_skia::Pixmap::from_vec(band, size_px) else { return };
     let shift = tiny_skia::Transform::from_translate(0.0, -(y0 as f32));
     let mut y = top;
-    for (lay, style) in &blocks {
+    for (lay, style, cue) in &blocks {
         let bw = lay.width + 2.0 * pad_x;
         let bh = lay.height + 2.0 * pad_y;
         let x = ((w - bw) / 2.0).max(0.0);
@@ -557,11 +590,40 @@ pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
             paint.anti_alias = true;
             canvas.fill_path(&back, &paint, tiny_skia::FillRule::Winding, shift, None);
         }
-        if let Some(path) = text::text_path(lay, style, Pt::new(x + pad_x, y + pad_y), lay.width) {
-            let mut paint = tiny_skia::Paint::default();
-            paint.set_color(draw::skia_color(style.text_color, 1.0));
-            paint.anti_alias = true;
-            canvas.fill_path(&path, &paint, tiny_skia::FillRule::Winding, shift, None);
+        let at = Pt::new(x + pad_x, y + pad_y);
+        let fill = |canvas: &mut tiny_skia::Pixmap, lay: &text::Layout, c: screengrabcraft_model::Color, alpha: f32| {
+            if let Some(path) = text::text_path(lay, style, at, lay.width) {
+                let mut paint = tiny_skia::Paint::default();
+                paint.set_color(draw::skia_color(c, alpha));
+                paint.anti_alias = true;
+                canvas.fill_path(&path, &paint, tiny_skia::FillRule::Winding, shift, None);
+            }
+        };
+        match t {
+            None => fill(&mut canvas, lay, style.text_color, 1.0),
+            Some(t) => {
+                // Its letters (spaces aren't counted) said, being said and to come, each drawn
+                // apart where the whole line has them.
+                let (before, through) = words_said(cue, t);
+                let space = text::layout(" ", style, None).lines.first().and_then(|l| l.glyphs.first()).map(|g| g.0);
+                let part = |from: usize, to: usize| {
+                    let mut n = 0usize;
+                    let mut l = lay.clone();
+                    for line in &mut l.lines {
+                        line.glyphs.retain(|g| {
+                            if Some(g.0) == space {
+                                return false;
+                            }
+                            n += 1;
+                            (from..to).contains(&(n - 1))
+                        });
+                    }
+                    l
+                };
+                fill(&mut canvas, &part(through, usize::MAX), style.text_color, 0.45);
+                fill(&mut canvas, &part(0, before), style.text_color, 1.0);
+                fill(&mut canvas, &part(before, through), screengrabcraft_model::Color::rgb(0x4D, 0xE1, 0xF0), 1.0);
+            }
         }
         y += bh + gap;
     }
@@ -573,7 +635,7 @@ pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
 /// Draws the camera's picture over the whole of `out`, as large as fits, keeping its shape (a
 /// recording with no screen).
 pub fn fill_camera(out: &mut Raster, cam: &Raster) {
-    fill_camera_keyed(out, cam, &crate::timeline::CameraLayout::default(), None);
+    fill_camera_keyed(out, cam, &crate::timeline::CameraLayout::default(), None, None);
 }
 
 /// How much of each pixel of the camera's picture (as drawn, `pic`) is kept: what the layout
@@ -588,14 +650,21 @@ pub fn camera_keep(pic: &mut Raster, layout: &crate::timeline::CameraLayout, pla
     }
 }
 
-/// [`fill_camera`], with what the layout takes away from the camera's picture taken away (black
-/// there).
-pub fn fill_camera_keyed(out: &mut Raster, cam: &Raster, layout: &crate::timeline::CameraLayout, plate: Option<&crate::keyer::Plate>) {
+/// [`fill_camera`], with what the layout takes away from the camera's picture taken away: black
+/// there, or what the layout puts behind (`picture`: the media bin's picture it names).
+pub fn fill_camera_keyed(
+    out: &mut Raster,
+    cam: &Raster,
+    layout: &crate::timeline::CameraLayout,
+    plate: Option<&crate::keyer::Plate>,
+    picture: Option<&Raster>,
+) {
     let (ow, oh) = (out.width(), out.height());
     let f = (f64::from(ow) / f64::from(cam.width().max(1))).min(f64::from(oh) / f64::from(cam.height().max(1)));
     let cw = ((f64::from(cam.width()) * f).round() as u32).clamp(1, ow.max(1));
     let ch = ((f64::from(cam.height()) * f).round() as u32).clamp(1, oh.max(1));
     let Some(mut small) = (if (cw, ch) == (cam.width(), cam.height()) { Some(cam.clone()) } else { scale(cam, cw, ch) }) else { return };
+    let back = if layout.remove == crate::keyer::Remove::Nothing { None } else { behind_camera(&small, layout.behind, picture) };
     let keep = camera_keep(&mut small, layout, plate);
     let (x0, y0) = ((ow.saturating_sub(cw) / 2) as usize, (oh.saturating_sub(ch) / 2) as usize);
     let (sw, ow_px) = (small.width() as usize, ow as usize);
@@ -610,8 +679,10 @@ pub fn fill_camera_keyed(out: &mut Raster, cam: &Raster, layout: &crate::timelin
             if let Some(keep) = &keep {
                 for (x, p) in d.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                     let a = f32::from(keep.get(y * sw + x).copied().unwrap_or(255)) / 255.0;
-                    for c in p.iter_mut().take(3) {
-                        *c = (f32::from(*c) * a).round() as u8;
+                    let b = back.as_ref().and_then(|b| b.pixels().get((y * sw + x) * 4..(y * sw + x) * 4 + 3));
+                    for (k, c) in p.iter_mut().take(3).enumerate() {
+                        let under = b.and_then(|b| b.get(k)).map_or(0.0, |v| f32::from(*v));
+                        *c = (f32::from(*c) * a + under * (1.0 - a)).round() as u8;
                     }
                 }
             }
@@ -655,12 +726,13 @@ pub fn camera_rect(layout: &crate::timeline::CameraLayout, aspect: f32, ow: f32,
 
 /// Draws the camera's picture in its place on `out`, in its shape.
 pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
-    overlay_camera_keyed(out, cam, timeline, None);
+    overlay_camera_keyed(out, cam, timeline, None, None);
 }
 
 /// [`overlay_camera`], with what the layout takes away from the camera's picture (a colour, or
-/// the background learnt in `plate`) showing the screen there.
-pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline, plate: Option<&crate::keyer::Plate>) {
+/// the background learnt in `plate`) showing the screen there, or what the layout puts behind
+/// (`picture`: the media bin's picture it names).
+pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline, plate: Option<&crate::keyer::Plate>, picture: Option<&Raster>) {
     let layout = timeline.camera;
     let (ow, oh) = (out.width() as f32, out.height() as f32);
     let aspect = cam.width() as f32 / cam.height().max(1) as f32;
@@ -673,6 +745,7 @@ pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline,
         Some(cam.clone())
     };
     let Some(mut small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
+    let back = if layout.remove == crate::keyer::Remove::Nothing { None } else { behind_camera(&small, layout.behind, picture) };
     let keep = camera_keep(&mut small, &layout, plate);
     // (It may be part off the picture: only what is on it is drawn.)
     let (x0, y0) = (x0 as i64, y0 as i64);
@@ -681,7 +754,15 @@ pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline,
     for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
         for (x, p) in row.as_chunks::<4>().0.iter().enumerate() {
             let kept = keep.as_ref().map_or(1.0, |k| f32::from(k.get(y * sw + x).copied().unwrap_or(255)) / 255.0);
-            let a = coverage(layout.shape, x as f32, y as f32, cw, ch) * kept;
+            // With something behind the person, what's taken away is that; else the screen.
+            let under = back.as_ref().and_then(|b| b.pixels().get((y * sw + x) * 4..(y * sw + x) * 4 + 3));
+            let (a, p) = match under {
+                Some(u) => {
+                    let mix = |k: usize| (f32::from(p[k]) * kept + f32::from(u.get(k).copied().unwrap_or(0)) * (1.0 - kept)).round() as u8;
+                    (coverage(layout.shape, x as f32, y as f32, cw, ch), [mix(0), mix(1), mix(2), 255])
+                }
+                None => (coverage(layout.shape, x as f32, y as f32, cw, ch) * kept, *p),
+            };
             if a <= 0.0 {
                 continue;
             }
@@ -691,12 +772,38 @@ pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline,
             }
             let i = ((dy * ow_px + dx) * 4) as usize;
             if let Some(d) = dst.get_mut(i..i + 3) {
-                for (dv, sv) in d.iter_mut().zip(p) {
+                for (dv, sv) in d.iter_mut().zip(p.iter()) {
                     *dv = (f32::from(*sv) * a + f32::from(*dv) * (1.0 - a)).round() as u8;
                 }
             }
         }
     }
+}
+
+/// What shows behind the person where the camera's background is taken away, the size of `pic`
+/// (the camera's picture as drawn): its own picture blurred (the room out of focus), or `picture`
+/// as large as covers it, the middle of it kept. None for the screen, or a picture not read.
+fn behind_camera(pic: &Raster, behind: crate::timeline::Behind, picture: Option<&Raster>) -> Option<Raster> {
+    use crate::timeline::Behind;
+    let (w, h) = (pic.width(), pic.height());
+    match behind {
+        Behind::Screen => None,
+        // A sixteenth as large and back, smoothly: soft all over.
+        Behind::Blur => scale(pic, (w / 16).max(1), (h / 16).max(1)).and_then(|s| covering(&s, w, h)),
+        Behind::Picture(_) => covering(picture?, w, h),
+    }
+}
+
+/// `src` drawn smoothly as large as covers `w × h`, its middle kept.
+fn covering(src: &Raster, w: u32, h: u32) -> Option<Raster> {
+    let from = screengrabcraft_render::canvas::to_pixmap(src)?;
+    let mut out = tiny_skia::Pixmap::new(w, h)?;
+    let (sw, sh) = (src.width().max(1) as f32, src.height().max(1) as f32);
+    let k = (w as f32 / sw).max(h as f32 / sh);
+    let place = tiny_skia::Transform::from_scale(k, k).post_translate((w as f32 - sw * k) / 2.0, (h as f32 - sh * k) / 2.0);
+    let paint = tiny_skia::PixmapPaint { quality: tiny_skia::FilterQuality::Bicubic, ..tiny_skia::PixmapPaint::default() };
+    out.draw_pixmap(0, 0, from.as_ref(), &paint, place, None);
+    screengrabcraft_render::canvas::from_pixmap(&out)
 }
 
 /// Whether two views of the screen differ by about a pixel or more on a `w × h` picture.
@@ -1785,6 +1892,46 @@ mod tests {
     }
 
     #[test]
+    fn captions_light_up_word_by_word_as_they_are_said() {
+        // Three words of five letters over three seconds: each about a second.
+        let cue = Cue { start: 1_000_000, end: 4_000_000, speaker: Speaker::Others, text: "First  later after".into() };
+        assert_eq!(words_said(&cue, 0), (0, 5), "before it, the first word");
+        assert_eq!(words_said(&cue, 1_500_000), (0, 5));
+        assert_eq!(words_said(&cue, 2_500_000), (5, 10));
+        assert_eq!(words_said(&cue, 3_900_000), (10, 15));
+        assert_eq!(words_said(&cue, 9_000_000), (15, 15), "after it, all of them said");
+        let empty = Cue { text: "   ".into(), ..cue.clone() };
+        assert_eq!(words_said(&empty, 2_000_000), (0, 0));
+        // Drawn: the word being said in bright blue, where it is; the rest white, the words to
+        // come fainter.
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 320, 180);
+        c.set_captions(Some(Arc::new(vec![cue])));
+        let blue_x = |f: &Raster| -> Vec<u32> {
+            (120..180u32)
+                .flat_map(|y| (0..320u32).map(move |x| (x, y)))
+                .filter(|(x, y)| f.pixel(*x, *y).is_some_and(|p| p.b > 200 && p.g > 180 && p.r < 120))
+                .map(|(x, _)| x)
+                .collect()
+        };
+        let f = c.frame(&tl, 1_500_000);
+        assert!(blue_x(&f).is_empty(), "not unless asked");
+        tl.captions.words = true;
+        let (first, last) = (blue_x(&c.frame(&tl, 1_500_000)), blue_x(&c.frame(&tl, 3_500_000)));
+        assert!(!first.is_empty() && !last.is_empty());
+        let mean = |v: &[u32]| v.iter().sum::<u32>() / v.len().max(1) as u32;
+        assert!(mean(&first) + 20 < mean(&last), "the first word, then the last: {} {}", mean(&first), mean(&last));
+        let white = |f: &Raster| {
+            (120..180u32)
+                .flat_map(|y| (0..320u32).map(move |x| (x, y)))
+                .filter(|(x, y)| f.pixel(*x, *y).is_some_and(|p| p.r > 230 && p.g > 230 && p.b > 230))
+                .count()
+        };
+        assert!(white(&c.frame(&tl, 3_500_000)) > white(&c.frame(&tl, 1_500_000)), "more of it said, more of it full white");
+    }
+
+    #[test]
     fn captions_are_drawn_at_the_bottom_in_each_speakers_colour() {
         let r = rec();
         let tl = Timeline::new(&r);
@@ -1946,6 +2093,35 @@ mod tests {
         tl.set_muted(0, true).unwrap();
         let f = c.frame(&tl, 500_000);
         assert!(count(&f, &green) < 20 && count(&f, &red) > 300);
+        // A picture of the media bin behind the person instead (the screen shown or not).
+        struct Blue;
+        impl crate::layer_draw::MediaStore for Blue {
+            fn picture(&self, _id: u32, _t: u64) -> Option<Arc<Raster>> {
+                Some(Arc::new(Raster::filled(40, 40, Color::rgb(20, 40, 230)).unwrap()))
+            }
+            fn sound(&self, _id: u32, _first: u64, count: usize) -> Vec<f32> {
+                vec![0.0; count * 2]
+            }
+        }
+        c.set_media(Arc::new(Blue));
+        let blue = |p: &[u8; 4]| p[2] > 180 && p[0] < 80 && p[1] < 80;
+        tl.camera.behind = crate::timeline::Behind::Picture(7);
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &blue) > 1000 && count(&f, &red) > 300 && count(&f, &green) < 20, "{}", count(&f, &blue));
+        tl.set_muted(0, false).unwrap();
+        let (f, white) = (c.frame(&tl, 500_000), |p: &[u8; 4]| p[0] > 240 && p[1] > 240 && p[2] > 240);
+        assert!(count(&f, &blue) > 1000 && count(&f, &red) > 300, "over the screen too");
+        let screen_left = count(&f, &white);
+        // Blurred: the room shows behind, soft (its green, washed with the person's red), not the
+        // screen; the person sharp in front.
+        tl.camera.behind = crate::timeline::Behind::Blur;
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &blue) == 0 && count(&f, &red) > 300);
+        assert!(count(&f, &|p: &[u8; 4]| p[1] > 90 && p[0] < 150 && p[2] < 120) > 800, "the room, blurred");
+        assert_eq!(count(&f, &white), screen_left, "the screen round the camera as it was");
+        // Nothing taken away: nothing behind, whatever's chosen.
+        tl.camera.remove = Remove::Nothing;
+        assert!(count(&c.frame(&tl, 500_000), &green) > 1000);
     }
 
     #[test]

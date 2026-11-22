@@ -416,15 +416,18 @@ fn captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
             Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
         }
     };
-    let (show, burn) = (flag("show")?, flag("burn")?);
+    let (show, burn, words) = (flag("show")?, flag("burn")?, flag("words")?);
     let c = &mut s.timeline.captions;
+    if let Some(v) = words {
+        c.words = v;
+    }
     if let Some(v) = show {
         c.show = v;
     }
     if let Some(v) = burn {
         c.burn = v;
     }
-    Ok(json!({"show": c.show, "burn": c.burn}))
+    Ok(json!({"show": c.show, "burn": c.burn, "words": c.words}))
 }
 
 fn revert(s: &mut VideoSession, _: &Value) -> Result<Value> {
@@ -1579,6 +1582,7 @@ fn watermark(s: &mut VideoSession, p: &Value) -> Result<Value> {
 /// background (learnt by the background model, see `screengrabcraft_media::keyer`).
 fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
     use screengrabcraft_media::keyer::Remove;
+    use screengrabcraft_media::timeline::Behind;
     if !p.is_object() {
         return Err(EngineError::Params("what's taken away is given as an object".to_string()));
     }
@@ -1600,7 +1604,23 @@ fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
         }
     };
     let tolerance = number(p, "tolerance")?;
+    // What shows behind: the screen, the camera blurred, or a picture of the media bin.
+    let behind = match p.get("behind").and_then(Value::as_str) {
+        None if p.get("behind").is_some() => return Err(EngineError::Params("`behind` is screen, blur or picture".to_string())),
+        None => None,
+        Some("screen") => Some(Behind::Screen),
+        Some("blur") => Some(Behind::Blur),
+        Some("picture") => {
+            let m = id(p, "picture")?;
+            if !s.timeline.media.iter().any(|x| x.id == m && x.kind == screengrabcraft_media::layers::MediaKind::Picture) {
+                return Err(EngineError::Params("`picture` is a picture of the media bin".to_string()));
+            }
+            Some(Behind::Picture(m))
+        }
+        Some(_) => return Err(EngineError::Params("`behind` is screen, blur or picture".to_string())),
+    };
     let c = &mut s.timeline.camera;
+    c.behind = behind.unwrap_or(c.behind);
     c.remove = remove.unwrap_or(c.remove);
     c.key_colour = colour.unwrap_or(c.key_colour);
     c.key_tolerance = tolerance.map_or(c.key_tolerance, |t| t.clamp(0.0, 1.0));
@@ -1831,7 +1851,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.captions",
         label: "Captions",
-        params: r#"{"show"?: bool, "burn"?: bool}: the captions on the picture in the editor, and burned into the video made"#,
+        params: r#"{"show"?: bool, "burn"?: bool, "words"?: bool}: the captions on the picture in the editor, and burned into the video made; with `words`, each word lit up as it's said (its time worked out from its line's by its length)"#,
         run: captions,
     },
     VideoCommand {
@@ -2012,7 +2032,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.cameraKey",
         label: "Camera Background",
-        params: r##"{"remove"?: "nothing"|"colour"|"background", "colour"?: "#rrggbb", "tolerance"?: 0..1}: what's taken away from the camera's picture so the screen shows round you: a colour (a green screen; how far from it still goes), or the background (learnt from a few of the camera's pictures by the background model, the camera kept still)"##,
+        params: r##"{"remove"?: "nothing"|"colour"|"background", "colour"?: "#rrggbb", "tolerance"?: 0..1, "behind"?: "screen"|"blur"|"picture", "picture"?: media id}: what's taken away from the camera's picture so the screen shows round you: a colour (a green screen; how far from it still goes), or the background (learnt from a few of the camera's pictures by the background model, the camera kept still); and what shows there instead: the screen, the camera's own picture blurred, or a picture of the media bin (`picture` names it)"##,
         run: camera_key,
     },
     VideoCommand {
@@ -2079,6 +2099,32 @@ mod tests {
         ] {
             assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_cameras_background_is_blurred_or_a_picture_and_captions_light_up_word_by_word() {
+        use screengrabcraft_media::timeline::Behind;
+        let mut s = session();
+        s.execute("video.cameraKey", &json!({"remove": "colour", "behind": "blur"})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Blur);
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Beach.png", "path": "C:/Beach.png", "width": 40, "height": 30})).unwrap();
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "Song.mp3", "path": "C:/Song.mp3", "duration": 2_000_000})).unwrap();
+        s.execute("video.cameraKey", &json!({"behind": "picture", "picture": pic["id"]})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Picture(pic["id"].as_u64().unwrap() as u32));
+        assert_eq!(s.undo_label(), Some("Camera Background"));
+        for bad in
+            [json!({"behind": "picture", "picture": song["id"]}), json!({"behind": "picture"}), json!({"behind": "beach"}), json!({"behind": 3})]
+        {
+            assert!(s.execute("video.cameraKey", &bad).is_err(), "{bad}");
+        }
+        assert!(matches!(s.timeline.camera.behind, Behind::Picture(_)), "unchanged by junk");
+        s.execute("video.cameraKey", &json!({"behind": "screen"})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Screen);
+        // The captions lit up word by word.
+        assert_eq!(s.execute("video.captions", &json!({"words": true})).unwrap()["words"], true);
+        assert!(s.timeline.captions.words);
+        assert!(s.execute("video.captions", &json!({"words": "yes"})).is_err());
     }
 
     #[test]

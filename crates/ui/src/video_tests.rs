@@ -287,6 +287,29 @@ fn caption_harness_stepping(bytes: Vec<u8>, host: CaptionHost, dt: f32) -> Harne
 }
 
 #[test]
+fn captions_light_up_word_by_word_from_the_view_menu() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let mut h = caption_harness(bytes, CaptionHost::default());
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(2_400_000);
+    h.get_by_label("View").click();
+    h.run_steps(2);
+    h.get_by_label("Light Up Each Word as It's Said").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.captions.words);
+    // Early in the others' line its first words are lit, the rest faint; later, more of it.
+    let lit = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0x4D, 0xE1, 0xF0]);
+    let early = h.state_mut().video.as_mut().unwrap().frame_at(2_400_000);
+    assert!(early.pixels() != before.pixels() && lit(&mut h, 2_400_000) > 0);
+    assert!(lit(&mut h, 3_400_000) > 0);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 2_700_000;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-captions-word-by-word");
+}
+
+#[test]
 fn captions_show_on_their_row_and_on_the_picture_and_go_into_the_video() {
     let mut bytes = meeting();
     bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
@@ -1884,6 +1907,19 @@ fn the_cameras_green_screen_or_its_background_is_taken_away_from_its_panel() {
     assert!(red(&mut h) > red_before / 2);
     assert!(h.query_by_label("Tolerance").is_some());
     shot(&mut h, "video-camera-green-screen");
+    // Behind you: your room blurred instead of the screen.
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    h.get_by_value("The screen").click();
+    h.run_steps(2);
+    h.get_by_label("Your room, blurred").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.camera.behind, screengrabcraft_media::timeline::Behind::Blur);
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    assert!(before.pixels() != after.pixels() && red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Pictures brought into the Media bin can go behind you too.").is_some());
+    shot(&mut h, "video-camera-blurred-room");
+    h.state_mut().video.as_mut().unwrap().session.execute("video.cameraKey", &serde_json::json!({"behind": "screen"})).unwrap();
+    h.run_steps(2);
     // Remove the background instead: it's learnt on a thread, then kept in the file.
     h.get_by_value("Remove a colour (green screen)").click();
     h.run_steps(3);

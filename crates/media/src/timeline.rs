@@ -644,6 +644,31 @@ pub struct CameraLayout {
     /// How far from that colour a colour still goes, 0 to 1.
     #[serde(default = "key_tolerance", rename = "keyTolerance")]
     pub key_tolerance: f32,
+    /// What shows where its background is taken away: the screen, its own picture blurred, or a
+    /// picture of the media bin.
+    #[serde(default, skip_serializing_if = "is_screen")]
+    pub behind: Behind,
+}
+
+/// What shows behind the person where the camera's background is taken away.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Behind {
+    /// The screen (black with none).
+    #[default]
+    Screen,
+    /// The camera's own picture, blurred: the room out of focus.
+    Blur,
+    /// A picture of the media bin (its id), as large as covers the camera's picture.
+    Picture(u32),
+}
+
+fn is_screen(b: &Behind) -> bool {
+    *b == Behind::Screen
+}
+
+fn is_off(v: &bool) -> bool {
+    !*v
 }
 
 fn is_nothing(r: &crate::keyer::Remove) -> bool {
@@ -672,6 +697,7 @@ impl Default for CameraLayout {
             remove: crate::keyer::Remove::Nothing,
             key_colour: key_colour(),
             key_tolerance: key_tolerance(),
+            behind: Behind::Screen,
         }
     }
 }
@@ -684,6 +710,9 @@ pub struct CaptionOptions {
     pub show: bool,
     #[serde(default)]
     pub burn: bool,
+    /// Each word lit up as it's said (its time worked out from its line's by its length).
+    #[serde(default, skip_serializing_if = "is_off")]
+    pub words: bool,
 }
 
 fn yes() -> bool {
@@ -692,7 +721,7 @@ fn yes() -> bool {
 
 impl Default for CaptionOptions {
     fn default() -> CaptionOptions {
-        CaptionOptions { show: true, burn: false }
+        CaptionOptions { show: true, burn: false, words: false }
     }
 }
 
