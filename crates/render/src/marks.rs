@@ -105,7 +105,7 @@ pub const MAX_MARK_TEXT: usize = 400;
 /// A text annotation for `text` in `style`, its box at `at`.
 fn text_object(text: &str, style: Style, at: Pt) -> Object {
     let rect = text::fit_box(text, &style, at, None);
-    Object { id: ObjectId(1), shape: Shape::Text { rect, text: text.to_string() }, style }
+    Object::new(ObjectId(1), Shape::Text { rect, text: text.to_string() }, style)
 }
 
 /// The mark drawn on its own, `width` pixels wide at most and `height` tall.

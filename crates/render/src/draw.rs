@@ -193,8 +193,37 @@ fn with_style(canvas: &mut Pixmap, bounds: Rect, style: &Style, draw: &dyn Fn(&m
     }
 }
 
+/// How far round a turned annotation its layer reaches, for its shadow.
+const TURNED_MARGIN: f32 = 64.0;
+
+/// A turned annotation: drawn square on a layer of its own, then put on the canvas turned round
+/// its middle (only the part that can land on the canvas is drawn).
+fn draw_turned(canvas: &mut Pixmap, doc: &Document, o: &Object, turn: f32) {
+    let style = o.style.clamped();
+    let c = o.shape.pivot();
+    let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
+    let reach = screengrabcraft_model::object::turned_box(full, c, -turn);
+    let Some(area) = o.shape.bounds(&style).inflate(TURNED_MARGIN).intersect(reach) else { return };
+    let (x, y) = (area.x.floor(), area.y.floor());
+    let (w, h) = ((area.right().ceil() - x).max(1.0) as u32, (area.bottom().ceil() - y).max(1.0) as u32);
+    let Some(mut layer) = canvas::blank(w, h) else { return };
+    let mut square = o.clone();
+    square.rotation = 0.0;
+    square.shape.translate(Pt::new(-x, -y));
+    draw_object(&mut layer, doc, &square);
+    // A highlight multiplies into what is under it, turned or not.
+    let blend = if o.shape.kind() == screengrabcraft_model::Kind::Highlight { BlendMode::Multiply } else { BlendMode::SourceOver };
+    let paint = PixmapPaint { opacity: 1.0, blend_mode: blend, quality: FilterQuality::Bilinear };
+    canvas.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::from_rotate_at(turn, c.x, c.y).pre_translate(x, y), None);
+}
+
 /// Draws one annotation onto the canvas.
 pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
+    let turn = o.turn();
+    if turn != 0.0 {
+        draw_turned(canvas, doc, o, turn);
+        return;
+    }
     let style = o.style.clamped();
     let bounds = o.shape.bounds(&style);
     match &o.shape {
@@ -1228,5 +1257,30 @@ mod stroke_tests {
         for (x, y) in [(38, 50), (142, 50), (90, 38), (90, 82), (10, 10)] {
             assert_eq!(out.pixel(x, y), Some(Color::WHITE), "nothing outside at {x},{y}");
         }
+    }
+
+    #[test]
+    fn a_turned_annotation_is_drawn_turned_round_its_middle() {
+        let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
+        let style = Style { fill: Color::RED, stroke: Color::TRANSPARENT, width: 0.0, shadow: false, ..Style::default() };
+        let id = d.add(Shape::Rect { rect: Rect::new(60.0, 55.0, 80.0, 10.0), radius: 0.0 }, style).unwrap();
+        let red = |out: &Raster, x, y| out.pixel(x, y) == Some(Color::RED);
+        let flat = render(&d).unwrap();
+        assert!(red(&flat, 65, 60) && !red(&flat, 100, 25));
+        d.get_mut(id).unwrap().rotation = 90.0;
+        let out = render(&d).unwrap();
+        assert!(red(&out, 100, 25) && red(&out, 100, 95), "tall and narrow now");
+        assert!(!red(&out, 65, 60) && !red(&out, 135, 60));
+        // A highlight turned still multiplies into the picture; a blur doesn't turn.
+        let hl = d.add(Shape::highlight(Rect::new(10.0, 10.0, 40.0, 10.0)), Kind::Highlight.default_style()).unwrap();
+        d.get_mut(hl).unwrap().rotation = 45.0;
+        let out = render(&d).unwrap();
+        assert!(out.pixel(30, 15).is_some_and(|c| c.b < 200 && c.r > 200), "{:?}", out.pixel(30, 15));
+        let blur = d.add(Shape::Blur { rect: Rect::new(150.0, 80.0, 30.0, 30.0) }, Style::default()).unwrap();
+        d.get_mut(blur).unwrap().rotation = 30.0;
+        assert_eq!(d.get(blur).unwrap().turn(), 0.0);
+        // Far off the picture, nothing to draw.
+        d.get_mut(id).unwrap().shape.translate(Pt::new(1.0e6, 1.0e6));
+        assert!(render(&d).is_some());
     }
 }

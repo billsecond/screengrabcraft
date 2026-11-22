@@ -2,7 +2,7 @@
 //! does on it (drawing with each tool, selecting, moving, resizing, cropping, typing text).
 
 use egui::{Color32, CursorIcon, Pos2, Sense, Stroke, StrokeKind, TextureOptions, Ui, pos2, vec2};
-use screengrabcraft_model::object::step_radius;
+use screengrabcraft_model::object::{step_radius, turn};
 use screengrabcraft_model::{ArrowHeads, BadgeShape, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
 use screengrabcraft_render::{Options, text};
 
@@ -150,6 +150,34 @@ pub enum Drag {
         start: Pt,
         now: Pt,
     },
+    /// The selection being turned by its handle: round `pivot`, from where the press was, the
+    /// annotations as they were before.
+    Rotate {
+        ids: Vec<ObjectId>,
+        pivot: Pt,
+        start: Pt,
+        before: Vec<screengrabcraft_model::Object>,
+    },
+}
+
+/// Starts dragging a handle of the selection: turning it by the turning handle, else reshaping.
+fn grab_handle(ed: &mut Editor, id: ObjectId, handle: Handle, start: Pt) {
+    if handle == Handle::Rotate
+        && let Some((pivot, _)) = ed.turn_handle()
+    {
+        let ids = ed.session.selected();
+        let before = ids.iter().filter_map(|i| ed.session.doc.get(*i).cloned()).collect();
+        ed.session.begin("Rotate");
+        ed.drag = Some(Drag::Rotate { ids, pivot, start, before });
+        return;
+    }
+    ed.session.begin("Resize");
+    ed.drag = Some(Drag::Handle { id, handle });
+}
+
+/// The angle, in degrees the way a clock goes, from `pivot` to `p`.
+fn angle_to(pivot: Pt, p: Pt) -> f32 {
+    (p.y - pivot.y).atan2(p.x - pivot.x).to_degrees()
 }
 
 /// The picture's tiles on the GPU (a long scrolling capture is more than one texture).
@@ -165,6 +193,10 @@ const HANDLE: f32 = 10.0;
 const GRAB: f32 = 13.0;
 /// How near a line or a border a press takes hold of its annotation, in screen points.
 const NEAR: f32 = 6.0;
+/// How far above a box its turning handle is, in screen points.
+const TURN_REACH: f32 = 28.0;
+/// The steps a turn snaps to with Shift held, in degrees.
+const TURN_STEP: f32 = 15.0;
 /// How big a tool drawn as the pointer is (the eyedropper, the Fill tool's pail), in screen points.
 const POINTER: f32 = 30.0;
 
@@ -288,14 +320,24 @@ impl Editor {
         }
         let tol = NEAR / self.view.scale();
         let solid = |o: &&screengrabcraft_model::Object| {
-            o.shape.hit(&screengrabcraft_model::Style { fill: screengrabcraft_model::Color::WHITE, ..o.style }, p, tol)
+            o.shape.hit(
+                &screengrabcraft_model::Style { fill: screengrabcraft_model::Color::WHITE, ..o.style },
+                turn(p, o.shape.pivot(), -o.turn()),
+                tol,
+            )
         };
         self.session.doc.objects.iter().rev().filter(|o| has_inside(o.shape.kind())).find(solid).map(|o| o.id)
     }
 
-    /// The handle of a selected annotation under a screen point.
+    /// The handle of a selected annotation under a screen point (the turning handle of a box or
+    /// a group among them).
     pub(crate) fn handle_at(&self, s: Pos2) -> Option<(ObjectId, Handle)> {
         let sel = self.session.selected();
+        if let Some((_, knob)) = self.turn_handle()
+            && self.view.to_screen(knob).distance(s) <= GRAB
+        {
+            return sel.first().map(|id| (*id, Handle::Rotate));
+        }
         if sel.len() != 1 {
             return None;
         }
@@ -306,7 +348,36 @@ impl Editor {
             return None;
         }
         // The nearest one in reach, so two handles close together (a small box) both work.
-        nearest(o.shape.handles(&o.style), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
+        nearest(o.handles(), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
+    }
+
+    /// Where the selection turns round, and its turning handle (on the picture): above the top
+    /// of a box, turned with it, or of a group's box. None for a line, a stroke, an effect
+    /// that stays square, or several annotations that aren't one group.
+    pub(crate) fn turn_handle(&self) -> Option<(Pt, Pt)> {
+        let sel = self.session.selected();
+        let doc = &self.session.doc;
+        let up = TURN_REACH / self.view.scale();
+        match sel.as_slice() {
+            [one] => {
+                let o = doc.get(*one)?;
+                if !o.shape.turns() || o.group.is_some() && doc.with_groups(&[o.id]).len() > 1 {
+                    return None;
+                }
+                let r = o.shape.rect()?;
+                let c = o.shape.pivot();
+                Some((c, turn(Pt::new(r.center().x, r.y - up), c, o.turn())))
+            }
+            [first, ..] => {
+                let g = doc.get(*first)?.group?;
+                if !sel.iter().all(|id| doc.get(*id).is_some_and(|o| o.group == Some(g))) {
+                    return None;
+                }
+                let b = doc.bounds_of(&sel)?;
+                Some((b.center(), Pt::new(b.center().x, b.y - up)))
+            }
+            [] => None,
+        }
     }
 
     fn crop_handle_at(&self, s: Pos2) -> Option<Handle> {
@@ -606,7 +677,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     match &ed.drag {
         Some(Drag::Handle { handle, .. }) => ctx.set_cursor_icon(cursor_for(*handle)),
         Some(Drag::CropHandle { handle }) => ctx.set_cursor_icon(cursor_for(*handle)),
-        Some(Drag::Move { .. } | Drag::CropMove { .. }) => ctx.set_cursor_icon(CursorIcon::Grabbing),
+        Some(Drag::Move { .. } | Drag::CropMove { .. } | Drag::Rotate { .. }) => ctx.set_cursor_icon(CursorIcon::Grabbing),
         _ => {}
     }
 
@@ -647,8 +718,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     // Inside an area of the picture selected: that part of it is moved.
                 } else if let Some((id, handle)) = ed.handle_at(start_s) {
                     ed.area = None;
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                 } else if let Some(id) = ed.object_under(start) {
                     ed.area = None;
                     let mut sel = ed.session.selected();
@@ -663,7 +733,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                         ed.session.select(sel.clone());
                     }
                     ed.session.begin("Move");
-                    ed.drag = Some(Drag::Move { ids: sel, last: start });
+                    ed.drag = Some(Drag::Move { ids: ed.session.selected(), last: start });
                 } else {
                     ed.drag = Some(Drag::Rubber { start, now: start });
                 }
@@ -689,8 +759,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     // Inside the selected area: that part of the picture is moved.
                 } else if let Some((id, handle)) = ed.handle_at(start_s) {
                     // A piece taken out is resized by its handles, and moved again by a drag.
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                 } else if let Some(id) = ed.object_under(start).filter(|id| ed.session.selected().contains(id)) {
                     ed.session.begin("Move");
                     ed.drag = Some(Drag::Move { ids: vec![id], last: start });
@@ -703,8 +772,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Tool::Draw(kind) => {
                 // Starting on a handle of the selected annotation reshapes it instead.
                 if let Some((id, handle)) = ed.handle_at(start_s) {
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                     return;
                 }
                 // Starting on an annotation picks it up and moves it, whatever the tool, as a
@@ -714,7 +782,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 {
                     ed.session.select(vec![id]);
                     ed.session.begin("Move");
-                    ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+                    ed.drag = Some(Drag::Move { ids: ed.session.selected(), last: start });
                     return;
                 }
                 // A picture of your own from the stamp library: placed, and moved by the drag.
@@ -797,19 +865,38 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::Handle { id, handle }) => {
                 if let Some(o) = ed.session.doc.get_mut(id) {
                     let style = o.style;
-                    let mut reshaped = o.shape.clone();
-                    reshaped.drag_handle(&style, handle, inside, shift);
+                    let mut reshaped = o.clone();
+                    // A turned box follows the pointer itself (its corners may be off the picture).
+                    reshaped.drag_handle(handle, if o.turn() == 0.0 { inside } else { now }, shift);
                     // Text boxes keep room for their text.
-                    if let Shape::Text { rect, text: body } = &mut reshaped {
+                    if let Shape::Text { rect, text: body } = &mut reshaped.shape {
                         let need = text::fit_box(body, &style, rect.min(), Some(rect.w));
                         rect.h = rect.h.max(need.h);
                     }
                     // Keeping proportions or room for text can reach past the pointer: it stops at
                     // the edge. An annotation already over it (an old project, a crop) stays free.
-                    if bounds.encloses(reshaped.extent()) || !bounds.encloses(o.shape.extent()) {
-                        o.shape = reshaped;
+                    if bounds.encloses(reshaped.extent()) || !bounds.encloses(o.extent()) || o.turn() != 0.0 {
+                        o.shape = reshaped.shape;
                     }
                 }
+                ed.session.touch();
+            }
+            Some(Drag::Rotate { ids, pivot, start, before }) => {
+                let mut by = angle_to(pivot, now) - angle_to(pivot, start);
+                // Shift: in steps, of the box's own turn when it's one box.
+                if shift {
+                    let base = match before.as_slice() {
+                        [one] => one.turn(),
+                        _ => 0.0,
+                    };
+                    by = ((base + by) / TURN_STEP).round() * TURN_STEP - base;
+                }
+                for o in &before {
+                    if let Some(slot) = ed.session.doc.get_mut(o.id) {
+                        *slot = o.clone();
+                    }
+                }
+                ed.session.doc.rotate_objects(&ids, by, pivot);
                 ed.session.touch();
             }
             Some(Drag::Rubber { start, .. }) => ed.drag = Some(Drag::Rubber { start, now: inside }),
@@ -875,6 +962,13 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     // Too small to be a drag: treat it as a click.
                     click(ed, &ctx, press, shift);
                 }
+            }
+            Some(Drag::Rotate { ids, .. }) => {
+                // A corner turned past the edge: the picture grows to hold it, as a move does.
+                if let Some(shift) = ed.session.doc.bounds_of(&ids).and_then(|area| ed.session.doc.grow_to(area)) {
+                    ed.picture_moved(shift);
+                }
+                ed.session.commit();
             }
             Some(Drag::Move { .. }) | Some(Drag::Handle { .. }) => {
                 // Let go: the picture keeps only the growth that is needed for where things are now.
@@ -1083,6 +1177,10 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
                 ui.close();
             }
             ui.separator();
+            if crate::arrange::items(ed, ui) {
+                ui.close();
+            }
+            ui.separator();
         }
         if item(ui, true, "Paste", "Ctrl+V") {
             ed.paste(ctx, false);
@@ -1134,11 +1232,13 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
             ed.area = None;
             match hit {
                 Some(id) if shift => {
+                    // A group is let go of, or taken, as one.
                     let mut sel = ed.session.selected();
-                    if let Some(i) = sel.iter().position(|s| *s == id) {
-                        sel.remove(i);
+                    let unit = ed.session.doc.with_groups(&[id]);
+                    if sel.contains(&id) {
+                        sel.retain(|s| !unit.contains(s));
                     } else {
-                        sel.push(id);
+                        sel.extend(unit);
                     }
                     ed.session.select(sel);
                 }
@@ -1258,7 +1358,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         if let Some(points) = stroke_points(&o.shape) {
             stroke_mark(&painter, ed, points, t.handle.gamma_multiply(0.7), false);
         } else {
-            let b = ed.view.rect_to_screen(o.shape.bounds(&o.style));
+            let b = ed.view.rect_to_screen(o.bounds());
             painter.rect_stroke(b.expand(2.0), 2.0, Stroke::new(1.0, t.handle.gamma_multiply(0.6)), StrokeKind::Outside);
         }
     }
@@ -1277,11 +1377,19 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         }
         let line_like = matches!(o.shape, Shape::Arrow { .. } | Shape::Line { .. });
         if !line_like {
-            let b = ed.view.rect_to_screen(o.shape.rect().unwrap_or_else(|| o.shape.bounds(&o.style)));
-            dashed_rect(&painter, b.expand(1.0), t.handle);
+            let r = o.shape.rect().unwrap_or_else(|| o.shape.bounds(&o.style));
+            if o.turn() == 0.0 {
+                dashed_rect(&painter, ed.view.rect_to_screen(r).expand(1.0), t.handle);
+            } else {
+                // Turned with it.
+                let (c, a) = (o.shape.pivot(), o.turn());
+                let mut pts: Vec<Pos2> = r.corners().iter().map(|q| ed.view.to_screen(turn(*q, c, a))).collect();
+                pts.extend(pts.first().copied());
+                painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, t.handle), 5.0, 3.0));
+            }
         }
         if selected.len() == 1 {
-            for (h, p) in o.shape.handles(&o.style) {
+            for (h, p) in o.handles() {
                 let s = ed.view.to_screen(p);
                 if h == Handle::Bend {
                     // A diamond in the arrow's middle: dragged, it bends the arrow.
@@ -1307,6 +1415,24 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
                 }
             }
         }
+    }
+
+    // A group's box, and the handle that turns the selection.
+    if selected.len() > 1
+        && let Some(b) = ed.session.doc.bounds_of(&selected)
+        && selected.iter().all(|id| ed.session.doc.get(*id).is_some_and(|o| o.group.is_some()))
+    {
+        dashed_rect(&painter, ed.view.rect_to_screen(b).expand(3.0), t.handle);
+    }
+    if (ed.drag.is_none() || matches!(ed.drag, Some(Drag::Rotate { .. })))
+        && let Some((pivot, knob)) = ed.turn_handle()
+    {
+        let (k, c) = (ed.view.to_screen(knob), ed.view.to_screen(pivot));
+        let towards = (c - k).normalized();
+        painter.line_segment([k, k + towards * TURN_REACH], Stroke::new(1.5, t.handle));
+        painter.circle_filled(k, HANDLE * 0.6, Color32::WHITE);
+        painter.circle_stroke(k, HANDLE * 0.6, Stroke::new(1.5, t.handle));
+        painter.circle_filled(k, 2.0, t.handle);
     }
 
     // A rubber band.

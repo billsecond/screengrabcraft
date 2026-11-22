@@ -14,7 +14,7 @@ pub mod raster;
 pub mod settings;
 
 pub use color::Color;
-pub use document::{DocError, Document, Meta, Order};
+pub use document::{Align, DocError, Document, Meta, Order};
 pub use geom::{IRect, Pt, Rect};
 pub use object::{
     ArrowHeads, BadgeShape, CalloutForm, FontName, Handle, HeadShape, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind, StepLabels, Style,

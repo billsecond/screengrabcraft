@@ -1242,6 +1242,8 @@ pub enum Handle {
     Tail,
     /// The middle of an arrow, dragged to bend it.
     Bend,
+    /// Above a box (or a selection), dragged round to turn it.
+    Rotate,
 }
 
 impl Handle {
@@ -1259,8 +1261,23 @@ impl Handle {
             Handle::Bottom => Pt::new(c.x, r.bottom()),
             Handle::BottomLeft => Pt::new(r.x, r.bottom()),
             Handle::Left => Pt::new(r.x, c.y),
-            Handle::Start | Handle::End | Handle::Tail | Handle::Bend => c,
+            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => c,
         }
+    }
+
+    /// The corner or side across the box from it, which stays put while it is dragged.
+    pub fn opposite(self) -> Option<Handle> {
+        Some(match self {
+            Handle::TopLeft => Handle::BottomRight,
+            Handle::Top => Handle::Bottom,
+            Handle::TopRight => Handle::BottomLeft,
+            Handle::Right => Handle::Left,
+            Handle::BottomRight => Handle::TopLeft,
+            Handle::Bottom => Handle::Top,
+            Handle::BottomLeft => Handle::TopRight,
+            Handle::Left => Handle::Right,
+            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => return None,
+        })
     }
 
     /// `r` with this handle dragged to `p`. With `keep_aspect`, a corner keeps the proportions.
@@ -1276,7 +1293,7 @@ impl Handle {
             Handle::Bottom => y1 = p.y,
             Handle::BottomLeft => (x0, y1) = (p.x, p.y),
             Handle::Left => x0 = p.x,
-            Handle::Start | Handle::End | Handle::Tail | Handle::Bend => return r,
+            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => return r,
         }
         let corner = matches!(self, Handle::TopLeft | Handle::TopRight | Handle::BottomRight | Handle::BottomLeft);
         if keep_aspect && corner && r.w > 0.0 && r.h > 0.0 {
@@ -1303,6 +1320,100 @@ pub struct Object {
     pub shape: Shape,
     #[serde(default)]
     pub style: Style,
+    /// How far it is turned round its middle, in degrees the way a clock goes (-180 to 180).
+    /// Only boxes keep a turn of their own ([`Shape::turns`]): lines and strokes are turned by
+    /// moving their points. Nought (and every annotation of an older file) isn't written.
+    #[serde(default, skip_serializing_if = "is_unturned")]
+    pub rotation: f32,
+    /// The group it is in: a group is selected, moved, turned and lined up as one. None when it
+    /// is on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u64>,
+}
+
+fn is_unturned(r: &f32) -> bool {
+    *r == 0.0
+}
+
+/// A turn in range: finite, -180 to 180 degrees; a hair's breadth from none is none.
+pub fn clamp_rotation(degrees: f32) -> f32 {
+    if !degrees.is_finite() {
+        return 0.0;
+    }
+    let r = (degrees + 180.0).rem_euclid(360.0) - 180.0;
+    if r.abs() < 0.01 { 0.0 } else { r }
+}
+
+/// `p` turned by `degrees` round `c`, the way a clock goes (on a picture, whose y grows
+/// downwards).
+pub fn turn(p: Pt, c: Pt, degrees: f32) -> Pt {
+    if degrees == 0.0 || !degrees.is_finite() {
+        return p;
+    }
+    let (s, co) = degrees.to_radians().sin_cos();
+    let d = p.sub(c);
+    Pt::new(c.x + d.x * co - d.y * s, c.y + d.x * s + d.y * co).finite()
+}
+
+/// The box round `r` turned by `degrees` round `c`.
+pub fn turned_box(r: Rect, c: Pt, degrees: f32) -> Rect {
+    if degrees == 0.0 {
+        return r;
+    }
+    Rect::bounding(&r.corners().map(|q| turn(q, c, degrees)))
+}
+
+impl Object {
+    pub fn new(id: ObjectId, shape: Shape, style: Style) -> Object {
+        Object { id, shape, style, rotation: 0.0, group: None }
+    }
+
+    /// Its turn, when it is one that counts (a box's).
+    pub fn turn(&self) -> f32 {
+        if self.shape.turns() { clamp_rotation(self.rotation) } else { 0.0 }
+    }
+
+    /// The area it covers on the picture, turned, its line width included.
+    pub fn bounds(&self) -> Rect {
+        turned_box(self.shape.bounds(&self.style), self.shape.pivot(), self.turn())
+    }
+
+    /// The area its own points cover on the picture, turned.
+    pub fn extent(&self) -> Rect {
+        turned_box(self.shape.extent(), self.shape.pivot(), self.turn())
+    }
+
+    /// Whether `p` (on the picture) touches it, within `tol` pixels.
+    pub fn hit(&self, p: Pt, tol: f32) -> bool {
+        self.shape.hit(&self.style, turn(p, self.shape.pivot(), -self.turn()), tol)
+    }
+
+    /// Where it can be dragged by, on the picture.
+    pub fn handles(&self) -> Vec<(Handle, Pt)> {
+        let (c, a) = (self.shape.pivot(), self.turn());
+        self.shape.handles(&self.style).into_iter().map(|(h, p)| (h, turn(p, c, a))).collect()
+    }
+
+    /// Moves `handle` to `p` (on the picture). A turned box is reshaped along its own sides,
+    /// the corner or side across from the handle staying where it is.
+    pub fn drag_handle(&mut self, handle: Handle, p: Pt, keep_aspect: bool) {
+        let a = self.turn();
+        if a == 0.0 {
+            self.shape.drag_handle(&self.style, handle, p, keep_aspect);
+            return;
+        }
+        let c = self.shape.pivot();
+        let anchor = handle.opposite();
+        let place = |shape: &Shape, style: &Style, h: Handle| shape.handles(style).into_iter().find(|(k, _)| *k == h).map(|(_, q)| q);
+        let before = anchor.and_then(|h| place(&self.shape, &self.style, h)).map(|q| turn(q, c, a));
+        self.shape.drag_handle(&self.style, handle, turn(p, c, -a), keep_aspect);
+        if let (Some(before), Some(h)) = (before, anchor)
+            && let Some(q) = place(&self.shape, &self.style, h)
+        {
+            let after = turn(q, self.shape.pivot(), a);
+            self.shape.translate(before.sub(after));
+        }
+    }
 }
 
 impl Shape {
@@ -1324,6 +1435,37 @@ impl Shape {
             Shape::Magnify { .. } => Kind::Magnify,
             Shape::Stamp { .. } => Kind::Stamp,
             Shape::Image { .. } => Kind::Image,
+        }
+    }
+
+    /// Whether it keeps a turn of its own: a box, but not one that changes the picture under it
+    /// (blur, pixelate, spotlight, magnify stay square to the picture).
+    pub fn turns(&self) -> bool {
+        self.rect().is_some() && !self.kind().is_effect()
+    }
+
+    /// What it turns round: the middle of its box (a callout's box, not its tail), else of what
+    /// it covers.
+    pub fn pivot(&self) -> Pt {
+        self.rect().unwrap_or_else(|| self.extent()).center()
+    }
+
+    /// Mirrored round `c`, across (`horizontal`) or up and down: its points move, and a stamp of an
+    /// arrow points the other way. Words and pictures still read the right way round.
+    pub fn mirror(&mut self, c: Pt, horizontal: bool) {
+        if horizontal {
+            self.map_points(&|p| Pt::new(2.0 * c.x - p.x, p.y));
+        } else {
+            self.map_points(&|p| Pt::new(p.x, 2.0 * c.y - p.y));
+        }
+        if let Shape::Stamp { stamp, .. } = self {
+            *stamp = match (*stamp, horizontal) {
+                (StampKind::ArrowLeft, true) => StampKind::ArrowRight,
+                (StampKind::ArrowRight, true) => StampKind::ArrowLeft,
+                (StampKind::ArrowUp, false) => StampKind::ArrowDown,
+                (StampKind::ArrowDown, false) => StampKind::ArrowUp,
+                (s, _) => s,
+            };
         }
     }
 
@@ -1619,11 +1761,11 @@ mod tests {
 
     #[test]
     fn json_shape_is_tagged_and_flat() {
-        let o = Object {
-            id: ObjectId(3),
-            shape: Shape::Arrow { from: Pt::new(1.0, 2.0), to: Pt::new(3.0, 4.0), heads: ArrowHeads::Both, bend: 0.0, head: HeadShape::Notched },
-            style: style(),
-        };
+        let o = Object::new(
+            ObjectId(3),
+            Shape::Arrow { from: Pt::new(1.0, 2.0), to: Pt::new(3.0, 4.0), heads: ArrowHeads::Both, bend: 0.0, head: HeadShape::Notched },
+            style(),
+        );
         let v = serde_json::to_value(&o).unwrap();
         assert_eq!(v["type"], "arrow");
         assert_eq!(v["id"], 3);

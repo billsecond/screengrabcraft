@@ -762,3 +762,76 @@ fn watermarks_and_capture_details() {
     let nothing = json!({"time": false, "program": false, "size": false});
     assert!(session().execute("effect.captureDetails", &nothing).is_err());
 }
+
+/// Turning, grouping, lining up, spreading out and mirroring annotations, each one undo step.
+#[test]
+fn annotations_are_turned_grouped_lined_up_and_mirrored() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 20}}));
+    let b = add(&mut s, json!({"type": "rect", "rect": {"x": 80, "y": 40, "w": 20, "h": 20}}));
+    let c = add(&mut s, json!({"type": "arrow", "from": {"x": 150, "y": 20}, "to": {"x": 190, "y": 20}}));
+    // Turned: a box keeps its turn, an arrow has its points turned.
+    s.execute("object.rotate", &json!({"ids": [a], "degrees": 30})).unwrap();
+    assert_eq!(s.doc.get(a).unwrap().rotation, 30.0);
+    assert_eq!(s.undo_label(), Some("Rotate"));
+    s.execute("object.rotate", &json!({"ids": [c], "degrees": 90})).unwrap();
+    assert!(
+        matches!(s.doc.get(c).unwrap().shape, Shape::Arrow { from, to, .. } if (from.x - 170.0).abs() < 0.01 && (to.y - from.y - 40.0).abs() < 0.01)
+    );
+    s.execute("object.rotate", &json!({"ids": [a], "angle": 0})).unwrap();
+    assert_eq!(s.doc.get(a).unwrap().rotation, 0.0);
+    // Grouped: selecting one selects both, and they line up as one.
+    let out = s.execute("object.group", &json!({"ids": [a, b]})).unwrap();
+    assert!(out["group"].as_u64().is_some());
+    s.select(vec![b]);
+    assert_eq!(s.selected(), vec![a, b]);
+    s.execute("object.align", &json!({"ids": [a, b, c], "to": "top"})).unwrap();
+    let top = |s: &Session, id| s.doc.get(id).unwrap().bounds().y;
+    assert!((top(&s, a) - top(&s, c)).abs() < 0.01, "the group's top is on the arrow's");
+    assert!(top(&s, b) - top(&s, a) > 25.0, "and the group kept its shape");
+    // One group alone lines up on the picture.
+    s.execute("object.align", &json!({"ids": [a], "to": "right"})).unwrap();
+    assert!((s.doc.bounds_of(&[a, b]).unwrap().right() - 200.0).abs() < 0.01);
+    // A duplicate of a group is a group of its own.
+    let copies = s.execute("edit.duplicate", &json!({"ids": [a, b]})).unwrap();
+    let copies: Vec<ObjectId> = copies["ids"].as_array().unwrap().iter().map(|v| ObjectId(v.as_u64().unwrap())).collect();
+    let g = |s: &Session, id| s.doc.get(id).unwrap().group;
+    assert!(g(&s, copies[0]).is_some() && g(&s, copies[0]) == g(&s, copies[1]) && g(&s, copies[0]) != g(&s, a));
+    s.execute("object.ungroup", &json!({"ids": [a]})).unwrap();
+    assert_eq!((g(&s, a), g(&s, b)), (None, None));
+    // Spread out: needs three.
+    assert!(s.execute("object.distribute", &json!({"ids": [a, b]})).is_err());
+    s.execute("object.distribute", &json!({"ids": [a, b, c], "horizontal": false})).unwrap();
+    // Mirrored across.
+    let before = s.doc.get(b).unwrap().shape.rect().unwrap();
+    s.execute("object.flip", &json!({"ids": [b]})).unwrap();
+    assert_eq!(s.doc.get(b).unwrap().shape.rect().unwrap(), before, "a box alone mirrors onto itself");
+    s.execute("object.rotate", &json!({"ids": [b], "degrees": 20})).unwrap();
+    s.execute("object.flip", &json!({"ids": [b]})).unwrap();
+    assert_eq!(s.doc.get(b).unwrap().rotation, -20.0);
+}
+
+/// Every annotation of a kind selected; old files (with no turns or groups) still open.
+#[test]
+fn every_one_of_a_kind_is_selected_and_old_annotations_still_read() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "arrow", "from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 50}}));
+    add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 20}}));
+    let c = add(&mut s, json!({"type": "arrow", "from": {"x": 60, "y": 1}, "to": {"x": 90, "y": 50}}));
+    s.select(vec![a]);
+    let out = s.execute("edit.selectKind", &json!({})).unwrap();
+    assert_eq!((out["selected"].as_u64(), s.selected()), (Some(2), vec![a, c]));
+    assert!(!s.can_undo() || s.undo_label() != Some("Select All of a Kind"), "selecting is no undo step");
+    s.execute("edit.selectKind", &json!({"kind": "rect"})).unwrap();
+    assert_eq!(s.selected().len(), 1);
+    assert!(s.execute("edit.selectKind", &json!({"kind": "teapot"})).is_err());
+    let old: screengrabcraft_model::Object =
+        serde_json::from_value(json!({"id": 4, "type": "rect", "rect": {"x": 0, "y": 0, "w": 5, "h": 5}})).unwrap();
+    assert_eq!((old.rotation, old.group), (0.0, None));
+    // Written without them when there are none, with them when there are.
+    let v = serde_json::to_value(&old).unwrap();
+    assert!(v.get("rotation").is_none() && v.get("group").is_none());
+    let turned = screengrabcraft_model::Object { rotation: 12.5, group: Some(3), ..old };
+    let v = serde_json::to_value(&turned).unwrap();
+    assert_eq!((v["rotation"].as_f64(), v["group"].as_u64()), (Some(12.5), Some(3)));
+}

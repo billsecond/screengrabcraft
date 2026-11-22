@@ -10,6 +10,7 @@ use screengrabcraft_render::effects;
 use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
 
+use crate::arrange;
 use crate::fx;
 use crate::session::Session;
 use crate::{EngineError, Result};
@@ -125,6 +126,61 @@ pub static COMMANDS: &[CommandSpec] = &[
     ),
     cmd!("object.text", "Change Text", "Annotate", None, r#"{"id": id, "text": "…"}"#, has_objects, set_text),
     cmd!("object.order", "Arrange", "Annotate", None, r#"{"to": "front"|"back"|"forward"|"backward", "ids"?: [id]}"#, has_selection, order),
+    cmd!(
+        "object.rotate",
+        "Rotate",
+        "Annotate",
+        None,
+        r#"{"degrees": 15, "ids"?: [id]} turns them by that much round the middle of them all (the way a clock goes), or {"angle": 0} turns each box to that angle round its own middle. Boxes keep their turn; lines, arrows and strokes have their points turned; blur, pixelate, spotlight and magnify stay square"#,
+        has_selection,
+        arrange::rotate
+    ),
+    cmd!(
+        "object.group",
+        "Group",
+        "Annotate",
+        Some("Ctrl+G"),
+        r#"{"ids"?: [id]} (two or more) → {"group": n}: selected, moved, turned and lined up as one"#,
+        has_selection,
+        arrange::group
+    ),
+    cmd!("object.ungroup", "Ungroup", "Annotate", Some("Ctrl+Shift+G"), r#"{"ids"?: [id]} → {"ungrouped": n}"#, has_selection, arrange::ungroup),
+    cmd!(
+        "object.align",
+        "Align",
+        "Annotate",
+        None,
+        r#"{"to": "left"|"center"|"right"|"top"|"middle"|"bottom", "ids"?: [id], "picture"?: false} — on the box round them all (a group as one); one alone, or with "picture", on the picture"#,
+        has_selection,
+        arrange::align
+    ),
+    cmd!(
+        "object.distribute",
+        "Distribute",
+        "Annotate",
+        None,
+        r#"{"horizontal"?: true, "ids"?: [id]} — three or more (a group as one) spread out evenly across (or down), the first and the last staying"#,
+        has_selection,
+        arrange::distribute
+    ),
+    cmd!(
+        "object.flip",
+        "Flip Annotations",
+        "Annotate",
+        None,
+        r#"{"horizontal"?: true, "ids"?: [id]} — mirrored round the middle of them all; words and pictures still read the right way round"#,
+        has_selection,
+        arrange::flip
+    ),
+    cmd!(
+        "edit.selectKind",
+        "Select All of a Kind",
+        "Edit",
+        None,
+        r#"{"kind"?: "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp"|"image"} (default: the kinds selected) → {"selected": n}"#,
+        has_objects,
+        arrange::select_kind
+    ),
     cmd!(
         "object.flatten",
         "Flatten",
@@ -392,7 +448,7 @@ pub(crate) fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
 }
 
 /// The ids a command acts on: `ids` if given, else the selection (unless `required`).
-fn ids_param(s: &Session, p: &Value, default_selection: bool) -> Result<Vec<ObjectId>> {
+pub(crate) fn ids_param(s: &Session, p: &Value, default_selection: bool) -> Result<Vec<ObjectId>> {
     match p.get("ids") {
         None | Some(Value::Null) if default_selection => Ok(s.selected()),
         None | Some(Value::Null) => Err(EngineError::Params("`ids` is a list of annotation ids".to_string())),
@@ -450,6 +506,8 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let further = |a: f32, b: f32| if a.abs() >= b.abs() { a } else { b };
     let d = Pt::new(further(on.x, back.x), further(on.y, back.y));
     let mut new_ids = Vec::new();
+    // Copies of a group are a group of their own.
+    let mut groups: Vec<(u64, u64)> = Vec::new();
     for id in ids {
         if let Some(o) = s.doc.get(id).cloned() {
             let mut shape = o.shape.clone();
@@ -457,7 +515,20 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
             if let Shape::Step { number, labels, .. } = &mut shape {
                 *number = s.doc.next_step_number(*labels);
             }
-            new_ids.push(s.doc.add(shape, o.style)?);
+            let copy = s.doc.add(shape, o.style)?;
+            let group = o.group.map(|g| match groups.iter().find(|(old, _)| *old == g) {
+                Some((_, new)) => *new,
+                None => {
+                    let new = s.doc.next_group();
+                    groups.push((g, new));
+                    new
+                }
+            });
+            if let Some(c) = s.doc.get_mut(copy) {
+                c.rotation = o.rotation;
+                c.group = group;
+            }
+            new_ids.push(copy);
         }
     }
     s.selection = new_ids.clone();

@@ -2513,3 +2513,77 @@ fn cut_out_takes_the_strip_dragged_across_out_and_joins_the_rest() {
     click_at(&mut h, p);
     assert_eq!(h.state().session.doc.width(), 400);
 }
+
+/// A box is turned by the round handle above it; a turned box is resized along its own sides;
+/// two grouped with Ctrl+G are selected and moved as one; the right-click menu arranges them.
+#[test]
+fn a_box_is_turned_by_its_handle_and_a_group_moves_as_one() {
+    use screengrabcraft_model::{ObjectId, Pt};
+    let mut h = harness(editor());
+    h.run_steps(4);
+    let add = |h: &mut Harness<'_, Editor>, x: f32, colour: &str| {
+        let obj = serde_json::json!({"type": "rect", "rect": {"x": x, "y": 100, "w": 120, "h": 60}, "style": {"fill": colour, "shadow": false}});
+        let out = h.state_mut().session.execute("object.add", &serde_json::json!({ "object": obj })).unwrap();
+        ObjectId(out["id"].as_u64().unwrap())
+    };
+    let a = add(&mut h, 40.0, "#1E88E5");
+    h.state_mut().set_tool(Tool::Select);
+    h.state_mut().session.select(vec![a]);
+    h.run_steps(2);
+    let (pivot, knob) = h.state().turn_handle().unwrap();
+    assert_eq!(pivot, Pt::new(100.0, 130.0));
+    assert!((knob.x - 100.0).abs() < 0.01 && knob.y < 100.0, "{knob:?}");
+    // Round to the right of its middle: a quarter turn, the way a clock goes.
+    let (from, to) = (h.state().view.to_screen(knob), at(&h, 200.0, 130.0));
+    drag(&mut h, from, to);
+    let turned = h.state().session.doc.get(a).unwrap().rotation;
+    assert!((turned - 90.0).abs() < 2.0, "{turned}");
+    assert_eq!(h.state().session.undo_label(), Some("Rotate"));
+    crate::quick_tests::shot(&mut h, "turned-box");
+    // Its corner handle is where the turned corner shows, and pulls along the box's own side.
+    let (_, corner) =
+        h.state().session.doc.get(a).unwrap().handles().into_iter().find(|(k, _)| *k == screengrabcraft_model::Handle::BottomRight).unwrap();
+    let c = h.state().view.to_screen(corner);
+    assert!(h.state().handle_at(c).is_some_and(|(_, k)| k == screengrabcraft_model::Handle::BottomRight));
+    // Shift snaps the turn to steps of 15°.
+    h.state_mut().session.execute("object.rotate", &serde_json::json!({"angle": 0})).unwrap();
+    // A second box; both selected, grouped by Ctrl+G.
+    let b = add(&mut h, 220.0, "#43A047");
+    h.state_mut().session.select(vec![a, b]);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::G);
+    h.run_steps(3);
+    let g = h.state().session.doc.get(a).unwrap().group;
+    assert!(g.is_some() && h.state().session.doc.get(b).unwrap().group == g, "grouped");
+    // A click on one selects both, and a drag moves both.
+    let p = at(&h, 270.0, 130.0);
+    let away = at(&h, 380.0, 280.0);
+    crate::tests::click_at(&mut h, away);
+    assert!(h.state().session.selected().is_empty());
+    crate::tests::click_at(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![a, b]);
+    let left = |h: &Harness<'_, Editor>, id| h.state().session.doc.get(id).unwrap().shape.rect().unwrap().x;
+    let down = at(&h, 270.0, 200.0);
+    drag(&mut h, p, down);
+    assert_eq!((left(&h, a), left(&h, b)), (40.0, 220.0), "moved down together");
+    assert!(h.state().session.doc.get(a).unwrap().shape.rect().unwrap().y > 150.0);
+    // The group has a turning handle too.
+    assert!(h.state().turn_handle().is_some());
+    crate::quick_tests::shot(&mut h, "group-selected");
+    // The right-click menu arranges them.
+    let on = at(&h, 270.0, 200.0);
+    right_click(&mut h, on);
+    crate::quick_tests::shot(&mut h, "arrange-right-click");
+    let sub = h.get_by_label_contains("Rotate and Flip").rect().center();
+    h.hover_at(sub);
+    h.run_steps(3);
+    h.get_by_label_contains("Rotate and Flip").click();
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "arrange-menu");
+    h.get_by_label("Flip Across").click();
+    h.run_steps(3);
+    assert_eq!((left(&h, a), left(&h, b)), (220.0, 40.0), "mirrored round their middle");
+    assert_eq!(h.state().session.undo_label(), Some("Flip Annotations"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::G);
+    h.run_steps(3);
+    assert_eq!(h.state().session.doc.get(a).unwrap().group, None, "ungrouped");
+}
