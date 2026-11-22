@@ -223,6 +223,11 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.
+- **All captures** (in the strip): every capture by day, with a search through names, tags,
+  programs and window titles. A star makes a capture a favourite; its tag button (or a right click
+  in the strip) gives it tags. Filters show only the favourites, the captures taken from one
+  program, or those with one tag. The program and tags are kept in `library.json` in the settings
+  folder, never in the pictures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
   WebP, BMP, GIF or PDF.
 

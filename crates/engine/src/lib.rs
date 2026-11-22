@@ -4,10 +4,12 @@
 //! Layer L4: no I/O and no UI; it builds for the browser.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod library;
 pub mod registry;
 pub mod session;
 pub mod video;
 
+pub use library::LIBRARY_COMMANDS;
 pub use registry::{COMMANDS, CommandSpec, describe, find, merge_style, parse_object};
 pub use session::{Background, Session};
 pub use video::{VIDEO_COMMANDS, VideoSession};

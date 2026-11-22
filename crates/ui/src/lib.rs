@@ -21,6 +21,7 @@ pub mod quick;
 pub mod recorder;
 pub mod services;
 pub mod strip;
+pub mod tags;
 pub mod theme;
 pub mod transcribe;
 pub mod video;

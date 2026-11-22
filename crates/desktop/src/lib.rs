@@ -4,7 +4,8 @@
 //! shown and hidden without animation ([`cloak`]), the persistent sign-in service and its
 //! supervisor ([`service`]), starting the other program
 //! ([`launch`]), the graphics backend on Windows ([`graphics`]), the tray icon ([`tray_icon`]),
-//! text read off a picture ([`text`], Grab Text), local time ([`time`]), the version line
+//! text read off a picture ([`text`], Grab Text), the captures' tags, favourites and programs
+//! ([`library`]), local time ([`time`]), the version line
 //! ([`version`]) and updates from GitHub's releases ([`update`], the only network code).
 //!
 //! Layer L6, desktop only.
@@ -15,6 +16,7 @@ pub mod cloak;
 pub mod graphics;
 pub mod instance;
 pub mod launch;
+pub mod library;
 pub mod logging;
 pub mod models;
 pub mod paths;

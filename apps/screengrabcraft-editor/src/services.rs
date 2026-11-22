@@ -332,6 +332,14 @@ impl Services for DesktopServices {
         items
     }
 
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        screengrabcraft_desktop::library::for_paths(paths)
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_desktop::library::run(id, params)
+    }
+
     fn today(&self) -> String {
         screengrabcraft_desktop::time::today()
     }

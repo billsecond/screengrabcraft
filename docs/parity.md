@@ -163,7 +163,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Recent captures strip; delete to the bin | Has | |
 | Pin captures in the strip | Missing | |
 | All captures by day, with search | Has | |
-| Captures sorted by program or website, tags, favourites | Missing | |
+| Captures sorted by program or website, tags, favourites | Part | All captures filters by favourites, the program a window was taken from and tags, and searches them and the window's title; a website only by its page's title |
 | Captures folder of your choosing | Has | |
 | PNG, JPEG, WebP, BMP, GIF, PDF | Has | |
 | TIFF, HEIF | Missing | |
@@ -279,6 +279,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 4. Scrolling capture that scrolls by itself (Windows; #59).
 5. Capture presets; areas of a set size; shapes held while dragging (#62).
 6. Drawing on the screen while recording (Windows).
+7. Tags, favourites, and captures sorted by the program they were taken from.
 
 **Still to build, in this order**
 
@@ -301,12 +302,11 @@ By how much someone using it every day would miss each one. Built ones move to a
 16. Camera background removed, or a colour removed.
 17. Transitions between clips; keyframe animation.
 18. Volume along a clip; music lowered under the voice; levels evened out.
-19. Tags, favourites, and captures sorted by program.
-20. Templates; several pictures combined into one.
-21. A picture per click made into a how-to guide.
-22. Groups, pushing later clips along, locked and solo tracks, clip colours.
-23. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-24. Print; batch changes; captures on a timer or at a set time.
-25. Cutting words from the transcript; filler words taken out.
-26. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+19. Templates; several pictures combined into one.
+20. A picture per click made into a how-to guide.
+21. Groups, pushing later clips along, locked and solo tracks, clip colours.
+22. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+23. Print; batch changes; captures on a timer or at a set time.
+24. Cutting words from the transcript; filler words taken out.
+25. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.
