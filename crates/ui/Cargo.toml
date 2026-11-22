@@ -17,6 +17,8 @@ screengrabcraft-engine = { workspace = true }
 egui = { workspace = true }
 # A computer's font checked before egui is given it (canvas.rs, typing_family).
 skrifa = { workspace = true }
+# Spelling while text is typed (spell.rs), with the word list in assets/dictionaries.
+spellbook = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 

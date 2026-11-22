@@ -899,6 +899,12 @@ pub struct EditorSettings {
     /// (rather than left see-through).
     #[serde(deserialize_with = "or_default")]
     pub fill_lifted: bool,
+    /// Spelling isn't checked while text and callouts are typed (Edit › Check Spelling).
+    #[serde(deserialize_with = "or_default")]
+    pub no_spell_check: bool,
+    /// The words added to the dictionary (Add to Dictionary), as they were typed.
+    #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
+    pub own_words: Vec<String>,
 }
 
 /// The Fill tool's settings.
@@ -1005,6 +1011,14 @@ where
     })
 }
 
+/// A word fit for the dictionary of the owner's own: trimmed, one word (no spaces or control
+/// characters), with a letter in it, at most 48 characters.
+fn own_word(word: &str) -> Option<String> {
+    let w = word.trim();
+    let fits = (1..=48).contains(&w.chars().count()) && w.chars().any(char::is_alphabetic) && !w.chars().any(|c| c.is_whitespace() || c.is_control());
+    fits.then(|| w.to_string())
+}
+
 /// A setting that can't be read is none.
 fn or_none<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -1061,7 +1075,31 @@ impl EditorSettings {
         self.effect_presets = presets;
         self.tool_bar.retain(|t| !t.is_empty() && t.len() <= 32);
         self.tool_bar.truncate(64);
+        let mut words: Vec<String> = Vec::new();
+        for w in std::mem::take(&mut self.own_words) {
+            if let Some(w) = own_word(&w)
+                && !words.iter().any(|k| k.to_lowercase() == w.to_lowercase())
+                && words.len() < EditorSettings::MAX_OWN_WORDS
+            {
+                words.push(w);
+            }
+        }
+        self.own_words = words;
         self
+    }
+
+    /// The most words added to the dictionary that are kept.
+    pub const MAX_OWN_WORDS: usize = 5_000;
+
+    /// Adds a word to the dictionary of the owner's own; whether it was added (not one already
+    /// there, nor anything but a word, nor one more than are kept).
+    pub fn add_word(&mut self, word: &str) -> bool {
+        let Some(w) = own_word(word) else { return false };
+        if self.own_words.len() >= EditorSettings::MAX_OWN_WORDS || self.own_words.iter().any(|k| k.to_lowercase() == w.to_lowercase()) {
+            return false;
+        }
+        self.own_words.push(w);
+        true
     }
 
     /// Keeps an effect preset of the owner's own (one of the same name is replaced); its name as
@@ -1595,5 +1633,29 @@ mod tests {
         let e = EditorSettings::from_json(text);
         assert_eq!(e.effect_presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Ok"]);
         assert!(e.show_tray);
+    }
+
+    /// Words added to the dictionary are single words, each once whatever its case; spelling is
+    /// checked unless turned off; what can't be read is let go alone.
+    #[test]
+    fn own_words_are_single_words_kept_once() {
+        let mut e = EditorSettings::default();
+        assert!(!e.no_spell_check, "spelling is checked at first");
+        assert!(e.add_word(" ScreenGrabCraft "));
+        assert!(!e.add_word("screengrabcraft"), "once, whatever its case");
+        for bad in ["", "  ", "two words", "1234", "tab\there", &"x".repeat(49)] {
+            assert!(!e.add_word(bad), "{bad:?}");
+        }
+        assert_eq!(e.own_words, ["ScreenGrabCraft"]);
+        e.no_spell_check = true;
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!((back.own_words.clone(), back.no_spell_check), (e.own_words.clone(), true));
+        let e = EditorSettings::from_json(r#"{"ownWords":["Ok",5,"ok","no way",null,"Fine"],"noSpellCheck":"yes","showTray":true}"#);
+        assert_eq!(e.own_words, ["Ok", "Fine"]);
+        assert!(!e.no_spell_check && e.show_tray);
+        let mut full = EditorSettings { own_words: (0..EditorSettings::MAX_OWN_WORDS + 5).map(|i| format!("w{i}x")).collect(), ..Default::default() };
+        full = full.clamped();
+        assert_eq!(full.own_words.len(), EditorSettings::MAX_OWN_WORDS);
+        assert!(!full.add_word("another"), "no more than are kept");
     }
 }

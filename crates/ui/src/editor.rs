@@ -278,6 +278,8 @@ pub struct Editor {
     /// the handle is let go.
     pub(crate) resume_editing: Option<ObjectId>,
     pub(crate) edit_buffer: String,
+    /// The words of the text being typed that the word list doesn't know, and the spelling menu.
+    pub(crate) spell: crate::spell::State,
     last_dark: Option<bool>,
     pub(crate) crop: Option<Rect>,
     /// The area of the picture selected with the Selection tool.
@@ -442,6 +444,7 @@ impl Editor {
             editing: None,
             resume_editing: None,
             edit_buffer: String::new(),
+            spell: crate::spell::State::default(),
             last_dark: None,
             crop: None,
             area: None,
@@ -1838,6 +1841,16 @@ impl Editor {
                     {
                         self.flatten(&ctx, true);
                         ui.close();
+                    }
+                    ui.separator();
+                    let mut spelling = !self.settings.no_spell_check;
+                    if ui
+                        .checkbox(&mut spelling, crate::spell::CHECK_SPELLING)
+                        .on_hover_text("Words the English word list doesn't know are underlined in red while text and callouts are typed; right-click one for suggestions")
+                        .changed()
+                    {
+                        self.settings.no_spell_check = !spelling;
+                        self.services.save_settings(&self.settings);
                     }
                 });
                 ui.menu_button("Image", |ui| {

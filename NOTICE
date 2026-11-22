@@ -30,3 +30,11 @@ Bundled model: IS-Net "general use" (Xuebin Qin, Hang Dai, Xiaobin Hu, Deng-Ping
 Luc Van Gool; https://github.com/xuebinqin/DIS), under the Apache License, Version 2.0, as ONNX
 by rembg (Daniel Gatis, https://github.com/danielgatis/rembg). Modified: its weights are kept in
 8 bits (assets/models/README.md).
+
+Bundled word list: SCOWL's en_US Hunspell dictionary, version 2020.12.07 (Kevin Atkinson and
+others, http://wordlist.aspell.net), unmodified, under SCOWL's permission notice, Ispell's BSD
+licence and the WordNet licence, with public-domain parts; every notice is in
+assets/dictionaries/README_en_US.txt and in the editor's About.
+
+Spelling checker: spellbook (https://github.com/helix-editor/spellbook), under the Mozilla Public
+License 2.0; its source is at that address and on crates.io, unmodified.

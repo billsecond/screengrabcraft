@@ -122,7 +122,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Group, align, flip annotations; select all of one kind** | Has | Edit menu and right-click: group (Ctrl+G), align, distribute, flip across or up and down, select all of the kinds selected; a group is selected, moved and turned as one |
 | **Rotate annotations** | Has | a round handle over a box or a group (Shift: 15° steps), or Rotate and Flip; lines, arrows and strokes turn by their points; blur, pixelate, spotlight and magnify stay square |
 | **Snap to guides** | Has | View › Rulers and Guides: rulers along the top and the left, guides dragged out of them (moved by dragging, taken away on their ruler or from their right-click menu), Guides at the Middle, Clear Guides; what is moved snaps its edges and middle to the guides and the picture's edges and middle (View › Snap to Guides); guides last while the picture is open |
-| Spell check | Missing | |
+| **Spell check** | Has | while a text or a callout is typed, words the English (US) word list doesn't know get a red wavy line; a right click on one offers corrections and Add to Dictionary (kept in the editor's settings); Edit › Check Spelling turns it off. The word list is SCOWL's en_US, built in, so it works offline and in the browser; English only |
 | **Measure a distance** | Has | the Measure tool (I): a drag reads out the length, across, down and the angle; Keep This One on the Picture (or keep each) adds a dimension line with a bar at each end and its length on a label, grouped |
 | Picture grows when something is moved past its edge | Has | |
 | Canvas size and colour, see-through | Has | |
@@ -293,7 +293,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 17. Effect presets; the picture rotated by any angle (#105).
 18. Rulers, guides and snapping; measuring a distance (#108).
 19. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
-20. TIFF opened and saved; a colour replaced by another.
+20. TIFF opened and saved; a colour replaced by another (#114).
+21. Spell check while text and callouts are typed.
 
 **Still to build, in this order**
 
@@ -317,4 +318,4 @@ By how much someone using it every day would miss each one. Built ones move to a
 18. Print; batch changes; captures on a timer or at a set time.
 19. Cutting words from the transcript; filler words taken out.
 20. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
-    backwards, lining up by sound, see-through video, HDR, QR codes, spell check.
+    backwards, lining up by sound, see-through video, HDR, QR codes.

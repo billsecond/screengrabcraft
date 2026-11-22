@@ -47,6 +47,9 @@ fontdb = "0.23"
 # A font file checked before it is handed to egui to show text being typed in it (egui reads fonts
 # with it, and stops on one it can't read).
 skrifa = "0.44"
+# Spelling checked while text is typed (MPL-2.0, source at github.com/helix-editor/spellbook): it
+# reads Hunspell dictionaries; the English one is SCOWL's (assets/dictionaries).
+spellbook = "0.4"
 # Deflate for the PDF writer (the backend written in Rust).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
