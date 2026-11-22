@@ -1748,17 +1748,26 @@ mod tests {
             created: String::new(),
         };
         let mut rec = start_video(plan, egui::Context::default()).unwrap();
-        if let Ok(mut b) = rec.begun.lock() {
-            *b = Some(Instant::now());
+        // Its own start, however long a busy machine takes to get to it (set by hand, the
+        // recording's worker could set it again later, under the pause).
+        let asked = Instant::now();
+        while rec.begun.lock().map(|b| b.is_none()).unwrap_or(true) && asked.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(rec.begun.lock().map(|b| b.is_some()).unwrap_or(false), "the recording began");
         rec.set_paused(true);
         assert!(rec.is_paused());
         let at = rec.elapsed();
         std::thread::sleep(Duration::from_millis(60));
-        assert!(rec.elapsed() <= at + Duration::from_millis(5), "the time shown stands still while paused");
+        // Nothing moves the clock while paused, however long the sleep took.
+        assert_eq!(rec.elapsed(), at, "the time shown stands still while paused");
+        let before = Instant::now();
         rec.set_paused(false);
         std::thread::sleep(Duration::from_millis(40));
-        assert!(rec.elapsed() >= at + Duration::from_millis(30), "and goes on after");
+        // At least the time slept since it went on (a busy machine only sleeps longer), and no
+        // more than the time since it was asked to.
+        let gone = rec.elapsed().saturating_sub(at);
+        assert!(gone >= Duration::from_millis(40) && gone <= before.elapsed(), "and goes on after: {gone:?}");
         rec.cancel();
         assert!(!rec.is_paused() || rec.stopping());
     }

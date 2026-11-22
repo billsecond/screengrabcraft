@@ -42,6 +42,8 @@ pub enum DialogResult {
     Import(Vec<String>),
     /// Video or sound files to transcribe (paths).
     Transcribe(Vec<String>),
+    /// Pictures for Batch Changes (paths; they're read one at a time).
+    Pictures(Vec<String>),
     Cancelled,
 }
 
@@ -221,6 +223,25 @@ pub trait Services {
     /// The recent captures, newest first.
     fn recent(&self) -> Vec<RecentItem> {
         Vec::new()
+    }
+
+    /// Asks for pictures for Batch Changes; the answer comes through [`Services::poll_dialog`] as
+    /// [`DialogResult::Pictures`].
+    fn request_pictures(&self) {}
+
+    /// Whether there's a file at `path` (Batch Changes never writes over one).
+    fn file_exists(&self, _path: &str) -> bool {
+        false
+    }
+
+    /// Prints a picture (`name` is what it's called): the system shows its printing window.
+    fn print(&self, _picture: &Raster, _name: &str) -> Result<(), String> {
+        Err("Printing needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// Whether pictures can be printed here, or why not (Print is greyed out, saying so).
+    fn can_print(&self) -> Result<(), String> {
+        Err("Printing needs ScreenGrabCraft on the desktop".to_string())
     }
 
     /// What's known of these captures (their tags, whether each is a favourite, the program each

@@ -263,6 +263,25 @@ pub(crate) fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)>
 }
 
 /// Every key the video editor knows, and what the mouse does on its timeline.
+/// The command a dialog's settings come to, as [`body`] gives it once drawn (Batch Changes keeps
+/// them before they're drawn); none for a dialog with nothing to apply.
+pub(crate) fn command(d: &Dialog) -> Option<(&'static str, Value)> {
+    Some(match d {
+        Dialog::Resize { width, height, .. } => ("image.resize", json!({"width": width, "height": height})),
+        Dialog::Canvas { left, top, right, bottom, color } => {
+            ("image.canvas", json!({"left": left, "top": top, "right": right, "bottom": bottom, "color": hex(*color)}))
+        }
+        Dialog::Border { width, color } => ("effect.border", json!({"width": width, "color": hex(*color)})),
+        Dialog::Shadow { offset, softness, color } => ("effect.shadow", json!({"offset": offset, "softness": softness, "color": hex(*color)})),
+        Dialog::Torn { top, right, bottom, left, depth } => {
+            ("effect.tornEdge", json!({"top": top, "right": right, "bottom": bottom, "left": left, "depth": depth}))
+        }
+        Dialog::Round { radius } => ("effect.roundCorners", json!({"radius": radius})),
+        Dialog::Brightness { brightness, contrast } => ("effect.brightness", json!({"brightness": brightness, "contrast": contrast})),
+        Dialog::Shortcuts | Dialog::VideoShortcuts | Dialog::About => return None,
+    })
+}
+
 fn video_shortcuts(ui: &mut Ui) {
     egui::Grid::new("video-keys").num_columns(2).striped(true).spacing([18.0, 4.0]).max_col_width(370.0).show(ui, |ui| {
         for (k, what) in [
@@ -325,6 +344,7 @@ fn shortcuts(ui: &mut Ui) {
             ("Ctrl+D", "Duplicate"),
             ("Ctrl+S / Ctrl+Shift+S", "Save / Save As"),
             ("Ctrl+E", "Export"),
+            ("Ctrl+P", "Print"),
             ("Ctrl+O", "Open"),
             ("Ctrl+Shift+N", "New capture"),
             ("Ctrl+0 / Ctrl+1", "Zoom to fit / actual size"),

@@ -266,6 +266,8 @@ pub struct Editor {
     pub(crate) grab_text: crate::grab_text::State,
     /// What Grab Text is reading is the selected area (not all of the picture).
     pub(crate) grab_text_area: bool,
+    /// Batch Changes, while its window is open.
+    pub(crate) batch: Option<crate::batch::Batch>,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -351,6 +353,7 @@ impl Editor {
             background: crate::background::State::default(),
             grab_text: crate::grab_text::State::default(),
             grab_text_area: false,
+            batch: None,
         }
     }
 
@@ -910,6 +913,22 @@ impl Editor {
     }
 
     /// Copy Picture: the whole picture as shown, whatever is selected.
+    /// Print: the picture as shown, with its annotations, to the system's printing window.
+    pub fn print(&mut self, ctx: &egui::Context) {
+        if let Err(why) = self.services.can_print() {
+            self.error(ctx, why);
+            return;
+        }
+        let Some(picture) = self.flattened() else {
+            self.error(ctx, "The picture could not be drawn to print it");
+            return;
+        };
+        match self.services.print(&picture, &self.name) {
+            Ok(()) => self.toast(ctx, "Sent to the printer: choose the printer and the paper in its window"),
+            Err(e) => self.error(ctx, e),
+        }
+    }
+
     pub fn copy_whole(&mut self, ctx: &egui::Context) {
         let Some(pic) = self.flattened() else { return };
         match self.services.copy_image(&pic) {
@@ -1150,6 +1169,7 @@ impl Editor {
                 }
             }
             DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
+            DialogResult::Pictures(paths) => self.open_batch(paths),
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {
@@ -1304,6 +1324,7 @@ impl Editor {
         crate::dialogs::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
+        crate::batch::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
@@ -1316,6 +1337,7 @@ impl Editor {
             || (self.pending.is_some() && !self.autosaves())
             || self.background.busy()
             || self.grab_text.busy()
+            || self.batch.is_some()
         {
             return;
         }
@@ -1333,6 +1355,9 @@ impl Editor {
         }
         if pressed(cmd(Key::E)) {
             self.export(self.settings.export_format);
+        }
+        if pressed(cmd(Key::P)) {
+            self.print(ctx);
         }
         if pressed(cmd_shift(Key::N)) {
             let _ = self.services.new_capture(CaptureMode::Region);
@@ -1556,6 +1581,25 @@ impl Editor {
                     });
                     if ui.add(egui::Button::new("Copy Picture").shortcut_text("Ctrl+C")).clicked() {
                         self.copy(&ctx);
+                        ui.close();
+                    }
+                    let can_print = self.services.can_print();
+                    let print = ui.add_enabled(can_print.is_ok(), egui::Button::new("Print…").shortcut_text("Ctrl+P"));
+                    let print = match &can_print {
+                        Ok(()) => print.on_hover_text("The picture as shown, with its annotations, to a printer"),
+                        Err(why) => print.on_disabled_hover_text(why),
+                    };
+                    if print.clicked() {
+                        self.print(&ctx);
+                        ui.close();
+                    }
+                    if self.services.has_paths()
+                        && ui
+                            .button("Batch Changes…")
+                            .on_hover_text("The same changes (a size, effects, a format, a name) made to many pictures at once")
+                            .clicked()
+                    {
+                        self.open_batch(Vec::new());
                         ui.close();
                     }
                     if self.services.has_paths() {

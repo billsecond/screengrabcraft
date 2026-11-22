@@ -259,6 +259,18 @@ fn all_captures(ed: &mut Editor, ui: &mut Ui, items: &[RecentItem]) {
         }
         // Newest first, whatever order they came in.
         matching.sort_by_key(|i| std::cmp::Reverse(i.modified));
+        // The pictures shown, all changed at once.
+        let pictures: Vec<String> = matching.iter().filter(|i| !is_video(&i.path)).map(|i| i.path.clone()).collect();
+        if !pictures.is_empty() {
+            let n = pictures.len();
+            let label = format!("Batch Change {} ({n})\u{2026}", if n == 1 { "This" } else { "These" });
+            if ui.button(label).on_hover_text("The same changes (a size, effects, a format, a name) made to every picture shown").clicked() {
+                ed.open_batch(pictures);
+                ui.close();
+                return;
+            }
+            ui.add_space(4.0);
+        }
         let today = ed.services.today();
         egui::ScrollArea::vertical().max_height(560.0).auto_shrink([false, true]).show(ui, |ui| {
             let mut start = 0;
