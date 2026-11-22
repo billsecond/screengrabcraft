@@ -270,6 +270,30 @@ impl VideoView {
         self.fix_selection();
     }
 
+    /// A subtitle file picked in File › Import Subtitles: its lines made the recording's
+    /// captions (they were timed on the video as it is now), and the transcript shown.
+    pub fn import_subtitles(&mut self, ed: &mut Editor, ctx: &egui::Context, files: Vec<crate::services::OpenedFile>) {
+        let Some(f) = files.into_iter().next() else { return };
+        if f.bytes.len() as u64 > crate::services::MAX_SUBTITLES {
+            ed.error(ctx, format!("{} is too large to be subtitles", f.name));
+            return;
+        }
+        let text = subtitle_text(&f.bytes);
+        self.caption_edit = None;
+        self.word_cut = None;
+        match self.session.execute("video.importCaptions", &json!({"text": text})) {
+            Ok(v) => {
+                let n = v.get("lines").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let left = v.get("left").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let s = if n == 1 { "" } else { "s" };
+                let more = if left > 0 { format!("; {left} fell where nothing is heard and were left out") } else { String::new() };
+                ed.toast(ctx, format!("{n} caption line{s} brought in from {}{more}", f.name));
+                self.transcript_open = true;
+            }
+            Err(e) => ed.error(ctx, format!("{}: {e}", f.name)),
+        }
+    }
+
     /// A line of the recording's captions, to put right: its words in the box above the lines.
     fn edit_caption(&mut self, source: usize) {
         let said = captions::as_corrected(self.captions.as_ref(), &self.session.timeline);
@@ -497,5 +521,24 @@ impl VideoView {
         if let Some(a) = act {
             self.line_act(ed, &ctx, a);
         }
+    }
+}
+
+/// A subtitle file's words: UTF-8 (anything that isn't, put right), or UTF-16 with its mark.
+pub(crate) fn subtitle_text(bytes: &[u8]) -> String {
+    let units = |little: bool| -> String {
+        let words = bytes
+            .get(2..)
+            .unwrap_or_default()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| if little { u16::from_le_bytes(*p) } else { u16::from_be_bytes(*p) });
+        char::decode_utf16(words).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
+    };
+    match bytes {
+        [0xFF, 0xFE, ..] => units(true),
+        [0xFE, 0xFF, ..] => units(false),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }

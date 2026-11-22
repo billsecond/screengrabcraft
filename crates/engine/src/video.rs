@@ -478,6 +478,31 @@ fn cut_fillers(s: &mut VideoSession, p: &Value) -> Result<Value> {
     cut_picks(s, &picks)
 }
 
+/// Subtitles brought in (SubRip or WebVTT, timed on the video as edited) as the recording's
+/// captions, following its edits from then on: instead of those it had, or with them.
+fn import_captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::captions::{Captions, from_subtitles, from_timeline};
+    let words = text(p, "text")?.ok_or_else(|| EngineError::Params("`text` is the subtitles, as written in a .srt or .vtt file".to_string()))?;
+    let replace = match p.get("replace") {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`replace` must be true or false".to_string()))?,
+    };
+    let lines = from_subtitles(&words);
+    if lines.is_empty() {
+        return Err(EngineError::Failed("there are no subtitles in it (SubRip .srt or WebVTT .vtt)".to_string()));
+    }
+    let (cues, left) = from_timeline(&lines, &s.timeline);
+    if cues.is_empty() {
+        return Err(EngineError::Failed("none of its lines falls where the video has a microphone or the computer's sound to follow".to_string()));
+    }
+    let n = cues.len();
+    let mut all = if replace { Vec::new() } else { corrected(s).clone() };
+    all.extend(cues);
+    let longest = s.longest();
+    s.timeline.corrected = Some(Captions { cues: all, model: String::new() }.checked(longest).cues);
+    Ok(json!({"lines": n, "left": left}))
+}
+
 // ---- markers: moments marked on the timeline, the chapters of the video made ----
 
 fn add_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -885,6 +910,46 @@ fn delete_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// The watermark on every frame: words or a picture of the media bin, in a corner.
+fn watermark(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::MediaKind;
+    if !p.is_object() {
+        return Err(EngineError::Params("the watermark is given as an object".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let picture = match p.get("picture") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => {
+            let pid = id(p, "picture")?;
+            if !s.timeline.media.iter().any(|m| m.id == pid && m.kind == MediaKind::Picture) {
+                return Err(EngineError::Params(format!("there's no picture {pid} in the media bin")));
+            }
+            Some(Some(pid))
+        }
+    };
+    let corner = match p.get("corner") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Corner>(v.clone())
+                .map_err(|_| EngineError::Params("`corner` is topLeft, topRight, bottomLeft or bottomRight".to_string()))?,
+        ),
+    };
+    let (words, opacity, size) = (text(p, "words")?, number(p, "opacity")?, number(p, "size")?);
+    let w = &mut s.timeline.watermark;
+    w.on = on.unwrap_or(w.on);
+    w.words = words.unwrap_or_else(|| w.words.clone());
+    w.picture = picture.unwrap_or(w.picture);
+    w.corner = corner.unwrap_or(w.corner);
+    w.opacity = opacity.unwrap_or(w.opacity);
+    w.size = size.unwrap_or(w.size);
+    *w = w.clone().checked();
+    Ok(json!({"on": w.on, "shows": w.shows()}))
+}
+
 /// What's taken away from the camera's picture: nothing, a colour (a green screen), or the
 /// background (learnt by the background model, see `screengrabcraft_media::keyer`).
 fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -1074,6 +1139,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: cut_fillers,
     },
     VideoCommand {
+        id: "video.importCaptions",
+        label: "Import Subtitles",
+        params: r#"{"text": the subtitles, "replace"?: bool}: SubRip (.srt) or WebVTT (.vtt) timed on the video as edited, made the recording's captions (instead of those it has, or with them: `replace` false); each follows its speaker's track from then on (`You:` and `Others:` lines theirs, the rest the microphone's). Says how many lines came in and how many fell where nothing is heard"#,
+        run: import_captions,
+    },
+    VideoCommand {
         id: "video.addMarker",
         label: "Add Marker",
         params: r#"{"at": µs, "name"?: text}: marks a moment on the timeline (a chapter of the video made); its place among the markers"#,
@@ -1188,6 +1259,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: move_layer,
     },
     VideoCommand {
+        id: "video.watermark",
+        label: "Watermark",
+        params: r#"{"on"?: bool, "words"?: text, "picture"?: media id | null, "corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "opacity"?: 0..1, "size"?: 0.02..0.3}: words (or a picture of the media bin, instead of them) on every frame of the video, in a corner, as see-through as `opacity` says, as tall as `size` of the video's height"#,
+        run: watermark,
+    },
+    VideoCommand {
         id: "video.cameraKey",
         label: "Camera Background",
         params: r##"{"remove"?: "nothing"|"colour"|"background", "colour"?: "#rrggbb", "tolerance"?: 0..1}: what's taken away from the camera's picture so the screen shows round you: a colour (a green screen; how far from it still goes), or the background (learnt from a few of the camera's pictures by the background model, the camera kept still)"##,
@@ -1253,6 +1330,40 @@ mod tests {
         assert!(s.execute("video.solo", &json!({"track": 0, "solo": true})).is_err());
         s.execute("video.ungroup", &json!({"track": 0, "clip": 1})).unwrap();
         assert!(s.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| c.group.is_none())));
+    }
+
+    #[test]
+    fn subtitles_are_brought_in_as_captions_and_a_watermark_is_set() {
+        let mut s = session();
+        s.execute("video.cut", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        let srt = "1\n00:00:01,500 --> 00:00:02,000\nYou: After the cut\n\n2\n00:00:09,000 --> 00:00:10,000\nPast the end\n";
+        let v = s.execute("video.importCaptions", &json!({"text": srt})).unwrap();
+        assert_eq!((v["lines"].as_u64(), v["left"].as_u64()), (Some(1), Some(1)));
+        assert_eq!(s.undo_label(), Some("Import Subtitles"));
+        let cues = s.timeline.corrected.clone().unwrap();
+        assert_eq!((cues[0].start, cues[0].end, cues[0].text.as_str()), (2_500_000, 3_000_000, "After the cut"), "in the recording's time");
+        // With those it has: both.
+        let vtt = "WEBVTT\n\n00:00.200 --> 00:00.800\nFirst\n";
+        s.execute("video.importCaptions", &json!({"text": vtt, "replace": false})).unwrap();
+        assert_eq!(s.timeline.corrected.as_ref().map(Vec::len), Some(2));
+        for bad in
+            [json!({}), json!({"text": "no subtitles here"}), json!({"text": srt, "replace": "yes"}), json!({"text": "00:30.000 --> 00:31.000\nx"})]
+        {
+            assert!(s.execute("video.importCaptions", &bad).is_err(), "{bad}");
+        }
+        // The watermark: words, then a picture of the bin; one that isn't there is refused.
+        s.execute("video.watermark", &json!({"on": true, "words": "Draft", "corner": "topLeft", "opacity": 3})).unwrap();
+        let w = s.timeline.watermark.clone();
+        assert!(w.on && w.words == "Draft" && w.opacity == 1.0 && w.corner == Corner::TopLeft);
+        assert_eq!(s.undo_label(), Some("Watermark"));
+        let logo = s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png"})).unwrap();
+        s.execute("video.watermark", &json!({"picture": logo["id"]})).unwrap();
+        assert_eq!(s.timeline.watermark.picture, logo["id"].as_u64().map(|v| v as u32));
+        for bad in [json!({"picture": 99}), json!({"corner": "middle"}), json!({"on": 1}), json!("x")] {
+            assert!(s.execute("video.watermark", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.watermark", &json!({"picture": null})).unwrap();
+        assert_eq!(s.timeline.watermark.picture, None);
     }
 
     #[test]

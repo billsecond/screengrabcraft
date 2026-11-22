@@ -1142,6 +1142,13 @@ impl Editor {
                 }
             }
             DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
+            // Into the video editor, as its captions.
+            DialogResult::Subtitles(files) => {
+                if let Some(mut v) = self.video.take() {
+                    v.import_subtitles(self, ctx, files);
+                    self.video = Some(v);
+                }
+            }
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {

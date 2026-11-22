@@ -1,8 +1,8 @@
 //! Export Video: a window to choose where the video goes, what it's made as (a video, a GIF, or
-//! just the sound), whether the whole of it or just the chosen stretch, and whether its captions
-//! go with it; a window while it's being made, with Cancel; and one when it's made, to play it or
-//! show it selected in its folder. And Save the Frame as a Picture: the picture at the playhead,
-//! opened in the Image Editor.
+//! just the sound), whether the whole of it or just the chosen stretch, whether its captions
+//! go with it, and a watermark on it; a window while it's being made, with Cancel; and one when
+//! it's made, to play it or show it selected in its folder. And Save the Frame as a Picture: the
+//! picture at the playhead, opened in the Image Editor.
 
 use egui::RichText;
 
@@ -464,6 +464,119 @@ impl VideoView {
                     .small()
                     .color(t.muted),
             );
+        }
+        if c.format.has_picture() {
+            ui.add_space(12.0);
+            heading(ui, "Watermark");
+            self.watermark_choice(ed, ui);
+        }
+    }
+
+    /// The watermark: on or off, words or a picture of the media bin, its corner, how much it
+    /// shows and how large. Each change is an edit (the preview shows it too).
+    fn watermark_choice(&mut self, ed: &mut Editor, ui: &mut egui::Ui) {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::timeline::Corner;
+        use serde_json::json;
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let w = self.session.timeline.watermark.clone();
+        let mut set = None;
+        let mut typing = false;
+        let mut on = w.on;
+        if ui.checkbox(&mut on, "Words or a picture on every frame").changed() {
+            set = Some(json!({"on": on}));
+        }
+        if !w.on {
+            if let Some(p) = set {
+                self.run(ed, &ctx, "video.watermark", p);
+            }
+            return;
+        }
+        let pictures: Vec<(u32, String)> =
+            self.session.timeline.media.iter().filter(|m| m.kind == MediaKind::Picture).map(|m| (m.id, m.name.clone())).collect();
+        ui.horizontal(|ui| {
+            if ui.radio(w.picture.is_none(), "Words").clicked() && w.picture.is_some() {
+                set = Some(json!({"picture": null}));
+            }
+            let first = pictures.first().map(|(id, _)| *id);
+            let r = ui.add_enabled(first.is_some(), egui::RadioButton::new(w.picture.is_some(), "A picture from the Media Bin"));
+            if r.on_disabled_hover_text("Bring a picture into the Media Bin first (File, Import Media)").clicked()
+                && w.picture.is_none()
+                && let Some(id) = first
+            {
+                set = Some(json!({"picture": id}));
+            }
+        });
+        match w.picture {
+            None => {
+                let mut words = w.words.clone();
+                let named = ui.label(RichText::new("The words").small().color(t.muted));
+                let r = ui
+                    .add(egui::TextEdit::singleline(&mut words).hint_text("Draft, your name, ©…").desired_width(ui.available_width()))
+                    .labelled_by(named.id);
+                if r.changed() {
+                    // Typing is one change.
+                    self.session.begin("Watermark");
+                    let _ = self.session.drag("video.watermark", &json!({"words": words}));
+                }
+                if r.lost_focus() {
+                    self.session.commit();
+                }
+                typing = r.has_focus();
+            }
+            Some(id) => {
+                let name = pictures.iter().find(|(p, _)| *p == id).map(|(_, n)| n.clone()).unwrap_or_default();
+                egui::ComboBox::from_id_salt("watermark-picture").width(ui.available_width()).selected_text(name).show_ui(ui, |ui| {
+                    for (p, n) in &pictures {
+                        if ui.selectable_label(*p == id, n).clicked() {
+                            set = Some(json!({"picture": p}));
+                        }
+                    }
+                });
+            }
+        }
+        ui.horizontal(|ui| {
+            for (corner, label, key) in [
+                (Corner::TopLeft, "Top left", "topLeft"),
+                (Corner::TopRight, "Top right", "topRight"),
+                (Corner::BottomLeft, "Bottom left", "bottomLeft"),
+                (Corner::BottomRight, "Bottom right", "bottomRight"),
+            ] {
+                if ui.add(egui::Button::new(label).selected(w.corner == corner)).clicked() {
+                    set = Some(json!({"corner": key}));
+                }
+            }
+        });
+        for (name, key, value, range) in [
+            ("How much it shows", "opacity", w.opacity * 100.0, 5.0..=100.0),
+            ("How tall (of the video's height)", "size", w.size * 100.0, 2.0..=30.0),
+        ] {
+            let mut v = value;
+            let r = super::named_slider(ui, name, &mut v, range, "%");
+            if r.drag_started() {
+                self.session.begin("Watermark");
+            }
+            // (The slider rounds what it's given: only a move is a change.)
+            if r.changed() && (v - value).abs() > 0.01 {
+                let p = json!({key: v / 100.0});
+                if r.dragged() {
+                    let _ = self.session.drag("video.watermark", &p);
+                } else {
+                    set = Some(p);
+                }
+            }
+            if r.drag_stopped() {
+                self.session.commit();
+            }
+        }
+        ui.label(RichText::new("It's on the preview too, and stays with the edits.").small().color(t.muted));
+        // Nothing typed or dragged any more: what was is one change, kept.
+        if !typing && ui.ctx().dragged_id().is_none() {
+            self.session.commit();
+        }
+        if let Some(p) = set {
+            self.run(ed, &ctx, "video.watermark", p);
         }
     }
 }

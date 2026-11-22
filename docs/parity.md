@@ -199,7 +199,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Library of titles, lower thirds, callouts, arrows, blur, transitions | Has | |
 | Your own pictures, sounds and videos brought in | Has | |
 | Lottie animations brought in | Has | |
-| Subtitle files brought in | Missing | |
+| **Subtitle files brought in** | Has | File › Import Subtitles: SubRip (.srt) or WebVTT (.vtt) timed on the video as it is now, made its captions (instead of those it had); each line follows its speaker's track from then on (`You:` and `Others:` lines theirs, the rest the microphone's) |
 | Items moved and resized on the picture, snapped to its middle and edges | Has | |
 | Rotate an item; crop a clip | Missing | |
 | Pin a picture onto a slanted surface | Missing | |
@@ -261,7 +261,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **A frame saved as a picture** | Has | at the recording's own size, in the captures folder; it opens in the picture editor |
 | **Just the chosen stretch** | Has | Export Video with a stretch chosen: its captions and chapters with it |
 | See-through video (WebM) | Missing | |
-| A watermark | Missing | |
+| **A watermark** | Has | Export Video's window: words, or a picture from the Media Bin, in a corner, as see-through and as large as asked; on the preview too |
 | Several at once (batch) | Missing | |
 | Templates and themes of your own | Missing | |
 | Uploads to video sites, an online editor, an online asset store | Not planned | needs a network service |
@@ -289,7 +289,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 14. Volume along a clip; the rest lowered under the voice; levels evened out (#88).
 15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours (#90).
 16. Words cut out of the video from the transcript; filler words taken out (word times estimated) (#95).
-17. J, K and L playback keys; a clip played backwards, its sound too.
+17. J, K and L playback keys; a clip played backwards, its sound too (#97).
+18. Subtitle files brought in as captions; a watermark on the video.
 
 **Still to build, in this order**
 

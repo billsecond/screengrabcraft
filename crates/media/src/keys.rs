@@ -248,6 +248,7 @@ mod tests {
             markers: Vec::new(),
             keys: Look::default(),
             ducking: Default::default(),
+            watermark: Default::default(),
         }
     }
 

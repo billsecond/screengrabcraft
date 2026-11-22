@@ -39,7 +39,7 @@ mod clips;
 mod export_window;
 mod library;
 mod sound;
-mod transcript;
+pub(crate) mod transcript;
 mod transitions;
 pub use library::{LibDrop, LibTab};
 
@@ -1450,6 +1450,17 @@ impl VideoView {
                     }
                     if ui.button("Import Media…").on_hover_text("Pictures, sound files and recordings for the Media Bin").clicked() {
                         ed.services.request_import();
+                        ui.close();
+                    }
+                    if self.has_sound
+                        && ui
+                            .button("Import Subtitles…")
+                            .on_hover_text(
+                                "A subtitle file (.srt or .vtt) timed on the video as it is now, as its captions (instead of those it has)",
+                            )
+                            .clicked()
+                    {
+                        ed.services.request_subtitles();
                         ui.close();
                     }
                     ui.separator();

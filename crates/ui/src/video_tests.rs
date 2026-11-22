@@ -3069,3 +3069,60 @@ fn j_k_and_l_play_backwards_pause_and_faster_and_a_clip_plays_backwards() {
     h.run_steps(2);
     assert!(!h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].reverse);
 }
+
+#[test]
+fn subtitles_are_brought_in_as_captions_and_a_watermark_goes_on_every_frame() {
+    use crate::services::{DialogResult, OpenedFile};
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    // File › Import Subtitles… asks the host; the file it gives is read as the captions.
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    h.get_by_label("Import Subtitles…").click();
+    h.run_steps(2);
+    let vtt = "WEBVTT\n\n00:00.500 --> 00:01.800\n<v You>Here's the <b>new</b> page.\n\n00:02.000 --> 00:03.000\nOthers: Looks good.\n\n00:09.000 --> 00:10.000\nAfter the end\n";
+    *host.answer.lock().unwrap() =
+        Some(DialogResult::Subtitles(vec![OpenedFile { name: "Talk.vtt".into(), path: None, bytes: vtt.as_bytes().to_vec() }]));
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.transcript_open, "the transcript shows what came in");
+        assert_eq!(v.cues.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Here's the new page.", "Looks good."]);
+        assert_eq!(v.session.undo_label(), Some("Import Subtitles"));
+    }
+    assert_eq!(h.state().toast_text(), Some("2 caption lines brought in from Talk.vtt; 1 fell where nothing is heard and were left out"));
+    shot(&mut h, "video-subtitles-imported");
+    // Junk is said, never panicked over; UTF-16 is read.
+    *host.answer.lock().unwrap() = Some(DialogResult::Subtitles(vec![OpenedFile { name: "Junk.srt".into(), path: None, bytes: vec![0xFF; 300] }]));
+    h.run_steps(3);
+    assert!(h.state().toast_text().is_some_and(|t| t.starts_with("Junk.srt: ")));
+    let utf16: Vec<u8> =
+        [0xFF, 0xFE].into_iter().chain("1\n00:00:01,000 --> 00:00:02,000\nÉté\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(crate::video::transcript::subtitle_text(&utf16), "1\n00:00:01,000 --> 00:00:02,000\nÉté\n");
+    // Export Video's window: a watermark, its words typed, in the top left.
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    h.get_by_label("Words or a picture on every frame").click();
+    // (The window grows and settles where it is.)
+    h.run_steps(6);
+    h.get_by_label("Top left").hover();
+    h.run_steps(1);
+    h.get_by_label("Top left").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "The words").click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("Draft".into()));
+    h.run_steps(2);
+    shot(&mut h, "video-export-watermark");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(2);
+    let w = h.state().video.as_ref().unwrap().session.timeline.watermark.clone();
+    assert!(w.on && w.words == "Draft" && w.corner == screengrabcraft_media::timeline::Corner::TopLeft, "{w:?}");
+    // On the picture: the top left changed, the rest as it was.
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    let differ = |x0: u32, y0: u32| {
+        (x0..x0 + 80).flat_map(|x| (y0..y0 + 30).map(move |y| (x, y))).filter(|(x, y)| before.pixel(*x, *y) != after.pixel(*x, *y)).count()
+    };
+    assert!(differ(0, 0) > 40 && differ(200, 140) == 0, "{} {}", differ(0, 0), differ(200, 140));
+}

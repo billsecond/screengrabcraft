@@ -262,23 +262,94 @@ pub fn edited_cues(captions: Option<&Captions>, timeline: &Timeline, of_media: &
 
 /// Lines read from SubRip subtitles (`.srt`): `You:` and `Others:` lines are theirs, any other
 /// line is [`Speaker::Media`]'s. What isn't subtitles is left out; at most [`MAX_CUES`] lines.
+/// (WebVTT is read too: see [`from_subtitles`].)
 pub fn from_srt(text: &str) -> Vec<Cue> {
-    let time = |s: &str| -> Option<u64> {
-        let s = s.trim();
-        let (hms, ms) = s.split_once([',', '.']).unwrap_or((s, "0"));
-        let mut parts = hms.split(':').map(|p| p.trim().parse::<u64>().ok());
-        let (h, m, sec) = (parts.next()??, parts.next()??, parts.next()??);
-        if parts.next().is_some() || m >= 60 || sec >= 60 || h > 999 {
-            return None;
-        }
-        let ms: u64 = ms.trim().chars().take(3).collect::<String>().parse().ok()?;
-        Some(((h * 3600 + m * 60 + sec) * 1000 + ms) * 1000)
+    from_subtitles(text)
+}
+
+/// A time in subtitles (µs): `hh:mm:ss,mmm` (SubRip), `hh:mm:ss.mmm` or `mm:ss.mmm` (WebVTT).
+fn subtitle_time(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (hms, frac) = s.split_once([',', '.']).unwrap_or((s, "0"));
+    let num = |p: &str| p.trim().parse::<u64>().ok();
+    let parts: Vec<&str> = hms.split(':').take(4).collect();
+    let (h, m, sec) = match parts.as_slice() {
+        [h, m, s] => (num(h)?, num(m)?, num(s)?),
+        [m, s] => (0, num(m)?, num(s)?),
+        _ => return None,
     };
+    if m >= 60 || sec >= 60 || h > 999 {
+        return None;
+    }
+    // Thousandths: "5" is half a second.
+    let frac: String = frac.trim().chars().take(3).collect();
+    if frac.is_empty() || !frac.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let ms: u64 = format!("{frac:0<3}").parse().ok()?;
+    Some(((h * 3600 + m * 60 + sec) * 1000 + ms) * 1000)
+}
+
+/// A subtitle's words without their markup: tags (`<i>`, `<v Ann>`, `<00:01.000>`,
+/// `<font color=…>`) taken out, and `&amp;` and the like put back.
+fn without_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            // A tag runs to its `>` (not far); a `<` that starts none stays.
+            let ahead: Vec<char> = chars.clone().take(120).collect();
+            let starts = ahead.first().is_some_and(|f| f.is_alphanumeric() || *f == '/' || *f == '.');
+            if let Some(end) = ahead.iter().position(|a| *a == '>').filter(|_| starts) {
+                for _ in 0..=end {
+                    chars.next();
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    let mut s = out;
+    for (from, to) in [
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&nbsp;", " "),
+        ("&quot;", "\""),
+        ("&#39;", "'"),
+        ("&apos;", "'"),
+        ("&lrm;", ""),
+        ("&rlm;", ""),
+        ("&amp;", "&"),
+    ] {
+        if s.contains(from) {
+            s = s.replace(from, to);
+        }
+    }
+    s
+}
+
+/// Who says a subtitle's words, by what it starts with: `You:` or `<v You>` are the owner's,
+/// `Others:` or `<v Others>` the people heard through the computer; anything else has no
+/// speaker named ([`Speaker::Media`]). The words without it.
+fn said_by(words: &str) -> (Speaker, &str) {
+    let w = words.trim_start();
+    for (mark, s) in [("You:", Speaker::You), ("Others:", Speaker::Others), ("<v You>", Speaker::You), ("<v Others>", Speaker::Others)] {
+        if let Some(rest) = w.strip_prefix(mark) {
+            return (s, rest);
+        }
+    }
+    (Speaker::Media, w)
+}
+
+/// Lines read from subtitles: SubRip (`.srt`) or WebVTT (`.vtt`; its heading, notes and styles
+/// are passed over, a cue's settings after its times too). Who said a line is as [`said_by`]
+/// reads it; markup goes. What isn't subtitles is left out; at most [`MAX_CUES`] lines.
+pub fn from_subtitles(text: &str) -> Vec<Cue> {
     let mut out = Vec::new();
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut lines = text.lines().take(MAX_CUES * 8).peekable();
     while lines.peek().is_some() && out.len() < MAX_CUES {
-        // A block: its number (optional), its times, its words up to an empty line.
+        // A block: its number or name (optional), its times, its words up to an empty line.
         let mut block: Vec<&str> = Vec::new();
         for l in lines.by_ref() {
             if l.trim().is_empty() {
@@ -293,24 +364,60 @@ pub fn from_srt(text: &str) -> Vec<Cue> {
         }
         let Some(at) = block.iter().position(|l| l.contains("-->")) else { continue };
         let Some((a, b)) = block.get(at).and_then(|l| l.split_once("-->")) else { continue };
-        // Anything after the end time (a position) is left out.
+        // Anything after the end time (a position, a cue's settings) is left out.
         let b = b.split_whitespace().next().unwrap_or("");
-        let (Some(start), Some(end)) = (time(a), time(b)) else { continue };
-        let words = block.get(at + 1..).unwrap_or_default().join(" ");
-        let (speaker, words) = if let Some(w) = words.strip_prefix("You:") {
-            (Speaker::You, w)
-        } else if let Some(w) = words.strip_prefix("Others:") {
-            (Speaker::Others, w)
-        } else {
-            (Speaker::Media, words.as_str())
+        let (Some(start), Some(end)) = (subtitle_time(a), subtitle_time(b)) else { continue };
+        let raw = block.get(at + 1..).unwrap_or_default().join(" ");
+        // Who said it: by its markup (`<v You>`), else by its words once the markup is gone.
+        let (speaker, text) = match said_by(&raw) {
+            (Speaker::Media, _) => {
+                let plain = without_markup(&raw);
+                let (speaker, words) = said_by(&plain);
+                (speaker, clean_text(words))
+            }
+            (speaker, words) => (speaker, clean_text(&without_markup(words))),
         };
-        let text = clean_text(words);
         if end > start && !text.is_empty() {
             out.push(Cue { start, end, speaker, text });
         }
     }
     out.sort_by_key(|c| (c.start, c.speaker));
     out
+}
+
+/// Lines timed on the edited video (subtitles brought in) put in the recording's time, so they
+/// follow the edits as its own captions do. Each goes on its speaker's track (a line with no
+/// speaker named on the microphone's, else the computer's sound's; a speaker with no track on
+/// the other's), from where that track plays at its start to where it plays at its end. Lines
+/// where none of the track's clips plays (a gap, a held frame, a clip played backwards) are left
+/// out: the lines kept, and how many were left out.
+pub fn from_timeline(lines: &[Cue], timeline: &Timeline) -> (Vec<Cue>, usize) {
+    let track_of = |s: Speaker| -> Option<(Speaker, usize)> {
+        let order = match s {
+            Speaker::Others => [Speaker::Others, Speaker::You],
+            Speaker::You | Speaker::Media => [Speaker::You, Speaker::Others],
+        };
+        order.into_iter().find_map(|sp| timeline.find(sp.source()).map(|i| (sp, i)))
+    };
+    let (mut out, mut left) = (Vec::new(), 0usize);
+    for line in lines.iter().take(MAX_CUES) {
+        let found = track_of(line.speaker).and_then(|(speaker, i)| {
+            let clips: Vec<&crate::timeline::Clip> =
+                timeline.tracks.get(i)?.clips.iter().filter(|c| !c.hold && !c.reverse && c.at < line.end && c.end() > line.start).collect();
+            let (first, last) = (clips.first()?, clips.last()?);
+            let start = first.source_at(line.start.max(first.at) - first.at);
+            let end = last.source_at(line.end.min(last.end()) - last.at);
+            // Clips moved out of the recording's order: the first clip's part only.
+            let end = if end > start { end } else { first.source_at(line.end.min(first.end()) - first.at) };
+            (end > start).then(|| Cue { start, end, speaker, text: line.text.clone() })
+        });
+        match found {
+            Some(c) => out.push(c),
+            None => left += 1,
+        }
+    }
+    out.sort_by_key(|c| (c.start, c.speaker));
+    (out, left)
 }
 
 /// The lines showing at `t`: the latest one of each speaker that covers it, the others' first.
@@ -700,6 +807,7 @@ mod tests {
             markers: Vec::new(),
             keys: Default::default(),
             ducking: Default::default(),
+            watermark: Default::default(),
         }
     }
 
@@ -904,6 +1012,52 @@ mod tests {
         }
         assert!(from_srt("00:00:05,000 --> 00:00:01,000\nbackwards").is_empty());
         assert!(from_srt(&"1\n00:00:01,000 --> 00:00:02,000\nx\n\n".repeat(MAX_CUES + 5)).len() <= MAX_CUES);
+    }
+
+    #[test]
+    fn webvtt_subtitles_are_read_with_their_markup_taken_out() {
+        let vtt = "WEBVTT - a talk\n\nNOTE written by hand --> not a cue\n\nSTYLE\n::cue { color: lime }\n\n\
+                   intro\n00:01.500 --> 00:03.000 align:start line:90%\n<v You>Hello <b>there</b> &amp; welcome\n\n\
+                   01:02:03.5 --> 01:02:04.000\n<v Ann>Hi <00:00:03.600>Bo &lt;3\n\n\
+                   00:05.000 --> 00:06.000\n<i>Others:</i> fine\n";
+        let cues = from_subtitles(vtt);
+        assert_eq!(
+            cues,
+            vec![
+                cue(1_500_000, 3_000_000, Speaker::You, "Hello there & welcome"),
+                cue(5_000_000, 6_000_000, Speaker::Others, "fine"),
+                cue(3_723_500_000, 3_724_000_000, Speaker::Media, "Hi Bo <3"),
+            ]
+        );
+        // SubRip's markup goes too, and a "<" that starts no tag stays.
+        assert_eq!(from_srt("1\n00:00:01,000 --> 00:00:02,000\n<font color=\"#fff\">a < b</font>\n")[0].text, "a < b");
+        // Junk: never panicked over.
+        for junk in ["WEBVTT", "00:61.000 --> 00:62.000\nx", "<<<<-->>>>", "1:2:3:4.5 --> 9\nx", "00:01.x --> 00:02.000\ny", "\u{feff}-->\n<"] {
+            let _ = from_subtitles(junk);
+        }
+        assert!(from_subtitles("00:01.x --> 00:02.000\ny").is_empty());
+        assert!(from_subtitles(&format!("00:01.000 --> 00:02.000\n<{}\n", "ab ".repeat(5_000))).len() == 1);
+    }
+
+    #[test]
+    fn subtitles_timed_on_the_edited_video_follow_its_tracks_from_then_on() {
+        let mut tl = timeline();
+        // Two seconds taken out at 1 s: the video's 2 s is the recording's 4 s.
+        tl.cut(1_000_000, 3_000_000).unwrap();
+        let lines = vec![
+            cue(2_000_000, 2_500_000, Speaker::Media, "Mine, as no one is named"),
+            cue(500_000, 1_500_000, Speaker::Others, "Across the cut"),
+            cue(30_000_000, 31_000_000, Speaker::You, "After the end"),
+        ];
+        let (cues, left) = from_timeline(&lines, &tl);
+        assert_eq!(left, 1);
+        assert_eq!(
+            cues,
+            vec![cue(500_000, 3_500_000, Speaker::Others, "Across the cut"), cue(4_000_000, 4_500_000, Speaker::You, "Mine, as no one is named")]
+        );
+        // As the recording's captions, they fall where they were brought in.
+        let on = Captions { cues, model: String::new() }.on_timeline(&tl);
+        assert!(on.iter().any(|c| c.text.starts_with("Mine") && c.start == 2_000_000 && c.end == 2_500_000), "{on:?}");
     }
 
     #[test]
