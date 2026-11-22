@@ -194,7 +194,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Groups of clips** | Has | a clip grouped with the other tracks' clips over the same time (its right button): they move together; Ungroup takes them apart |
 | Markers; chapters | Has | M marks the playhead; the markers are the MP4's chapters (both kinds of MP4) |
 | **Clip colours** | Has | eight, from a clip's right button |
-| Replace a clip keeping its effects; copy effects | Missing | |
+| **Replace a clip keeping its effects; copy effects** | Has | an item's right button or its panel (Effects): Replace With shows another file of the Media bin, of a kind for its layer, keeping its time, place, look, motion and animations. Copy Effects and Paste Effects: an item's look, entrance, exit and keyframes onto another item; a clip's colours and crop (a picture's), fades (a sound's) and the transition into it onto another clip. The recording's own clips can't be replaced (they are the recording) |
 | Undo and redo; edits saved by themselves | Has | |
 | Library of titles, lower thirds, callouts, arrows, blur, transitions | Has | |
 | Your own pictures, sounds and videos brought in | Has | |
@@ -299,7 +299,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart) (#113).
 24. Sound while playing faster (J and L), at its own pitch; a video's sound apart from its picture;
     tracks and sound layers mixed to mono (#116).
-25. Pieces of a track joined back together; a clip or an item lined up with another by its sound.
+25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
+26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another.
 
 **Still to build, in this order**
 

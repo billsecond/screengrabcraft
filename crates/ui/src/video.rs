@@ -334,6 +334,8 @@ pub struct VideoView {
     pub(crate) renaming: Option<(Rename, String, bool, bool)>,
     /// The camera's background being learnt by the background model, to take it away.
     pub(crate) learning: Option<camera_key::Learning>,
+    /// A clip's or an item's effects copied, to paste on another (as `video.copyEffects` said them).
+    pub(crate) copied_effects: Option<Value>,
 }
 
 /// A small button with a triangle pointing up (or down): true when it's clicked.
@@ -619,6 +621,7 @@ impl VideoView {
             transcript_heights: None,
             renaming: None,
             learning: None,
+            copied_effects: None,
             type_words: false,
         }
     }
@@ -3118,6 +3121,10 @@ impl VideoView {
                     if it.plays_sound(&self.session.timeline.media) {
                         self.line_up_menu(ed, ui, ctx, json!({"layer": id, "item": item}));
                     }
+                    if matches!(it.what, screengrabcraft_media::layers::What::Media { .. }) {
+                        self.replace_menu(ed, ui, ctx, id, item);
+                    }
+                    self.effects_items(ed, ui, ctx, json!({"layer": id, "item": item}));
                     ui.separator();
                 }
                 if layer.kind == screengrabcraft_media::layers::LayerKind::Sound
