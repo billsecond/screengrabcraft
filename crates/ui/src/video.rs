@@ -2136,6 +2136,18 @@ impl VideoView {
             self.run(ed, &ctx, "video.pointer", json!({"show": show}));
         }
         ui.add_enabled_ui(look.show, |ui| {
+            // The recorded pointer, or one of another look drawn in its place.
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Pointer").size(12.0).color(Tokens::get(ui.ctx()).muted));
+                egui::ComboBox::from_id_salt("pointer-kind").width(150.0).selected_text(look.kind.label()).show_ui(ui, |ui| {
+                    for k in screengrabcraft_media::pointer::Kind::ALL {
+                        if ui.selectable_label(look.kind == k, k.label()).clicked() {
+                            self.run(ed, &ctx, "video.pointer", json!({"kind": k}));
+                        }
+                    }
+                });
+            });
             for (label, key, value, range, tip) in [
                 ("Size", "size", look.size * 100.0, 50.0..=400.0, "How large it's drawn: 100% is as it was on the screen"),
                 (
@@ -2185,7 +2197,57 @@ impl VideoView {
                 }
             }
             self.pointer_hidden_section(ed, ui);
+            self.pointer_path_section(ed, ui);
         });
+    }
+
+    /// The pointer's path redrawn: in the chosen stretch through points to drag on the picture,
+    /// each such stretch straightened or put back as recorded.
+    fn pointer_path_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let t = Tokens::get(ui.ctx());
+        ui.add_space(8.0);
+        ui.label(RichText::new("Its path").size(12.0).color(t.muted));
+        let edit = ui
+            .add_enabled(self.range.is_some(), egui::Button::new("Edit Its Path in the Chosen Stretch"))
+            .on_hover_text("Points along its way there, shown on the picture while the playhead is in the stretch: drag them where it should go")
+            .on_disabled_hover_text("Choose a stretch first: drag a handle beside the playhead on the ruler")
+            .clicked();
+        if edit && let Some((a, b)) = self.range {
+            match self.session.execute("video.redrawPointer", &json!({"from": a, "to": b})) {
+                Ok(_) => {
+                    // The playhead in it, so its points show.
+                    self.pause();
+                    if !(a..b).contains(&self.playhead) {
+                        self.playhead = a + (b - a) / 2;
+                    }
+                }
+                Err(e) => ed.error(&ctx, e.to_string()),
+            }
+        }
+        let paths = self.session.timeline.pointer_paths_on_timeline();
+        let (mut go, mut run) = (None, None);
+        for (n, a, b) in paths.iter().take(8) {
+            ui.label(RichText::new(format!("Redrawn from {} to {}", clock(*a), clock(*b))).size(12.0).color(t.text));
+            ui.horizontal(|ui| {
+                if ui.small_button("Go To").on_hover_text("The playhead into it: its points show on the picture").clicked() {
+                    go = Some(a + (b - a) / 2);
+                }
+                if ui.small_button("Straighten").on_hover_text("Straight from its first point to its last").clicked() {
+                    run = Some(("video.straightenPointer", *n));
+                }
+                if ui.small_button("As Recorded").on_hover_text("The pointer goes as it was recorded here again").clicked() {
+                    run = Some(("video.pointerAsRecorded", *n));
+                }
+            });
+        }
+        if let Some(at) = go {
+            self.pause();
+            self.playhead = at;
+        }
+        if let Some((cmd, n)) = run {
+            self.run(ed, &ctx, cmd, json!({"path": n}));
+        }
     }
 
     /// The stretches the pointer is hidden in: hidden in the chosen stretch, each shown again.

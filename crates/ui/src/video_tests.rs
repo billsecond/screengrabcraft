@@ -1688,6 +1688,79 @@ fn recording_with_pointer() -> Vec<u8> {
 }
 
 #[test]
+fn the_pointer_takes_another_look_and_its_path_is_dragged_on_the_picture() {
+    use screengrabcraft_media::pointer::Kind;
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xE0, 0x20, 0x20]);
+    assert!(red(&mut h, 1_000_000) > 0);
+    // The Pointer panel: a hand in its place.
+    scroll_side_panel_to(&mut h, "Show the mouse pointer");
+    h.get_by_value("As recorded").click();
+    h.run_steps(2);
+    h.get_by_label("Hand").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.pointer.kind, Kind::Hand);
+    assert_eq!(red(&mut h, 1_000_000), 0, "the recorded square isn't drawn");
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.run_steps(3);
+    shot(&mut h, "video-pointer-look");
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.pointer", &serde_json::json!({"kind": "recorded", "smooth": 0})).unwrap();
+        v.range = Some((500_000, 1_500_000));
+        v.playhead = 0;
+    }
+    h.run_steps(2);
+    // Its path in the chosen stretch: a point every half second, the playhead put in it.
+    scroll_side_panel_to(&mut h, "Edit Its Path in the Chosen Stretch");
+    h.get_by_label("Edit Its Path in the Chosen Stretch").click();
+    h.run_steps(3);
+    let paths = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.pointer_paths.clone();
+    assert_eq!(paths(&h).len(), 1);
+    assert_eq!(paths(&h)[0].points.len(), 3);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 1_000_000);
+    assert!(h.query_by_label("Redrawn from 0:00.5 to 0:01.5").is_some());
+    // Its middle point (where it was at 1 s: 80, 60 of the screen) dragged down on the picture.
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    let vw = h.state_mut().video.as_mut().unwrap().frame_at(0).width() as f32;
+    let f = pic.width() / vw;
+    let at = pic.min + egui::vec2(80.0 * f, 60.0 * f);
+    crate::tests::drag(&mut h, at, at + egui::vec2(0.0, 50.0));
+    let q = paths(&h)[0].points[1];
+    assert!((q.y - (60.0 + 50.0 / f)).abs() < 3.0 && (q.x - 80.0).abs() < 3.0, "{q:?}");
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Move the Pointer"));
+    // The pointer is drawn there at 1 s; outside the stretch, as recorded.
+    let top_of_red = |h: &mut Harness<'_, Editor>, t: u64| {
+        let pic = h.state_mut().video.as_mut().unwrap().frame_at(t);
+        let w = pic.width() as usize;
+        let y = pic.pixels().chunks(4).position(|p| p[0].abs_diff(0xE0) < 30 && p[1] < 60 && p[2] < 60).map(|i| i / w);
+        y.map(|y| y as f32 * 180.0 / pic.height() as f32)
+    };
+    let y = top_of_red(&mut h, 1_000_000).unwrap();
+    assert!((y - q.y).abs() < 4.0, "{y} {}", q.y);
+    assert!((top_of_red(&mut h, 2_000_000).unwrap() - 60.0).abs() < 4.0);
+    shot(&mut h, "video-pointer-path");
+    // Straightened, then put back as recorded, from the panel.
+    scroll_side_panel_to(&mut h, "Straighten");
+    h.get_by_label("Straighten").click();
+    h.run_steps(2);
+    assert_eq!(paths(&h)[0].points.len(), 2);
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(paths(&h).is_empty());
+}
+
+#[test]
 fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_panel() {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
     ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });

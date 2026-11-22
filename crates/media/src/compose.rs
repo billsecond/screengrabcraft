@@ -49,6 +49,8 @@ pub struct Composer {
     media: Arc<dyn crate::layer_draw::MediaStore>,
     /// The arrow drawn for a pointer the recording has no picture of.
     arrow: Option<crate::pointer::Shape>,
+    /// The pointers of other looks drawn in code, to draw in place of the recorded one.
+    looks: Vec<(crate::pointer::Kind, crate::pointer::Shape)>,
     texts: crate::layer_draw::TextCache,
     pictures: crate::layer_draw::PictureCache,
     pub width: u32,
@@ -77,6 +79,7 @@ impl Composer {
             captions: None,
             media: Arc::new(crate::layer_draw::NoMedia),
             arrow: crate::pointer::arrow(),
+            looks: crate::pointer::Kind::ALL.iter().filter_map(|k| crate::pointer::drawn(*k).map(|s| (*k, s))).collect(),
             texts: Default::default(),
             pictures: Default::default(),
             width: width.max(2),
@@ -170,7 +173,9 @@ impl Composer {
         {
             let (left, top, vw, _) = view.pixels(s.width, s.height);
             let f = w as f32 / vw.max(1.0);
-            crate::pointer::draw_view(&mut out, &self.rec.pointer, timeline.pointer, src, (f, left, top), self.arrow.as_ref());
+            let instead = self.looks.iter().find(|(k, _)| *k == timeline.pointer.kind).map(|(_, s)| s);
+            let (paths, arrow) = (&timeline.pointer_paths, self.arrow.as_ref());
+            crate::pointer::draw_view(&mut out, &self.rec.pointer, timeline.pointer, src, (f, left, top), arrow, instead, paths);
         }
         // The screen framed: smaller on its background, rounded, a device round it (not while a
         // zoom is being placed: then the whole screen fills the picture, as its frame is drawn on it).
@@ -720,6 +725,27 @@ pub fn average(pics: &[Raster]) -> Option<Raster> {
 }
 
 /// `inner` (a part of a picture) of the part `outer` of a picture: the part of the whole picture.
+/// Where a point of the screen's recording (its pixels, the screen `sw × sh`) shows on the edited
+/// video's `w × h` picture at timeline time `t`, as the pointer is drawn there: through its clip's
+/// crop, and with `zoom` (as the picture is shown) a zoom and the screen's frame.
+pub fn screen_point(timeline: &Timeline, (sw, sh): (u32, u32), t: u64, (x, y): (f32, f32), (w, h): (f32, f32), zoom: bool) -> (f32, f32) {
+    let look = timeline
+        .find(StreamKind::Screen)
+        .and_then(|i| timeline.clip_at(i, t).and_then(|k| timeline.tracks.get(i)?.clips.get(k)))
+        .map(|c| c.look)
+        .unwrap_or_default();
+    let z = if zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
+    let (left, top, vw, _) = within(look.view(), z).pixels(sw, sh);
+    let f = w / vw.max(1.0);
+    let (px, py) = ((x - left) * f, (y - top) * f);
+    if zoom && !timeline.frame.is_plain() {
+        let r = timeline.frame.screen_rect(w, h);
+        (r.x + px * r.w / w.max(1.0), r.y + py * r.h / h.max(1.0))
+    } else {
+        (px, py)
+    }
+}
+
 fn within(outer: crate::zoom::View, inner: crate::zoom::View) -> crate::zoom::View {
     crate::zoom::View { x: outer.x + inner.x * outer.w, y: outer.y + inner.y * outer.h, w: inner.w * outer.w, h: inner.h * outer.h }
 }
