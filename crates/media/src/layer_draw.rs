@@ -235,6 +235,8 @@ pub fn motion(item: &Item, t: u64, w: f32, h: f32) -> Motion {
                 m.scale *= 1.0 - p * 0.85;
                 m.alpha *= 1.0 - p * 0.4;
             }
+            // Written on (see `written`): it doesn't move.
+            AnimKind::Write => {}
         }
     }
     m.alpha = m.alpha.clamp(0.0, 1.0);
@@ -281,7 +283,21 @@ pub fn item_rect(item: &Item, timeline: &Timeline, store: &dyn MediaStore, w: f3
             let v = crate::zoom::frame(item);
             Some(Rect::new(v.x * w, v.y * h, v.w * w, v.h * h))
         }
+        // The rectangle of the screen it holds.
+        What::Freeze { h: fh } => {
+            let r = freeze_rect(item.place, *fh);
+            Some(Rect::new(r.x * w, r.y * h, r.w * w, r.h * h))
+        }
     }
+}
+
+/// A frozen region's rectangle, shares of the screen: its middle at its place, as wide as its
+/// place's width and `h` high, kept on the screen.
+pub fn freeze_rect(place: layers::Placement, h: f32) -> Rect {
+    let n = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+    let (rw, rh) = (n(place.w, 0.02, 1.0, 0.3), layers::freeze_height(h));
+    let (x, y) = (n(place.x, 0.0, 1.0, 0.5) - rw / 2.0, n(place.y, 0.0, 1.0, 0.5) - rh / 2.0);
+    Rect::new(x.clamp(0.0, 1.0 - rw), y.clamp(0.0, 1.0 - rh), rw, rh)
 }
 
 /// The colour of `#rrggbb`.
@@ -311,6 +327,49 @@ fn words_at(canvas: &mut Pixmap, l: &text::Layout, style: &Style, x: f32, y: f32
     if let Some(path) = text::text_path(l, style, Pt::new(x, y), l.width) {
         canvas.fill_path(&path, &paint(c, alpha), FillRule::Winding, Transform::identity(), None);
     }
+}
+
+/// How much of an item is written on at timeline time `t` (1: all of it), while it comes in or
+/// goes out by writing: steadily, as a pen goes.
+pub fn written(item: &Item, t: u64) -> f32 {
+    let (inn, out) = item.anim_at(t);
+    let mut r = 1.0f32;
+    if item.intro.kind == AnimKind::Write {
+        r = r.min(inn);
+    }
+    if item.outro.kind == AnimKind::Write {
+        r = r.min(1.0 - out);
+    }
+    r.clamp(0.0, 1.0)
+}
+
+/// Whether an item's words are what's written on (its letters, one after another): a graphic
+/// with words. Anything else that writes on is wiped on from its left.
+fn writes_letters(item: &Item) -> bool {
+    matches!(&item.what, What::Text { style, .. } if style.has_words())
+}
+
+/// A `w × h` mask showing `reveal` of an item's box from its left (`bx` in its own space, `to`
+/// putting that on the picture), its leading edge soft.
+fn wipe_mask(bx: Rect, to: Transform, reveal: f32, w: u32, h: u32) -> Option<tiny_skia::Mask> {
+    let reveal = if reveal.is_finite() { reveal.clamp(0.0, 1.0) } else { 1.0 };
+    let mut pix = Pixmap::new(w, h)?;
+    if reveal > 0.0 && bx.w > 0.0 && bx.h > 0.0 {
+        let soft = (bx.w * 0.08).max(1.0);
+        let to_x = bx.x + bx.w * reveal + soft * reveal;
+        let solid = (to_x - soft).max(bx.x);
+        let pen = tiny_skia::LinearGradient::new(
+            tiny_skia::Point::from_xy(solid, bx.y),
+            tiny_skia::Point::from_xy(to_x, bx.y),
+            vec![tiny_skia::GradientStop::new(0.0, tiny_skia::Color::WHITE), tiny_skia::GradientStop::new(1.0, tiny_skia::Color::TRANSPARENT)],
+            tiny_skia::SpreadMode::Pad,
+            Transform::identity(),
+        );
+        if let (Some(shader), Some(r)) = (pen, tiny_skia::Rect::from_ltrb(bx.x - 1.0, bx.y - 1.0, to_x.max(bx.x), bx.y + bx.h + 1.0)) {
+            pix.fill_rect(r, &Paint { shader, anti_alias: true, ..Paint::default() }, to, None);
+        }
+    }
+    Some(tiny_skia::Mask::from_pixmap(pix.as_ref(), tiny_skia::MaskType::Alpha))
 }
 
 fn box_at(canvas: &mut Pixmap, r: Rect, radius: f32, c: Color, alpha: f32) {
@@ -602,8 +661,9 @@ pub fn draw_layers_at(
         .iter()
         .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
         .filter_map(|l| l.items.iter().find(|i| i.at <= t && t < i.end()))
-        // A zoom draws nothing of its own, nor a video's sound apart from its picture.
-        .filter(|i| !matches!(i.what, What::Zoom) && !i.sound_only)
+        // A zoom or a frozen region draws nothing of its own (they change the screen under
+        // everything), nor a video's sound apart from its picture.
+        .filter(|i| !matches!(i.what, What::Zoom | What::Freeze { .. }) && !i.sound_only)
         .collect();
     if showing.is_empty() {
         return;
@@ -623,7 +683,10 @@ pub fn draw_layers_at(
         } else {
             Vec::new()
         };
-        let apart = (item.look.is_layered() || !moments.is_empty()) && !changes_under;
+        // Writing on: its own words letter by letter, anything else wiped on from its left.
+        let reveal = written(whole, t);
+        let wipe = reveal < 1.0 && !writes_letters(item);
+        let apart = (item.look.is_layered() || !moments.is_empty() || wipe) && !changes_under;
         if !apart {
             let _ = draw_item(&mut pix, item, timeline, store, t, texts, pictures);
             continue;
@@ -637,6 +700,9 @@ pub fn draw_layers_at(
         let Some((mut own, (bx, to))) = drawn else { continue };
         let look = item.look.clone().checked();
         if let Some(mask) = mask_for(&look.mask, bx, to, own.width(), own.height()) {
+            own.apply_mask(&mask);
+        }
+        if wipe && let Some(mask) = wipe_mask(bx, to, reveal, own.width(), own.height()) {
             own.apply_mask(&mask);
         }
         let paint = PixmapPaint { blend_mode: blend_mode(look.blend), ..PixmapPaint::default() };
@@ -858,10 +924,12 @@ fn draw_item(
                 && m.dy == 0.0
                 && (m.scale - 1.0).abs() < 1.0e-4
                 && turn.abs() < 1.0e-3;
+            // Its words written on, letter by letter, while it comes in or goes out by writing.
+            let reveal = written(item, t);
             if plain {
-                g.animation.render(pix, secs, at);
+                g.animation.render_written(pix, secs, at, reveal);
             } else if let Some(mut own) = Pixmap::new(w as u32, h as u32) {
-                g.animation.render(&mut own, secs, at);
+                g.animation.render_written(&mut own, secs, at, reveal);
                 turned_at(pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
             }
             Some((r, frame_transform(m, w, h, turn, pivot)))
@@ -885,8 +953,9 @@ fn draw_item(
             transition(pix, *kind, p);
             None
         }
-        // It zooms the screen under everything (see `crate::zoom`); it draws nothing itself.
-        What::Zoom => None,
+        // A zoom zooms the screen under everything (see `crate::zoom`), a frozen region holds part
+        // of it (see `crate::compose`): neither draws anything itself.
+        What::Zoom | What::Freeze { .. } => None,
     }
 }
 
@@ -1027,6 +1096,48 @@ mod tests {
         assert_eq!(motion(&title, 0, 100.0, 100.0).alpha, 0.0);
         assert!(motion(&title, 500_000, 100.0, 100.0).alpha > 0.3);
         assert_eq!(motion(&title, 2_000_000, 100.0, 100.0).alpha, 1.0);
+    }
+
+    #[test]
+    fn words_write_themselves_on_from_the_left_and_anything_else_is_wiped_on() {
+        let write = layers::Anim { kind: AnimKind::Write, len: 2_000_000 };
+        let mut tl = timeline();
+        let none = layers::Anim { kind: AnimKind::None, len: 0 };
+        let title = Item { intro: write, outro: none, len: 6_000_000, ..template("title-box").unwrap().item };
+        let (layer, _) = tl.place(title, None, 0).unwrap();
+        // Where the box's words have ink (white on the coloured box), left half and right half.
+        let ink = |tl: &Timeline, t: u64| {
+            let mut out = grey(640, 360);
+            draw_layers(&mut out, tl, &NoMedia, t, &mut TextCache::default(), &mut PictureCache::default());
+            let w = out.width() as usize;
+            // The words are white on a blue box over grey: only they are red at all.
+            let white: Vec<usize> = out.pixels().chunks(4).enumerate().filter(|(_, p)| p[0] > 150).map(|(i, _)| i % w).collect();
+            (white.iter().filter(|x| **x < 320).count(), white.iter().filter(|x| **x >= 320).count())
+        };
+        let (left0, right0) = ink(&tl, 0);
+        assert_eq!(left0 + right0, 0, "nothing written yet");
+        let (left, right) = ink(&tl, 600_000);
+        assert!(left > 20 && right == 0, "the start of the words first: {left} {right}");
+        let (left2, right2) = ink(&tl, 3_000_000);
+        assert!(left2 >= left && right2 > 20, "then all of them: {left2} {right2}");
+        assert_eq!(motion(&tl.layers[0].items[0], 600_000, 640.0, 360.0).alpha, 1.0, "it doesn't fade meanwhile");
+        // Rubbed off the same way at its end.
+        let id = tl.layers[0].items[0].id;
+        tl.set_item(layer, id, |i| i.outro = write).unwrap();
+        let end = tl.layers[0].items[0].end();
+        let (l, r) = ink(&tl, end - 600_000);
+        assert!(l > 20 && r == 0, "the end of the words gone first: {l} {r}");
+        // A highlight (no words) is wiped on from its left.
+        let mut tl = timeline();
+        tl.place(Item { intro: write, ..template("highlight").unwrap().item }, None, 0).unwrap();
+        let mut out = grey(320, 180);
+        draw_layers(&mut out, &tl, &NoMedia, 300_000, &mut TextCache::default(), &mut PictureCache::default());
+        let red = |x: u32, y: u32| out.pixel(x, y).unwrap().r > 200;
+        let r = item_rect(&tl.layers[0].items[0], &tl, &NoMedia, 320.0, 180.0).unwrap();
+        // Its sides, half way down.
+        let (mid_y, left_x, right_x) = ((r.y + r.h / 2.0) as u32, r.x.round() as u32, (r.x + r.w).round() as u32);
+        assert!(red(left_x, mid_y) && !red(right_x, mid_y), "its left first");
+        assert!(written(&tl.layers[0].items[0], 2_000_000) >= 1.0);
     }
 
     struct OnePicture(Arc<Raster>);

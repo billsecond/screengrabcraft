@@ -215,7 +215,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Motion along a path** | Has | an item with two keyframes or more: Along a curved path (its panel's Motion) takes it through their places on a smooth curve without stopping at them, easing out of the first and into the last; while it's chosen its way shows on the picture, a dot at each keyframe's place |
 | Transitions as items (fades, dips, wipes, stingers) | Has | |
 | **Transitions between two clips** | Has | a cross-fade, through black, wipes four ways, a push and a circle where two clips of a track meet, across the cut; sound clips cross-fade. From the clip's panel, the right button, or the Library's Between Clips dropped on the cut |
-| Words that draw themselves on | Part | the highlight and circle do |
+| **Words that draw themselves on** | Has | a title's, a lower third's or a callout's Entrance or Exit, Write on: its words written on letter by letter from the first, line after line, the letter being written fading on (rubbed off the same way going); anything without words wiped on from its left. The highlight, circle and arrow draw themselves on as they always did |
 | **Keys pressed shown as a callout** | Has | the Keys Pressed section: shown or not, where, how large, light or dark keys |
 | Progress bar, countdown | Has | |
 | Camera shape and corner | Has | |
@@ -225,7 +225,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Border, shadow, rounded corners on a clip** | Has | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the recording's own screen too, made smaller on a background colour (the side panel's Screen Frame); the camera's shapes |
 | **Device frames, masks, blend modes** | Has | an item's panel (Mask and Blend): shown only inside a rectangle, rounded rectangle, oval, diamond, star or heart, or with the shape cut out of it, placed and sized on the item; laid on what's under it as multiply, screen, overlay, darken or lighten. A plain laptop, phone or browser window drawn in code round the screen (Screen Frame, the screen made small enough for it) or round a picture or a video on a layer (its panel, Device round it) |
 | Spotlight, blur a region | Has | |
-| **Motion blur**, freeze a region | Part | the side panel's Motion Blur (or a zoom's panel): items sliding, growing or moving by their keyframes, and zooms going in, out or panning, blurred along their way (five moments of the shutter blended); no region frozen yet |
+| **Motion blur, freeze a region** | Has | the side panel's Motion Blur (or a zoom's panel): items sliding, growing or moving by their keyframes, and zooms going in, out or panning, blurred along their way (five moments of the shutter blended). Edit › Freeze a Region (or the screen track's right button): a rectangle of the screen held as it was at its start while the rest plays on, an item on a layer, dragged and sized on the picture or in its panel; it stays with the screen through zooms (the pointer still shows over it) |
 | Pointer: larger, smoothed, rings, hidden | Has | |
 | **Pointer hidden for a stretch**, a pointer of another look, its path edited | Part | hidden for a stretch: the Pointer panel with a stretch chosen, or the screen track's right button (its clicks neither seen nor heard there; a dashed line on the screen's row; it stays with what the screen showed through later edits). No pointer of another look; its path isn't edited |
 | Pointer highlight, spotlight, magnifier, click sounds | Has | the click sound is made in code |
@@ -301,7 +301,8 @@ By how much someone using it every day would miss each one. Built ones move to a
     tracks and sound layers mixed to mono (#116).
 25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
 26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another (#118).
-27. Motion along a curved path; a picture pinned onto a slanted surface by its corners.
+27. Motion along a curved path; a picture pinned onto a slanted surface by its corners (#119).
+28. Words that write themselves on; a region of the screen frozen while the rest plays on.
 
 **Still to build, in this order**
 
