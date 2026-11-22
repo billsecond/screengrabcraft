@@ -663,9 +663,98 @@ const DHT: [u8; 420] = {
     out
 };
 
+/// How long a camera is given to settle (its exposure and focus) before its picture is kept, and
+/// the longest a picture is waited for.
+pub const STILL_SETTLE: Duration = Duration::from_millis(1500);
+pub const STILL_WAIT: Duration = Duration::from_secs(10);
+
+/// A still picture from a camera that's running: `take` gives the pictures that came in since it
+/// was last asked (as [`CameraCapture::take`]), `trouble` why none came, if the system said.
+/// The first picture to come once the camera has had `settle` to settle is kept (or the last one
+/// before `wait` runs out); `pause` waits a little between looks. The JPEG and its size.
+pub fn still(
+    take: &mut dyn FnMut() -> Vec<CameraFrame>,
+    trouble: &dyn Fn() -> Option<String>,
+    settle: Duration,
+    wait: Duration,
+    pause: &mut dyn FnMut(Duration),
+) -> Result<CameraFrame, String> {
+    let step = Duration::from_millis(50);
+    let mut waited = Duration::ZERO;
+    let mut last: Option<CameraFrame> = None;
+    // At most so many looks, whatever the clock says.
+    let looks = (wait.as_millis() / step.as_millis().max(1)).clamp(1, 100_000);
+    for _ in 0..looks {
+        if let Some(f) = take().into_iter().rfind(|f| !f.jpeg.is_empty() && f.width > 0 && f.height > 0) {
+            last = Some(f);
+        }
+        if waited >= settle
+            && let Some(f) = last.take()
+        {
+            return Ok(f);
+        }
+        pause(step);
+        waited = waited.saturating_add(step);
+    }
+    last.ok_or_else(|| match trouble() {
+        Some(t) => format!("the camera sent no picture: {t}"),
+        None => "the camera sent no picture".to_string(),
+    })
+}
+
+/// A still picture from camera `index`: started (in its own program where there is one), given
+/// a moment to settle, its picture kept and the camera let go. At most 640 × 480, as the camera
+/// is read for a recording.
+pub fn take_still(index: u32) -> Result<CameraFrame, String> {
+    let cam = CameraCapture::start(index, Instant::now()).map_err(|e| e.to_string())?;
+    let r = still(&mut || cam.take(), &|| cam.trouble(), STILL_SETTLE, STILL_WAIT, &mut |d| std::thread::sleep(d));
+    match &r {
+        Ok(_) => {
+            let _ = cam.stop();
+        }
+        // A camera that sends nothing is let go at once.
+        Err(_) => cam.abandon(),
+    }
+    r
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(n: u8) -> CameraFrame {
+        CameraFrame { at: Duration::from_millis(u64::from(n)), jpeg: vec![n; 4], width: 4, height: 3 }
+    }
+
+    #[test]
+    fn a_still_is_the_first_picture_once_the_camera_has_settled() {
+        // A made-up camera: a picture every 100 ms.
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let mut n = 0u8;
+        let mut take = || {
+            let due = (clock.get().as_millis() / 100) as u8;
+            let mut out = Vec::new();
+            while n < due {
+                n += 1;
+                out.push(frame(n));
+            }
+            out
+        };
+        let mut pause = |d: Duration| clock.set(clock.get() + d);
+        let f = still(&mut take, &|| None, Duration::from_millis(1000), Duration::from_secs(5), &mut pause).unwrap();
+        assert!(f.jpeg[0] >= 10, "not one from before it settled: {}", f.jpeg[0]);
+        assert!(clock.get() < Duration::from_millis(1200), "kept at once: {:?}", clock.get());
+        // One that sends nothing: why, when the system said.
+        let err = still(&mut Vec::new, &|| Some("in use".into()), Duration::ZERO, Duration::from_millis(200), &mut |_| {}).unwrap_err();
+        assert!(err.contains("no picture") && err.contains("in use"), "{err}");
+        // One that sends only a few early on: the last of them.
+        let mut once = vec![vec![frame(1), frame(2)]];
+        let f = still(&mut || once.pop().unwrap_or_default(), &|| None, Duration::from_secs(9), Duration::from_millis(300), &mut |_| {}).unwrap();
+        assert_eq!(f.jpeg[0], 2);
+        // Empty pictures are no pictures; nonsense times still end.
+        let mut junk = || vec![CameraFrame { at: Duration::ZERO, jpeg: Vec::new(), width: 0, height: 0 }];
+        assert!(still(&mut junk, &|| None, Duration::MAX, Duration::MAX, &mut |_| {}).is_err());
+    }
 
     fn test_picture() -> image::RgbImage {
         image::RgbImage::from_fn(64, 48, |x, y| image::Rgb([(x * 4) as u8, (y * 5) as u8, 128]))

@@ -49,6 +49,7 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 | — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
 | — (set one in Settings) | — | **Grab Text**: drag out an area (or click a window) and its text goes on the clipboard (Windows) |
+| — (set one in Settings) | — | **Picture from the Camera**: a still from Video Production's camera (Windows, macOS) |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
 every capture, a delayed capture (3, 5 or 10 s), the editor and the captures folder. While choosing
@@ -84,6 +85,9 @@ the steps and stops it). Stop, and the guide window lists the numbered steps to 
 out and word, and saves the guide as a PDF, a web page or Markdown, the pictures in a folder beside
 it. The guide itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
 opens it again).
+
+A recording (a GIF, a video, Video Production) starts after a **countdown** shown over the area, 3 seconds
+by default; Settings › Recording changes it or turns it off.
 
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
 or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes

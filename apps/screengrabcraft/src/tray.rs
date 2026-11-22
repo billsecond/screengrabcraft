@@ -156,6 +156,7 @@ pub fn entries(
         CaptureMode::Gif,
         CaptureMode::Repeat,
         CaptureMode::Text,
+        CaptureMode::Camera,
     ]
     .into_iter()
     .map(capture)

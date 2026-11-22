@@ -178,10 +178,12 @@ pub enum CaptureMode {
     Text,
     /// An area drawn round freehand: what's outside the outline is see-through.
     Freehand,
+    /// A still picture from the camera (Video Production's camera).
+    Camera,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 12] = [
+    pub const ALL: [CaptureMode; 13] = [
         CaptureMode::Region,
         CaptureMode::Adjust,
         CaptureMode::Freehand,
@@ -194,6 +196,7 @@ impl CaptureMode {
         CaptureMode::Video,
         CaptureMode::Production,
         CaptureMode::Text,
+        CaptureMode::Camera,
     ];
 
     pub fn label(self) -> &'static str {
@@ -210,6 +213,7 @@ impl CaptureMode {
             CaptureMode::Production => "Video Production",
             CaptureMode::Text => "Grab Text",
             CaptureMode::Freehand => "Capture Freehand Area",
+            CaptureMode::Camera => "Picture from the Camera",
         }
     }
 
@@ -228,6 +232,7 @@ impl CaptureMode {
             CaptureMode::Production => "production",
             CaptureMode::Text => "text",
             CaptureMode::Freehand => "freehand",
+            CaptureMode::Camera => "camera",
         }
     }
 
@@ -270,6 +275,8 @@ pub struct Hotkeys {
     pub text: Option<Hotkey>,
     /// An area drawn round freehand: none by default.
     pub freehand: Option<Hotkey>,
+    /// A still from the camera: none by default.
+    pub camera: Option<Hotkey>,
     pub editor: Option<Hotkey>,
     /// While a recording runs (only then are they taken from other programs): pause it or go on,
     /// and stop it. F9 and F10, as screen recorders have them.
@@ -299,6 +306,7 @@ impl Hotkeys {
                 production: k("P"),
                 text: None,
                 freehand: None,
+                camera: None,
                 editor: k("E"),
                 // A Mac's top row is its media keys, so with Control and Shift there.
                 pause: k("F9"),
@@ -320,6 +328,7 @@ impl Hotkeys {
                 production: None,
                 text: None,
                 freehand: None,
+                camera: None,
                 editor: None,
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
@@ -342,6 +351,7 @@ impl Hotkeys {
             CaptureMode::Production => self.production.as_ref(),
             CaptureMode::Text => self.text.as_ref(),
             CaptureMode::Freehand => self.freehand.as_ref(),
+            CaptureMode::Camera => self.camera.as_ref(),
         }
     }
 
@@ -374,6 +384,7 @@ impl Hotkeys {
             CaptureMode::Production => &mut self.production,
             CaptureMode::Text => &mut self.text,
             CaptureMode::Freehand => &mut self.freehand,
+            CaptureMode::Camera => &mut self.camera,
         };
         *slot = key;
     }
@@ -696,6 +707,8 @@ pub const HOTKEYS_VERSION: u32 = 1;
 /// they can make it.
 pub const SCROLLING_LONGEST: u32 = 30_000;
 pub const SCROLLING_SHORTEST: u32 = 1_000;
+/// The longest countdown before a recording, in seconds.
+pub const RECORD_COUNTDOWN_MAX: u32 = 10;
 
 /// The shapes an area can be held to (`w` wide for every `h` tall), as presets offer them.
 pub const SHAPES: [(u32, u32); 7] = [(1, 1), (4, 3), (3, 2), (16, 10), (16, 9), (21, 9), (9, 16)];
@@ -896,6 +909,9 @@ pub struct Settings {
     /// controls and the tray). On by default.
     #[serde(default = "on")]
     pub recording_border: bool,
+    /// Seconds counted down on the screen before a recording (a GIF, a video, Video Production)
+    /// starts; 0: none. 3 by default.
+    pub record_countdown: u32,
     /// A scrolling capture turns the mouse wheel over the area by itself and stops at the end of
     /// the page (where the system lets it: elsewhere, or off, the owner scrolls). On by default.
     #[serde(default = "on")]
@@ -945,6 +961,7 @@ impl Default for Settings {
             check_updates: true,
             keep_editor_ready: true,
             recording_border: true,
+            record_countdown: 3,
             scroll_by_itself: true,
             scrolling_longest: SCROLLING_LONGEST,
             presets: Vec::new(),
@@ -991,6 +1008,7 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
         self.delay_secs = self.delay_secs.min(60);
+        self.record_countdown = self.record_countdown.min(RECORD_COUNTDOWN_MAX);
         self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
         self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
@@ -1406,6 +1424,15 @@ mod tests {
                 CaptureMode::Repeat
             ]
         );
+    }
+
+    #[test]
+    fn a_recording_counts_down_three_seconds_unless_told_otherwise() {
+        assert_eq!(Settings::from_json("{}").record_countdown, 3, "a file from before it existed");
+        assert_eq!(Settings::from_json(r#"{"recordCountdown": 0}"#).record_countdown, 0, "turned off");
+        assert_eq!(Settings::from_json(r#"{"recordCountdown": 99}"#).clamped().record_countdown, RECORD_COUNTDOWN_MAX);
+        assert_eq!(CaptureMode::from_arg("camera"), Some(CaptureMode::Camera));
+        assert!(!CaptureMode::Camera.is_still(), "the camera isn't taken from while a recording has it");
     }
 
     #[test]
