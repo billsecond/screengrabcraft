@@ -263,10 +263,15 @@ fn captions() -> screengrabcraft_media::captions::Captions {
 }
 
 fn caption_harness(bytes: Vec<u8>, host: CaptionHost) -> Harness<'static, Editor> {
+    caption_harness_stepping(bytes, host, 0.25)
+}
+
+/// [`caption_harness`], each of its steps so long (seconds): a double click needs them short.
+fn caption_harness_stepping(bytes: Vec<u8>, host: CaptionHost, dt: f32) -> Harness<'static, Editor> {
     let mut ed = Editor::new(Box::new(host), EditorSettings::default());
     let path = Some("C:/Captures/Production.sgvideo".to_string());
     ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes });
-    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 860.0)).build_ui_state(
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 860.0)).with_step_dt(dt).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
             ed.logic(&ctx);
@@ -1591,6 +1596,79 @@ fn a_sound_clip_fades_and_its_tracks_steady_hum_is_taken_out() {
     assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].denoise, 0.6);
     let after = loud(&h);
     assert!(before > 0.05 && after < before / 2.0, "{before} then {after}");
+}
+
+#[test]
+fn a_caption_is_put_right_split_joined_and_moved_from_the_transcript() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let mut h = caption_harness_stepping(bytes, CaptionHost::default(), 0.02);
+    h.state_mut().video.as_mut().unwrap().transcript_open = true;
+    h.run_steps(3);
+    let corrected = |h: &Harness<'_, Editor>| {
+        h.state()
+            .video
+            .as_ref()
+            .unwrap()
+            .session
+            .timeline
+            .corrected
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.text, c.end))
+            .collect::<Vec<_>>()
+    };
+    // Your line, double-clicked: its words in a box, chosen, typed over, kept with Enter.
+    let at = h.get_by_label_contains("Here's the new login page.").rect().center();
+    h.hover_at(at);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().caption_edit.is_some(), "the double click puts its words in the box");
+    h.event(egui::Event::Text("Here's the new sign-in page, with its button on the right.".into()));
+    h.run_steps(1);
+    shot(&mut h, "video-caption-editing");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.caption_edit.is_none());
+        assert_eq!(v.session.undo_label(), Some("Edit Caption"));
+        assert!(v.cues.iter().any(|c| c.text.starts_with("Here's the new sign-in page")), "on the picture and in the video too");
+    }
+    // Its right button: Split in Two, then joined back.
+    let at = h.get_by_label_contains("sign-in page").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Split in Two").click();
+    h.run_steps(3);
+    assert_eq!(
+        corrected(&h).iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>()[..2],
+        ["Here's the new sign-in page,", "with its button on the right."]
+    );
+    let at = h.get_by_label_contains("sign-in page,").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Join with the Next Line").click();
+    h.run_steps(3);
+    assert_eq!(corrected(&h)[0].0, "Here's the new sign-in page, with its button on the right.");
+    // The others' line ends at the playhead (3 s).
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.run_steps(2);
+    let at = h.get_by_label_contains("It looks good to me.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("End at the Playhead").click();
+    h.run_steps(3);
+    assert!(corrected(&h).contains(&("It looks good to me.".to_string(), 3_000_000)));
+    shot(&mut h, "video-caption-moved");
+    // All as heard again, from the same menu.
+    let at = h.get_by_label_contains("It looks good to me.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("All Captions as Heard").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.corrected.is_none());
+    assert!(h.query_by_label_contains("Here's the new login page.").is_some());
 }
 
 #[test]

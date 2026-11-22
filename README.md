@@ -149,7 +149,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   or a double click) and the name is the track's or the layer's, in the transcript, on the
   timeline and in Export Transcript. A click on a line takes the playhead there; while the video
   plays, the line playing is marked and kept in view. Copy puts the whole transcript on the
-  clipboard.
+  clipboard. **Put a line right**: double-click it to change its words (and split it at the
+  cursor); its right button splits it, joins it to the speaker's next line, moves its start or end
+  to the playhead, or deletes it. The lines put right are what the picture, Export Video and the
+  subtitles show; All Captions as Heard takes them back.
 - Undo and redo everything. The edits are saved into the recording file a moment after each
   change (the recording itself is never changed), and File › Revert to Recording brings every
   track back whole.
