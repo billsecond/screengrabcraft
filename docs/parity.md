@@ -44,7 +44,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | HDR screens captured in their true colours | Missing | |
 | QR codes made or read | Has | the Image menu: Read QR Codes (the picture or the area selected) shows each code's words to copy, a web address shown and never opened; Make a QR Code… puts one of your words on the picture as a picture annotation. On this computer, every system |
 | Pictures sent from a phone | Not planned | needs a network service |
-| Capture presets (an area type, effects and where it goes, under one shortcut) | Has | the area (any kind, a shape or a set size), a wait, what happens after, effects added as it's taken (border, round corners, torn edge, shadow, grey), a folder and a file format of its own and a shortcut of its own; on the Capture page, in the tray, and `screengrabcraft --preset <name>` for scripts and a desktop's own shortcuts |
+| Capture presets (an area type, effects and where it goes, under one shortcut) | Has | the area (any kind, a shape or a set size), a wait, what happens after, effects added as it's taken (border, round corners, torn edge, shadow, grey), a folder and a file format of its own (its captures listed in the Recent strip and All captures with the rest, the folders remembered) and a shortcut of its own; on the Capture page, in the tray, and `screengrabcraft --preset <name>` for scripts and a desktop's own shortcuts |
 | After a capture: copy, open in the editor, save, or ask with a bar | Has | |
 | Every shortcut changed or turned off | Has | |
 
@@ -292,6 +292,7 @@ By how much someone using it every day would miss each one. Built ones move to a
     `--preset <name>` (#93).
 17. Open With: a capture in a program of the owner's choosing (Windows; #94).
 18. The camera full screen, swapped with the screen while recording (#98).
+19. Captures kept in a preset's own folder listed in the Recent strip and All captures.
 
 **Still to build, in this order**
 

@@ -73,7 +73,8 @@ off too (the video editor never is: it stays as you left it).
 held to a shape (16:9, square…) or of a set size placed with a click, a freehand area, a window, the screen, all
 screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); effects
 added as it's taken (a border, round corners, a torn edge, a shadow, grey); a folder and a file format
-of its own; and a shortcut of its own. They're on the Capture page and in the tray menu (Capture
+of its own (its captures are in the editor's Recent strip and All captures with the rest, even after
+the preset changes folder); and a shortcut of its own. They're on the Capture page and in the tray menu (Capture
 Presets), and `screengrabcraft --preset <name>` takes one from a script or a desktop's own shortcut.
 
 **Captures on a timer** (the Capture page, or Captures on a Timer in the tray): one every so many

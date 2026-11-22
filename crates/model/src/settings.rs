@@ -1072,7 +1072,16 @@ pub struct Settings {
     pub presets: Vec<CapturePreset>,
     /// Captures on a timer and at a set time (the Capture page).
     pub timed: crate::timed::TimedCaptures,
+    /// Folders captures were kept in besides the captures folder (a capture preset's own), the
+    /// latest first: the Recent strip and All captures list theirs too, after the preset
+    /// changes folder. See [`Settings::note_folder`].
+    pub other_folders: Vec<String>,
 }
+
+/// The most other folders remembered (see [`Settings::other_folders`]).
+pub const OTHER_FOLDERS_MAX: usize = 20;
+/// The longest folder remembered, in characters.
+const FOLDER_CHARS_MAX: usize = 1000;
 
 fn on() -> bool {
     true
@@ -1114,6 +1123,7 @@ impl Default for Settings {
             scrolling_longest: SCROLLING_LONGEST,
             presets: Vec::new(),
             timed: crate::timed::TimedCaptures::default(),
+            other_folders: Vec::new(),
         }
     }
 }
@@ -1166,10 +1176,32 @@ impl Settings {
         self.presets.truncate(PRESETS_MAX);
         self.presets = std::mem::take(&mut self.presets).into_iter().map(CapturePreset::clamped).collect();
         self.timed = std::mem::take(&mut self.timed).clamped();
+        let folders = std::mem::take(&mut self.other_folders);
+        for f in folders.iter().take(OTHER_FOLDERS_MAX * 4).rev() {
+            self.note_folder(f);
+        }
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }
         self
+    }
+
+    /// Notes a folder a capture was just kept in (a capture preset's own), first among
+    /// [`Settings::other_folders`]. False when nothing changed: it's the captures folder, it's
+    /// first already, or it's no folder.
+    pub fn note_folder(&mut self, folder: &str) -> bool {
+        let f = folder.trim();
+        let same = |a: &str, b: &str| a.trim_end_matches(['/', '\\']).eq_ignore_ascii_case(b.trim_end_matches(['/', '\\']));
+        if f.is_empty() || f.chars().count() > FOLDER_CHARS_MAX || f.chars().any(char::is_control) {
+            return false;
+        }
+        if self.folder.as_deref().is_some_and(|c| same(c.trim(), f)) || self.other_folders.first().is_some_and(|o| same(o, f)) {
+            return false;
+        }
+        self.other_folders.retain(|o| !same(o, f));
+        self.other_folders.insert(0, f.to_string());
+        self.other_folders.truncate(OTHER_FOLDERS_MAX);
+        true
     }
 
     /// Pairs of actions that share a shortcut (only one of each pair can have it), the presets'
@@ -1518,6 +1550,30 @@ mod tests {
         assert_eq!(s.presets[0].delay_secs, 60);
         assert_eq!(s.presets[1].area, PresetArea::Shape { w: 1, h: SHAPE_MAX });
         assert_eq!(s.presets[2].name.chars().count(), PRESET_NAME_MAX);
+    }
+
+    #[test]
+    fn folders_captures_were_kept_in_are_remembered_latest_first() {
+        let mut s = Settings { folder: Some("C:/Captures".into()), ..Settings::default() };
+        assert!(s.note_folder("D:/Docs/Shots"));
+        assert!(s.note_folder(" E:/Bugs "));
+        assert!(!s.note_folder("E:/Bugs/"), "first already");
+        assert!(!s.note_folder("c:/captures"), "the captures folder is listed anyway");
+        assert!(!s.note_folder("  ") && !s.note_folder("D:/\u{7}"));
+        assert!(s.note_folder("d:/docs/shots"));
+        assert_eq!(s.other_folders, ["d:/docs/shots", "E:/Bugs"]);
+        for i in 0..50 {
+            s.note_folder(&format!("F:/{i}"));
+        }
+        assert_eq!(s.other_folders.len(), OTHER_FOLDERS_MAX);
+        assert_eq!(s.other_folders.first().map(String::as_str), Some("F:/49"));
+        // Kept through a settings file, cleaned as it's read; one from before has none.
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back.other_folders, s.other_folders);
+        let odd = Settings::from_json(r#"{"otherFolders": ["G:/A", "", "G:/A", "\u0007", "H:/B"]}"#);
+        assert_eq!(odd.other_folders, ["G:/A", "H:/B"]);
+        assert!(Settings::from_json(r#"{"otherFolders": 5}"#).other_folders.is_empty());
+        assert!(Settings::from_json("{}").other_folders.is_empty());
     }
 
     #[test]
