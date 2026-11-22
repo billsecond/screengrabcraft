@@ -590,10 +590,13 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
     // computer's sound.
     let voice = voice_track(timeline);
     let mut rest = vec![0f32; count * 2];
-    crate::layer_draw::mix_layers(&mut rest, timeline, media, first, count);
+    // (A track played alone: the layers' sound isn't heard.)
+    if !timeline.tracks.iter().any(|t| t.solo && !t.kind.is_video()) {
+        crate::layer_draw::mix_layers(&mut rest, timeline, media, first, count);
+    }
     let end = first.saturating_add(count as u64);
     for (ti, t) in timeline.tracks.iter().enumerate() {
-        if t.muted || t.kind.is_video() || t.volume <= 0.0 {
+        if !timeline.heard(ti) || t.kind.is_video() || t.volume <= 0.0 {
             continue;
         }
         let into = if voice.is_none_or(|v| v == ti) { &mut out } else { &mut rest };
@@ -1135,6 +1138,12 @@ mod tests {
         tl.set_volume(1, 0.5).unwrap();
         let s = mix(&r, &tl, 100, 1);
         assert!((s[0] - m * 0.5).abs() < 1e-6 && (s[1] - m * 0.5).abs() < 1e-6);
+        // The computer's sound played alone (unmuted): only it is heard.
+        let mut alone = tl.clone();
+        alone.set_muted(2, false).unwrap();
+        alone.set_solo(2, true).unwrap();
+        let s = mix(&r, &alone, 100, 1);
+        assert!((s[0] - sl).abs() < 1e-6 && (s[1] - sr).abs() < 1e-6);
         // Where a clip was taken out there is silence.
         tl.split(1_000_000, Some(1)).unwrap();
         tl.delete_clip(1, 1).unwrap();

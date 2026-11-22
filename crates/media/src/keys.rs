@@ -236,6 +236,8 @@ mod tests {
                 name: None,
                 denoise: 0.0,
                 points: Vec::new(),
+                locked: false,
+                solo: false,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),

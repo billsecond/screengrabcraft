@@ -2915,3 +2915,51 @@ fn scroll_side_panel_to(h: &mut Harness<'_, Editor>, label: &str) {
         scroll_side_panel(h, 1);
     }
 }
+
+#[test]
+fn clips_are_grouped_coloured_and_tracks_locked_or_played_alone() {
+    let mut h = harness();
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.split", &serde_json::json!({"at": 2_000_000})).unwrap();
+        v.session.execute("video.lift", &serde_json::json!({"from": 2_000_000, "to": 2_500_000})).unwrap();
+    }
+    h.run_steps(2);
+    let mic = h.state().video.as_ref().unwrap().session.timeline.find(StreamKind::Microphone).unwrap();
+    let tl = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.clone();
+    // The microphone locked from its header: its clip can't be dragged.
+    h.get_all_by_label("Lock it: its clips stay as they are").nth(mic).unwrap().click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].locked);
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    let x = |s: f32| lane.min.x + s * pps - scroll;
+    let row_y = |t: usize| rows_top + t as f32 * 48.0 + 20.0;
+    crate::tests::drag(&mut h, egui::pos2(x(3.0), row_y(mic)), egui::pos2(x(2.6), row_y(mic)));
+    assert_eq!(tl(&h).tracks[mic].clips[1].at, 2_500_000, "a locked track's clip stays");
+    h.get_by_label("Locked: its clips stay as they are. Click to unlock it.").click();
+    h.run_steps(2);
+    // The screen's second clip grouped with those under it, then dragged: they all go.
+    right_click(&mut h, egui::pos2(x(3.0), row_y(0)));
+    h.get_by_label("Group with the Clips Above and Below").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks.iter().all(|t| t.clips[1].group == Some(1)));
+    crate::tests::drag(&mut h, egui::pos2(x(3.0), row_y(0)), egui::pos2(x(2.7), row_y(0)));
+    let moved: Vec<u64> = tl(&h).tracks.iter().map(|t| t.clips[1].at).collect();
+    assert!(moved.iter().all(|a| *a == moved[0] && *a < 2_400_000 && *a >= 2_000_000), "{moved:?}");
+    // A colour from the right button.
+    right_click(&mut h, egui::pos2(x(1.0), row_y(0)));
+    h.get_by_label_contains("Clip Colour").hover();
+    h.run_steps(2);
+    h.get_by_label("Teal").click();
+    h.run_steps(2);
+    assert_eq!(tl(&h).tracks[0].clips[0].colour, Some(4));
+    // The microphone played alone.
+    h.get_by_label("Play it alone: the other sound isn't heard").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].solo);
+    shot(&mut h, "video-groups-and-locks");
+}

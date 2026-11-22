@@ -177,7 +177,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | A row for each track and layer; reorder, rename, hide, mute | Has | |
-| Lock a track; play one track alone | Missing | |
+| **Lock a track; play one track alone** | Has | the padlock and S in its header (or its right button): a locked track's clips stay as they are (cuts, speeds and holds of the whole video still keep it in time); while any sound track plays alone only those are heard |
 | Zoom the timeline, scroll it | Has | |
 | Play, step a frame, full screen | Has | |
 | Faster and slower playback keys (J, K, L) | Missing | |
@@ -185,15 +185,15 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Cut leaving a gap, or closing it | Has | |
 | Trim, slide a clip | Has | |
 | Choose a stretch; play it | Has | |
-| Push later clips along when moving one | Missing | |
+| **Push later clips along when moving one** | Has | Shift-drag a clip: every later clip of its track (and of its group's tracks) moves with it |
 | Join pieces back together | Part | Revert to Recording brings every track back |
 | **Hold a frame (freeze)** | Has | H, the Edit menu or the ruler's right button: every track waits while the picture is held, the sound silent; its end dragged, or its panel, holds it longer |
 | **Speed up or slow down a stretch** | Has | a quarter as fast to eight times (any speed from a tenth to ten times by command), every track together; voices keep their pitch |
 | Play a clip backwards | Missing | |
 | Line up clips by their sound | Missing | |
-| Groups of clips | Missing | |
+| **Groups of clips** | Has | a clip grouped with the other tracks' clips over the same time (its right button): they move together; Ungroup takes them apart |
 | Markers; chapters | Has | M marks the playhead; the markers are the MP4's chapters (both kinds of MP4) |
-| Clip colours | Missing | |
+| **Clip colours** | Has | eight, from a clip's right button |
 | Replace a clip keeping its effects; copy effects | Missing | |
 | Undo and redo; edits saved by themselves | Has | |
 | Library of titles, lower thirds, callouts, arrows, blur, transitions | Has | |
@@ -286,7 +286,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed (#76).
 12. The camera's background removed, with or without a green screen (#79).
 13. Transitions between clips; keyframe animation of an item's place, size and opacity (#85).
-14. Volume along a clip; the rest lowered under the voice; levels evened out.
+14. Volume along a clip; the rest lowered under the voice; levels evened out (#88).
+15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours.
 
 **Still to build, in this order**
 
@@ -304,9 +305,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 11. Tags, favourites, and captures sorted by program.
 12. Templates; several pictures combined into one.
 13. A picture per click made into a how-to guide.
-14. Groups, pushing later clips along, locked and solo tracks, clip colours.
-15. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-16. Print; batch changes; captures on a timer or at a set time.
-17. Cutting words from the transcript; filler words taken out.
-18. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+15. Print; batch changes; captures on a timer or at a set time.
+16. Cutting words from the transcript; filler words taken out.
+17. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

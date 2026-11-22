@@ -69,7 +69,16 @@ pub struct Clip {
     /// across the cut, half before it and half after; it does nothing while they don't meet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition: Option<ClipTransition>,
+    /// Its colour on the timeline (one of [`CLIP_COLOURS`]); none: its track's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub colour: Option<u8>,
+    /// The group it's in: the clips of a group move together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<u32>,
 }
+
+/// How many colours a clip can be given.
+pub const CLIP_COLOURS: u8 = 8;
 
 /// How one clip turns into the next where they meet on a track.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +167,7 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None }
+        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None, colour: None, group: None }
     }
 
     /// A held frame: the picture recorded at `from`, shown from `at` for `len`.
@@ -283,6 +292,13 @@ pub struct Track {
     /// with the sound through every edit. Sound only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub points: Vec<VolumePoint>,
+    /// Locked: its clips stay as they are (only edits of the whole video, a cut, a speed or a
+    /// hold, move them, so it stays in time with the rest).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub locked: bool,
+    /// Played alone: while any sound track is, only those are heard. Sound only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub solo: bool,
 }
 
 /// A point of a sound track's volume line: how loud it is at a moment of its recording (µs).
@@ -500,7 +516,18 @@ impl Timeline {
             .map(|s| {
                 let len = rec.stream_duration(s.id);
                 let clips = if len >= MIN_CLIP_US { vec![Clip::new(0, 0, len)] } else { Vec::new() };
-                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None, denoise: 0.0, points: Vec::new() }
+                Track {
+                    stream: s.id,
+                    kind: s.kind,
+                    muted: false,
+                    volume: 1.0,
+                    clips,
+                    name: None,
+                    denoise: 0.0,
+                    points: Vec::new(),
+                    locked: false,
+                    solo: false,
+                }
             })
             .collect();
         Timeline {
@@ -541,6 +568,7 @@ impl Timeline {
             t.name = t.name.as_deref().and_then(clean_name);
             t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 2.0) } else { 1.0 };
             t.denoise = if t.denoise.is_finite() && !t.kind.is_video() { t.denoise.clamp(0.0, 1.0) } else { 0.0 };
+            t.solo = t.solo && !t.kind.is_video();
             // The volume line: of sound, levels in range, in order, one to a moment, not too many.
             t.points.truncate(MAX_VOLUME_POINTS);
             if t.kind.is_video() {
@@ -563,6 +591,8 @@ impl Timeline {
                         let len = c.len.min(MAX_HOLD_US);
                         return (!sound && source > 0 && len >= MIN_CLIP_US).then_some(Clip {
                             transition: c.transition.map(|x| checked_transition(x, sound)),
+                            colour: c.colour.filter(|k| *k < CLIP_COLOURS),
+                            group: c.group,
                             ..Clip::held(c.at.min(u64::MAX / 4), c.from.min(source - 1), len)
                         });
                     }
@@ -580,6 +610,8 @@ impl Timeline {
                         fade_out: fade(c.fade_out),
                         hold: false,
                         transition: c.transition.map(|x| checked_transition(x, sound)),
+                        colour: c.colour.filter(|k| *k < CLIP_COLOURS),
+                        group: c.group,
                     })
                 })
                 .take(10_000)
@@ -796,7 +828,8 @@ impl Timeline {
                 self.track(i)?;
                 vec![i]
             }
-            None => (0..self.tracks.len()).collect(),
+            // Every track but the locked ones.
+            None => (0..self.tracks.len()).filter(|i| self.tracks.get(*i).is_some_and(|t| !t.locked)).collect(),
         };
         for i in which {
             let t = self.track_mut(i)?;
@@ -827,7 +860,8 @@ impl Timeline {
                 self.track(i)?;
                 vec![i]
             }
-            None => (0..self.tracks.len()).collect(),
+            // Every track but the locked ones.
+            None => (0..self.tracks.len()).filter(|i| self.tracks.get(*i).is_some_and(|t| !t.locked)).collect(),
         };
         let mut made = 0;
         for i in which {
@@ -900,16 +934,125 @@ impl Timeline {
 
     /// Slides a clip along the timeline to start at `to`, between its neighbours.
     pub fn move_clip(&mut self, track: usize, clip: usize, to: u64) -> Result<(), EditError> {
-        let (clips, c) = self.clip_mut(track, clip)?;
-        let floor = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0);
-        let ceiling = clips.get(clip + 1).map(|n| n.at.saturating_sub(c.len)).unwrap_or(u64::MAX / 4);
-        if ceiling < floor {
+        self.move_clips(track, clip, to, false)
+    }
+
+    /// The clips of a group (by track and place), or just the clip given if it's in none.
+    pub fn group_of(&self, track: usize, clip: usize) -> Vec<(usize, usize)> {
+        let g = self.tracks.get(track).and_then(|t| t.clips.get(clip)).and_then(|c| c.group);
+        match g {
+            None => vec![(track, clip)],
+            Some(g) => self
+                .tracks
+                .iter()
+                .enumerate()
+                .flat_map(|(ti, t)| t.clips.iter().enumerate().filter(move |(_, c)| c.group == Some(g)).map(move |(ci, _)| (ti, ci)))
+                .collect(),
+        }
+    }
+
+    /// Slides a clip to start at `to`, the clips grouped with it by as much. Without `ripple`
+    /// they stay between their neighbours; with it every later clip of their tracks moves along
+    /// with them (pushed along, or pulled back as far as the clip before allows). A clip of a
+    /// locked track doesn't move.
+    pub fn move_clips(&mut self, track: usize, clip: usize, to: u64, ripple: bool) -> Result<(), EditError> {
+        let c = *self.track(track)?.clips.get(clip).ok_or(EditError::NoClip(track, clip))?;
+        let members = self.group_of(track, clip);
+        if members.iter().any(|(ti, _)| self.tracks.get(*ti).is_some_and(|t| t.locked)) {
+            return Err(EditError::Invalid("a clip of a locked track doesn't move".to_string()));
+        }
+        let member = |ti: usize, ci: usize| members.contains(&(ti, ci));
+        // How far they can all go: back to the clip before each (not one of them), and on to the
+        // clip after (unless that moves too).
+        let (mut lo, mut hi) = (i128::MIN, i128::MAX);
+        for &(ti, ci) in &members {
+            let Some(clips) = self.tracks.get(ti).map(|t| &t.clips) else { continue };
+            let Some(m) = clips.get(ci) else { continue };
+            let before = ci.checked_sub(1).filter(|p| !member(ti, *p)).and_then(|p| clips.get(p)).map_or(0, Clip::end);
+            lo = lo.max(i128::from(before) - i128::from(m.at));
+            if !ripple && let Some(n) = clips.get(ci + 1).filter(|_| !member(ti, ci + 1)) {
+                hi = hi.min(i128::from(n.at) - i128::from(m.end()));
+            }
+        }
+        hi = hi.min(i128::from(u64::MAX / 4) - i128::from(c.end()));
+        if lo > hi {
             return Ok(());
         }
-        if let Some(slot) = clips.get_mut(clip) {
-            slot.at = to.clamp(floor, ceiling);
+        let delta = (i128::from(to.min(u64::MAX / 4)) - i128::from(c.at)).clamp(lo, hi);
+        let shift = |v: u64| u64::try_from(i128::from(v) + delta).unwrap_or(0);
+        for ti in 0..self.tracks.len() {
+            let first = members.iter().filter(|(t, _)| *t == ti).map(|(_, c)| *c).min();
+            let Some(first) = first else { continue };
+            let Some(t) = self.tracks.get_mut(ti) else { continue };
+            for (ci, clip) in t.clips.iter_mut().enumerate() {
+                if member(ti, ci) || (ripple && ci > first) {
+                    clip.at = shift(clip.at);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Puts clips (by track and place) into a group of their own, out of any they were in: they
+    /// then move together. Its number.
+    pub fn group(&mut self, clips: &[(usize, usize)]) -> Result<u32, EditError> {
+        if clips.len() < 2 {
+            return Err(EditError::Invalid("a group is two clips or more".to_string()));
+        }
+        for &(ti, ci) in clips {
+            self.track(ti)?.clips.get(ci).ok_or(EditError::NoClip(ti, ci))?;
+        }
+        let g = self.tracks.iter().flat_map(|t| t.clips.iter()).filter_map(|c| c.group).max().unwrap_or(0).saturating_add(1);
+        for &(ti, ci) in clips {
+            if let Some(c) = self.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)) {
+                c.group = Some(g);
+            }
+        }
+        Ok(g)
+    }
+
+    /// Takes the group a clip is in apart: each of its clips on its own again.
+    pub fn ungroup(&mut self, track: usize, clip: usize) -> Result<(), EditError> {
+        let g = self.track(track)?.clips.get(clip).ok_or(EditError::NoClip(track, clip))?.group;
+        let Some(g) = g else { return Ok(()) };
+        for c in self.tracks.iter_mut().flat_map(|t| t.clips.iter_mut()).filter(|c| c.group == Some(g)) {
+            c.group = None;
+        }
+        Ok(())
+    }
+
+    /// A clip's colour on the timeline (none: its track's).
+    pub fn set_clip_colour(&mut self, track: usize, clip: usize, colour: Option<u8>) -> Result<(), EditError> {
+        if colour.is_some_and(|k| k >= CLIP_COLOURS) {
+            return Err(EditError::Invalid(format!("a clip's colour is 0 to {}", CLIP_COLOURS - 1)));
+        }
+        let (clips, _) = self.clip_mut(track, clip)?;
+        if let Some(c) = clips.get_mut(clip) {
+            c.colour = colour;
+        }
+        Ok(())
+    }
+
+    /// Locks a track (its clips stay as they are) or lets it go.
+    pub fn set_locked(&mut self, track: usize, locked: bool) -> Result<(), EditError> {
+        self.track_mut(track)?.locked = locked;
+        Ok(())
+    }
+
+    /// Plays a sound track alone (with any others played alone), or not.
+    pub fn set_solo(&mut self, track: usize, solo: bool) -> Result<(), EditError> {
+        let t = self.track_mut(track)?;
+        if t.kind.is_video() {
+            return Err(EditError::Invalid("only a sound track is played alone".to_string()));
+        }
+        t.solo = solo;
+        Ok(())
+    }
+
+    /// Whether a sound track is heard: not muted, and played alone if any is.
+    pub fn heard(&self, track: usize) -> bool {
+        let any_solo = self.tracks.iter().any(|t| t.solo && !t.kind.is_video());
+        self.tracks.get(track).is_some_and(|t| !t.muted && (!any_solo || t.solo))
     }
 
     /// Plays `from..to` of the timeline at `speed` (hundredths of as recorded, see
@@ -1275,6 +1418,8 @@ mod tests {
             name: None,
             denoise: 0.0,
             points: Vec::new(),
+            locked: false,
+            solo: false,
         };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
@@ -1389,6 +1534,46 @@ mod tests {
         assert_eq!(t.tracks[1].clips[0].at, 500_000);
         t.move_clip(1, 0, 9_000_000).unwrap();
         assert_eq!(t.tracks[1].clips[0].end(), 4_000_000);
+    }
+
+    #[test]
+    fn grouped_clips_move_together_and_a_ripple_pushes_the_later_ones_along() {
+        let mut t = two_tracks();
+        // Each track cut at 3 s and 6 s, the middle pieces moved apart from their neighbours.
+        for at in [3_000_000, 6_000_000] {
+            t.split(at, None).unwrap();
+        }
+        t.lift(2_000_000, 3_000_000, None).unwrap();
+        // Screen: 0-2, 3-6, 6-10; microphone the same. The two middle clips grouped.
+        assert!(t.group(&[(0, 1)]).is_err(), "a group is two clips or more");
+        let g = t.group(&[(0, 1), (1, 1)]).unwrap();
+        assert_eq!(t.group_of(1, 1), vec![(0, 1), (1, 1)]);
+        // Moved back half a second: both go; they stop at the clips before them.
+        t.move_clips(0, 1, 2_500_000, false).unwrap();
+        assert_eq!((t.tracks[0].clips[1].at, t.tracks[1].clips[1].at), (2_500_000, 2_500_000));
+        t.move_clips(1, 1, 0, false).unwrap();
+        assert_eq!((t.tracks[0].clips[1].at, t.tracks[1].clips[1].at), (2_000_000, 2_000_000));
+        // Moved along with a ripple: what follows on both tracks is pushed along as far.
+        t.move_clips(0, 1, 3_000_000, true).unwrap();
+        for tr in &t.tracks {
+            assert_eq!(tr.clips.iter().map(|c| c.at).collect::<Vec<_>>(), vec![0, 3_000_000, 7_000_000]);
+        }
+        // A locked track's clip doesn't move, nor one grouped with it.
+        t.set_locked(1, true).unwrap();
+        assert!(t.move_clips(0, 1, 2_000_000, true).is_err());
+        // Splitting every track leaves the locked one whole.
+        assert_eq!(t.split(1_000_000, None).unwrap(), 1);
+        t.set_locked(1, false).unwrap();
+        t.ungroup(0, 2).unwrap();
+        assert!(t.tracks.iter().all(|tr| tr.clips.iter().all(|c| c.group != Some(g))));
+        // Colours: in range, or none.
+        t.set_clip_colour(0, 0, Some(3)).unwrap();
+        assert_eq!(t.tracks[0].clips[0].colour, Some(3));
+        assert!(t.set_clip_colour(0, 0, Some(CLIP_COLOURS)).is_err());
+        // Played alone: only a sound track, and then the others aren't heard.
+        assert!(t.set_solo(0, true).is_err());
+        t.set_solo(1, true).unwrap();
+        assert!(t.heard(1));
     }
 
     #[test]
