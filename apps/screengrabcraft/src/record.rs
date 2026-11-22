@@ -65,6 +65,11 @@ pub struct Recording {
     pub lost: Arc<AtomicU32>,
     /// A scrolling capture is scrolling by itself (else the owner scrolls it).
     pub by_itself: Arc<AtomicBool>,
+    /// What the owner draws on the screen while it records, drawn into its frames.
+    pub ink: crate::ink::SharedInk,
+    /// Whether it can be drawn on: one area or one monitor, on Windows (which keeps the drawing
+    /// window out of the recording).
+    pub drawable: bool,
     /// Making the video after the recording stopped: 0 not yet, then 1 to 1001 (its progress + 1).
     pub saving: Arc<AtomicU32>,
     /// How loud the computer's sound and the microphone are just now (`f32` bits, 0 to 1).
@@ -167,12 +172,14 @@ pub fn start(
     let paused = Arc::new(AtomicBool::new(false));
     let scroll = ScrollPlan { by_itself: scroll.by_itself && screengrabcraft_capture::scroll::supported(), ..scroll };
     let by_itself = Arc::new(AtomicBool::new(kind == Kind::Scrolling && scroll.by_itself));
+    let ink = crate::ink::SharedInk::default();
+    let marks = ink.clone();
     let (s, c, p, l, z, b) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone(), by_itself.clone());
     let handle = std::thread::Builder::new()
         .name(format!("{kind:?}").to_lowercase())
         .spawn(move || {
             let out = match kind {
-                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &wake),
+                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &marks, &wake),
                 Kind::Scrolling => {
                     let flags = Flags { stop: &s, progress: &p, lost: &l, by_itself: &b };
                     scrolling(monitor, area, middle(desktop), scroll, &c, &flags, &wake)
@@ -195,6 +202,8 @@ pub fn start(
         progress,
         lost,
         by_itself,
+        drawable: kind == Kind::Gif && cfg!(target_os = "windows"),
+        ink,
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
@@ -217,6 +226,7 @@ fn gif(
     cancel: &AtomicBool,
     paused: &AtomicBool,
     progress: &AtomicU32,
+    ink: &crate::ink::SharedInk,
     wake: &egui::Context,
 ) -> Result<Output, String> {
     let dir = std::env::temp_dir().join("ScreenGrabCraft");
@@ -254,6 +264,7 @@ fn gif(
         let at = Instant::now();
         match grab() {
             Ok(frame) if frame.width() == area.w && frame.height() == area.h => {
+                let frame = crate::ink::mark_frame(ink, frame);
                 let delay = at.duration_since(last).as_millis().min(u128::from(u32::MAX)) as u32;
                 // A frame left out only makes the one before last longer.
                 if writer.offer(frame, if frames == 0 { 0 } else { delay }).map_err(|e| e.to_string())? {
@@ -536,6 +547,8 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         progress: Arc::default(),
         lost: Arc::default(),
         by_itself: Arc::default(),
+        ink: crate::ink::SharedInk::default(),
+        drawable: cfg!(target_os = "windows") && matches!(plan.screen, Screen::Part { .. } | Screen::Monitor { .. }),
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
@@ -545,6 +558,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
     let (stop, cancel, progress, saving, levels, sources, begun) =
         (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone(), r.begun.clone());
     let paused = r.paused.clone();
+    let ink = r.ink.clone();
     let handle = std::thread::Builder::new()
         .name("video".into())
         .spawn(move || {
@@ -557,6 +571,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
                 levels: &levels,
                 sources: &sources,
                 begun: &begun,
+                ink: &ink,
                 wake: &wake,
             };
             let out = video(&plan, &shared);
@@ -577,6 +592,8 @@ struct Shared<'a> {
     sources: &'a Mutex<Vec<String>>,
     /// When the recording really began.
     begun: &'a Mutex<Option<Instant>>,
+    /// What the owner draws on the screen, drawn into the screen's frames.
+    ink: &'a crate::ink::SharedInk,
     wake: &'a egui::Context,
 }
 
@@ -1285,6 +1302,7 @@ fn record_screen(
         if let Some(pts) = place
             && let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab)
         {
+            let pic = crate::ink::mark_frame(s.ink, pic);
             if waiting.load(Ordering::SeqCst) < WAITING {
                 waiting.fetch_add(1, Ordering::SeqCst);
                 let _ = tx.send(Item::Screen(pts.as_micros() as u64, pic));

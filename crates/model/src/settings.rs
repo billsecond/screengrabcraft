@@ -262,6 +262,8 @@ pub struct Hotkeys {
     /// and stop it. F9 and F10, as screen recorders have them.
     pub pause: Option<Hotkey>,
     pub stop: Option<Hotkey>,
+    /// While a recording runs: draw on the screen, or stop drawing. F8 by default.
+    pub draw: Option<Hotkey>,
 }
 
 impl Hotkeys {
@@ -287,6 +289,7 @@ impl Hotkeys {
                 // A Mac's top row is its media keys, so with Control and Shift there.
                 pause: k("F9"),
                 stop: k("F10"),
+                draw: k("F8"),
             }
         } else {
             Hotkeys {
@@ -305,6 +308,7 @@ impl Hotkeys {
                 editor: None,
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
+                draw: Some(Hotkey::new(false, false, false, false, "F8")),
             }
         }
     }
@@ -368,6 +372,9 @@ impl Hotkeys {
         }
         if let Some(k) = &self.stop {
             named.push(("Stop Recording", k));
+        }
+        if let Some(k) = &self.draw {
+            named.push(("Draw on the Screen While Recording", k));
         }
         let mut out = Vec::new();
         for (i, (a, ka)) in named.iter().enumerate() {
@@ -980,7 +987,12 @@ impl Settings {
         let keys = &self.hotkeys;
         let presets: Vec<(String, &Hotkey)> =
             self.presets.iter().enumerate().filter_map(|(i, p)| p.hotkey.as_ref().map(|k| (p.title(i + 1), k))).collect();
-        let others = [("Open the Image Editor", &keys.editor), ("Pause or Resume Recording", &keys.pause), ("Stop Recording", &keys.stop)];
+        let others = [
+            ("Open the Image Editor", &keys.editor),
+            ("Pause or Resume Recording", &keys.pause),
+            ("Stop Recording", &keys.stop),
+            ("Draw on the Screen While Recording", &keys.draw),
+        ];
         for (i, (a, ka)) in presets.iter().enumerate() {
             for m in CaptureMode::ALL {
                 if keys.get(m) == Some(*ka) {

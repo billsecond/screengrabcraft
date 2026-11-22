@@ -145,6 +145,10 @@ pub struct Service {
     restarting: Option<(Recording, Again)>,
     /// The recording's controls are put away in the tray (Minimize, or no room off the area).
     pub controls_hidden: bool,
+    /// The owner is drawing on the screen over the area being recorded.
+    pub drawing: bool,
+    /// The drawing window's picture of the latest frame, and that frame's number.
+    pub draw_texture: Option<(u64, egui::TextureHandle)>,
     /// Where the owner dragged the recording's controls to (its window's place, in points).
     pub controls_at: Option<egui::Pos2>,
     /// The controls being dragged: where on them the pointer took hold (pixels).
@@ -227,6 +231,8 @@ impl Service {
             again: None,
             restarting: None,
             controls_hidden: false,
+            drawing: false,
+            draw_texture: None,
             controls_at: None,
             controls_drag: None,
             screens: Vec::new(),
@@ -427,6 +433,7 @@ impl Service {
                     Some(Item::RestartRecording) => self.restart_recording(),
                     Some(Item::ToggleControls) => self.controls_hidden = !self.controls_hidden,
                     Some(Item::ToggleBorder) => self.toggle_border(),
+                    Some(Item::ToggleDrawing) => self.toggle_drawing(),
                     Some(Item::DiscardRecording) => self.stop_recording(true),
                     Some(Item::Editor) => {
                         if let Err(e) = launch::open_editor(&[]) {
@@ -453,6 +460,7 @@ impl Service {
             Msg::Hotkey(id) => match self.keys.target(id) {
                 Some(Target::Pause) => self.toggle_pause(),
                 Some(Target::Stop) => self.stop_recording(false),
+                Some(Target::Draw) => self.toggle_drawing(),
                 Some(Target::Capture(CaptureMode::Gif)) if self.recording.is_some() => self.stop_recording(false),
                 Some(Target::Capture(CaptureMode::Scrolling | CaptureMode::Video | CaptureMode::Production)) if self.recording.is_some() => {
                     self.stop_recording(false)
@@ -885,6 +893,7 @@ impl Service {
     /// tray shows the captures again.
     fn recording_over(&mut self) {
         self.recording = None;
+        self.drawing = false;
         if let Some(t) = &mut self.tray {
             t.set_recording(false);
             t.show_recording(None);
@@ -917,6 +926,9 @@ impl Service {
             border: self.settings.recording_border,
             pause_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Pause),
             stop_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Stop),
+            drawing: self.drawing,
+            can_draw: r.drawable && !r.stopping(),
+            draw_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Draw),
             shot_key: self.keys.label(&self.settings.hotkeys, CaptureMode::Region),
         });
         if let Some(t) = &mut self.tray {
@@ -930,6 +942,30 @@ impl Service {
             let paused = r.is_paused();
             r.set_paused(!paused);
         }
+        self.sync_tray();
+    }
+
+    /// Drawing on the screen over the area being recorded, on or off. Where it can't be (not
+    /// Windows, every screen at once, no screen), the owner is told why.
+    pub fn toggle_drawing(&mut self) {
+        let Some((drawable, stopping, ink)) = self.recording.as_ref().map(|r| (r.drawable, r.stopping(), r.ink.clone())) else { return };
+        if !drawable {
+            let why = if cfg!(target_os = "windows") {
+                "It works on a recording of an area, a window or one screen."
+            } else {
+                "It works on Windows for now: elsewhere the drawing would be recorded twice."
+            };
+            self.notify("You can't draw on this recording", why, None, None, true);
+            return;
+        }
+        self.drawing = !self.drawing && !stopping;
+        if let Ok(mut ink) = ink.lock() {
+            ink.on = self.drawing;
+            if !self.drawing {
+                ink.latest = None;
+            }
+        }
+        log::info!("drawing on the screen: {}", if self.drawing { "on" } else { "off" });
         self.sync_tray();
     }
 
@@ -1230,6 +1266,7 @@ impl Service {
         crate::popups::countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
         crate::popups::recording_frame(self, &ctx);
+        crate::popups::drawing(self, &ctx);
         crate::popups::notice(self, &ctx);
         crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);

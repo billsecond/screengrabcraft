@@ -75,6 +75,11 @@ on; on Windows the screen frozen to choose the area, and what's said once it's k
 the video. The picture is saved and copied as usual, and opens in the editor once the recording
 stops, so nothing comes up over the screen being recorded.
 
+**Draw on the screen while you record** (Windows): press F8, or the pen on the recording's controls,
+and draw over the area with a pen, arrows, boxes or step numbers. They go into the recording and
+fade away after a few seconds; F8, Done or Esc stops drawing. (Not on a recording of every screen
+at once.)
+
 On Windows the editor is kept ready in the background (Settings, After a capture): it starts a
 little after the capture service, and closing its window hides it, so a capture opens in it at
 once instead of waiting for Windows to start it. The editor opens where you left it: the same
