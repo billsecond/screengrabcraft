@@ -23,8 +23,13 @@ fn click(h: &mut Harness<'_, Editor>, label: &str) {
 }
 
 fn callout(ed: &mut Editor) -> screengrabcraft_model::ObjectId {
-    let shape =
-        Shape::Callout { rect: Rect::new(60.0, 40.0, 160.0, 60.0), tail: Pt::new(70.0, 160.0), text: "Hi".into(), form: CalloutForm::Rounded };
+    let shape = Shape::Callout {
+        rect: Rect::new(60.0, 40.0, 160.0, 60.0),
+        tail: Pt::new(70.0, 160.0),
+        text: "Hi".into(),
+        form: CalloutForm::Rounded,
+        tails: Vec::new(),
+    };
     ed.session.doc.add(shape, Kind::Callout.default_style()).unwrap()
 }
 
@@ -220,7 +225,7 @@ fn a_quick_style_restyles_the_selected_callout_in_one_undo_step() {
     shot(&mut h, "callout-quick-styles");
     click(&mut h, "Blue, arrow");
     let o = h.state().session.doc.get(id).cloned().unwrap();
-    let Shape::Callout { form, tail, rect, text } = o.shape else { panic!("a callout") };
+    let Shape::Callout { form, tail, rect, text, .. } = o.shape else { panic!("a callout") };
     assert_eq!((form, text.as_str()), (CalloutForm::Arrow, "Hi"));
     assert!(tail.x > rect.right(), "the arrow points right: {tail:?} {rect:?}");
     assert_eq!(o.style.fill, Color::rgb(0x1E, 0x88, 0xE5));

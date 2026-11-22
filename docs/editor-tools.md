@@ -24,7 +24,7 @@ had before 0.1.19, and what is still missing.
 | Effects, Properties | Effects only in the menu bar; the properties always shown | no Effects or Properties buttons by the panel |
 | Callouts | one form: a rounded box with a tail dragged anywhere | no square, oval, cloud or arrow-shaped callouts; no tails set to the lower left or right in one click |
 | Arrows | four head layouts, thickness, dashes, shadow | (curved arrows and other head shapes came later) |
-| Shapes | rectangle, rounded rectangle, ellipse | (triangles, polygons and stars came later; a polygon of clicked points is still missing) |
+| Shapes | rectangle, rounded rectangle, ellipse | (triangles, polygons and stars came later, and polygons of points clicked one by one) |
 | Text | our own fonts, colours, a box behind the text | no outline round the letters, no ready-made overlays (titles, captions on a see-through box) |
 | Stamps | seven stamps drawn in code | (a library of 34 with a search, faces and your own pictures came later) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |

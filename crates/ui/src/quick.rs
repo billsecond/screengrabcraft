@@ -128,7 +128,7 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind, cor
             bend: o.bend.unwrap_or(0.0),
             head: o.head.unwrap_or_default(),
         },
-        Kind::Line => Shape::Line { from: Pt::new(16.0, 62.0), to: Pt::new(92.0, 18.0) },
+        Kind::Line => Shape::Line { from: Pt::new(16.0, 62.0), to: Pt::new(92.0, 18.0), bend: 0.0 },
         Kind::Pen => Shape::Pen {
             points: (0..=24)
                 .map(|i| {
@@ -145,7 +145,7 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind, cor
             if round {
                 Shape::Ellipse { rect }
             } else if polygon {
-                Shape::Polygon { rect, sides: o.sides.unwrap_or(corners.0), star: o.star.unwrap_or(corners.1) }
+                Shape::Polygon { rect, sides: o.sides.unwrap_or(corners.0), star: o.star.unwrap_or(corners.1), corners: Vec::new() }
             } else {
                 Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) }
             }
@@ -164,7 +164,7 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind, cor
             let form = o.form.unwrap_or_default();
             let spot = o.tail.unwrap_or_default();
             let rect = callout_box(spot);
-            Shape::Callout { rect, tail: spot.place(form, rect), text: "Aa".into(), form }
+            Shape::Callout { rect, tail: spot.place(form, rect), text: "Aa".into(), form, tails: Vec::new() }
         }
         Kind::Step => {
             style.font_size = 22.0;

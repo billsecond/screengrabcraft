@@ -237,13 +237,14 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
     let line_end = || if shift { area.stop_at_edge(start, snap_angle(start, now)) } else { now };
     match kind {
         Kind::Arrow => Shape::Arrow { from: start, to: line_end(), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
-        Kind::Line => Shape::Line { from: start, to: line_end() },
+        Kind::Line => Shape::Line { from: start, to: line_end(), bend: 0.0 },
         Kind::Rect => Shape::Rect { rect: boxed(false), radius: 0.0 },
         Kind::Ellipse => Shape::Ellipse { rect: boxed(false) },
         Kind::Polygon => Shape::Polygon {
             rect: boxed(false),
             sides: opts.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES),
             star: opts.star.unwrap_or(false),
+            corners: Vec::new(),
         },
         Kind::Pen => Shape::Pen { points: vec![start, now] },
         Kind::Highlight => Shape::highlight(boxed(false)),
@@ -253,7 +254,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
             let rect = boxed(false);
             let form = opts.form.unwrap_or_default();
             let tail = area.nearest(opts.tail.unwrap_or_default().place(form, rect));
-            Shape::Callout { rect, tail, text: String::new(), form }
+            Shape::Callout { rect, tail, text: String::new(), form, tails: Vec::new() }
         }
         Kind::Step => Shape::step(now, step),
         Kind::Blur => Shape::Blur { rect: boxed(false) },
@@ -268,7 +269,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
 /// Whether a just-drawn shape is big enough to keep.
 fn big_enough(shape: &Shape) -> bool {
     match shape {
-        Shape::Arrow { from, to, .. } | Shape::Line { from, to } => from.distance(*to) >= 4.0,
+        Shape::Arrow { from, to, .. } | Shape::Line { from, to, .. } => from.distance(*to) >= 4.0,
         Shape::Pen { points } => points.len() >= 2 && Rect::bounding(points).w.max(Rect::bounding(points).h) >= 2.0,
         Shape::Step { .. } => true,
         other => other.rect().is_some_and(|r| r.w >= 4.0 && r.h >= 4.0),
@@ -544,6 +545,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
         crate::edit_text::paint(ed, ui, resp.hover_pos());
+        paint_polygon_draft(ed, ui, resp.hover_pos());
         text_editor(ed, ui);
     });
 }
@@ -596,6 +598,9 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 
     // ---- Edit Text in the Picture: while its lines are offered, a click picks one ----
     if crate::edit_text::input(ed, &ctx, resp) {
+        return;
+    }
+    if polygon_input(ed, &ctx, resp) {
         return;
     }
 
@@ -1141,6 +1146,75 @@ fn lift_area(ed: &mut Editor, ctx: &egui::Context, start: Pt) -> bool {
     true
 }
 
+/// The Shape tool drawing a polygon of points clicked one by one: each click puts a corner down,
+/// a double click (or a click on the first corner, or Enter) closes it, Backspace takes the last
+/// back and Esc lets it go. A press on an annotation before the first corner picks it up, as with
+/// any tool. True when it took the pointer. (Enter, Backspace and Esc are the editor's keys.)
+fn polygon_input(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) -> bool {
+    if ed.tool != Tool::Draw(Kind::Polygon) || !ed.polygon_points {
+        return false;
+    }
+    if ed.polygon_draft.is_empty()
+        && let Some(p) = ctx.input(|i| i.pointer.press_origin())
+        && ctx.input(|i| i.pointer.primary_down() || i.pointer.primary_released())
+        && (ed.handle_at(p).is_some() || ed.object_under(ed.view.to_image(p)).is_some())
+    {
+        return false;
+    }
+    if resp.hovered() {
+        ctx.set_cursor_icon(CursorIcon::Crosshair);
+    }
+    if resp.clicked_by(egui::PointerButton::Primary)
+        && let Some(h) = resp.interact_pointer_pos()
+    {
+        // A double click (its second click where the first put the last corner) closes it;
+        // quick clicks elsewhere are corners.
+        let last = ed.polygon_draft.last().map(|l| ed.view.to_screen(*l));
+        if resp.double_clicked() && last.is_some_and(|l| l.distance(h) <= GRAB) {
+            close_polygon(ed, ctx);
+            return true;
+        }
+        let p = ed.view.to_image(h);
+        let first = ed.polygon_draft.first().map(|f| ed.view.to_screen(*f));
+        if ed.polygon_draft.len() >= 3 && first.is_some_and(|f| f.distance(h) <= GRAB) {
+            close_polygon(ed, ctx);
+        } else if ed.session.doc.bounds().contains(p) && ed.polygon_draft.len() < screengrabcraft_model::object::MAX_CORNERS {
+            ed.stop_editing();
+            ed.session.select(Vec::new());
+            ed.polygon_draft.push(p);
+        }
+    }
+    true
+}
+
+/// The polygon clicked out, added (with the Shape tool's look); fewer than three corners, let go.
+pub(crate) fn close_polygon(ed: &mut Editor, ctx: &egui::Context) {
+    let points = std::mem::take(&mut ed.polygon_draft);
+    let Some(shape) = screengrabcraft_model::object::polygon_through(&points) else {
+        ed.toast(ctx, "A polygon needs three corners or more");
+        return;
+    };
+    let mut object = serde_json::to_value(shape).unwrap_or_default();
+    object["style"] = serde_json::to_value(ed.tool_style(Kind::Polygon)).unwrap_or_default();
+    ed.run(ctx, "object.add", serde_json::json!({ "object": object }));
+}
+
+/// The corners clicked so far, joined, and on to the pointer.
+fn paint_polygon_draft(ed: &Editor, ui: &Ui, hover: Option<Pos2>) {
+    if ed.polygon_draft.is_empty() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let painter = ui.painter();
+    let mut pts: Vec<Pos2> = ed.polygon_draft.iter().map(|p| ed.view.to_screen(*p)).collect();
+    pts.extend(hover);
+    painter.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, t.handle)));
+    for p in pts.iter().take(ed.polygon_draft.len()) {
+        painter.circle_filled(*p, 4.0, Color32::WHITE);
+        painter.circle_stroke(*p, 4.0, Stroke::new(1.5, t.handle));
+    }
+}
+
 /// The menu a right-click on the picture opens: what can be done with the area of the picture
 /// selected, or with the annotations selected (Flatten among it), and Flatten All.
 fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
@@ -1238,6 +1312,21 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
             {
                 ed.start_editing(id);
                 ui.close();
+            }
+            // A callout: another tail, or one taken away.
+            let tails = match sel.as_slice() {
+                [one] => ed.session.doc.get(*one).and_then(|o| if let Shape::Callout { tails, .. } = &o.shape { Some(tails.len()) } else { None }),
+                _ => None,
+            };
+            if let Some(n) = tails {
+                if item(ui, n + 1 < screengrabcraft_model::object::MAX_TAILS, "Add a Tail", "") {
+                    ed.run(ctx, "object.addTail", serde_json::json!({}));
+                    ui.close();
+                }
+                if n > 0 && item(ui, true, "Remove a Tail", "") {
+                    ed.run(ctx, "object.removeTail", serde_json::json!({}));
+                    ui.close();
+                }
             }
             if item(ui, true, "Duplicate", "Ctrl+D") {
                 ed.run(ctx, "edit.duplicate", serde_json::json!({}));
@@ -1382,7 +1471,7 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                     let off = opts.tail.unwrap_or_default().offset(form, bw, bh);
                     let x = (p.x - off.x).min(w - bw).max(0.0);
                     let y = (p.y - off.y).min(h - bh).max(0.0);
-                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form })
+                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form, tails: Vec::new() })
                 }
                 Kind::Step => {
                     let labels = ed.tool_options(Kind::Step).labels.unwrap_or_default();
@@ -1488,7 +1577,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
                     let d = HANDLE * 0.75;
                     let corners = vec![pos2(s.x, s.y - d), pos2(s.x + d, s.y), pos2(s.x, s.y + d), pos2(s.x - d, s.y)];
                     painter.add(egui::Shape::convex_polygon(corners, t.handle, Stroke::new(1.5, Color32::WHITE)));
-                } else if h == Handle::Tail || line_like {
+                } else if matches!(h, Handle::Tail | Handle::TailAt(_)) || line_like {
                     painter.circle_filled(s, HANDLE * 0.6, Color32::WHITE);
                     painter.circle_stroke(s, HANDLE * 0.6, Stroke::new(1.5, t.handle));
                 } else {

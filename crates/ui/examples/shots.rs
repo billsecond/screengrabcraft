@@ -341,6 +341,7 @@ fn picture_editor(settings: &EditorSettings) -> Result<Editor, String> {
             tail: Pt::new(618.0, 284.0),
             text: "Saturday was the busiest day".into(),
             form: CalloutForm::Rounded,
+            tails: Vec::new(),
         },
     );
     ed.session.replace(doc);

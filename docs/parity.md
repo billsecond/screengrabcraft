@@ -83,13 +83,13 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Arrow: one or two heads, thickness, dashes, shadow | Has | |
 | **Curved arrow, more head shapes** | Has | a diamond in a selected arrow's middle bends it, or Straight and Curved in its Shape options; heads notched, solid, an open V, a dot or a bar |
-| Line, pen, highlighter | Has | |
+| Line, pen, highlighter | Has | a line bends as an arrow does: the diamond in its middle, or Curved in its Shape options |
 | Text: fill, outline round the letters, shadow, alignment | Has | |
 | **Any font on the computer** | Has | for text and callouts, with a search; used, never shipped; a project keeps the font's name and shows the built-in font where it's missing; not in the browser |
 | Callouts in five forms, tails any way | Has | |
-| Callout with several tails | Missing | |
+| **Callout with several tails** | Has | Add a Tail in a selected callout's Shape options or its right-click menu: up to 8, each dragged on its own, in every form |
 | Rectangle, rounded rectangle, ellipse | Has | |
-| **Polygon, triangle, star** | Part | triangles, diamonds, polygons of 3 to 12 corners and stars of 3 to 12 points, drawn in a box with the Shape tool; not a polygon of points clicked one by one |
+| **Polygon, triangle, star** | Has | triangles, diamonds, polygons of 3 to 12 corners and stars of 3 to 12 points, drawn in a box with the Shape tool; and polygons of points clicked one by one (Shape options › Points clicked: a double click or Enter closes it), moved and resized as a box |
 | **Stamps: a library with a search, faces, pictures of your own** | Has | 34 drawn in code (25 symbols and 9 faces); pictures of your own kept in the settings folder (not in the browser) |
 | Fill an area or a shape | Has | |
 | Gradient fills | Missing | |
@@ -288,6 +288,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 12. Personal details hidden by themselves: emails, phone and card numbers, addresses (Windows; not faces).
 13. Simplify; a part of the picture lifted and moved, filled where it was.
 14. Edit text in the picture: a line read covered and typed over in its size and colour (Windows).
+15. Polygons of points clicked one by one; bent lines; callouts with several tails.
 
 **Still to build, in this order**
 

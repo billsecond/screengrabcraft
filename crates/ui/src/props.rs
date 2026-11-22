@@ -420,7 +420,12 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     };
     ui.heading(title);
     if sel.is_empty() {
-        ui.label(egui::RichText::new(how_to(kind)).size(12.0).color(t.muted));
+        let how = if ed.tool == Tool::Draw(Kind::Polygon) && ed.polygon_points {
+            "Click each corner on the picture. A double click, a click on the first corner or Enter closes it; Backspace takes the last back."
+        } else {
+            how_to(kind)
+        };
+        ui.label(egui::RichText::new(how).size(12.0).color(t.muted));
     }
     ui.add_space(8.0);
     if kind != Kind::Image {
@@ -614,8 +619,10 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     let mut s = old;
     let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
     let outline = !matches!(kind, Kind::Blur | Kind::Pixelate);
-    let picker =
-        matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step);
+    let picker = matches!(
+        kind,
+        Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step
+    );
     let shadow = !matches!(kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Highlight);
     let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Pen | Kind::Callout);
     // Text and callouts can have an outline round their letters too.
@@ -958,6 +965,9 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
     let opts = options_of(shape, ed.tool_options(kind));
     let mut chosen: Option<ShapeOptions> = None;
     let mut new_tool: Option<Tool> = None;
+    // A polygon of clicked points picked (Some(true)), or another shape (Some(false)).
+    let mut by_points: Option<bool> = None;
+    let (mut add_tail, mut remove_tail) = (false, false);
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(220.0);
         let none = ShapeOptions::default();
@@ -1004,6 +1014,24 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                 ui.add_space(4.0);
                 ui.label(small("Drag the diamond in a selected arrow's middle to bend it as you like."));
             }
+            Kind::Line => {
+                ui.label(small("Line"));
+                ui.horizontal_wrapped(|ui| {
+                    let bend = opts.bend.unwrap_or(0.0);
+                    for (b, label, name) in [
+                        (0.0, "Straight", "A straight line"),
+                        (CURVE, "Curved", "Bowed to the left of the way it was drawn"),
+                        (-CURVE, "Curved the other way", "Bowed to the right of the way it was drawn"),
+                    ] {
+                        let on = if b == 0.0 { bend == 0.0 } else { bend * b > 0.0 };
+                        if ui.selectable_label(on, label).on_hover_text(name).clicked() {
+                            chosen = Some(ShapeOptions { bend: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Drag the diamond in a selected line's middle to bend it as you like."));
+            }
             Kind::Rect | Kind::Ellipse | Kind::Polygon => {
                 let radius = opts.radius.unwrap_or(0.0);
                 for (label, round, rounded) in [("Rectangle", false, false), ("Rounded rectangle", false, true), ("Ellipse", true, false)] {
@@ -1012,7 +1040,9 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         Kind::Rect => !round && (radius > 0.0) == rounded,
                         _ => false,
                     };
+                    let on = on && !ed.polygon_points;
                     if ui.selectable_label(on, label).clicked() {
+                        by_points = Some(false);
                         let r = if rounded { if radius > 0.0 { radius } else { 14.0 } } else { 0.0 };
                         chosen = Some(ShapeOptions { round: Some(round), radius: (!round).then_some(r), ..none });
                         new_tool = Some(Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect }));
@@ -1021,14 +1051,23 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                 ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     for (label, sides, star) in POLYGONS {
-                        let on = shown_kind == Kind::Polygon && opts.sides == Some(sides) && opts.star.unwrap_or(false) == star;
+                        let on = shown_kind == Kind::Polygon && opts.sides == Some(sides) && opts.star.unwrap_or(false) == star && !ed.polygon_points;
                         if ui.selectable_label(on, label).clicked() {
+                            by_points = Some(false);
                             chosen = Some(ShapeOptions { sides: Some(sides), star: Some(star), ..none });
                             new_tool = Some(Tool::Draw(Kind::Polygon));
                         }
                     }
                 });
-                if shown_kind == Kind::Polygon {
+                let free = shape.is_some_and(|s| matches!(s, Shape::Polygon { corners, .. } if !corners.is_empty()));
+                if ui
+                    .selectable_label(free || (shape.is_none() && ed.polygon_points), "Points clicked")
+                    .on_hover_text("A polygon of points clicked one by one: a double click or Enter closes it")
+                    .clicked()
+                {
+                    by_points = Some(true);
+                }
+                if shown_kind == Kind::Polygon && !free && !ed.polygon_points {
                     let star = opts.star.unwrap_or(false);
                     ui.add_space(6.0);
                     ui.label(small(if star { "Points" } else { "Corners" }));
@@ -1060,6 +1099,27 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         }
                     }
                 });
+                if let Some(Shape::Callout { tails, .. }) = shape {
+                    ui.add_space(6.0);
+                    ui.label(small("Tails"));
+                    ui.horizontal(|ui| {
+                        let room = tails.len() + 1 < screengrabcraft_model::object::MAX_TAILS;
+                        if ui
+                            .add_enabled(room, egui::Button::new("Add a Tail"))
+                            .on_hover_text("Another tail, to point at something else too")
+                            .clicked()
+                        {
+                            add_tail = true;
+                        }
+                        if ui
+                            .add_enabled(!tails.is_empty(), egui::Button::new("Remove a Tail"))
+                            .on_hover_text("Takes away the tail added last")
+                            .clicked()
+                        {
+                            remove_tail = true;
+                        }
+                    });
+                }
             }
             Kind::Stamp => {
                 ui.label(small("Stamp"));
@@ -1104,6 +1164,21 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
             _ => {}
         }
     });
+    if add_tail || remove_tail {
+        ed.run(&ctx, if add_tail { "object.addTail" } else { "object.removeTail" }, serde_json::json!({}));
+    }
+    match by_points {
+        Some(true) => {
+            ed.polygon_points = true;
+            ed.polygon_draft.clear();
+            if ed.session.selected().is_empty() {
+                ed.set_tool(Tool::Draw(Kind::Polygon));
+                ed.polygon_points = true;
+            }
+        }
+        Some(false) => ed.polygon_points = false,
+        None => {}
+    }
     if let Some(o) = chosen {
         // A rectangle or an ellipse picked: the Shape tool draws no polygon until one is picked.
         if o.round.is_some() && kind.family() == Kind::Rect {

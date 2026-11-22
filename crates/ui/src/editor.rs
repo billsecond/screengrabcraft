@@ -305,6 +305,10 @@ pub struct Editor {
     pub(crate) simplify: crate::simplify::State,
     /// Edit Text in the Picture: the reader at work, and the lines offered to pick from.
     pub(crate) edit_text: crate::edit_text::State,
+    /// The Shape tool draws a polygon of points clicked one by one (its "Points clicked").
+    pub(crate) polygon_points: bool,
+    /// The corners of that polygon clicked so far.
+    pub(crate) polygon_draft: Vec<screengrabcraft_model::Pt>,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -409,6 +413,8 @@ impl Editor {
             details: crate::details::State::default(),
             simplify: crate::simplify::State::default(),
             edit_text: crate::edit_text::State::default(),
+            polygon_points: false,
+            polygon_draft: Vec::new(),
         }
     }
 
@@ -1498,14 +1504,18 @@ impl Editor {
         }
         let plain = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
         if plain(Key::Delete) || plain(Key::Backspace) {
-            if self.area.is_some() {
+            if !self.polygon_draft.is_empty() {
+                self.polygon_draft.pop();
+            } else if self.area.is_some() {
                 self.erase_area(ctx);
             } else if !self.session.selected().is_empty() {
                 self.run(ctx, "edit.delete", json!({}));
             }
         }
         if plain(Key::Escape) {
-            if self.edit_text.picking() {
+            if !self.polygon_draft.is_empty() {
+                self.polygon_draft.clear();
+            } else if self.edit_text.picking() {
                 self.edit_text.stop();
             } else if crate::eyedropper::active(ctx) {
                 // Only the eyedropper goes: the selection it was taking a colour for stays.
@@ -1521,8 +1531,12 @@ impl Editor {
                 self.run(ctx, "edit.selectNone", json!({}));
             }
         }
-        if plain(Key::Enter) && self.crop.is_some() {
-            self.apply_crop(ctx);
+        if plain(Key::Enter) {
+            if self.crop.is_some() {
+                self.apply_crop(ctx);
+            } else if !self.polygon_draft.is_empty() {
+                crate::canvas::close_polygon(self, ctx);
+            }
         }
         for (key, dx, dy) in [(Key::ArrowLeft, -1.0, 0.0), (Key::ArrowRight, 1.0, 0.0), (Key::ArrowUp, 0.0, -1.0), (Key::ArrowDown, 0.0, 1.0)] {
             let big = ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, key));
@@ -1540,6 +1554,9 @@ impl Editor {
     }
 
     pub fn set_tool(&mut self, tool: Tool) {
+        if tool != Tool::Draw(Kind::Polygon) {
+            self.polygon_draft.clear();
+        }
         if self.tool == Tool::Crop && tool != Tool::Crop {
             self.crop = None;
         }
