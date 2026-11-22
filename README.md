@@ -217,6 +217,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   area selected on the picture. Drag the panes' left edge to make them wider, and the bar
   between them to give either more room (a double click puts it back). The Effects menu has
   them too.
+- **Turn, group and line up annotations**: the round handle over a selected box (or group) turns
+  it, Shift in steps of 15°; Edit › Group (Ctrl+G) and Ungroup, Rotate and Flip, Align and
+  Distribute, and Select All of This Kind, in the right-click menu too.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen draws over things); its handles take hold even when the press is a little off.

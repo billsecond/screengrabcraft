@@ -1390,6 +1390,11 @@ impl Editor {
         if pressed(cmd(Key::D)) && !self.session.selected().is_empty() {
             self.run(ctx, "edit.duplicate", json!({}));
         }
+        if pressed(cmd_shift(Key::G)) && !self.session.selected().is_empty() {
+            self.run(ctx, "object.ungroup", json!({}));
+        } else if pressed(cmd(Key::G)) && self.session.selected().len() >= 2 {
+            self.run(ctx, "object.group", json!({}));
+        }
         // Flatten: the selected annotations, or every one when none is selected.
         if pressed(cmd_shift(Key::F)) && !self.session.doc.objects.is_empty() {
             self.flatten(ctx, false);
@@ -1643,6 +1648,10 @@ impl Editor {
                             self.run(&ctx, "object.order", json!({"to": to}));
                             ui.close();
                         }
+                    }
+                    ui.separator();
+                    if crate::arrange::items(self, ui) {
+                        ui.close();
                     }
                     ui.separator();
                     if ui

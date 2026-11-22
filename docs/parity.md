@@ -119,8 +119,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Undo and redo, also after closing | Has | |
 | Flatten selected, flatten all | Has | |
 | Bring forward, send back | Has | |
-| Group, align, flip annotations; select all of one kind | Missing | |
-| Rotate annotations | Missing | |
+| **Group, align, flip annotations; select all of one kind** | Has | Edit menu and right-click: group (Ctrl+G), align, distribute, flip across or up and down, select all of the kinds selected; a group is selected, moved and turned as one |
+| **Rotate annotations** | Has | a round handle over a box or a group (Shift: 15° steps), or Rotate and Flip; lines, arrows and strokes turn by their points; blur, pixelate, spotlight and magnify stay square |
 | Snap to guides | Missing | |
 | Spell check | Missing | |
 | Measure a distance | Missing | |
@@ -282,6 +282,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 7. Any font on the computer.
 8. More effects: hue, saturation and gamma, sepia, sharpen, blur, wavy and faded edges, a bevel,
    perspective, a page curl, a reflection, a watermark, capture details; on a selected area.
+9. Rotate, group, align, distribute and flip annotations; select all of one kind.
 
 **Still to build, in this order**
 
@@ -295,18 +296,17 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Hold a frame.
 9. Keys pressed shown in the video.
 10. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-11. Rotate, group and align annotations; select all of one kind.
-12. Magic wand, eraser, ellipse and freehand selections.
-13. Camera background removed, or a colour removed.
-14. Transitions between clips; keyframe animation.
-15. Drawing on the screen while recording.
-16. Volume along a clip; music lowered under the voice; levels evened out.
-17. Tags, favourites, and captures sorted by program.
-18. Templates; several pictures combined into one.
-19. A picture per click made into a how-to guide.
-20. Groups, pushing later clips along, locked and solo tracks, clip colours.
-21. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-22. Print; batch changes; captures on a timer or at a set time.
-23. Cutting words from the transcript; filler words taken out.
-24. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+11. Magic wand, eraser, ellipse and freehand selections.
+12. Camera background removed, or a colour removed.
+13. Transitions between clips; keyframe animation.
+14. Drawing on the screen while recording.
+15. Volume along a clip; music lowered under the voice; levels evened out.
+16. Tags, favourites, and captures sorted by program.
+17. Templates; several pictures combined into one.
+18. A picture per click made into a how-to guide.
+19. Groups, pushing later clips along, locked and solo tracks, clip colours.
+20. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+21. Print; batch changes; captures on a timer or at a set time.
+22. Cutting words from the transcript; filler words taken out.
+23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

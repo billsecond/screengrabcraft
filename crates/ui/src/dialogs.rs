@@ -695,6 +695,8 @@ fn shortcuts(ui: &mut Ui) {
             ("Ctrl+V", "Paste a picture into this one"),
             ("Ctrl+Shift+V", "Paste a picture as a new one"),
             ("Ctrl+D", "Duplicate"),
+            ("Ctrl+G / Ctrl+Shift+G", "Group / Ungroup"),
+            ("The round handle", "Turn the selected box or group (Shift: in steps of 15°)"),
             ("Ctrl+S / Ctrl+Shift+S", "Save / Save As"),
             ("Ctrl+E", "Export"),
             ("Ctrl+O", "Open"),

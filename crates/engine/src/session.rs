@@ -250,8 +250,10 @@ impl Session {
         self.selection.iter().copied().filter(|id| self.doc.get(*id).is_some()).collect()
     }
 
+    /// Selects these annotations, and every other in a group with one of them (a group is
+    /// selected as one).
     pub fn select(&mut self, ids: Vec<ObjectId>) {
-        self.selection = ids;
+        self.selection = if self.doc.objects.iter().any(|o| o.group.is_some()) { self.doc.with_groups(&ids) } else { ids };
     }
 
     /// The undo and redo steps, to keep in a file (the next to undo or redo last in each).
