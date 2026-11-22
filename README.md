@@ -154,6 +154,13 @@ the picture editor to the video editor. Its timeline has a row for each track:
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
   what's round it twice as large.
+- **The camera's background taken away**, so the screen shows round you (the camera's panel,
+  Background): **Remove a colour** for a green screen (choose the colour and how far from it
+  still goes; its green glow on you is taken out), or **Remove it** with no green screen: the
+  background model (the one Remove Background uses, on this computer) looks at four of the
+  camera's pictures and learns what the room behind you looks like, then every picture keeps
+  what differs from it. Keep the camera still; Learn It Again if the light changed. What it
+  learnt is kept in the recording file.
 - **Keys pressed**: in a recording that kept the shortcuts pressed (see above), the Keys Pressed
   section of the panel shows each as keys on the video for a moment after it's pressed, where the
   edits put that moment: at the bottom (above the captions), the top or a corner, any size, light

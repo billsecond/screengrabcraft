@@ -1346,6 +1346,116 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
     assert!(h.query_by_label("Show the mouse pointer").is_none());
 }
 
+/// A white screen and a camera of a green screen with a red box (the person) in it, for 2 s.
+fn recording_green_screen() -> Vec<u8> {
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 },
+        StreamInfo { id: 3, kind: StreamKind::Camera, name: "Camera".into(), width: 80, height: 60, channels: 0 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    let mut cam = image::RgbImage::from_pixel(80, 60, image::Rgb([0x00, 0xB1, 0x40]));
+    for y in 10..60 {
+        for x in 30..50 {
+            cam.put_pixel(x, y, image::Rgb([0xE0, 0x20, 0x20]));
+        }
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95).encode_image(&cam).unwrap();
+    for t in 0..20u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::WHITE).unwrap()).unwrap();
+        w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+    }
+    w.finish(2_000_000).unwrap()
+}
+
+/// A made-up background model: the red is the person.
+struct RedIsThePerson;
+
+impl screengrabcraft_render::matte::Matting for RedIsThePerson {
+    fn name(&self) -> &str {
+        "test"
+    }
+    fn matte(
+        &self,
+        picture: &Raster,
+        progress: &mut dyn FnMut(f32) -> bool,
+    ) -> Result<screengrabcraft_render::matte::Matte, screengrabcraft_render::matte::MatteError> {
+        progress(0.5);
+        let alpha = picture.pixels().chunks(4).map(|p| if p[0] > 150 && p[1] < 100 { 255 } else { 0 }).collect();
+        Ok(screengrabcraft_render::matte::Matte::new(picture.width(), picture.height(), alpha).unwrap())
+    }
+}
+
+/// A host with the made-up model, keeping what's added to the recording file.
+#[derive(Clone, Default)]
+struct ModelHost(std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>>);
+
+impl crate::services::Services for ModelHost {
+    fn background_model(&self) -> Result<std::sync::Arc<dyn screengrabcraft_render::matte::Matting>, String> {
+        Ok(std::sync::Arc::new(RedIsThePerson))
+    }
+    fn append_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().push((path.to_string(), bytes.len()));
+        Ok(())
+    }
+}
+
+#[test]
+fn the_cameras_green_screen_or_its_background_is_taken_away_from_its_panel() {
+    let host = ModelHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Green.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Green.sgvideo".into(), path, bytes: recording_green_screen() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 900.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let green = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(500_000), [0x00, 0xB1, 0x40]);
+    let red = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(500_000), [0xE0, 0x20, 0x20]);
+    let (green_before, red_before) = (green(&mut h), red(&mut h));
+    assert!(green_before > 400 && red_before > 100, "{green_before} {red_before}");
+    shot(&mut h, "video-camera-panel");
+    // Remove a colour: the green screen goes, the person stays.
+    h.get_by_value("Keep it").click();
+    h.run_steps(3);
+    h.get_by_label("Remove a colour (green screen)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.camera.remove, screengrabcraft_media::keyer::Remove::Colour);
+    assert!(green(&mut h) < 20, "{}", green(&mut h));
+    assert!(red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Tolerance").is_some());
+    shot(&mut h, "video-camera-green-screen");
+    // Remove the background instead: it's learnt on a thread, then kept in the file.
+    h.get_by_value("Remove a colour (green screen)").click();
+    h.run_steps(3);
+    h.get_by_label("Remove it (no green screen)").click();
+    for _ in 0..40 {
+        h.run_steps(1);
+        if h.state().video.as_ref().unwrap().rec.plate().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().rec.plate().is_some(), "the background was learnt");
+    assert_eq!(host.0.lock().unwrap().last().map(|(p, _)| p.as_str()), Some("C:/Captures/Green.sgvideo"));
+    assert!(green(&mut h) < 60, "{}", green(&mut h));
+    assert!(red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Learn It Again").is_some());
+    shot(&mut h, "video-camera-background");
+    // Undone: kept as it was.
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    assert!(green(&mut h) > 400);
+}
+
 /// A grey screen for 4 s, with Ctrl+S pressed at 1 s and Enter at 3 s.
 fn recording_with_keys() -> Vec<u8> {
     let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 }];

@@ -638,6 +638,38 @@ fn delete_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// What's taken away from the camera's picture: nothing, a colour (a green screen), or the
+/// background (learnt by the background model, see `screengrabcraft_media::keyer`).
+fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::keyer::Remove;
+    if !p.is_object() {
+        return Err(EngineError::Params("what's taken away is given as an object".to_string()));
+    }
+    let remove = match p.get("remove") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Remove>(v.clone()).map_err(|_| EngineError::Params("`remove` is nothing, colour or background".to_string()))?,
+        ),
+    };
+    let colour = match text(p, "colour")? {
+        None => None,
+        Some(c) => {
+            let h = c.trim().trim_start_matches('#');
+            let byte = |i: usize| h.get(i..i + 2).and_then(|s| u8::from_str_radix(s, 16).ok());
+            match (h.len(), byte(0), byte(2), byte(4)) {
+                (6, Some(r), Some(g), Some(b)) => Some([r, g, b]),
+                _ => return Err(EngineError::Params("`colour` is #rrggbb".to_string())),
+            }
+        }
+    };
+    let tolerance = number(p, "tolerance")?;
+    let c = &mut s.timeline.camera;
+    c.remove = remove.unwrap_or(c.remove);
+    c.key_colour = colour.unwrap_or(c.key_colour);
+    c.key_tolerance = tolerance.map_or(c.key_tolerance, |t| t.clamp(0.0, 1.0));
+    Ok(json!({}))
+}
+
 fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if p.get("corner").is_some_and(|v| !v.is_null()) || p.get("x").is_none() {
         // Back in its corner.
@@ -817,6 +849,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Move Layer",
         params: r#"{"layer": id, "to": n}: its place among the layers, 0 at the back"#,
         run: move_layer,
+    },
+    VideoCommand {
+        id: "video.cameraKey",
+        label: "Camera Background",
+        params: r##"{"remove"?: "nothing"|"colour"|"background", "colour"?: "#rrggbb", "tolerance"?: 0..1}: what's taken away from the camera's picture so the screen shows round you: a colour (a green screen; how far from it still goes), or the background (learnt from a few of the camera's pictures by the background model, the camera kept still)"##,
+        run: camera_key,
     },
     VideoCommand {
         id: "video.cameraAt",
@@ -1073,6 +1111,25 @@ mod tests {
         s.execute("video.volume", &json!({"track": 1, "volume": 1.5})).unwrap();
         assert!(s.timeline.tracks[1].muted);
         s.execute("video.revert", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_cameras_colour_or_background_is_taken_away_and_undone() {
+        use screengrabcraft_media::keyer::Remove;
+        let mut s = session();
+        s.execute("video.cameraKey", &json!({"remove": "colour", "colour": "#10F020", "tolerance": 7})).unwrap();
+        let c = s.timeline.camera;
+        assert_eq!((c.remove, c.key_colour, c.key_tolerance), (Remove::Colour, [0x10, 0xF0, 0x20], 1.0));
+        assert_eq!(s.undo_label(), Some("Camera Background"));
+        s.execute("video.cameraKey", &json!({"remove": "background"})).unwrap();
+        assert_eq!(s.timeline.camera.remove, Remove::Background);
+        for bad in [json!({"remove": "everything"}), json!({"colour": "green"}), json!({"colour": "#12345"}), json!({"tolerance": "lots"}), json!(1)]
+        {
+            assert!(s.execute("video.cameraKey", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
     }
 

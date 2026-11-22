@@ -301,6 +301,15 @@ pub fn captions_bytes(captions: &Captions) -> Result<Vec<u8>, RecordingError> {
     Ok(out)
 }
 
+/// A chunk of the camera's background as learnt (see [`crate::keyer`]), to add to the end of a
+/// recording: the last one counts.
+pub fn plate_bytes(plate: &crate::keyer::Plate) -> Result<Vec<u8>, RecordingError> {
+    let body = plate.to_bytes();
+    let mut out = Vec::with_capacity(body.len() + 12);
+    chunk(&mut out, b"CPLT", &body)?;
+    Ok(out)
+}
+
 /// How much of a recording's end is looked through for its captions.
 const CAPTIONS_TAIL: u64 = 32 * 1024 * 1024;
 
@@ -428,6 +437,9 @@ pub struct Recording {
     pub duration_us: u64,
     /// Each sound track's steady noise, learnt the first time its noise is taken out.
     noise: Mutex<BTreeMap<u8, std::sync::Arc<Vec<f32>>>>,
+    /// The camera's background, learnt by the background model to take it away (read from the
+    /// file, or learnt since it was opened).
+    plate: Mutex<Option<std::sync::Arc<crate::keyer::Plate>>>,
 }
 
 /// Where a stretch of sound ends, in µs.
@@ -458,6 +470,7 @@ impl Recording {
         let mut finished = None;
         let (mut pointer_samples, mut pointer_shapes) = (Vec::new(), Vec::new());
         let mut keys: Vec<crate::keys::Press> = Vec::new();
+        let mut plate = None;
         while at + 12 <= len {
             let head = source.read_at(at, 12)?;
             let (Some(size), Some(crc)) = (u32_at(&head, 4), u32_at(&head, 8)) else { break };
@@ -525,6 +538,11 @@ impl Recording {
                         pointer_shapes.push(s);
                     }
                 }
+                b"CPLT" => {
+                    if let Some(p) = crate::keyer::Plate::from_bytes(&peek) {
+                        plate = Some(std::sync::Arc::new(p));
+                    }
+                }
                 b"KEYS" => {
                     if keys.len() < crate::keys::MAX_PRESSES
                         && let Some(p) = crate::keys::press_from(&peek)
@@ -565,6 +583,7 @@ impl Recording {
             finished: finished.is_some(),
             duration_us,
             noise: Mutex::default(),
+            plate: Mutex::new(plate),
         };
         if let Some(t) = rec.timeline.take() {
             rec.timeline = Some(t.checked(&rec));
@@ -579,6 +598,16 @@ impl Recording {
     /// The pictures of a track, in order.
     pub fn frames(&self, stream: u8) -> &[FrameEntry] {
         self.frames.get(&stream).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// The camera's background as learnt to take it away (see [`crate::keyer`]), if it has been.
+    pub fn plate(&self) -> Option<std::sync::Arc<crate::keyer::Plate>> {
+        self.plate.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// The camera's background, learnt since it was opened (the host adds it to the file too).
+    pub fn set_plate(&self, plate: crate::keyer::Plate) {
+        *self.plate.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(std::sync::Arc::new(plate));
     }
 
     /// A sound track's steady noise (see [`crate::denoise::learn`]): learnt from the track the

@@ -34,6 +34,7 @@ use screengrabcraft_media::recording::{self, Recording, StreamKind};
 use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
+mod camera_key;
 mod export_window;
 mod library;
 mod transcript;
@@ -312,6 +313,8 @@ pub struct VideoView {
     /// A track's or a layer's name being typed (in its header, or the transcript), the words so
     /// far, whether the box has had the keys yet, and whether it's the transcript's.
     pub(crate) renaming: Option<(Rename, String, bool, bool)>,
+    /// The camera's background being learnt by the background model, to take it away.
+    pub(crate) learning: Option<camera_key::Learning>,
 }
 
 /// A small button with a triangle pointing up (or down): true when it's clicked.
@@ -588,6 +591,7 @@ impl VideoView {
             transcript_follow: None,
             transcript_heights: None,
             renaming: None,
+            learning: None,
             type_words: false,
         }
     }
@@ -1225,6 +1229,7 @@ impl VideoView {
             ctx.request_repaint_after(std::time::Duration::from_millis(300));
         }
         self.poll_export(ed, ctx);
+        self.poll_learning(ed, ctx);
     }
 
     fn keys(&mut self, ed: &mut Editor, ctx: &egui::Context) {
@@ -2083,6 +2088,8 @@ impl VideoView {
         }
         ui.add_space(4.0);
         ui.label(small("Or drag the camera on the picture to put it anywhere."));
+        ui.add_space(8.0);
+        self.camera_background(ed, ui);
         let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
         if hidden {
             ui.add_space(4.0);

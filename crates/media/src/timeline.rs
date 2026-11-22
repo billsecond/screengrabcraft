@@ -246,6 +246,28 @@ pub struct CameraLayout {
     /// in its corner.
     #[serde(default)]
     pub at: Option<[f32; 2]>,
+    /// What's taken away from its picture, so the screen shows round the person: a colour (a
+    /// green screen) or the background (see [`crate::keyer`]).
+    #[serde(default, skip_serializing_if = "is_nothing")]
+    pub remove: crate::keyer::Remove,
+    /// The colour taken away (RGB).
+    #[serde(default = "key_colour", rename = "keyColour")]
+    pub key_colour: [u8; 3],
+    /// How far from that colour a colour still goes, 0 to 1.
+    #[serde(default = "key_tolerance", rename = "keyTolerance")]
+    pub key_tolerance: f32,
+}
+
+fn is_nothing(r: &crate::keyer::Remove) -> bool {
+    *r == crate::keyer::Remove::Nothing
+}
+
+fn key_colour() -> [u8; 3] {
+    crate::keyer::GREEN
+}
+
+fn key_tolerance() -> f32 {
+    0.35
 }
 
 fn camera_size() -> f32 {
@@ -254,7 +276,15 @@ fn camera_size() -> f32 {
 
 impl Default for CameraLayout {
     fn default() -> CameraLayout {
-        CameraLayout { corner: Corner::default(), size: camera_size(), shape: CameraShape::default(), at: None }
+        CameraLayout {
+            corner: Corner::default(),
+            size: camera_size(),
+            shape: CameraShape::default(),
+            at: None,
+            remove: crate::keyer::Remove::Nothing,
+            key_colour: key_colour(),
+            key_tolerance: key_tolerance(),
+        }
     }
 }
 
@@ -418,6 +448,7 @@ impl Timeline {
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
         self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
+        self.camera.key_tolerance = if self.camera.key_tolerance.is_finite() { self.camera.key_tolerance.clamp(0.0, 1.0) } else { key_tolerance() };
         let mut checked = Timeline {
             tracks,
             camera: self.camera,

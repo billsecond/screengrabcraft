@@ -60,7 +60,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Camera in a corner: square, rounded, circle | Has | |
 | Camera full screen, swapped with the screen while recording | Part | with the screen off the camera is the video |
 | Camera border, mirrored camera | Missing | |
-| Camera background blurred or replaced | Missing | |
+| Camera background blurred or replaced | Part | taken away in the video editor (a colour, or the background learnt by the model) so the screen shows round you; not blurred, not replaced by a picture |
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
 | Recording controls kept out of the video | Has | |
@@ -219,8 +219,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Keys pressed shown as a callout** | Has | the Keys Pressed section: shown or not, where, how large, light or dark keys |
 | Progress bar, countdown | Has | |
 | Camera shape and corner | Has | |
-| Camera background removed (no green screen) | Missing | |
-| A colour removed (green screen) | Missing | |
+| **Camera background removed (no green screen)** | Has | the background model looks at four of the camera's pictures and learns the room; each picture keeps what differs from it (the camera kept still) |
+| **A colour removed (green screen)** | Has | the camera's panel: the colour and how far from it still goes; its glow on you taken out |
 | Colour adjustments and looks | Missing | |
 | Border, shadow, rounded corners on a clip | Part | the camera's shapes |
 | Device frames, masks, blend modes | Missing | |
@@ -283,7 +283,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Markers on the timeline, kept as chapters in the MP4 (#69).
 9. A frame saved as a picture; just the chosen stretch; just the sound (WAV, M4A) (#71).
 10. Hold a frame: the picture held while every track waits (#73).
-11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed.
+11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed (#76).
+12. The camera's background removed, with or without a green screen.
 
 **Still to build, in this order**
 
@@ -297,16 +298,15 @@ By how much someone using it every day would miss each one. Built ones move to a
     curl, reflection, watermark, capture details.
 8. Rotate, group and align annotations; select all of one kind.
 9. Magic wand, eraser, ellipse and freehand selections.
-10. Camera background removed, or a colour removed.
-11. Transitions between clips; keyframe animation.
-12. Drawing on the screen while recording.
-13. Volume along a clip; music lowered under the voice; levels evened out.
-14. Tags, favourites, and captures sorted by program.
-15. Templates; several pictures combined into one.
-16. A picture per click made into a how-to guide.
-17. Groups, pushing later clips along, locked and solo tracks, clip colours.
-18. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-19. Print; batch changes; captures on a timer or at a set time.
-20. Cutting words from the transcript; filler words taken out.
-21. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+10. Transitions between clips; keyframe animation.
+11. Drawing on the screen while recording.
+12. Volume along a clip; music lowered under the voice; levels evened out.
+13. Tags, favourites, and captures sorted by program.
+14. Templates; several pictures combined into one.
+15. A picture per click made into a how-to guide.
+16. Groups, pushing later clips along, locked and solo tracks, clip colours.
+17. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+18. Print; batch changes; captures on a timer or at a set time.
+19. Cutting words from the transcript; filler words taken out.
+20. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.
