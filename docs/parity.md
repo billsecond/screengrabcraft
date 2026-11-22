@@ -289,10 +289,10 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. Simplify; a part of the picture lifted and moved, filled where it was.
 14. Edit text in the picture: a line read covered and typed over in its size and colour (Windows).
 15. Polygons of points clicked one by one; bent lines; callouts with several tails.
-16. Gradient fills; themes of your own for the quick styles.
-17. Effect presets; the picture rotated by any angle.
-18. Rulers, guides and snapping; measuring a distance.
-19. A tool bar of your choosing; the captured pointer as an annotation to move or delete.
+16. Gradient fills; themes of your own for the quick styles (#100).
+17. Effect presets; the picture rotated by any angle (#105).
+18. Rulers, guides and snapping; measuring a distance (#108).
+19. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
 
 **Still to build, in this order**
 
