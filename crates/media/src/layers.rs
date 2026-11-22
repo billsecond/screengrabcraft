@@ -357,11 +357,30 @@ pub struct ItemLook {
     pub radius: f32,
     /// A soft shadow under it.
     pub shadow: bool,
+    /// How it's laid on what's under it.
+    #[serde(skip_serializing_if = "is_normal")]
+    pub blend: BlendMode,
+    /// Shown only inside a shape, or with a shape cut out of it.
+    #[serde(skip_serializing_if = "Mask::is_none")]
+    pub mask: Mask,
+}
+
+fn is_normal(b: &BlendMode) -> bool {
+    *b == BlendMode::Normal
 }
 
 impl Default for ItemLook {
     fn default() -> ItemLook {
-        ItemLook { rotate: 0.0, crop: [0.0; 4], border: 0.0, border_colour: "#ffffff".to_string(), radius: 0.0, shadow: false }
+        ItemLook {
+            rotate: 0.0,
+            crop: [0.0; 4],
+            border: 0.0,
+            border_colour: "#ffffff".to_string(),
+            radius: 0.0,
+            shadow: false,
+            blend: BlendMode::Normal,
+            mask: Mask::default(),
+        }
     }
 }
 
@@ -369,7 +388,18 @@ impl ItemLook {
     /// Nothing changed: drawn as it is.
     pub fn is_plain(&self) -> bool {
         let none = |v: f32| v.abs() < 1.0e-4 || !v.is_finite();
-        none(self.rotate) && self.crop.iter().all(|c| none(*c)) && none(self.border) && none(self.radius) && !self.shadow
+        none(self.rotate)
+            && self.crop.iter().all(|c| none(*c))
+            && none(self.border)
+            && none(self.radius)
+            && !self.shadow
+            && self.blend == BlendMode::Normal
+            && self.mask.is_none()
+    }
+
+    /// Drawn on a picture of its own first: masked, or laid on what's under it other than as it is.
+    pub fn is_layered(&self) -> bool {
+        self.blend != BlendMode::Normal || !self.mask.is_none()
     }
 
     /// Every value in its range (a hostile file's NaNs made sensible).
@@ -383,6 +413,119 @@ impl ItemLook {
             border_colour: format!("#{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2]),
             radius: f(self.radius, 0.0, 0.5),
             shadow: self.shadow,
+            blend: self.blend,
+            mask: self.mask.checked(),
+        }
+    }
+}
+
+/// How an item's picture is laid on what's under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlendMode {
+    /// As it is: it covers what's under it.
+    #[default]
+    Normal,
+    /// Its colours times those under it: white goes, dark darkens (a shadow, a stamp on paper).
+    Multiply,
+    /// The opposite: black goes, light lightens (light leaks, glows, flares).
+    Screen,
+    /// Multiply on the dark under it, screen on the light: more contrast (a texture).
+    Overlay,
+    /// The darker of it and what's under it.
+    Darken,
+    /// The lighter of it and what's under it.
+    Lighten,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 6] =
+        [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay, BlendMode::Darken, BlendMode::Lighten];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Darken => "Darken",
+            BlendMode::Lighten => "Lighten",
+        }
+    }
+}
+
+/// The shape of an item's mask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MaskShape {
+    /// No mask: all of it is shown.
+    #[default]
+    None,
+    Rectangle,
+    /// A rectangle with round corners.
+    Rounded,
+    /// An oval (a circle on a square).
+    Ellipse,
+    Diamond,
+    /// A five-pointed star.
+    Star,
+    Heart,
+}
+
+impl MaskShape {
+    pub const ALL: [MaskShape; 7] =
+        [MaskShape::None, MaskShape::Rectangle, MaskShape::Rounded, MaskShape::Ellipse, MaskShape::Diamond, MaskShape::Star, MaskShape::Heart];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MaskShape::None => "None",
+            MaskShape::Rectangle => "Rectangle",
+            MaskShape::Rounded => "Rounded rectangle",
+            MaskShape::Ellipse => "Oval",
+            MaskShape::Diamond => "Diamond",
+            MaskShape::Star => "Star",
+            MaskShape::Heart => "Heart",
+        }
+    }
+}
+
+/// An item shown only inside a shape (or, cut, everywhere but inside it). The shape's middle and
+/// size are shares of the item's own box, so it moves, grows and turns with it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Mask {
+    pub shape: MaskShape,
+    /// Its middle, across and down the item (0 to 1 is inside it).
+    pub x: f32,
+    pub y: f32,
+    /// Its width and height, shares of the item's.
+    pub w: f32,
+    pub h: f32,
+    /// The shape cut out of the item, instead of only it shown.
+    pub cut: bool,
+}
+
+impl Default for Mask {
+    fn default() -> Mask {
+        Mask { shape: MaskShape::None, x: 0.5, y: 0.5, w: 1.0, h: 1.0, cut: false }
+    }
+}
+
+impl Mask {
+    pub fn is_none(&self) -> bool {
+        self.shape == MaskShape::None
+    }
+
+    /// Every number in its range.
+    pub fn checked(self) -> Mask {
+        let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        Mask {
+            shape: self.shape,
+            x: f(self.x, -0.5, 1.5, 0.5),
+            y: f(self.y, -0.5, 1.5, 0.5),
+            w: f(self.w, 0.05, 2.0, 1.0),
+            h: f(self.h, 0.05, 2.0, 1.0),
+            cut: self.cut,
         }
     }
 }

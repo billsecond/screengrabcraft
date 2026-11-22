@@ -221,9 +221,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Camera shape and corner | Has | |
 | **Camera background removed (no green screen)** | Has | the background model looks at four of the camera's pictures and learns the room; each picture keeps what differs from it (the camera kept still) |
 | **A colour removed (green screen)** | Has | the camera's panel: the colour and how far from it still goes; its glow on you taken out |
-| **Colour adjustments and looks** | Part | a screen or camera clip's brightness, contrast and colour, in its panel; no ready-made looks |
+| **Colour adjustments and looks** | Has | a screen or camera clip's brightness, contrast, colour and tint, in its panel; eight ready-made looks (warm, cool, vivid, faded, dramatic, black and white, sepia, night) |
 | **Border, shadow, rounded corners on a clip** | Part | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the camera's shapes; not the recording's own screen |
-| Device frames, masks, blend modes | Missing | |
+| **Masks and blend modes**; device frames | Part | an item's panel (Mask and Blend): shown only inside a rectangle, rounded rectangle, oval, diamond, star or heart, or with the shape cut out of it, placed and sized on the item; laid on what's under it as multiply, screen, overlay, darken or lighten. No device frames yet |
 | Spotlight, blur a region | Has | |
 | Motion blur, freeze a region | Missing | |
 | Pointer: larger, smoothed, rings, hidden | Has | |
@@ -291,7 +291,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 16. Words cut out of the video from the transcript; filler words taken out (word times estimated) (#95).
 17. J, K and L playback keys; a clip played backwards, its sound too (#97).
 18. Subtitle files brought in as captions; a watermark on the video (#102).
-19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop.
+19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop (#106).
+20. Masks and blend modes for layer items; ready-made colour looks for a clip.
 
 **Still to build, in this order**
 
@@ -311,5 +312,5 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 15. Print; batch changes; captures on a timer or at a set time.
-16. The rest: device frames, pinning onto surfaces, motion paths, blend modes, lining up by
-    sound, see-through video, HDR, QR codes, measuring, spell check.
+16. The rest: device frames, pinning onto surfaces, motion paths, lining up by sound,
+    see-through video, HDR, QR codes, measuring, spell check.

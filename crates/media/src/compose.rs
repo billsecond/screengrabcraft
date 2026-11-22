@@ -603,25 +603,33 @@ fn within(outer: crate::zoom::View, inner: crate::zoom::View) -> crate::zoom::Vi
 }
 
 /// A picture's colours changed as a clip's look says: lighter or darker, more or less contrast,
-/// more or less colour (down to grey).
+/// more or less colour (down to grey), and tinted towards a colour (its lightness kept).
 pub fn adjust_colours(pic: &mut Raster, look: crate::timeline::ClipLook) {
     let look = look.checked();
-    if look.brightness == 0 && look.contrast == 0 && look.saturation == 0 {
+    if look.colours_plain() {
         return;
     }
     let lift = f32::from(look.brightness) / 100.0 * 128.0;
     let contrast = 1.0 + f32::from(look.contrast) / 100.0;
     let colour = 1.0 + f32::from(look.saturation) / 100.0;
+    // The tint: its colour for each grey, as light as that grey.
+    let [tr, tg, tb] = look.tint.map(f32::from);
+    let tint_grey = (0.299 * tr + 0.587 * tg + 0.114 * tb).max(16.0);
+    let tint = [tr / tint_grey, tg / tint_grey, tb / tint_grey];
+    let amount = f32::from(look.tint_amount) / 100.0;
     // Brightness and contrast, for each of the 256 values.
     let curve: Vec<f32> = (0..256).map(|v| ((v as f32 - 128.0) * contrast + 128.0 + lift).clamp(0.0, 255.0)).collect();
     let at = |v: u8| curve.get(usize::from(v)).copied().unwrap_or(f32::from(v));
     for p in pic.pixels_mut().as_chunks_mut::<4>().0 {
         let [r, g, b] = [at(p[0]), at(p[1]), at(p[2])];
         let grey = 0.299 * r + 0.587 * g + 0.114 * b;
-        let more = |v: f32| (grey + (v - grey) * colour).round().clamp(0.0, 255.0) as u8;
-        p[0] = more(r);
-        p[1] = more(g);
-        p[2] = more(b);
+        let more = |v: f32, k: f32| {
+            let v = (grey + (v - grey) * colour).clamp(0.0, 255.0);
+            (v + ((grey * k).min(255.0) - v) * amount).round().clamp(0.0, 255.0) as u8
+        };
+        p[0] = more(r, tint[0]);
+        p[1] = more(g, tint[1]);
+        p[2] = more(b, tint[2]);
     }
 }
 
@@ -1207,14 +1215,67 @@ mod tests {
         assert!(c.frame(&tl, 1_000_000).pixel(3, 3).unwrap().r < 100);
         // A sound track's clip has no colours; junk is kept in range.
         assert!(tl.set_clip_look(1, 0, |l| l.contrast = 10).is_err());
-        tl.set_clip_look(0, 0, |l| *l = crate::timeline::ClipLook { brightness: i8::MIN, contrast: i8::MAX, saturation: -128, crop: [9_999; 4] })
-            .unwrap();
+        tl.set_clip_look(0, 0, |l| {
+            *l = crate::timeline::ClipLook {
+                brightness: i8::MIN,
+                contrast: i8::MAX,
+                saturation: -128,
+                crop: [9_999; 4],
+                tint: [1, 2, 3],
+                tint_amount: 250,
+            }
+        })
+        .unwrap();
         let l = tl.tracks[0].clips[0].look;
         assert_eq!((l.brightness, l.contrast, l.saturation, l.crop), (-100, 100, -100, [450; 4]));
+        assert_eq!((l.tint, l.tint_amount), ([1, 2, 3], 100));
         let _ = c.frame(&tl, 1_000_000);
         // A crop of the left fifth: what's left, its shape kept, in the middle of it.
         let v = crate::timeline::ClipLook { crop: [200, 0, 0, 0], ..crate::timeline::ClipLook::PLAIN }.view();
         assert!((v.x - 0.2).abs() < 1e-6 && (v.y - 0.1).abs() < 1e-6 && (v.w - 0.8).abs() < 1e-6 && (v.h - 0.8).abs() < 1e-6, "{v:?}");
+    }
+
+    #[test]
+    fn ready_made_looks_tint_and_change_a_clips_colours() {
+        use crate::timeline::{ClipLook, LOOKS};
+        let grey = |v: u8| {
+            let mut p = Raster::filled(2, 1, Color::rgb(v, v, v)).unwrap();
+            p.pixels_mut()[4..7].copy_from_slice(&[200, 40, 40]);
+            p
+        };
+        let look = |key: &str| LOOKS.iter().find(|n| n.key == key).unwrap().look;
+        // Every look is different, named, and changes a picture.
+        for (k, n) in LOOKS.iter().enumerate() {
+            assert!(LOOKS.iter().skip(k + 1).all(|m| m.look != n.look && m.key != n.key), "{}", n.key);
+            assert_eq!(ClipLook { crop: [10, 0, 0, 0], ..n.look }.named().map(|m| m.key), Some(n.key));
+            let mut p = grey(128);
+            adjust_colours(&mut p, n.look);
+            assert_ne!(p, grey(128), "{}", n.key);
+        }
+        assert!(ClipLook::PLAIN.named().is_none());
+        // Sepia: grey becomes brown, its lightness about kept; the red pixel too.
+        let mut p = grey(128);
+        adjust_colours(&mut p, look("sepia"));
+        let (a, b) = (p.pixel(0, 0).unwrap(), p.pixel(1, 0).unwrap());
+        assert!(a.r > a.g && a.g > a.b && (100..=170).contains(&a.r), "{a:?}");
+        assert!(b.r > b.g && b.g > b.b, "{b:?}");
+        // Warm reddens grey, cool blues it; black and white is grey.
+        let mut w = grey(128);
+        adjust_colours(&mut w, look("warm"));
+        let mut c = grey(128);
+        adjust_colours(&mut c, look("cool"));
+        assert!(w.pixel(0, 0).unwrap().r > w.pixel(0, 0).unwrap().b && c.pixel(0, 0).unwrap().b > c.pixel(0, 0).unwrap().r);
+        let mut bw = grey(128);
+        adjust_colours(&mut bw, look("blackAndWhite"));
+        let q = bw.pixel(1, 0).unwrap();
+        assert!(q.r == q.g && q.g == q.b, "{q:?}");
+        // A tint of nothing does nothing; a full tint of a strong colour stays in range.
+        let mut p = grey(128);
+        adjust_colours(&mut p, ClipLook { tint: [255, 0, 0], tint_amount: 0, ..ClipLook::PLAIN });
+        assert_eq!(p, grey(128));
+        let mut p = grey(250);
+        adjust_colours(&mut p, ClipLook { tint: [0, 0, 255], tint_amount: 100, ..ClipLook::PLAIN });
+        assert_eq!(p.pixel(0, 0).unwrap(), Color::rgb(0, 0, 255));
     }
 
     #[test]

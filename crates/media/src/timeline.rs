@@ -97,28 +97,76 @@ pub struct ClipLook {
     pub saturation: i8,
     /// What's cut off each side, thousandths of the picture: left, top, right, bottom (0 to 450).
     pub crop: [u16; 4],
+    /// A colour its picture is tinted towards, its lightness kept...
+    pub tint: [u8; 3],
+    /// ...this far: 0 (not at all) to 100 (wholly that colour's hue).
+    #[serde(rename = "tintAmount")]
+    pub tint_amount: u8,
 }
 
 /// The most cut off a side (thousandths).
 pub const MAX_CROP: u16 = 450;
 
+/// A ready-made look for a clip: its colours only (its crop is its own).
+pub struct NamedLook {
+    /// Its name in commands.
+    pub key: &'static str,
+    pub label: &'static str,
+    pub look: ClipLook,
+}
+
+const fn colours(brightness: i8, contrast: i8, saturation: i8, tint: [u8; 3], tint_amount: u8) -> ClipLook {
+    ClipLook { brightness, contrast, saturation, crop: [0; 4], tint, tint_amount }
+}
+
+/// The ready-made looks, each made of a brightness, a contrast, a colour and a tint.
+pub const LOOKS: &[NamedLook] = &[
+    NamedLook { key: "warm", label: "Warm", look: colours(4, 6, 10, [255, 150, 60], 22) },
+    NamedLook { key: "cool", label: "Cool", look: colours(0, 4, -5, [70, 140, 255], 22) },
+    NamedLook { key: "vivid", label: "Vivid", look: colours(0, 18, 45, [0, 0, 0], 0) },
+    NamedLook { key: "faded", label: "Faded", look: colours(10, -30, -35, [0, 0, 0], 0) },
+    NamedLook { key: "dramatic", label: "Dramatic", look: colours(-8, 40, -25, [0, 0, 0], 0) },
+    NamedLook { key: "blackAndWhite", label: "Black and White", look: colours(0, 15, -100, [0, 0, 0], 0) },
+    NamedLook { key: "sepia", label: "Sepia", look: colours(0, 5, -100, [160, 110, 60], 70) },
+    NamedLook { key: "night", label: "Night", look: colours(-25, 10, -40, [40, 70, 160], 35) },
+];
+
 impl ClipLook {
     /// As recorded.
-    pub const PLAIN: ClipLook = ClipLook { brightness: 0, contrast: 0, saturation: 0, crop: [0; 4] };
+    pub const PLAIN: ClipLook = ClipLook { brightness: 0, contrast: 0, saturation: 0, crop: [0; 4], tint: [0; 3], tint_amount: 0 };
 
     pub fn is_plain(&self) -> bool {
-        *self == ClipLook::PLAIN
+        self.checked() == ClipLook::PLAIN
     }
 
-    /// Every value in its range.
+    /// Its colours as recorded (its crop aside).
+    pub fn colours_plain(&self) -> bool {
+        ClipLook { crop: [0; 4], ..self.checked() } == ClipLook::PLAIN
+    }
+
+    /// Every value in its range (a tint of nothing is no tint).
     pub fn checked(self) -> ClipLook {
         let p = |v: i8| v.clamp(-100, 100);
+        let tint_amount = self.tint_amount.min(100);
         ClipLook {
             brightness: p(self.brightness),
             contrast: p(self.contrast),
             saturation: p(self.saturation),
             crop: self.crop.map(|c| c.min(MAX_CROP)),
+            tint: if tint_amount == 0 { [0; 3] } else { self.tint },
+            tint_amount,
         }
+    }
+
+    /// Its colours made those of a ready-made look (its crop kept).
+    pub fn with_colours_of(self, named: &ClipLook) -> ClipLook {
+        ClipLook { crop: self.crop, ..*named }
+    }
+
+    /// The ready-made look its colours are, if they're one.
+    pub fn named(&self) -> Option<&'static NamedLook> {
+        let mine = ClipLook { crop: [0; 4], ..self.checked() };
+        LOOKS.iter().find(|n| n.look == mine)
     }
 
     /// The part of the picture shown (shares of it): what the crop leaves, cut a little more the

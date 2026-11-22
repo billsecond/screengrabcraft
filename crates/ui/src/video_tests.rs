@@ -3166,3 +3166,83 @@ fn a_picture_item_is_framed_and_a_clip_coloured_from_their_panels() {
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
 }
+
+#[test]
+fn a_picture_item_is_masked_and_blended_and_a_clip_given_a_look_from_their_panels() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::{BlendMode, MaskShape};
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let l = &v.session.timeline.layers[0];
+        let key = (l.id, l.items[0].id);
+        v.item = Some(key);
+        v.playhead = 1_000_000;
+        key
+    };
+    h.run_steps(3);
+    let look = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.clone();
+    // Its panel: shown in an oval, then the oval cut out of it; blended by multiplying.
+    scroll_side_panel_to(&mut h, "Mask and Blend");
+    h.get_by_value("None").click();
+    h.run_steps(2);
+    h.get_by_label("Oval").click();
+    h.run_steps(3);
+    assert_eq!(look(&h).mask.shape, MaskShape::Ellipse);
+    for label in ["Cut the shape out", "Shape across", "Shape width"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    h.get_by_value("Normal").click();
+    h.run_steps(2);
+    h.get_by_label("Multiply").click();
+    h.run_steps(3);
+    assert_eq!(look(&h).blend, BlendMode::Multiply);
+    shot(&mut h, "video-item-mask");
+    scroll_side_panel_to(&mut h, "Cut the shape out");
+    h.get_by_label("Cut the shape out").click();
+    h.run_steps(3);
+    let l = look(&h);
+    assert!(l.mask.cut && l.mask.w < 0.6, "cut out at half its size: {:?}", l.mask);
+    // On the video: the middle of the picture is gone, its corners there (multiplied: darker
+    // over the screen's dark square, as it is over its white).
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let multiplied = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "blend": "normal"})).unwrap();
+        let red = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        assert!(multiplied < red, "{multiplied} {red}");
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "mask": "none"})).unwrap();
+        let whole = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        assert!(red > 0 && red < whole * 9 / 10, "{red} of {whole}");
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "mask": "ellipse"})).unwrap();
+    }
+    // The screen's clip: a ready-made look from its panel.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.selected = Some((0, 0));
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Look");
+    h.get_by_value("As recorded").click();
+    h.run_steps(2);
+    h.get_by_label("Sepia").click();
+    h.run_steps(3);
+    let c = h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look;
+    assert_eq!(c.named().map(|n| n.key), Some("sepia"));
+    scroll_side_panel_to(&mut h, "Tint");
+    shot(&mut h, "video-clip-look");
+    scroll_side_panel_to(&mut h, "As Recorded");
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
+}

@@ -676,7 +676,7 @@ fn delete_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    use screengrabcraft_media::layers::{AnimKind, What};
+    use screengrabcraft_media::layers::{AnimKind, BlendMode, MaskShape, What};
     let (title, subtitle, color) = (text(p, "title")?, text(p, "subtitle")?, text(p, "color")?);
     let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
     let anim = |k: &str| -> Result<Option<AnimKind>> {
@@ -710,6 +710,36 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
         if p.get("introLen").is_some() { Some(int(p, "introLen")?) } else { None },
         if p.get("outroLen").is_some() { Some(int(p, "outroLen")?) } else { None },
     );
+    // How it's laid on what's under it, and the shape it's shown in (or that's cut out of it).
+    let blend = match p.get("blend") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<BlendMode>(v.clone())
+                .map_err(|_| EngineError::Params("`blend` is normal, multiply, screen, overlay, darken or lighten".to_string()))?,
+        ),
+    };
+    let mask = match p.get("mask") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<MaskShape>(v.clone())
+                .map_err(|_| EngineError::Params("`mask` is none, rectangle, rounded, ellipse, diamond, star or heart".to_string()))?,
+        ),
+    };
+    let mask_area = match p.get("maskArea") {
+        None => None,
+        Some(v) => {
+            let n: Vec<f32> =
+                v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect()).unwrap_or_default();
+            match n.as_slice() {
+                [x, y, w, h] => Some([*x, *y, *w, *h]),
+                _ => return Err(EngineError::Params("`maskArea` is [x, y, width, height], shares of the item".to_string())),
+            }
+        }
+    };
+    let mask_cut = match p.get("maskCut") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`maskCut` must be true or false".to_string()))?),
+    };
     s.timeline
         .set_item(id(p, "layer")?, id(p, "item")?, |i| {
             if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
@@ -755,6 +785,18 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             if let Some(v) = shadow {
                 look.shadow = v;
             }
+            if let Some(b) = blend {
+                look.blend = b;
+            }
+            if let Some(m) = mask {
+                look.mask.shape = m;
+            }
+            if let Some([x, y, w, h]) = mask_area {
+                (look.mask.x, look.mask.y, look.mask.w, look.mask.h) = (x, y, w, h);
+            }
+            if let Some(c) = mask_cut {
+                look.mask.cut = c;
+            }
             i.look = std::mem::take(&mut i.look).checked();
         })
         .map_err(edit_err)?;
@@ -783,9 +825,34 @@ fn clip_look(s: &mut VideoSession, p: &Value) -> Result<Value> {
             }
         }
     };
+    // A ready-made look sets every colour (what else is given then changes it); "plain" none.
+    let named = match text(p, "look")? {
+        None => None,
+        Some(k) if k == "plain" => Some(screengrabcraft_media::timeline::ClipLook::PLAIN),
+        Some(k) => Some(screengrabcraft_media::timeline::LOOKS.iter().find(|n| n.key == k).map(|n| n.look).ok_or_else(|| {
+            let keys: Vec<&str> = screengrabcraft_media::timeline::LOOKS.iter().map(|n| n.key).collect();
+            EngineError::Params(format!("`look` is plain or one of {}", keys.join(", ")))
+        })?),
+    };
+    let tint = match text(p, "tint")? {
+        None => None,
+        Some(c) => {
+            let t = c.trim().trim_start_matches('#');
+            if t.len() != 6 || !t.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(EngineError::Params("`tint` is a colour, #rrggbb".to_string()));
+            }
+            Some(screengrabcraft_media::layers::color(&c, [0, 0, 0]))
+        }
+    };
+    let tint_amount = number(p, "tintAmount")?.map(|v| v.round().clamp(0.0, 100.0) as u8);
     let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
     s.timeline
         .set_clip_look(track, clip, |l| {
+            if let Some(n) = &named {
+                *l = l.with_colours_of(n);
+            }
+            l.tint = tint.unwrap_or(l.tint);
+            l.tint_amount = tint_amount.unwrap_or(l.tint_amount);
             l.brightness = brightness.unwrap_or(l.brightness);
             l.contrast = contrast.unwrap_or(l.contrast);
             l.saturation = saturation.unwrap_or(l.saturation);
@@ -1085,7 +1152,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.clipLook",
         label: "Colour and Crop",
-        params: r#"{"track": n, "clip": n, "brightness"?: -100..100, "contrast"?: -100..100, "saturation"?: -100..100, "crop"?: [left, top, right, bottom] 0..450 thousandths}: a picture track's clip lighter or darker, with more or less contrast and colour, and its edges cut off (what's left fills the picture, its shape kept)"#,
+        params: r##"{"track": n, "clip": n, "look"?: "plain"|"warm"|"cool"|"vivid"|"faded"|"dramatic"|"blackAndWhite"|"sepia"|"night", "brightness"?: -100..100, "contrast"?: -100..100, "saturation"?: -100..100, "tint"?: "#rrggbb", "tintAmount"?: 0..100, "crop"?: [left, top, right, bottom] 0..450 thousandths}: a picture track's clip lighter or darker, with more or less contrast and colour, tinted towards a colour, and its edges cut off (what's left fills the picture, its shape kept); a ready-made `look` sets all its colours first"##,
         run: clip_look,
     },
     VideoCommand {
@@ -1267,7 +1334,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool} (a picture or a video is cut down, bordered, rounded and shadowed; words and graphics are only turned)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool} (a picture or a video is cut down, bordered, rounded and shadowed; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -1923,6 +1990,52 @@ mod layer_tests {
         }
         s.execute("edit.undo", &json!({})).unwrap();
         assert!(s.timeline.tracks[0].clips[0].look.is_plain());
+    }
+
+    #[test]
+    fn an_item_is_masked_and_blended_and_a_clip_given_a_ready_made_look() {
+        use screengrabcraft_media::layers::{BlendMode, MaskShape};
+        let mut s = session();
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute(
+            "video.setItem",
+            &json!({"layer": layer, "item": item, "mask": "heart", "maskArea": [0.3, 0.5, 9, 0.5], "maskCut": true, "blend": "screen"}),
+        )
+        .unwrap();
+        let l = s.timeline.item(layer, item).unwrap().look.clone();
+        assert_eq!((l.mask.shape, l.mask.x, l.mask.w, l.mask.cut, l.blend), (MaskShape::Heart, 0.3, 2.0, true, BlendMode::Screen));
+        for bad in [
+            json!({"layer": layer, "item": item, "mask": "blob"}),
+            json!({"layer": layer, "item": item, "blend": 3}),
+            json!({"layer": layer, "item": item, "maskArea": [0.5]}),
+            json!({"layer": layer, "item": item, "maskCut": "yes"}),
+        ] {
+            assert!(s.execute("video.setItem", &bad).is_err(), "{bad}");
+        }
+        // A ready-made look sets the colours, keeping the crop; then a slider changes one of them.
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "crop": [100, 0, 0, 0]})).unwrap();
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "sepia"})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.named().map(|n| n.key), c.crop[0], c.saturation), (Some("sepia"), 100, -100));
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "warm", "contrast": 50})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert!(c.named().is_none() && c.contrast == 50 && c.tint_amount > 0);
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "tint": "#00FF00", "tintAmount": 400})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.tint, c.tint_amount), ([0, 255, 0], 100));
+        for bad in [
+            json!({"track": 0, "clip": 0, "look": "neon"}),
+            json!({"track": 0, "clip": 0, "tint": "green"}),
+            json!({"track": 0, "clip": 0, "tintAmount": "x"}),
+        ] {
+            assert!(s.execute("video.clipLook", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "plain"})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert!(c.colours_plain() && c.crop[0] == 100);
     }
 
     #[test]
