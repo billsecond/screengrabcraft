@@ -294,7 +294,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop (#106).
 20. Masks and blend modes for layer items; ready-made colour looks for a clip (#109).
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
-    bordered and shadowed.
+    bordered and shadowed (#111).
 
 **Still to build, in this order**
 
