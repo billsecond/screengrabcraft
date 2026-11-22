@@ -245,8 +245,13 @@ pub struct Editor {
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
     pub(crate) recent: Vec<crate::services::RecentItem>,
     pub(crate) recent_at: f64,
-    /// What All captures is searching for.
-    pub(crate) capture_search: String,
+    /// What All captures shows: favourites, a program's, a tag's, what's searched for.
+    pub(crate) capture_filter: screengrabcraft_model::library::Filter,
+    /// The listed captures' tags, favourites and programs, as the host last said.
+    pub(crate) library: screengrabcraft_model::Library,
+    /// The capture whose tags are being changed in All captures, and the tag being typed.
+    pub(crate) tagging: Option<String>,
+    pub(crate) new_tag: String,
     pub services: Box<dyn Services>,
     /// Set when the window should close (the host closes it).
     pub quit_requested: bool,
@@ -333,7 +338,10 @@ impl Editor {
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
             recent_at: f64::NEG_INFINITY,
-            capture_search: String::new(),
+            capture_filter: Default::default(),
+            library: Default::default(),
+            tagging: None,
+            new_tag: String::new(),
             services,
             quit_requested: false,
             close_confirmed: false,
@@ -1244,6 +1252,8 @@ impl Editor {
         let now = ctx.input(|i| i.time);
         if now - self.recent_at > 3.0 {
             self.recent = self.services.recent();
+            let paths: Vec<String> = self.recent.iter().map(|r| r.path.clone()).collect();
+            self.library = self.services.library(&paths);
             self.recent_at = now;
         }
         // The dot while changes are still to be written.

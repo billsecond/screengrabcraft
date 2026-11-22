@@ -5,7 +5,7 @@
 use screengrabcraft_media::captions::{Captions, Cue};
 use screengrabcraft_media::recording::{Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
-use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
+use screengrabcraft_model::{CaptureMode, EditorSettings, Library, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 
 pub use crate::autosave::{SaveJob, Saved};
@@ -221,6 +221,18 @@ pub trait Services {
     /// The recent captures, newest first.
     fn recent(&self) -> Vec<RecentItem> {
         Vec::new()
+    }
+
+    /// What's known of these captures (their tags, whether each is a favourite, the program each
+    /// was taken from), under their paths as given.
+    fn library(&self, _paths: &[String]) -> Library {
+        Library::default()
+    }
+
+    /// Runs a library command (`library.tag`, `library.favorite`, …) on the library as the host
+    /// keeps it (the editor runs it on its own copy as well).
+    fn run_library(&self, _id: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("tags and favourites are kept by ScreenGrabCraft on the desktop".to_string())
     }
 
     /// Today, locally, as `2026-11-07` (empty when the host can't tell).

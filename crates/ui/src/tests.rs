@@ -875,6 +875,8 @@ struct DiskState {
     fail_trash: bool,
     made: u32,
     thumbs_asked: Vec<(String, u64)>,
+    /// The captures' tags, favourites and programs, as the host keeps them.
+    library: screengrabcraft_model::Library,
 }
 
 /// A host with a fake disk, shared with the test.
@@ -976,6 +978,19 @@ impl Services for Disk {
     fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {
         self.0.borrow_mut().thumbs_asked.push((path.to_string(), modified));
         Raster::filled(20, 10, Color::rgb(0, 0, 255)).ok()
+    }
+
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        let s = self.0.borrow();
+        let mut out = screengrabcraft_model::Library::default();
+        for p in paths {
+            out.set(p, s.library.get(p));
+        }
+        out
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_engine::library::run(&mut self.0.borrow_mut().library, id, params).map_err(|e| e.to_string())
     }
 }
 
@@ -1964,13 +1979,138 @@ fn all_captures_lists_every_capture_and_opens_the_one_picked() {
     assert_eq!(h.get_all_by_label("Capture 000.png").count(), 2, "in the strip and in the menu");
     // A search narrows it down; the oldest is there too.
     crate::quick_tests::shot(&mut h, "all-captures-grid");
-    h.state_mut().capture_search = "117".into();
+    h.state_mut().capture_filter.search = "117".into();
     h.run_steps(3);
     crate::quick_tests::shot(&mut h, "all-captures");
     let item = h.get_all_by_label("Capture 117.png").last().map(|n| n.rect()).expect("in the menu");
     click_at(&mut h, item.center());
     h.run_steps(4);
     assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 117.png"));
+}
+
+// ---- tags, favourites and the program a capture was taken from ----
+
+/// Six captures: two from Notes (the first a favourite), one from a browser, the second and the
+/// third tagged.
+fn library_disk() -> Disk {
+    use screengrabcraft_model::CaptureInfo;
+    let disk = many_captures(6);
+    let info = |program: &str, tags: &[&str], favorite: bool| CaptureInfo {
+        program: program.into(),
+        title: format!("{program} window"),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        favorite,
+    };
+    let mut s = disk.0.borrow_mut();
+    s.library.set("captures/Capture 000.png", info("Notes", &[], true));
+    s.library.set("captures/Capture 001.png", info("Browser", &["receipts"], false));
+    s.library.set("captures/Capture 002.png", info("Notes", &["receipts", "plans"], false));
+    drop(s);
+    disk
+}
+
+/// The captures All captures shows (each is in the strip as well).
+fn in_all_captures(h: &Harness<'_, Editor>) -> Vec<usize> {
+    (0..6).filter(|i| h.get_all_by_label(&format!("Capture {i:03}.png")).count() == 2).collect()
+}
+
+fn open_all_captures(h: &mut Harness<'_, Editor>) {
+    h.get_by_label("All captures (6)").click();
+    h.run_steps(3);
+}
+
+#[test]
+fn all_captures_filters_by_favourites_program_and_tag_and_searches_them() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5]);
+    crate::quick_tests::shot(&mut h, "all-captures-filters");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0], "favourites only");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 2], "taken from Notes");
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [2], "from Notes and tagged receipts");
+    crate::quick_tests::shot(&mut h, "all-captures-filtered");
+    h.get_by_label("Notes (2)").click();
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5], "every filter off again");
+    // The search goes through the program, the window's title and the tags too.
+    for (search, shown) in [("browser", vec![1]), ("plans", vec![2]), ("notes window", vec![0, 2]), ("005", vec![5])] {
+        h.state_mut().capture_filter.search = search.into();
+        h.run_steps(3);
+        assert_eq!(in_all_captures(&h), shown, "{search}");
+    }
+}
+
+#[test]
+fn a_star_makes_a_favourite_and_its_tags_are_added_and_taken_off_in_all_captures() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    let path = "captures/Capture 003.png";
+    h.get_by_label("Add Capture 003.png to Favorites").click();
+    h.run_steps(3);
+    assert!(disk.0.borrow().library.get(path).favorite, "kept by the host");
+    assert!(h.state().library.get(path).favorite, "and shown");
+    h.get_by_label("Remove Capture 003.png from Favorites");
+    // Its tags: one typed, one another capture has.
+    h.get_by_label("Tags of Capture 003.png").click();
+    h.run_steps(3);
+    h.state_mut().new_tag = "  bug  report ".into();
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    h.get_by_label("+ receipts").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["bug report", "receipts"]);
+    crate::quick_tests::shot(&mut h, "all-captures-tags");
+    h.get_by_label("bug report  \u{00d7}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["receipts"]);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 2, "the row's heading and the button");
+    h.get_by_label("Done").click();
+    h.run_steps(3);
+    assert_eq!(h.state().tagging, None);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 1, "the row is gone");
+    // The capture wasn't opened by any of it.
+    assert_eq!(h.state().picture_path, None);
+}
+
+#[test]
+fn a_right_click_in_the_strip_makes_a_favourite_and_tags_it() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    crate::quick_tests::shot(&mut h, "strip-menu");
+    h.get_by_label("Add to Favorites").click();
+    h.run_steps(3);
+    let path = "captures/Capture 004.png";
+    assert!(disk.0.borrow().library.get(path).favorite);
+    right_click(&mut h, thumb.center());
+    h.get_by_label("plans").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["plans"]);
+}
+
+#[test]
+fn a_capture_deleted_from_the_strip_leaves_the_library_too() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    delete_from_strip(&mut h, "Capture 002.png");
+    assert!(disk.0.borrow().library.get("captures/Capture 002.png").is_empty());
+    assert!(!disk.0.borrow().library.get("captures/Capture 001.png").is_empty(), "the others stay");
 }
 
 // ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----

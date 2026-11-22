@@ -48,6 +48,13 @@ pub enum Msg {
 }
 
 /// What became of a finished capture.
+/// The window a capture was taken from: its program and its title.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Window {
+    pub program: String,
+    pub title: String,
+}
+
 pub struct Done {
     pub saved: Option<PathBuf>,
     pub copied: bool,
@@ -67,6 +74,9 @@ pub struct OverlayRun {
     pub seen: bool,
     /// Kept until the windows have been drawn, so a crash in opening them switches to OpenGL.
     pub opening: graphics::Opening,
+    /// Each window's title as the overlay shows it, and the program it belongs to (the captures'
+    /// library notes where a capture was taken from).
+    pub programs: Vec<(String, String)>,
 }
 
 pub struct Countdown {
@@ -128,7 +138,7 @@ pub struct Service {
     /// A picture chosen in the overlay, kept on the next frame, once the overlay (the frozen
     /// screen) has gone: copying it to the clipboard takes a moment, and the screen shouldn't
     /// stay frozen meanwhile.
-    chosen: Option<(Raster, String, Action)>,
+    chosen: Option<(Raster, String, Action, Option<Window>)>,
     /// When the capture now under way was asked for, for the log's timings.
     asked: Option<Instant>,
     /// Whether an editor is to be kept ready out of sight (the setting, on Windows), as last seen.
@@ -700,11 +710,8 @@ impl Service {
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
                 let pointer = frozen.pointer;
                 let om = frozen.monitors.into_iter().map(|(m, picture)| OverlayMonitor { rect: m.rect, picture, name: m.name }).collect();
-                let ow = frozen
-                    .windows
-                    .into_iter()
-                    .map(|w| OverlayWindow { rect: w.rect, title: if w.title.is_empty() { w.app } else { w.title } })
-                    .collect();
+                let programs = frozen.windows.iter().map(|w| (shown_title(w), w.app.clone())).collect();
+                let ow = frozen.windows.into_iter().map(|w| OverlayWindow { rect: w.rect, title: shown_title(&w) }).collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
                 let after = &self.after();
                 // Grab Text reads the area at once: there is nothing to choose on a bar.
@@ -724,7 +731,7 @@ impl Service {
                     overlay.shape = Some((w, h));
                 }
                 let opening = graphics::Opening::start();
-                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening });
+                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening, programs });
             }
         }
     }
@@ -779,8 +786,13 @@ impl Service {
                 let pic = self.with_pointer(&pic, &m, (mon.picture.width(), mon.picture.height()), origin, run.pointer);
                 self.settings.last_region = Some(desktop);
                 store::save_settings(&self.settings);
+                // A window clicked: the program it belongs to, for the captures' library.
+                let window = title
+                    .as_ref()
+                    .and_then(|t| run.programs.iter().find(|(shown, _)| shown == t))
+                    .map(|(shown, app)| Window { program: app.clone(), title: shown.clone() });
                 // Kept on the next frame, when the frozen screen has gone.
-                self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action));
+                self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action, window));
                 self.ctx.request_repaint();
             }
         }
@@ -824,6 +836,12 @@ impl Service {
     }
 
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
+        self.finish_from(pic, source, None, action);
+    }
+
+    /// [`Service::finish`] for a capture of a window (`window`), whose program the captures'
+    /// library notes.
+    pub fn finish_from(&mut self, pic: Raster, source: &str, window: Option<Window>, action: Action) {
         let after = self.after();
         self.preset = None;
         let (save, copy, edit) = what_to_keep(action, &after);
@@ -841,7 +859,7 @@ impl Service {
         let copy_later = copy && cfg!(target_os = "windows");
         let copied = copy && !copy_later && copy_to_clipboard(&pic);
         let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
-            let r = keep(&pic, &source, &settings, save, edit, copied, copy_later);
+            let r = keep(&pic, &source, window.as_ref(), &settings, save, edit, copied, copy_later);
             let _ = tx.send(Msg::Saved(r));
             ctx.request_repaint();
         });
@@ -1098,9 +1116,9 @@ impl Service {
         }
         // The overlay went at the end of the last frame: the picture chosen in it is kept now.
         if self.overlay.is_none()
-            && let Some((pic, source, action)) = self.chosen.take()
+            && let Some((pic, source, action, window)) = self.chosen.take()
         {
-            self.finish(pic, &source, action);
+            self.finish_from(pic, &source, window, action);
         }
         if let Some(c) = &self.countdown
             && Instant::now() >= c.until
@@ -1331,6 +1349,11 @@ fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], ra
     }
 }
 
+/// A window's title as the overlay shows it: its program's name when it has none.
+fn shown_title(w: &screengrabcraft_capture::WindowInfo) -> String {
+    if w.title.is_empty() { w.app.clone() } else { w.title.clone() }
+}
+
 fn file_name(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
 }
@@ -1436,8 +1459,21 @@ fn copy_to_clipboard(pic: &Raster) -> bool {
 /// The file work of keeping a capture (on a worker thread): written, handed to the editor, then
 /// copied to the clipboard if that's left to do (`copy_later`), whether the file could be
 /// written or not.
-fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool, copy_later: bool) -> Result<Done, String> {
+fn keep(
+    pic: &Raster,
+    source: &str,
+    window: Option<&Window>,
+    s: &Settings,
+    save: bool,
+    edit: bool,
+    copied: bool,
+    copy_later: bool,
+) -> Result<Done, String> {
     let file = write_capture(pic, source, s, save, edit);
+    // A window's capture kept in the captures folder: the library notes its program and title.
+    if let (Ok((Some(saved), _)), Some(w)) = (&file, window) {
+        screengrabcraft_desktop::library::taken_from(saved, &w.program, &w.title);
+    }
     let mut edited = false;
     if edit && let Ok((_, Some(p))) = &file {
         let t = Instant::now();

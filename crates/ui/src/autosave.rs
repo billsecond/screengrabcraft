@@ -437,6 +437,11 @@ impl Editor {
             self.error(ctx, format!("{name} couldn't be moved to the {TRASH}: {e}"));
             return;
         }
+        // What the library knew of it goes with it.
+        let forget = serde_json::json!({"path": path});
+        if self.services.run_library("library.forget", &forget).is_ok() {
+            let _ = screengrabcraft_engine::library::run(&mut self.library, "library.forget", &forget);
+        }
         let side = sibling_project(path);
         match self.services.trash(&side) {
             Ok(()) => self.toast(ctx, format!("Moved {name} to the {TRASH}")),

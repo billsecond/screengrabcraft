@@ -8,6 +8,7 @@
 pub mod color;
 pub mod document;
 pub mod geom;
+pub mod library;
 pub mod object;
 pub mod quick;
 pub mod raster;
@@ -16,6 +17,7 @@ pub mod settings;
 pub use color::Color;
 pub use document::{DocError, Document, Meta, Order};
 pub use geom::{IRect, Pt, Rect};
+pub use library::{CaptureInfo, Library};
 pub use object::{ArrowHeads, CalloutForm, Handle, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
 pub use quick::QuickStyle;
 pub use raster::{MAX_PIXELS, MAX_SIDE, Raster, RasterError};
