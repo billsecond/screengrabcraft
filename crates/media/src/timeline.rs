@@ -275,6 +275,10 @@ pub struct Timeline {
     /// How the mouse pointer is drawn on the video (if the recording has it).
     #[serde(default)]
     pub pointer: crate::pointer::Look,
+    /// The recording's captions as put right by hand (words, lines split or joined, times
+    /// moved), in recording time; none: as they were heard. See [`crate::captions::edit`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corrected: Option<Vec<crate::captions::Cue>>,
 }
 
 impl Timeline {
@@ -297,6 +301,7 @@ impl Timeline {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            corrected: None,
         }
     }
 
@@ -365,6 +370,7 @@ impl Timeline {
             layers: self.layers,
             media: self.media,
             pointer: self.pointer.checked(),
+            corrected: self.corrected.map(|c| crate::captions::Captions { cues: c, model: String::new() }.checked(rec.duration_us).cues),
         };
         checked.check_layers();
         checked
@@ -715,6 +721,7 @@ mod tests {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            corrected: None,
         }
     }
 

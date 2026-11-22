@@ -116,13 +116,19 @@ impl Captions {
     /// The lines as they fall on the edited video: each follows the clips of its speaker's
     /// track, and is left out where that track was cut, deleted or muted.
     pub fn on_timeline(&self, timeline: &Timeline) -> Vec<Cue> {
+        self.on_timeline_from(timeline).into_iter().map(|(c, _)| c).collect()
+    }
+
+    /// [`Captions::on_timeline`], each line with which of the recording's lines it is a piece
+    /// of (its place in `cues`).
+    pub fn on_timeline_from(&self, timeline: &Timeline) -> Vec<(Cue, usize)> {
         let mut out = Vec::new();
         for speaker in [Speaker::You, Speaker::Others] {
             let Some(track) = timeline.find(speaker.source()).and_then(|i| timeline.tracks.get(i)) else { continue };
             if track.muted {
                 continue;
             }
-            for cue in self.cues.iter().filter(|c| c.speaker == speaker) {
+            for (k, cue) in self.cues.iter().enumerate().filter(|(_, c)| c.speaker == speaker) {
                 let whole = cue.end - cue.start;
                 for clip in &track.clips {
                     let (from, to) = (cue.start.max(clip.from), cue.end.min(clip.from.saturating_add(clip.source_len())));
@@ -135,11 +141,11 @@ impl Captions {
                     // Sped up or slowed down with its clip.
                     let start = clip.at.saturating_add(clip.played(from - clip.from));
                     let end = clip.at.saturating_add(clip.played(to - clip.from)).min(clip.end()).max(start.saturating_add(1));
-                    out.push(Cue { start, end, speaker, text: cue.text.clone() });
+                    out.push((Cue { start, end, speaker, text: cue.text.clone() }, k));
                 }
             }
         }
-        out.sort_by_key(|c| (c.start, c.speaker));
+        out.sort_by_key(|(c, _)| (c.start, c.speaker));
         out
     }
 }
@@ -197,12 +203,38 @@ pub enum Who {
 
 /// Everything said in the edited video, in order, each line with who said it.
 pub fn transcript(captions: Option<&Captions>, timeline: &Timeline, of_media: &std::collections::HashMap<u32, Vec<Cue>>) -> Vec<(Cue, Who)> {
-    let mut out: Vec<(Cue, Who)> =
-        captions.map(|c| c.on_timeline(timeline)).unwrap_or_default().into_iter().map(|c| (c.clone(), Who::Speaker(c.speaker))).collect();
-    out.extend(layer_lines(timeline, of_media).into_iter().map(|(c, l)| (c, Who::Layer(l))));
-    out.sort_by_key(|(c, w)| (c.start, *w));
+    transcript_from(captions, timeline, of_media).into_iter().map(|(c, w, _)| (c, w)).collect()
+}
+
+/// [`transcript`], each of the recording's lines with which of its captions it is a piece of
+/// (its place in `cues`, to put it right); a layer's lines with none.
+pub fn transcript_from(
+    captions: Option<&Captions>,
+    timeline: &Timeline,
+    of_media: &std::collections::HashMap<u32, Vec<Cue>>,
+) -> Vec<(Cue, Who, Option<usize>)> {
+    let mut out: Vec<(Cue, Who, Option<usize>)> = captions
+        .map(|c| c.on_timeline_from(timeline))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(c, k)| {
+            let who = Who::Speaker(c.speaker);
+            (c, who, Some(k))
+        })
+        .collect();
+    out.extend(layer_lines(timeline, of_media).into_iter().map(|(c, l)| (c, Who::Layer(l), None)));
+    out.sort_by_key(|(c, w, _)| (c.start, *w));
     out.truncate(MAX_CUES);
     out
+}
+
+/// The recording's captions as they are now: as put right by hand (the timeline's
+/// [`Timeline::corrected`]), else as heard.
+pub fn as_corrected(heard: Option<&Captions>, timeline: &Timeline) -> Option<Captions> {
+    match &timeline.corrected {
+        Some(cues) => Some(Captions { cues: cues.clone(), model: heard.map(|h| h.model.clone()).unwrap_or_default() }),
+        None => heard.cloned(),
+    }
 }
 
 /// What the transcript calls who said a line: the name given to the track it was heard on (the
@@ -365,6 +397,102 @@ pub fn to_text_named(lines: &[(Cue, String)]) -> String {
     out
 }
 
+/// Captions put right by hand: each works on the recording's lines (recording time, in order) and
+/// keeps them in order, inside `0..duration`, and clean; a line that isn't there is an error.
+pub mod edit {
+    use super::{Cue, MAX_TEXT, clean_text};
+
+    fn line(cues: &mut [Cue], i: usize) -> Result<&mut Cue, String> {
+        cues.get_mut(i).ok_or_else(|| format!("there's no line {i} in the captions"))
+    }
+
+    fn sort(cues: &mut [Cue]) {
+        cues.sort_by_key(|c| (c.start, c.speaker));
+    }
+
+    /// A line's words put right; no words left: the line goes.
+    pub fn text(cues: &mut Vec<Cue>, i: usize, words: &str) -> Result<(), String> {
+        let words = clean_text(words);
+        if words.is_empty() {
+            line(cues, i)?;
+            cues.remove(i);
+            return Ok(());
+        }
+        line(cues, i)?.text = words;
+        Ok(())
+    }
+
+    /// A line cut in two between words, near its `at`th character (none: near its middle); its
+    /// time shared as its words are.
+    pub fn split(cues: &mut Vec<Cue>, i: usize, at: Option<usize>) -> Result<(), String> {
+        let c = line(cues, i)?.clone();
+        let chars: Vec<char> = c.text.chars().collect();
+        let want = at.unwrap_or(chars.len() / 2).min(chars.len());
+        // The space nearest the place asked for.
+        let cut = chars
+            .iter()
+            .enumerate()
+            .filter(|(_, ch)| ch.is_whitespace())
+            .map(|(k, _)| k)
+            .min_by_key(|k| k.abs_diff(want))
+            .ok_or_else(|| "a line of one word can't be split".to_string())?;
+        let first: String = chars.get(..cut).unwrap_or_default().iter().collect();
+        let second: String = chars.get(cut..).unwrap_or_default().iter().collect();
+        let (first, second) = (clean_text(&first), clean_text(&second));
+        if first.is_empty() || second.is_empty() {
+            return Err("there are no words on one side of that place".to_string());
+        }
+        let share = first.chars().count() as u64 + 1;
+        let whole = share + second.chars().count() as u64;
+        let mid = c.start + (c.end - c.start) * share / whole.max(1);
+        let mid = mid.clamp(c.start.saturating_add(1).min(c.end), c.end);
+        if let Some(l) = cues.get_mut(i) {
+            l.text = first;
+            l.end = mid;
+        }
+        cues.insert(i + 1, Cue { start: mid, end: c.end, speaker: c.speaker, text: second });
+        sort(cues);
+        Ok(())
+    }
+
+    /// A line and the next line of the same speaker made one.
+    pub fn join(cues: &mut Vec<Cue>, i: usize) -> Result<(), String> {
+        let c = line(cues, i)?.clone();
+        let j = cues
+            .iter()
+            .enumerate()
+            .skip(i + 1)
+            .find(|(_, n)| n.speaker == c.speaker)
+            .map(|(j, _)| j)
+            .ok_or_else(|| "it's the speaker's last line: there's none after it to join".to_string())?;
+        let next = cues.remove(j);
+        let both = format!("{} {}", c.text, next.text);
+        if both.chars().count() > MAX_TEXT {
+            cues.insert(j, next);
+            return Err(format!("together they'd be longer than a line can be ({MAX_TEXT} characters)"));
+        }
+        if let Some(l) = cues.get_mut(i) {
+            l.text = clean_text(&both);
+            l.end = l.end.max(next.end);
+        }
+        Ok(())
+    }
+
+    /// A line's start and end moved (either kept if not given), inside `0..duration`; it keeps
+    /// at least a tenth of a second.
+    pub fn times(cues: &mut [Cue], i: usize, start: Option<u64>, end: Option<u64>, duration: u64) -> Result<(), String> {
+        let l = line(cues, i)?;
+        let start = start.unwrap_or(l.start).min(duration);
+        let end = end.unwrap_or(l.end).min(duration);
+        if end < start.saturating_add(100_000) {
+            return Err("a line must end at least a tenth of a second after it starts".to_string());
+        }
+        (l.start, l.end) = (start, end);
+        sort(cues);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +512,7 @@ mod tests {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            corrected: None,
         }
     }
 
@@ -407,6 +536,59 @@ mod tests {
         tl.cut(2_000_000, 2_900_000).unwrap();
         let on = caps.on_timeline(&tl);
         assert_eq!(on.iter().filter(|c| c.speaker == Speaker::You).count(), 1, "{on:?}");
+    }
+
+    #[test]
+    fn lines_are_put_right_split_joined_and_moved() {
+        let mut cues = vec![
+            cue(1_000_000, 3_000_000, Speaker::You, "Hello their, this is the new page."),
+            cue(2_000_000, 4_000_000, Speaker::Others, "Hi."),
+            cue(5_000_000, 6_000_000, Speaker::You, "Any questions?"),
+        ];
+        edit::text(&mut cues, 0, "Hello there,\n this is   the new page.").unwrap();
+        assert_eq!(cues[0].text, "Hello there, this is the new page.");
+        // Split near its middle, between words; the time shared as the words are.
+        edit::split(&mut cues, 0, None).unwrap();
+        assert_eq!((cues[0].text.as_str(), cues[2].text.as_str()), ("Hello there, this", "is the new page."));
+        assert!(cues[0].end > 1_900_000 && cues[0].end < 2_200_000 && cues[2].start == cues[0].end && cues[2].end == 3_000_000, "{cues:?}");
+        assert_eq!(cues[1].speaker, Speaker::Others, "kept in order: the others' line starts before the second half");
+        // At a place: the space nearest it.
+        edit::split(&mut cues, 0, Some(3)).unwrap();
+        assert_eq!(cues[0].text, "Hello");
+        // Joined with the speaker's next line (the others' line between is passed over).
+        edit::join(&mut cues, 0).unwrap();
+        assert_eq!(cues[0].text, "Hello there, this");
+        let mine = cues.iter().position(|c| c.text == "is the new page.").unwrap();
+        edit::join(&mut cues, mine).unwrap();
+        assert_eq!(cues[mine].text, "is the new page. Any questions?");
+        assert_eq!(cues[mine].end, 6_000_000);
+        assert!(edit::join(&mut cues, mine).is_err(), "the speaker's last line");
+        // Moved: kept inside the recording, and in order.
+        edit::times(&mut cues, 0, Some(4_500_000), Some(99_000_000), 7_000_000).unwrap();
+        assert_eq!(cues.last().map(|c| (c.start, c.end)), Some((4_500_000, 7_000_000)));
+        assert!(edit::times(&mut cues, 0, Some(10), Some(20), 7_000_000).is_err(), "too short");
+        // No words left: the line goes. A line that isn't there, one word: errors.
+        let n = cues.len();
+        edit::text(&mut cues, 0, "  \n").unwrap();
+        assert_eq!(cues.len(), n - 1);
+        assert!(edit::text(&mut cues, 9, "x").is_err() && edit::split(&mut cues, 9, None).is_err());
+        let mut one = vec![cue(0, 1_000_000, Speaker::You, "Word")];
+        assert!(edit::split(&mut one, 0, None).is_err());
+    }
+
+    #[test]
+    fn each_piece_on_the_timeline_says_which_line_it_is_and_corrections_replace_what_was_heard() {
+        let caps = Captions { cues: vec![cue(1_000_000, 5_000_000, Speaker::You, "A long line.")], model: "m".into() };
+        let mut tl = timeline();
+        tl.cut(2_000_000, 3_000_000).unwrap();
+        let on = caps.on_timeline_from(&tl);
+        assert_eq!(on.iter().map(|(_, k)| *k).collect::<Vec<_>>(), vec![0, 0], "both pieces are line 0");
+        assert!(as_corrected(Some(&caps), &tl).is_some_and(|c| c.cues[0].text == "A long line."));
+        tl.corrected = Some(vec![cue(1_000_000, 5_000_000, Speaker::You, "A longer line.")]);
+        let now = as_corrected(Some(&caps), &tl).unwrap();
+        assert_eq!((now.cues[0].text.as_str(), now.model.as_str()), ("A longer line.", "m"));
+        let lines = transcript_from(Some(&now), &tl, &Default::default());
+        assert!(lines.iter().all(|(c, _, k)| c.text == "A longer line." && *k == Some(0)));
     }
 
     #[test]

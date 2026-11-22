@@ -4,13 +4,42 @@
 //! there; the line playing is marked, and followed while the video plays. Each speaker's name is
 //! the name of the track (or the layer) it was heard on, and is renamed here or in its header.
 
-use egui::{Color32, Rect, RichText, Sense, Ui, vec2};
+//!
+//! The recording's own lines are put right here too: a double click on a line puts its words in a
+//! box to change (and to split at the cursor); its right button splits it, joins it to the
+//! speaker's next line, moves its start or end to the playhead, or deletes it. Every change is a
+//! `video.caption*` command, so it's undone like any edit and saved with the edits.
+
+use egui::{Color32, Key, Rect, RichText, Sense, Ui, vec2};
 use screengrabcraft_media::captions::{self, Cue, Speaker, Who};
+use serde_json::json;
 
 use super::{Rename, VideoView, clock, kind_colour};
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
+
+/// A line's words being put right in the transcript pane.
+pub(crate) struct CaptionEdit {
+    /// Which of the recording's captions it is (its place among them).
+    pub source: usize,
+    pub words: String,
+    /// The box has had the keys (its words chosen, to type over).
+    pub started: bool,
+    /// Where the cursor is in the words (characters): Split at the Cursor cuts there.
+    pub cursor: Option<usize>,
+}
+
+/// What was asked of a line of the recording's captions in the pane.
+enum LineAct {
+    Edit(usize),
+    Split(usize),
+    Join(usize),
+    /// Its start (true) or its end moved to the playhead; who said it, for whose sound it's on.
+    Move(usize, Who, bool),
+    Delete(usize),
+    AllAsHeard,
+}
 
 /// The pane's width.
 pub const TRANSCRIPT_W: f32 = 300.0;
@@ -76,8 +105,91 @@ impl VideoView {
                 }
                 ui.add_space(6.0);
                 ui.separator();
+                self.caption_editor(ed, ui);
                 self.transcript_lines(ed, ui, &lines);
             });
+    }
+
+    /// The words of the line being put right, in a box above the lines: Enter (or Done) keeps
+    /// them, Esc (or Cancel) lets them go, Split at the Cursor cuts the line in two there.
+    fn caption_editor(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let Some(mut e) = self.caption_edit.take() else { return };
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        // Esc lets it go (seen before the box, which takes the key, has its turn).
+        if e.started && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            return;
+        }
+        ui.label(RichText::new("Put the line right").size(12.0).color(t.muted));
+        let out = egui::TextEdit::multiline(&mut e.words).desired_rows(2).desired_width(f32::INFINITY).return_key(None).show(ui);
+        if !e.started {
+            out.response.request_focus();
+            let mut state = out.state.clone();
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(e.words.chars().count()));
+            state.cursor.set_char_range(Some(all));
+            state.store(&ctx, out.response.id);
+            e.started = true;
+        }
+        if let Some(r) = out.cursor_range {
+            e.cursor = Some(r.primary.index.into());
+        }
+        let enter = out.response.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter));
+        let (mut split, mut done, mut cancel) = (false, false, false);
+        ui.horizontal(|ui| {
+            split = ui.button("Split at the Cursor").on_hover_text("Two lines: the words before the cursor, and after it").clicked();
+            done = ui.button("Done").on_hover_text("Keep the words (Enter)").clicked();
+            cancel = ui.button("Cancel").on_hover_text("As they were (Esc)").clicked();
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        if cancel {
+            return;
+        }
+        if enter || done || split {
+            self.run(ed, &ctx, "video.captionText", json!({"line": e.source, "text": e.words}));
+            if split {
+                // Where the cursor is in the words as they're kept (spaces tidied the same way).
+                let before: String = e.words.chars().take(e.cursor.unwrap_or(0)).collect();
+                let at = captions::clean_text(&before).chars().count();
+                self.run(ed, &ctx, "video.captionSplit", json!({"line": e.source, "at": at}));
+            }
+            return;
+        }
+        self.caption_edit = Some(e);
+    }
+
+    /// A line of the recording's captions, to put right: its words in the box above the lines.
+    fn edit_caption(&mut self, source: usize) {
+        let said = captions::as_corrected(self.captions.as_ref(), &self.session.timeline);
+        if let Some(c) = said.as_ref().and_then(|s| s.cues.get(source)) {
+            self.caption_edit = Some(CaptionEdit { source, words: c.text.clone(), started: false, cursor: None });
+        }
+    }
+
+    /// Does what was asked of a line in the pane.
+    fn line_act(&mut self, ed: &mut Editor, ctx: &egui::Context, act: LineAct) {
+        // Whatever was being typed is let go (a new line's words take its place).
+        self.caption_edit = None;
+        match act {
+            LineAct::Edit(k) => self.edit_caption(k),
+            LineAct::Split(k) => self.run(ed, ctx, "video.captionSplit", json!({"line": k})),
+            LineAct::Join(k) => self.run(ed, ctx, "video.captionJoin", json!({"line": k})),
+            LineAct::Delete(k) => self.run(ed, ctx, "video.captionText", json!({"line": k, "text": ""})),
+            LineAct::AllAsHeard => self.run(ed, ctx, "video.captionsHeard", json!({})),
+            LineAct::Move(k, who, start) => {
+                // The playhead's moment in the recording, on the sound the line was heard on.
+                let tl = &self.session.timeline;
+                let at = match who {
+                    Who::Speaker(s) => tl.find(s.source()).and_then(|i| tl.source_time(i, self.playhead)),
+                    Who::Layer(_) => None,
+                };
+                let key = if start { "start" } else { "end" };
+                match at {
+                    Some(t) => self.run(ed, ctx, "video.captionTimes", json!({"line": k, key: t})),
+                    None => ed.error(ctx, "The playhead isn't on that speaker's sound: move it onto a clip of their track first".to_string()),
+                }
+            }
+        }
     }
 
     /// A speaker: their mark, their name (renamed with the pencil, or a double click), and where
@@ -180,6 +292,10 @@ impl VideoView {
             self.transcript_follow = now;
         }
         let mut go = None;
+        let mut act = None;
+        let sources = self.line_sources.clone();
+        let editing = self.caption_edit.as_ref().map(|e| e.source);
+        let corrected = self.session.timeline.corrected.is_some();
         scroll.show_viewport(ui, |ui, view| {
             ui.set_height(total);
             let origin = ui.max_rect().min;
@@ -197,7 +313,10 @@ impl VideoView {
                 let name = names.iter().find(|(n, _)| n == who).map(|(_, s)| s.as_str()).unwrap_or("");
                 let resp = ui.interact(rect, ui.id().with(("transcript-line", k)), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} {name}: {}", clock(c.start), c.text)));
-                let fill = if now == Some(k) {
+                let source = sources.get(k).copied().flatten();
+                let fill = if source.is_some() && source == editing {
+                    t.accent.gamma_multiply(0.4)
+                } else if now == Some(k) {
                     t.accent.gamma_multiply(0.22)
                 } else if resp.hovered() {
                     t.hover
@@ -216,15 +335,47 @@ impl VideoView {
                 );
                 let words = p.layout(c.text.clone(), words_font.clone(), t.text, words_w);
                 p.galley(rect.min + vec2(PAD, PAD + HEAD), words, t.text);
-                if resp.on_hover_text("Go there").clicked() {
+                let Some(source) = source else {
+                    if resp.on_hover_text("Go there").clicked() {
+                        go = Some(c.start);
+                    }
+                    continue;
+                };
+                // The recording's own lines: put right with a double click or the right button.
+                let resp = resp.on_hover_text("Go there; double-click to put its words right, right-click for more");
+                if resp.double_clicked() {
+                    act = Some(LineAct::Edit(source));
+                } else if resp.clicked() {
                     go = Some(c.start);
                 }
+                resp.context_menu(|ui| {
+                    let mut pick = |ui: &mut Ui, label: &str, tip: &str, what: LineAct| {
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            act = Some(what);
+                            ui.close();
+                        }
+                    };
+                    pick(ui, "Put the Words Right…", "Change its words (or double-click the line)", LineAct::Edit(source));
+                    pick(ui, "Split in Two", "Two lines, between the words nearest its middle", LineAct::Split(source));
+                    pick(ui, "Join with the Next Line", "With the same speaker's next line", LineAct::Join(source));
+                    ui.separator();
+                    pick(ui, "Start at the Playhead", "The line starts where the playhead is", LineAct::Move(source, *who, true));
+                    pick(ui, "End at the Playhead", "The line ends where the playhead is", LineAct::Move(source, *who, false));
+                    ui.separator();
+                    pick(ui, "Delete the Line", "Its words go from the captions (the sound stays)", LineAct::Delete(source));
+                    if corrected {
+                        pick(ui, "All Captions as Heard", "Every line put right goes back to how it was heard", LineAct::AllAsHeard);
+                    }
+                });
             }
         });
         self.transcript_heights = Some((self.lines_rev, width, heights));
         if let Some(at) = go {
             let now = ctx.input(|i| i.time);
             self.seek(ed, at, now);
+        }
+        if let Some(a) = act {
+            self.line_act(ed, &ctx, a);
         }
     }
 }

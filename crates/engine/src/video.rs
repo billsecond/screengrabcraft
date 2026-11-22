@@ -36,6 +36,8 @@ pub struct VideoSession {
     /// Changed since it was last saved.
     pub dirty: bool,
     revision: u64,
+    /// The recording's captions as they were heard: what putting them right starts from.
+    heard: Vec<screengrabcraft_media::captions::Cue>,
 }
 
 fn edit_err(e: EditError) -> EngineError {
@@ -66,7 +68,19 @@ impl VideoSession {
         let original = Timeline::new(rec);
         let timeline = rec.timeline.clone().unwrap_or_else(|| original.clone());
         let sources = rec.header.streams.iter().map(|s| (s.id, rec.stream_duration(s.id))).collect();
-        VideoSession { timeline, original, sources, undo: Vec::new(), redo: Vec::new(), pending: None, dirty: false, revision: 0 }
+        let heard = rec.captions.as_ref().map(|c| c.cues.clone()).unwrap_or_default();
+        VideoSession { timeline, original, sources, undo: Vec::new(), redo: Vec::new(), pending: None, dirty: false, revision: 0, heard }
+    }
+
+    /// The recording's captions as heard, when they come after it was opened (made meanwhile):
+    /// what putting them right starts from. Lines already put right stay so.
+    pub fn set_heard(&mut self, captions: Option<&screengrabcraft_media::captions::Captions>) {
+        self.heard = captions.map(|c| c.cues.clone()).unwrap_or_default();
+    }
+
+    /// How long the recording is (µs): its longest track.
+    fn longest(&self) -> u64 {
+        self.sources.values().copied().max().unwrap_or(0)
     }
 
     /// Changes with every edit (for knowing when to save or redraw).
@@ -307,10 +321,57 @@ fn captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn revert(s: &mut VideoSession, _: &Value) -> Result<Value> {
-    // The media bin stays (it's only what was brought in); the layers go.
+    // The media bin stays (it's only what was brought in), and the captions put right; the
+    // layers go.
     let media = std::mem::take(&mut s.timeline.media);
+    let corrected = s.timeline.corrected.take();
     s.timeline = s.original.clone();
     s.timeline.media = media;
+    s.timeline.corrected = corrected;
+    Ok(json!({}))
+}
+
+// ---- the captions put right (see `screengrabcraft_media::captions::edit`) ----
+
+/// The captions to put right: those already put right, else a copy of those heard.
+fn corrected(s: &mut VideoSession) -> &mut Vec<screengrabcraft_media::captions::Cue> {
+    let heard = &s.heard;
+    s.timeline.corrected.get_or_insert_with(|| heard.clone())
+}
+
+fn caption_text(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (line, words) = (index(p, "line")?, text(p, "text")?.ok_or_else(|| EngineError::Params("`text` is missing".to_string()))?);
+    screengrabcraft_media::captions::edit::text(corrected(s), line, &words).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_split(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let at = if p.get("at").is_some_and(|v| !v.is_null()) { Some(index(p, "at")?) } else { None };
+    screengrabcraft_media::captions::edit::split(corrected(s), line, at).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_join(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    screengrabcraft_media::captions::edit::join(corrected(s), line).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_times(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let given = |key: &str| -> Result<Option<u64>> { if p.get(key).is_some_and(|v| !v.is_null()) { int(p, key).map(Some) } else { Ok(None) } };
+    let (start, end) = (given("start")?, given("end")?);
+    if start.is_none() && end.is_none() {
+        return Err(EngineError::Params("say where the line goes: `start`, `end` or both, in µs of the recording".to_string()));
+    }
+    let longest = s.longest();
+    screengrabcraft_media::captions::edit::times(corrected(s), line, start, end, longest).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn captions_heard(s: &mut VideoSession, _: &Value) -> Result<Value> {
+    s.timeline.corrected = None;
     Ok(json!({}))
 }
 
@@ -573,6 +634,36 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
     VideoCommand {
+        id: "video.captionText",
+        label: "Edit Caption",
+        params: r#"{"line": n, "text": text}: a line of the recording's captions (its place among them, in order) put right; no words: the line goes"#,
+        run: caption_text,
+    },
+    VideoCommand {
+        id: "video.captionSplit",
+        label: "Split Caption",
+        params: r#"{"line": n, "at"?: n}: the line cut in two between words, near its `at`th character (else its middle), its time shared as its words are"#,
+        run: caption_split,
+    },
+    VideoCommand {
+        id: "video.captionJoin",
+        label: "Join Captions",
+        params: r#"{"line": n}: the line and the same speaker's next line made one"#,
+        run: caption_join,
+    },
+    VideoCommand {
+        id: "video.captionTimes",
+        label: "Move Caption",
+        params: r#"{"line": n, "start"?: µs, "end"?: µs}: when the line starts and ends, in the recording's time"#,
+        run: caption_times,
+    },
+    VideoCommand {
+        id: "video.captionsHeard",
+        label: "Captions as Heard",
+        params: "{}: every line put right goes back to how it was heard",
+        run: captions_heard,
+    },
+    VideoCommand {
         id: "video.addMedia",
         label: "Import Media",
         params: r#"{"kind": "picture"|"sound"|"video", "name": text, "path": text, "duration"?: µs, "width"?: px, "height"?: px}: into the media bin; its id"#,
@@ -763,6 +854,47 @@ mod tests {
         s.execute("edit.undo", &json!({})).unwrap();
         s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
+    }
+
+    #[test]
+    fn captions_are_put_right_split_joined_and_moved_then_go_back_to_as_heard() {
+        use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+        let streams = vec![StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut bytes = w.finish(5_000_000).unwrap();
+        let heard = Captions {
+            cues: vec![
+                Cue { start: 500_000, end: 2_000_000, speaker: Speaker::You, text: "Hello their friends".into() },
+                Cue { start: 3_000_000, end: 4_000_000, speaker: Speaker::You, text: "Bye".into() },
+            ],
+            model: String::new(),
+        };
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&heard).unwrap());
+        let mut s = VideoSession::new(&Recording::open(Box::new(bytes)).unwrap());
+        s.execute("video.captionText", &json!({"line": 0, "text": "Hello there friends"})).unwrap();
+        assert_eq!(s.undo_label(), Some("Edit Caption"));
+        s.execute("video.captionSplit", &json!({"line": 0})).unwrap();
+        s.execute("video.captionJoin", &json!({"line": 1})).unwrap();
+        s.execute("video.captionTimes", &json!({"line": 0, "start": 0, "end": 99_000_000})).unwrap();
+        let words: Vec<(String, u64, u64)> = s.timeline.corrected.as_ref().unwrap().iter().map(|c| (c.text.clone(), c.start, c.end)).collect();
+        assert_eq!(words[0], ("Hello there".to_string(), 0, 5_000_000), "moved, up to the recording's end");
+        assert_eq!(words[1].0, "friends Bye");
+        // Revert to Recording keeps them; Captions as Heard takes them back.
+        s.execute("video.revert", &json!({})).unwrap();
+        assert!(s.timeline.corrected.is_some());
+        s.execute("video.captionsHeard", &json!({})).unwrap();
+        assert!(s.timeline.corrected.is_none());
+        for bad in [json!({"line": 9, "text": "x"}), json!({"line": 0}), json!({"line": "first", "text": "x"})] {
+            assert!(s.execute("video.captionText", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.captionTimes", &json!({"line": 0})).is_err());
+        assert!(s.timeline.corrected.is_none(), "a command that fails changes nothing");
+        // Captions that came later are what's put right from then on.
+        s.set_heard(None);
+        assert!(s.execute("video.captionJoin", &json!({"line": 0})).is_err());
     }
 
     #[test]

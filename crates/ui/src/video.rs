@@ -297,6 +297,11 @@ pub struct VideoView {
     /// Everything said in the video as edited, each line with who said it (for the transcript),
     /// and a count of the times it was made again.
     pub lines: Arc<Vec<(Cue, captions::Who)>>,
+    /// For each of those lines, which of the recording's captions it's a piece of (to put it
+    /// right); none for a layer's.
+    pub line_sources: Arc<Vec<Option<usize>>>,
+    /// A line's words being put right in the transcript.
+    pub(crate) caption_edit: Option<transcript::CaptionEdit>,
     lines_rev: u64,
     /// The transcript's line the pane last followed while playing.
     transcript_follow: Option<usize>,
@@ -574,6 +579,8 @@ impl VideoView {
             menu: None,
             transcript_open: false,
             lines: Arc::new(Vec::new()),
+            line_sources: Arc::new(Vec::new()),
+            caption_edit: None,
             lines_rev: 0,
             transcript_follow: None,
             transcript_heights: None,
@@ -594,8 +601,12 @@ impl VideoView {
             return;
         }
         self.cues_for = Some(key);
-        self.cues = Arc::new(screengrabcraft_media::captions::edited_cues(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
-        self.lines = Arc::new(captions::transcript(self.captions.as_ref(), &self.session.timeline, &self.media_cues));
+        // The recording's captions as put right, if they were.
+        let said = captions::as_corrected(self.captions.as_ref(), &self.session.timeline);
+        self.cues = Arc::new(screengrabcraft_media::captions::edited_cues(said.as_ref(), &self.session.timeline, &self.media_cues));
+        let lines = captions::transcript_from(said.as_ref(), &self.session.timeline, &self.media_cues);
+        self.line_sources = Arc::new(lines.iter().map(|(_, _, k)| *k).collect());
+        self.lines = Arc::new(lines.into_iter().map(|(c, w, _)| (c, w)).collect());
         self.lines_rev += 1;
         self.composer.set_captions(self.showing_captions().then(|| self.cues.clone()));
         self.shown = None;
@@ -847,6 +858,7 @@ impl VideoView {
                     Some(c) => {
                         let n = c.cues.len();
                         self.captions = Some(c);
+                        self.session.set_heard(self.captions.as_ref());
                         self.captions_rev += 1;
                         if came {
                             ed.toast(ctx, format!("Transcribed: {n} lines"));
