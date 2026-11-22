@@ -12,7 +12,7 @@
 //! screengrabcraft-cli --version
 //! ```
 //!
-//! Output files take their format from their extension: .png .jpg .webp .bmp .gif .pdf, or
+//! Output files take their format from their extension: .png .jpg .webp .bmp .tif .gif .pdf, or
 //! .sgcraft for a project with its annotations still editable.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -37,7 +37,7 @@ const USAGE: &str = "usage:
   screengrabcraft-cli service install|uninstall|status
   screengrabcraft-cli --version
 
-Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft (a project).
+Output formats follow the extension: .png .jpg .webp .bmp .tif .gif .pdf, or .sgcraft (a project).
 --model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).
 --picture FILE: a picture lent to the commands, the first as {\"picture\": 0} (effect.watermark).";
 

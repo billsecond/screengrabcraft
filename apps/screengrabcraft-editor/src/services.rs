@@ -22,7 +22,10 @@ use screengrabcraft_ui::services::{
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
 const THUMB: u32 = 200;
+/// The pictures the video editor brings in (Import Media).
 const PICTURES: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+/// The pictures the picture editor opens and lists in its strip: those, and TIFF.
+const STILLS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
 /// Videos in the strip too: recordings to edit, and MP4s that play in the system's player.
 const VIDEOS: &[&str] = &[REC, "mp4"];
 /// The extension of a video recording.
@@ -199,12 +202,12 @@ impl Services for DesktopServices {
                     .set_title("Open a Recording")
                     .set_directory(&start)
                     .add_filter("Video recording", &[REC])
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
             } else {
                 rfd::AsyncFileDialog::new()
                     .set_title("Open")
                     .set_directory(&start)
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
                     .add_filter("ScreenGrabCraft project", &[PROJECT_EXT])
                     .add_filter("Video recording", &[REC])
             };
@@ -308,7 +311,7 @@ impl Services for DesktopServices {
             .filter(|e| {
                 e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
                     let x = x.to_ascii_lowercase();
-                    PICTURES.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
+                    STILLS.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
                 })
             })
             .filter_map(|e| {

@@ -93,6 +93,15 @@ pub enum Dialog {
         lightness: f32,
         gamma: f32,
     },
+    /// A colour replaced by another. `at` is the pixel the colour was picked on with the
+    /// eyedropper (none when it was chosen otherwise): where "only where it joins" starts.
+    Replace {
+        from: Color32,
+        with: Color32,
+        tolerance: u8,
+        joined: bool,
+        at: Option<(u32, u32)>,
+    },
     Sharpen {
         amount: u32,
         radius: f32,
@@ -195,6 +204,10 @@ impl Dialog {
         Dialog::Hue { hue: 0.0, saturation: 0.0, lightness: 0.0, gamma: 1.0 }
     }
 
+    pub fn replace() -> Dialog {
+        Dialog::Replace { from: Color32::WHITE, with: Color32::from_rgb(0xFF, 0xD6, 0x00), tolerance: 24, joined: false, at: None }
+    }
+
     pub fn sharpen() -> Dialog {
         Dialog::Sharpen { amount: 60, radius: 1.5 }
     }
@@ -236,7 +249,14 @@ impl Dialog {
     pub(crate) fn takes_area(id: &str) -> bool {
         matches!(
             id,
-            "effect.grayscale" | "effect.invert" | "effect.sepia" | "effect.brightness" | "effect.hueSaturation" | "effect.sharpen" | "effect.blur"
+            "effect.grayscale"
+                | "effect.invert"
+                | "effect.sepia"
+                | "effect.brightness"
+                | "effect.hueSaturation"
+                | "effect.replaceColor"
+                | "effect.sharpen"
+                | "effect.blur"
         )
     }
 
@@ -257,6 +277,7 @@ impl Dialog {
             Dialog::Curl { .. } => "Page Curl",
             Dialog::Reflection { .. } => "Reflection",
             Dialog::Hue { .. } => "Hue, Saturation and Gamma",
+            Dialog::Replace { .. } => "Replace a Colour",
             Dialog::Sharpen { .. } => "Sharpen",
             Dialog::Blur { .. } => "Blur",
             Dialog::Watermark { .. } => "Watermark",
@@ -281,6 +302,10 @@ impl Dialog {
 pub fn open(ed: &mut Editor, dialog: Dialog) {
     ed.dialog = Some(dialog);
 }
+
+/// What Replace a Colour's eyedropper and its "only where it joins" box are called.
+pub const REPLACE_PICK: &str = "Pick the colour to replace from the picture";
+pub const REPLACE_JOINED: &str = "Only where it joins the point picked";
 
 fn hex(c: Color32) -> String {
     from_color32(c).to_hex()
@@ -522,6 +547,55 @@ pub(crate) fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)>
                 ui.end_row();
             });
             Some(("effect.hueSaturation", json!({"hue": hue, "saturation": saturation, "lightness": lightness, "gamma": gamma})))
+        }
+        Dialog::Replace { from, with, tolerance, joined, at } => {
+            let ctx = ui.ctx().clone();
+            // A colour picked from the picture comes with the pixel it was picked on.
+            let point = crate::eyedropper::take_point(&ctx, REPLACE_PICK);
+            if let Some(c) = crate::eyedropper::take(&ctx, REPLACE_PICK) {
+                *from = crate::to_color32(c.with_alpha(255));
+                *at = point;
+            }
+            settings(ui, "replace-colour", |ui| {
+                ui.label("Colour");
+                ui.horizontal(|ui| {
+                    if egui::color_picker::color_edit_button_srgba(ui, from, egui::color_picker::Alpha::Opaque).changed() {
+                        *at = None;
+                    }
+                    let picking = crate::eyedropper::for_button(&ctx).is_some_and(|b| b == REPLACE_PICK);
+                    let tip = "Pick the colour from the picture, on the part to change";
+                    let resp = crate::icons::button_sized(ui, crate::icons::Icon::Eyedropper, tip, picking, true, 22.0);
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, REPLACE_PICK));
+                    if resp.clicked() {
+                        crate::eyedropper::start(&ctx, REPLACE_PICK);
+                    }
+                });
+                ui.end_row();
+                ui.label("With");
+                egui::color_picker::color_edit_button_srgba(ui, with, egui::color_picker::Alpha::Opaque);
+                ui.end_row();
+                ui.label("Tolerance");
+                ui.add(egui::Slider::new(tolerance, 0..=128));
+                ui.end_row();
+            });
+            if at.is_none() {
+                *joined = false;
+            }
+            ui.add_enabled(at.is_some(), egui::Checkbox::new(joined, REPLACE_JOINED))
+                .on_hover_text("Only the part of that colour round the point picked, not the same colour elsewhere")
+                .on_disabled_hover_text("Pick the colour from the picture first, on the part to change");
+            ui.label(
+                egui::RichText::new("Colours this close to it change too and keep their shade; smooth edges round it take the new colour.")
+                    .small()
+                    .color(Tokens::get(ui.ctx()).muted),
+            );
+            let mut params = json!({"color": hex(*from), "with": hex(*with), "tolerance": tolerance});
+            if let (true, Some((x, y))) = (*joined, *at) {
+                params["x"] = json!(x);
+                params["y"] = json!(y);
+                params["contiguous"] = json!(true);
+            }
+            Some(("effect.replaceColor", params))
         }
         Dialog::Sharpen { amount, radius } => {
             settings(ui, "sharpen", |ui| {

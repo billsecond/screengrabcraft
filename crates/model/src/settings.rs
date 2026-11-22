@@ -398,10 +398,12 @@ pub enum ImageFormat {
     Bmp,
     Gif,
     Pdf,
+    Tiff,
 }
 
 impl ImageFormat {
-    pub const ALL: [ImageFormat; 6] = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Bmp, ImageFormat::Gif, ImageFormat::Pdf];
+    pub const ALL: [ImageFormat; 7] =
+        [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Bmp, ImageFormat::Tiff, ImageFormat::Gif, ImageFormat::Pdf];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -411,6 +413,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "bmp",
             ImageFormat::Gif => "gif",
             ImageFormat::Pdf => "pdf",
+            ImageFormat::Tiff => "tif",
         }
     }
 
@@ -422,6 +425,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "BMP",
             ImageFormat::Gif => "GIF",
             ImageFormat::Pdf => "PDF",
+            ImageFormat::Tiff => "TIFF",
         }
     }
 
@@ -433,6 +437,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "image/bmp",
             ImageFormat::Gif => "image/gif",
             ImageFormat::Pdf => "application/pdf",
+            ImageFormat::Tiff => "image/tiff",
         }
     }
 
@@ -445,6 +450,7 @@ impl ImageFormat {
             "bmp" => Some(ImageFormat::Bmp),
             "gif" => Some(ImageFormat::Gif),
             "pdf" => Some(ImageFormat::Pdf),
+            "tif" | "tiff" => Some(ImageFormat::Tiff),
             _ => None,
         }
     }
@@ -1452,6 +1458,7 @@ mod tests {
             assert_eq!(ImageFormat::from_extension(f.extension()), Some(f));
         }
         assert_eq!(ImageFormat::from_extension(".JPEG"), Some(ImageFormat::Jpeg));
+        assert_eq!(ImageFormat::from_extension("TIFF"), Some(ImageFormat::Tiff));
         for m in CaptureMode::ALL {
             assert_eq!(CaptureMode::from_arg(m.arg()), Some(m));
         }

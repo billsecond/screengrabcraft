@@ -1232,6 +1232,7 @@ impl Editor {
                 ImageFormat::Bmp => &["bmp"],
                 ImageFormat::Gif => &["gif"],
                 ImageFormat::Pdf => &["pdf"],
+                ImageFormat::Tiff => &["tif", "tiff"],
             };
             self.services.request_save(&name, &[(format.label(), exts)]);
         } else if let Some(pic) = self.flattened()
@@ -2034,6 +2035,7 @@ impl Editor {
             &[
                 ("Brightness and Contrast…", Dialog::brightness),
                 ("Hue, Saturation and Gamma…", Dialog::hue),
+                ("Replace a Colour…", Dialog::replace),
                 ("Sharpen…", Dialog::sharpen),
                 ("Blur…", Dialog::blur),
             ],

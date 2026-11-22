@@ -364,6 +364,9 @@ fn properties_stay_shown_over_the_effects_pane() {
     }
     assert!(h.query_by_label("Apply Border").is_none());
     click(&mut h, "Border");
+    // Its Apply is further down the pane than it shows at once.
+    h.get_by_label("Apply Border").scroll_to_me();
+    h.run_steps(3);
     shot(&mut h, "effects-pane");
     click(&mut h, "Apply Border");
     assert_eq!(h.state().session.undo_label(), Some("Border"));
@@ -874,4 +877,74 @@ fn more_effects_in_the_pane_and_the_colours_keep_to_an_area() {
         h.get_by_label(name);
     }
     shot(&mut h, "effects-menu");
+}
+
+/// Replace a Colour, from the Effects pane: the colour picked from the picture with the
+/// eyedropper, replaced everywhere or only where it joins the point picked; from the Effects
+/// menu it is a window of its own.
+#[test]
+fn a_colour_picked_from_the_picture_is_replaced_everywhere_or_where_it_joins() {
+    use crate::dialogs::{REPLACE_JOINED, REPLACE_PICK};
+    use screengrabcraft_model::{Document, Raster};
+    let (blue, red, yellow) = (Color::rgb(30, 90, 200), Color::rgb(229, 57, 53), Color::rgb(0xFF, 0xD6, 0x00));
+    // Blue, with a big red square in the middle and a small one at the top left.
+    let mut pic = Raster::filled(400, 300, blue).unwrap();
+    for (x0, y0, side) in [(150, 100, 100), (20, 20, 30)] {
+        for y in y0..y0 + side {
+            for x in x0..x0 + side {
+                let i = (y * 400 + x) * 4;
+                pic.pixels_mut()[i..i + 4].copy_from_slice(&[red.r, red.g, red.b, 255]);
+            }
+        }
+    }
+    let mut ed = editor();
+    ed.session.replace(Document::new(pic));
+    ed.settings.properties_share = Some(0.2);
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1200.0));
+    h.run_steps(4);
+    click(&mut h, "Replace a Colour");
+    h.run_steps(20);
+    assert!(
+        egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label(REPLACE_JOINED)).is_disabled(),
+        "nothing picked yet, so there is no point to join"
+    );
+    // The eyedropper out, a click on the big square takes its colour and where it was.
+    click(&mut h, REPLACE_PICK);
+    assert!(crate::eyedropper::active(&h.ctx));
+    let p = at(&h, 200.0, 150.0);
+    crate::tests::click_at(&mut h, p);
+    h.run_steps(3);
+    assert!(!crate::eyedropper::active(&h.ctx));
+    assert!(!egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label(REPLACE_JOINED)).is_disabled(), "a point picked");
+    click(&mut h, REPLACE_JOINED);
+    h.run_steps(2);
+    shot(&mut h, "replace-colour-pane");
+    click(&mut h, "Apply Replace a Colour");
+    let ed = h.state();
+    assert_eq!(ed.session.undo_label(), Some("Replace a Colour"));
+    let base = &ed.session.doc.base;
+    assert_eq!(base.pixel(200, 150), Some(yellow), "the square clicked");
+    assert_eq!(base.pixel(30, 30), Some(red), "not the one it doesn't join");
+    assert_eq!(base.pixel(5, 5), Some(blue));
+    // Undone, and everywhere: both squares.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    click(&mut h, REPLACE_JOINED);
+    click(&mut h, "Apply Replace a Colour");
+    let base = &h.state().session.doc.base;
+    assert_eq!((base.pixel(200, 150), base.pixel(30, 30), base.pixel(5, 5)), (Some(yellow), Some(yellow), Some(blue)));
+    click(&mut h, "Replace a Colour");
+    // From the Effects menu, a window with Apply: the blue page becomes yellow too.
+    click(&mut h, "Effects");
+    click(&mut h, "Replace a Colour…");
+    h.run_steps(10);
+    assert!(matches!(h.state().dialog, Some(crate::dialogs::Dialog::Replace { .. })));
+    if let Some(crate::dialogs::Dialog::Replace { from, .. }) = &mut h.state_mut().dialog {
+        *from = crate::to_color32(blue);
+    }
+    h.run_steps(2);
+    shot(&mut h, "replace-colour-window");
+    click(&mut h, "Apply");
+    assert!(h.state().dialog.is_none());
+    assert_eq!(h.state().session.doc.base.pixel(5, 5), Some(yellow));
 }
