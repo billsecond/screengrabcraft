@@ -94,7 +94,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Add Annotation",
         "Annotate",
         None,
-        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}} (arrow also "bend"?: 0.3, how far its middle bows to the left of the way it points as a share of its length, -1.5 to 1.5, and "head"?: "notched"|"triangle"|"open"|"dot"|"bar"), boxes {"rect":{"x","y","w","h"}}, polygon {"rect", "sides"?: 3 (3 to 12), "star"?: false}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"|"plus"|"minus"|"arrowUp"|"arrowDown"|"arrowLeft"|"arrowRight"|"noEntry"|"idea"|"pin"|"flag"|"lock"|"clock"|"search"|"bookmark"|"gear"|"home"|"mail"|"pencil"|"happy"|"laughing"|"wink"|"neutral"|"sad"|"surprised"|"angry"|"love"|"cool"}"##,
+        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}} (both also "bend"?: 0.3, how far the middle bows to the left of the way it points as a share of its length, -1.5 to 1.5; an arrow also "head"?: "notched"|"triangle"|"open"|"dot"|"bar"), boxes {"rect":{"x","y","w","h"}}, polygon {"rect", "sides"?: 3 (3 to 12), "star"?: false} or {"points": [{"x", "y"}, …]} (through points clicked one by one), pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail", and "tails"?: [{"x", "y"}] for more), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"|"plus"|"minus"|"arrowUp"|"arrowDown"|"arrowLeft"|"arrowRight"|"noEntry"|"idea"|"pin"|"flag"|"lock"|"clock"|"search"|"bookmark"|"gear"|"home"|"mail"|"pencil"|"happy"|"laughing"|"wink"|"neutral"|"sad"|"surprised"|"angry"|"love"|"cool"}"##,
         always,
         add_object
     ),
@@ -126,6 +126,24 @@ pub static COMMANDS: &[CommandSpec] = &[
         apply_look
     ),
     cmd!("object.text", "Change Text", "Annotate", None, r#"{"id": id, "text": "…"}"#, has_objects, set_text),
+    cmd!(
+        "object.addTail",
+        "Add a Tail",
+        "Annotate",
+        None,
+        r#"{"id"?: id (default: the callout selected), "at"?: {"x", "y"}} → {"tails": n} — another tail on a callout (8 in all at most), pointing at "at" (default: across from its first)"#,
+        has_objects,
+        add_tail
+    ),
+    cmd!(
+        "object.removeTail",
+        "Remove a Tail",
+        "Annotate",
+        None,
+        r#"{"id"?: id (default: the callout selected), "index"?: n (of its other tails, from 0; default: the last)} → {"tails": n}"#,
+        has_objects,
+        remove_tail
+    ),
     cmd!("object.order", "Arrange", "Annotate", None, r#"{"to": "front"|"back"|"forward"|"backward", "ids"?: [id]}"#, has_selection, order),
     cmd!(
         "object.rotate",
@@ -625,7 +643,24 @@ pub fn parse_object(v: &Value) -> Result<(Shape, Style)> {
     if fields.get("type").and_then(Value::as_str) == Some("step") && !fields.contains_key("number") {
         fields.insert("number".to_string(), json!(0));
     }
-    let shape: Shape = serde_json::from_value(Value::Object(fields)).map_err(|e| EngineError::Params(format!("object: {e}")))?;
+    let points = match fields.get("points") {
+        Some(Value::Array(a)) if fields.get("type").and_then(Value::as_str) == Some("polygon") => Some(a),
+        _ => None,
+    };
+    let shape: Shape = match points {
+        // A polygon through points clicked one by one, on the picture.
+        Some(a) => {
+            let pts = a
+                .iter()
+                .take(screengrabcraft_model::object::MAX_CORNERS)
+                .map(|v| serde_json::from_value::<Pt>(v.clone()))
+                .collect::<std::result::Result<Vec<Pt>, _>>()
+                .map_err(|_| EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string()))?;
+            screengrabcraft_model::object::polygon_through(&pts)
+                .ok_or_else(|| EngineError::Params("a polygon of points needs three or more, apart".to_string()))?
+        }
+        None => serde_json::from_value(Value::Object(fields)).map_err(|e| EngineError::Params(format!("object: {e}")))?,
+    };
     let kind = shape.kind();
     let style = match style_patch {
         Some(p) => merge_style(&kind.default_style(), &p)?,
@@ -757,6 +792,55 @@ fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
         }
         None => Err(EngineError::Params(format!("annotation {} has no text", id.0))),
     }
+}
+
+/// The callout a tail command is for: `id`, or the one callout selected.
+fn callout_param(s: &Session, p: &Value) -> Result<ObjectId> {
+    let id = match p.get("id") {
+        None | Some(Value::Null) => match s.selected().as_slice() {
+            [one] => *one,
+            _ => return Err(EngineError::Params("give the `id` of a callout, or select one".to_string())),
+        },
+        Some(_) => id_param(s, p)?,
+    };
+    match s.doc.get(id).map(|o| &o.shape) {
+        Some(Shape::Callout { .. }) => Ok(id),
+        _ => Err(EngineError::Params(format!("annotation {} is no callout", id.0))),
+    }
+}
+
+fn add_tail(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = callout_param(s, p)?;
+    let picture = s.doc.bounds();
+    let at = match p.get("at") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(serde_json::from_value::<Pt>(v.clone()).map_err(|_| EngineError::Params("`at` is {\"x\", \"y\"}".to_string()))?.finite()),
+    };
+    let Some(Shape::Callout { rect, tail, tails, .. }) = s.doc.get_mut(id).map(|o| &mut o.shape) else { return Err(EngineError::NoObject(id.0)) };
+    if tails.len() + 1 >= screengrabcraft_model::object::MAX_TAILS {
+        return Err(EngineError::Failed(format!("a callout has {} tails at most", screengrabcraft_model::object::MAX_TAILS)));
+    }
+    // Across from the first: mirrored over the box's middle, or beside it when that's the same spot.
+    let c = rect.center();
+    let across = Pt::new(2.0 * c.x - tail.x, tail.y);
+    let across = if across.distance(*tail) < 8.0 { Pt::new(tail.x + rect.w * 0.6, tail.y) } else { across };
+    tails.push(picture.nearest(at.unwrap_or(across)));
+    Ok(json!({ "tails": tails.len() + 1 }))
+}
+
+fn remove_tail(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = callout_param(s, p)?;
+    let index = match p.get("index") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or_else(|| EngineError::Params("`index` is a number from 0".to_string()))? as usize),
+    };
+    let Some(Shape::Callout { tails, .. }) = s.doc.get_mut(id).map(|o| &mut o.shape) else { return Err(EngineError::NoObject(id.0)) };
+    let i = index.unwrap_or(tails.len().saturating_sub(1));
+    if i >= tails.len() {
+        return Err(EngineError::Params("the callout has no such tail (its first stays)".to_string()));
+    }
+    tails.remove(i);
+    Ok(json!({ "tails": tails.len() + 1 }))
 }
 
 fn order(s: &mut Session, p: &Value) -> Result<Value> {

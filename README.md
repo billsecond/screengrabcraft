@@ -194,14 +194,17 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Arrow** (one or two heads, notched, solid, an open V, a dot or a bar, any thickness; straight
   or curved: drag the diamond in a selected arrow's middle to bend it), **line**, **shape** (a
   rectangle, rounded or not, an ellipse, a triangle, a diamond, a polygon of up to 12 corners or a
-  star, picked in its Shape options) and **pen**; Shift draws at 45° and makes squares and circles.
+  star, picked in its Shape options, or a polygon of points clicked one by one: Points clicked, then
+  a double click or Enter closes it) and **pen**; Shift draws at 45° and makes squares and circles.
+  A line bends as an arrow does, by the diamond in its middle.
 - **Highlighter** (H): drag a box over what should stand out; it's tinted as under a marker
   (dark stays dark), and resized by its handles or moved like any shape.
 - **Hand** (D): drag the picture round in the window. Space held down, or the middle button,
   does the same with any tool.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
   with the text in it) with a tail set to point down left, down right, left, right, up or down,
-  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono or any font on the computer (Font,
+  and dragged anywhere, and more tails (Add a Tail, up to 8) to point at several things; in
+  PatroneOS Sans or PatroneOS Mono or any font on the computer (Font,
   with a search; a project keeps the font's name, and shows the built-in font where it's missing;
   not in the browser), bold, italic, left, centred or right.
   Text overlays: an outline round the letters, a shadow, a filled or see-through box behind

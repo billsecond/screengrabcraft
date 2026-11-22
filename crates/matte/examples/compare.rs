@@ -101,6 +101,7 @@ fn callout_on_plain_colour() -> Result<Raster, String> {
             tail: Pt::new(560.0, 330.0),
             text: "Click here to keep it".into(),
             form: screengrabcraft_model::CalloutForm::Rounded,
+            tails: Vec::new(),
         },
         Kind::Callout.default_style(),
     ))?;

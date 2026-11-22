@@ -566,7 +566,7 @@ fn a_snapped_line_stops_at_the_edge_on_its_angle() {
     let (a, b) = (at(&h, 200.0, 150.0), at(&h, 470.0, 400.0));
     shift_drag(&mut h, a, b);
     let ed = h.state();
-    let Some(Shape::Line { from, to }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
+    let Some(Shape::Line { from, to, .. }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
     assert!(picture(ed).contains(to), "{to:?}");
     assert!(((to.x - from.x).abs() - (to.y - from.y).abs()).abs() < 0.5, "still at 45 degrees: {from:?} to {to:?}");
 }
@@ -1825,6 +1825,7 @@ fn the_eyedropper_takes_a_colour_from_the_picture_for_the_selection() {
                 tail: screengrabcraft_model::Pt::new(40.0, 130.0),
                 text: "Hi".into(),
                 form: screengrabcraft_model::CalloutForm::Rounded,
+                tails: Vec::new(),
             },
             Kind::Callout.default_style(),
         )

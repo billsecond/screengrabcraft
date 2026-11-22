@@ -2,7 +2,7 @@
 //! pixels under them (blur, pixelate, spotlight, magnify) work on what has been drawn so far, so
 //! a blur hides an arrow drawn before it and not one drawn after.
 
-use screengrabcraft_model::object::{PIN_POINT, arrow_head, bent_points, polygon_points, step_radius};
+use screengrabcraft_model::object::{PIN_POINT, arrow_head, bent_points, polygon_outline, step_radius};
 use screengrabcraft_model::{ArrowHeads, BadgeShape, CalloutForm, Color, Document, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
@@ -231,12 +231,17 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let (from, to, heads, bend, head) = (*from, *to, *heads, *bend, *head);
             with_style(canvas, bounds, &style, &|c, t| draw_arrow(c, t, (from, to, bend), heads, head, &style));
         }
-        Shape::Line { from, to } => {
-            let (from, to) = (*from, *to);
+        Shape::Line { from, to, bend } => {
+            let points = bent_points(*from, *to, *bend, 64);
             with_style(canvas, bounds, &style, &|c, t| {
                 let mut pb = PathBuilder::new();
-                pb.move_to(from.x, from.y);
-                pb.line_to(to.x, to.y);
+                for (i, p) in points.iter().enumerate() {
+                    if i == 0 {
+                        pb.move_to(p.x, p.y);
+                    } else {
+                        pb.line_to(p.x, p.y);
+                    }
+                }
                 if let Some(path) = pb.finish() {
                     c.stroke_path(&path, &paint(style.stroke), &stroke_of(style.width, style.dashed, LineCap::Round), t, None);
                 }
@@ -258,8 +263,8 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
                 }
             });
         }
-        Shape::Polygon { rect, sides, star } => {
-            let corners = polygon_points(*rect, *sides, *star);
+        Shape::Polygon { rect, sides, star, corners } => {
+            let corners = polygon_outline(*rect, *sides, *star, corners);
             with_style(canvas, bounds, &style, &|c, t| {
                 if let Some(path) = polygon(&corners) {
                     fill_and_stroke(c, &path, &style, t);
@@ -290,10 +295,11 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let rect = *rect;
             with_style(canvas, bounds, &style, &|c, t| draw_text_box(c, t, rect, body, &style));
         }
-        Shape::Callout { rect, tail, text: body, form } => {
-            let (rect, tail, form) = (*rect, *tail, *form);
+        Shape::Callout { rect, tail, text: body, form, tails } => {
+            let (rect, form) = (*rect, *form);
+            let all: Vec<Pt> = std::iter::once(*tail).chain(tails.iter().copied()).collect();
             with_style(canvas, bounds, &style, &|c, t| {
-                for path in callout_paths(rect, tail, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
+                for path in callout_paths_with(rect, &all, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
                     fill_and_stroke(c, &path, &style, t);
                 }
                 draw_text_centered(c, t, form.text_area(rect), body, &style);
@@ -606,12 +612,24 @@ fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, label: &str, badge: Badge
 /// The outlines of a callout of any form, in drawing order: one for most, the cloud and then
 /// each of the bubbles of its tail for a cloud.
 pub fn callout_paths(rect: Rect, tail: Pt, form: CalloutForm, radius: f32) -> Vec<Path> {
+    callout_paths_with(rect, &[tail], form, radius)
+}
+
+/// The same with several tails, each to a point of `tails`.
+pub fn callout_paths_with(rect: Rect, tails: &[Pt], form: CalloutForm, radius: f32) -> Vec<Path> {
     match form {
-        CalloutForm::Rounded => callout_path(rect, tail, radius).into_iter().collect(),
-        CalloutForm::Square => callout_path(rect, tail, 0.0).into_iter().collect(),
-        CalloutForm::Oval => oval_callout_path(rect, tail).into_iter().collect(),
-        CalloutForm::Cloud => cloud_paths(rect, tail, form.bulge(rect)),
-        CalloutForm::Arrow => arrow_callout_path(rect, tail).into_iter().collect(),
+        CalloutForm::Rounded => callout_path_with(rect, tails, radius).into_iter().collect(),
+        CalloutForm::Square => callout_path_with(rect, tails, 0.0).into_iter().collect(),
+        CalloutForm::Oval => oval_callout_path_with(rect, tails).into_iter().collect(),
+        CalloutForm::Cloud => {
+            let mut out = cloud_paths(rect, tails.first().copied().unwrap_or(rect.center()), form.bulge(rect));
+            // The other tails' bubbles (the cloud itself is drawn once).
+            for t in tails.iter().skip(1) {
+                out.extend(cloud_paths(rect, *t, form.bulge(rect)).into_iter().skip(1));
+            }
+            out
+        }
+        CalloutForm::Arrow => arrow_callout_path_with(rect, tails).into_iter().collect(),
     }
 }
 
@@ -630,13 +648,31 @@ fn facing_side(rect: Rect, p: Pt) -> u8 {
 
 /// A box whose side facing `tail` narrows to a point at `tail`: an arrow with room for text.
 pub fn arrow_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
-    if rect.is_empty() || rect.inflate(-1.0).contains(tail) {
+    arrow_callout_path_with(rect, &[tail])
+}
+
+/// The tails outside `rect` that leave from `side` (0 top, 1 right, 2 bottom, 3 left), in the
+/// order the outline goes round (clockwise: left to right along the top, and so on).
+fn tails_on(rect: Rect, tails: &[Pt], side: u8) -> Vec<Pt> {
+    let mut on: Vec<Pt> = tails.iter().copied().filter(|t| !rect.inflate(-1.0).contains(*t) && facing_side(rect, *t) == side).collect();
+    let key = |p: &Pt| match side {
+        0 => p.x,
+        1 => p.y,
+        2 => -p.x,
+        _ => -p.y,
+    };
+    on.sort_by(|a, b| key(a).total_cmp(&key(b)));
+    on
+}
+
+/// A box with a point out to each of `tails`, from the side each faces.
+pub fn arrow_callout_path_with(rect: Rect, tails: &[Pt]) -> Option<Path> {
+    if rect.is_empty() || tails.iter().all(|t| rect.inflate(-1.0).contains(*t)) {
         return rounded_rect(rect, 0.0);
     }
     let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
     let corners = [Pt::new(x0, y0), Pt::new(x1, y0), Pt::new(x1, y1), Pt::new(x0, y1)];
-    // The point goes between the two corners of the side it leaves from.
-    let side = usize::from(facing_side(rect, tail));
+    // Each point goes between the two corners of the side it leaves from.
     let mut pb = PathBuilder::new();
     for (i, p) in corners.iter().enumerate() {
         if i == 0 {
@@ -644,8 +680,8 @@ pub fn arrow_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
         } else {
             pb.line_to(p.x, p.y);
         }
-        if i == side {
-            pb.line_to(tail.x, tail.y);
+        for t in tails_on(rect, tails, i as u8) {
+            pb.line_to(t.x, t.y);
         }
     }
     pb.close();
@@ -666,12 +702,47 @@ fn ellipse_steps(rx: f32, ry: f32) -> usize {
 
 /// An oval with a tail from its edge to `tail`, as one outline.
 pub fn oval_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
+    oval_callout_path_with(rect, &[tail])
+}
+
+/// An oval with a tail out to each of `tails` (those outside it), as one outline.
+pub fn oval_callout_path_with(rect: Rect, tails: &[Pt]) -> Option<Path> {
     let c = rect.center();
     let (rx, ry) = (rect.w / 2.0, rect.h / 2.0);
-    let (nx, ny) = if rx >= 1.0 && ry >= 1.0 { ((tail.x - c.x) / rx, (tail.y - c.y) / ry) } else { (0.0, 0.0) };
-    if nx * nx + ny * ny <= 1.0 || !(nx.is_finite() && ny.is_finite()) {
-        return oval(rect);
+    let angle = |t: &Pt| {
+        let (nx, ny) = if rx >= 1.0 && ry >= 1.0 { ((t.x - c.x) / rx, (t.y - c.y) / ry) } else { (0.0, 0.0) };
+        (nx * nx + ny * ny > 1.0 && nx.is_finite() && ny.is_finite()).then(|| (ny.atan2(nx), *t))
+    };
+    let mut out: Vec<(f32, Pt)> = tails.iter().filter_map(angle).collect();
+    if out.len() > 1 {
+        // Round the ellipse once, going out to each tail at its angle.
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let half = 0.24;
+        let steps = ellipse_steps(rx, ry);
+        let mut pb = PathBuilder::new();
+        let start = out.first().map_or(0.0, |(a, _)| *a) + half;
+        let first = on_ellipse(c, rx, ry, start);
+        pb.move_to(first.x, first.y);
+        let mut at = start;
+        for k in 1..=out.len() {
+            let (a, t) = out.get(k % out.len()).copied().unwrap_or((start, c));
+            let a = if k == out.len() { a + std::f32::consts::TAU } else { a };
+            let to = (a - half).max(at);
+            let n = ((to - at) / std::f32::consts::TAU * steps as f32).ceil().max(1.0) as usize;
+            for i in 1..=n {
+                let p = on_ellipse(c, rx, ry, at + (to - at) * i as f32 / n as f32);
+                pb.line_to(p.x, p.y);
+            }
+            pb.line_to(t.x, t.y);
+            at = (a + half).max(to);
+            let p = on_ellipse(c, rx, ry, at);
+            pb.line_to(p.x, p.y);
+        }
+        pb.close();
+        return pb.finish();
     }
+    let Some((_, tail)) = out.first().copied() else { return oval(rect) };
+    let (nx, ny) = ((tail.x - c.x) / rx, (tail.y - c.y) / ry);
     // Round the ellipse the long way, from one side of the tail's base to the other, then out
     // to the tail and back.
     let a = ny.atan2(nx);
@@ -742,53 +813,66 @@ pub fn cloud_paths(rect: Rect, tail: Pt, bulge: f32) -> Vec<Path> {
 
 /// A rounded box with a tail running from the side facing `tail` to `tail`, as one outline.
 pub fn callout_path(rect: Rect, tail: Pt, radius: f32) -> Option<Path> {
+    callout_path_with(rect, &[tail], radius)
+}
+
+/// A rounded box with a tail to each of `tails` (those outside it), each from the side facing it,
+/// as one outline.
+pub fn callout_path_with(rect: Rect, tails: &[Pt], radius: f32) -> Option<Path> {
     let rad = radius.max(0.0).min(rect.w / 2.0).min(rect.h / 2.0);
-    if rect.inflate(-1.0).contains(tail) || rect.is_empty() {
+    if rect.is_empty() || tails.iter().all(|t| rect.inflate(-1.0).contains(*t)) {
         return rounded_rect(rect, rad);
     }
     let c = rect.center();
-    let d = tail.sub(c);
-    let side = facing_side(rect, tail);
-    // Where on that side the line from the centre to the tail crosses, kept clear of the corners.
-    let base_half = (if side.is_multiple_of(2) { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
-    let (lo_x, hi_x) = (rect.x + rad + base_half, rect.right() - rad - base_half);
-    let (lo_y, hi_y) = (rect.y + rad + base_half, rect.bottom() - rad - base_half);
     let cross = |along: f32, lo: f32, hi: f32| if lo <= hi { along.clamp(lo, hi) } else { (lo + hi) / 2.0 };
-    let at_x = |y: f32| if d.y.abs() > f32::EPSILON { c.x + d.x * (y - c.y) / d.y } else { c.x };
-    let at_y = |x: f32| if d.x.abs() > f32::EPSILON { c.y + d.y * (x - c.x) / d.x } else { c.y };
+    // Where on its side the line from the centre to a tail crosses, kept clear of the corners,
+    // and how wide the tail is there.
+    let base = |tail: Pt, side: u8| -> (f32, f32) {
+        let d = tail.sub(c);
+        let base_half = (if side.is_multiple_of(2) { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
+        let at_x = |y: f32| if d.y.abs() > f32::EPSILON { c.x + d.x * (y - c.y) / d.y } else { c.x };
+        let at_y = |x: f32| if d.x.abs() > f32::EPSILON { c.y + d.y * (x - c.x) / d.x } else { c.y };
+        let m = match side {
+            0 => cross(at_x(rect.y), rect.x + rad + base_half, rect.right() - rad - base_half),
+            2 => cross(at_x(rect.bottom()), rect.x + rad + base_half, rect.right() - rad - base_half),
+            1 => cross(at_y(rect.right()), rect.y + rad + base_half, rect.bottom() - rad - base_half),
+            _ => cross(at_y(rect.x), rect.y + rad + base_half, rect.bottom() - rad - base_half),
+        };
+        (m, base_half)
+    };
     let k = 0.552_284_8 * rad;
     let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
     let mut pb = PathBuilder::new();
     pb.move_to(x0 + rad, y0);
-    if side == 0 {
-        let m = cross(at_x(y0), lo_x, hi_x);
-        pb.line_to(m - base_half, y0);
+    for tail in tails_on(rect, tails, 0) {
+        let (m, b) = base(tail, 0);
+        pb.line_to(m - b, y0);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(m + base_half, y0);
+        pb.line_to(m + b, y0);
     }
     pb.line_to(x1 - rad, y0);
     pb.cubic_to(x1 - rad + k, y0, x1, y0 + rad - k, x1, y0 + rad);
-    if side == 1 {
-        let m = cross(at_y(x1), lo_y, hi_y);
-        pb.line_to(x1, m - base_half);
+    for tail in tails_on(rect, tails, 1) {
+        let (m, b) = base(tail, 1);
+        pb.line_to(x1, m - b);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(x1, m + base_half);
+        pb.line_to(x1, m + b);
     }
     pb.line_to(x1, y1 - rad);
     pb.cubic_to(x1, y1 - rad + k, x1 - rad + k, y1, x1 - rad, y1);
-    if side == 2 {
-        let m = cross(at_x(y1), lo_x, hi_x);
-        pb.line_to(m + base_half, y1);
+    for tail in tails_on(rect, tails, 2) {
+        let (m, b) = base(tail, 2);
+        pb.line_to(m + b, y1);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(m - base_half, y1);
+        pb.line_to(m - b, y1);
     }
     pb.line_to(x0 + rad, y1);
     pb.cubic_to(x0 + rad - k, y1, x0, y1 - rad + k, x0, y1 - rad);
-    if side == 3 {
-        let m = cross(at_y(x0), lo_y, hi_y);
-        pb.line_to(x0, m + base_half);
+    for tail in tails_on(rect, tails, 3) {
+        let (m, b) = base(tail, 3);
+        pb.line_to(x0, m + b);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(x0, m - base_half);
+        pb.line_to(x0, m - b);
     }
     pb.line_to(x0, y0 + rad);
     pb.cubic_to(x0, y0 + rad - k, x0 + rad - k, y0, x0 + rad, y0);
@@ -858,7 +942,7 @@ mod tests {
         let shapes = vec![
             Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(150.0, 100.0), heads: ArrowHeads::Both, bend: 0.0, head: Default::default() },
             Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(5.2, 5.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
-            Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(199.0, 119.0) },
+            Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(199.0, 119.0), bend: 0.0 },
             Shape::Rect { rect: r, radius: 12.0 },
             Shape::Ellipse { rect: r },
             Shape::Pen { points: vec![Pt::new(1.0, 1.0), Pt::new(30.0, 40.0), Pt::new(60.0, 10.0)] },
@@ -866,12 +950,18 @@ mod tests {
             Shape::highlight(Rect::new(10.0, 50.0, 180.0, 20.0)),
             Shape::highlight(Rect::new(-40.0, 100.0, 400.0, 0.0)),
             Shape::Text { rect: r, text: "Hello, world".into() },
-            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded },
-            Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square },
-            Shape::Callout { rect: r, tail: Pt::new(180.0, 45.0), text: "Oval".into(), form: CalloutForm::Oval },
-            Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud },
-            Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow },
-            Shape::Callout { rect: Rect::new(10.0, 10.0, 0.5, 0.5), tail: Pt::new(f32::NAN, 1.0), text: String::new(), form: CalloutForm::Cloud },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 45.0), text: "Oval".into(), form: CalloutForm::Oval, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow, tails: Vec::new() },
+            Shape::Callout {
+                rect: Rect::new(10.0, 10.0, 0.5, 0.5),
+                tail: Pt::new(f32::NAN, 1.0),
+                text: String::new(),
+                form: CalloutForm::Cloud,
+                tails: Vec::new(),
+            },
             Shape::step(Pt::new(150.0, 30.0), 7),
             Shape::Blur { rect: r },
             Shape::Pixelate { rect: Rect::new(-50.0, -50.0, 500.0, 500.0) },
@@ -903,8 +993,8 @@ mod tests {
     fn polygons_fill_their_outline_and_arrows_bow() {
         let style = Style { fill: Color::BLACK, stroke: Color::BLACK, width: 2.0, shadow: false, ..Style::default() };
         let mut d = doc();
-        d.add(Shape::Polygon { rect: Rect::new(10.0, 10.0, 80.0, 70.0), sides: 3, star: false }, style).unwrap();
-        d.add(Shape::Polygon { rect: Rect::new(110.0, 10.0, 80.0, 80.0), sides: 5, star: true }, style).unwrap();
+        d.add(Shape::Polygon { rect: Rect::new(10.0, 10.0, 80.0, 70.0), sides: 3, star: false, corners: Vec::new() }, style).unwrap();
+        d.add(Shape::Polygon { rect: Rect::new(110.0, 10.0, 80.0, 80.0), sides: 5, star: true, corners: Vec::new() }, style).unwrap();
         let out = render(&d).unwrap();
         assert_eq!(px(&out, 50, 60), Color::BLACK, "inside the triangle");
         assert_eq!(px(&out, 14, 14), Color::WHITE, "a corner of its box");
@@ -947,7 +1037,12 @@ mod tests {
         for sides in 0..14 {
             for star in [false, true] {
                 d.add(
-                    Shape::Polygon { rect: Rect::new(f32::from(sides as u8) * 12.0, 5.0, 10.0 + f32::from(sides as u8), 30.0), sides, star },
+                    Shape::Polygon {
+                        rect: Rect::new(f32::from(sides as u8) * 12.0, 5.0, 10.0 + f32::from(sides as u8), 30.0),
+                        sides,
+                        star,
+                        corners: Vec::new(),
+                    },
                     style,
                 )
                 .unwrap();
@@ -1095,6 +1190,53 @@ mod tests {
     }
 
     #[test]
+    fn a_callout_reaches_each_of_several_tails_in_every_form() {
+        let r = Rect::new(100.0, 100.0, 120.0, 60.0);
+        // Two below (left and right), one to the right, one above.
+        let tails = [Pt::new(90.0, 230.0), Pt::new(240.0, 230.0), Pt::new(300.0, 130.0), Pt::new(160.0, 30.0)];
+        for form in CalloutForm::ALL {
+            let paths = callout_paths_with(r, &tails, form, 10.0);
+            let reach = 0.5 + if form == CalloutForm::Cloud { 3.0 } else { 0.0 };
+            for t in tails {
+                let near = paths.iter().any(|p| {
+                    let b = p.bounds();
+                    b.left() <= t.x + reach && b.right() >= t.x - reach && b.top() <= t.y + reach && b.bottom() >= t.y - reach
+                });
+                assert!(near, "{form:?} {t:?}");
+            }
+        }
+        // Drawn: each tail's tip is inked, and the box still holds its text.
+        let mut d = Document::new(Raster::filled(320, 260, Color::WHITE).unwrap());
+        let style = Style { stroke: Color::rgb(200, 0, 0), fill: Color::WHITE, width: 3.0, shadow: false, ..Style::default() };
+        let (tail, more) = (Pt::new(120.0, 220.0), vec![Pt::new(200.0, 220.0), Pt::new(300.0, 130.0)]);
+        d.add(Shape::Callout { rect: r, tail, text: String::new(), form: CalloutForm::Rounded, tails: more.clone() }, style).unwrap();
+        let out = render(&d).unwrap();
+        for t in std::iter::once(tail).chain(more) {
+            let (x, y) = (t.x as u32, t.y as u32);
+            let inked = (x.saturating_sub(3)..x + 3)
+                .any(|px| (y.saturating_sub(3)..y + 3).any(|py| out.pixel(px, py).is_some_and(|c| c.r > 150 && c.g < 80)));
+            assert!(inked, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_polygon_of_points_and_a_bent_line_are_drawn() {
+        let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
+        let style = Style { stroke: Color::BLACK, fill: Color::rgb(0, 0, 200), width: 2.0, shadow: false, ..Style::default() };
+        let shape = screengrabcraft_model::object::polygon_through(&[Pt::new(10.0, 10.0), Pt::new(90.0, 10.0), Pt::new(10.0, 90.0)]).unwrap();
+        d.add(shape, style).unwrap();
+        let line = Style { stroke: Color::rgb(0, 150, 0), width: 4.0, shadow: false, ..Style::default() };
+        d.add(Shape::Line { from: Pt::new(110.0, 100.0), to: Pt::new(190.0, 100.0), bend: 0.4 }, line).unwrap();
+        let out = render(&d).unwrap();
+        // Inside the triangle's corner, not across its long side.
+        assert_eq!(out.pixel(25, 25), Some(Color::rgb(0, 0, 200)));
+        assert_eq!(out.pixel(80, 80), Some(Color::WHITE));
+        // The line bows up: its middle is well above its ends, and the straight way is empty.
+        assert!(out.pixel(150, 68).is_some_and(|c| c.g > 100 && c.r < 80), "{:?}", out.pixel(150, 68));
+        assert_eq!(out.pixel(150, 100), Some(Color::WHITE));
+    }
+
+    #[test]
     fn every_callout_form_reaches_its_tail_and_holds_its_box() {
         let r = Rect::new(100.0, 100.0, 120.0, 60.0);
         for form in CalloutForm::ALL {
@@ -1161,9 +1303,15 @@ mod tests {
         let mut d = doc();
         let style = Style { fill: Color::rgb(0, 0, 255), stroke: Color::TRANSPARENT, width: 0.0, shadow: false, ..Style::default() };
         let rect = Rect::new(20.0, 30.0, 100.0, 60.0);
-        d.add(Shape::Callout { rect, tail: Pt::new(170.0, 60.0), text: String::new(), form: CalloutForm::Arrow }, style).unwrap();
+        d.add(Shape::Callout { rect, tail: Pt::new(170.0, 60.0), text: String::new(), form: CalloutForm::Arrow, tails: Vec::new() }, style).unwrap();
         d.add(
-            Shape::Callout { rect: Rect::new(150.0, 5.0, 40.0, 20.0), tail: Pt::new(170.0, 15.0), text: String::new(), form: CalloutForm::Oval },
+            Shape::Callout {
+                rect: Rect::new(150.0, 5.0, 40.0, 20.0),
+                tail: Pt::new(170.0, 15.0),
+                text: String::new(),
+                form: CalloutForm::Oval,
+                tails: Vec::new(),
+            },
             style,
         )
         .unwrap();

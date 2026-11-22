@@ -75,6 +75,8 @@ pub fn setup(ctx: &egui::Context, theme: screengrabcraft_model::Theme) {
 #[cfg(test)]
 mod quick_tests;
 #[cfg(test)]
+mod shapes_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod video_tests;

@@ -596,7 +596,7 @@ mod tests {
         let b = o.bounds();
         assert!((b.w - 14.0).abs() < 0.5 && (b.h - 44.0).abs() < 0.5, "{b:?}");
         // Lines turn by their points and keep no turn.
-        let l = d.add(Shape::Line { from: Pt::new(10.0, 10.0), to: Pt::new(30.0, 10.0) }, Style::default()).unwrap();
+        let l = d.add(Shape::Line { from: Pt::new(10.0, 10.0), to: Pt::new(30.0, 10.0), bend: 0.0 }, Style::default()).unwrap();
         d.rotate_objects(&[l], 90.0, Pt::new(20.0, 10.0));
         let o = d.get(l).unwrap();
         assert_eq!((o.rotation, o.shape.extent()), (0.0, Rect::new(20.0, 0.0, 0.0, 20.0)));

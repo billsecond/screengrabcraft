@@ -600,6 +600,9 @@ pub enum Shape {
     Line {
         from: Pt,
         to: Pt,
+        /// How far it bows out of a straight line, as an arrow's `bend`. Nought isn't written.
+        #[serde(default, skip_serializing_if = "is_straight")]
+        bend: f32,
     },
     Rect {
         rect: Rect,
@@ -617,6 +620,11 @@ pub enum Shape {
         sides: u32,
         #[serde(default)]
         star: bool,
+        /// The corners of a polygon of points clicked one by one, as shares of its box (0 to 1
+        /// across and down), so it is moved, resized and turned as a box is. None for a polygon
+        /// of `sides` corners.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        corners: Vec<Pt>,
     },
     /// A freehand line.
     Pen {
@@ -646,6 +654,9 @@ pub enum Shape {
         text: String,
         #[serde(default)]
         form: CalloutForm,
+        /// Its other tails, pointing at other things (at most [`MAX_TAILS`] in all).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tails: Vec<Pt>,
     },
     /// A numbered badge, for steps in an explanation: its place in the count, written as a
     /// number, a letter or a Roman numeral, on a circle or another shape.
@@ -1030,7 +1041,7 @@ impl ShapeOptions {
 
     /// A polygon of these options in `rect`: their corners (three unless they say) and star.
     fn polygon(&self, rect: Rect, sides: u32, star: bool) -> Shape {
-        Shape::Polygon { rect, sides: self.sides.unwrap_or(sides), star: self.star.unwrap_or(star) }
+        Shape::Polygon { rect, sides: self.sides.unwrap_or(sides), star: self.star.unwrap_or(star), corners: Vec::new() }
     }
 
     /// Whether these options say nothing.
@@ -1050,12 +1061,17 @@ impl ShapeOptions {
             Shape::Rect { rect, .. } | Shape::Ellipse { rect } if o.round.is_none() && o.sides.is_some() => o.polygon(rect, MIN_SIDES, false),
             Shape::Rect { rect, radius } => Shape::Rect { rect, radius: o.radius.unwrap_or(radius) },
             Shape::Ellipse { rect } | Shape::Polygon { rect, .. } if o.round == Some(false) => Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) },
-            Shape::Polygon { rect, sides, star } => o.polygon(rect, sides, star),
-            Shape::Callout { rect, tail, text, form } => {
+            // A polygon of clicked points stays one, unless its corners are set.
+            Shape::Polygon { rect, sides, star, corners } if !corners.is_empty() && o.sides.is_none() => {
+                Shape::Polygon { rect, sides, star, corners }
+            }
+            Shape::Polygon { rect, sides, star, .. } => o.polygon(rect, sides, star),
+            Shape::Callout { rect, tail, text, form, tails } => {
                 let form = o.form.unwrap_or(form);
                 let tail = o.tail.map(|s| s.place(form, rect)).unwrap_or(tail);
-                Shape::Callout { rect, tail, text, form }
+                Shape::Callout { rect, tail, text, form, tails }
             }
+            Shape::Line { from, to, bend } => Shape::Line { from, to, bend: o.bend.unwrap_or(bend) },
             Shape::Stamp { rect, stamp } => Shape::Stamp { rect, stamp: o.stamp.unwrap_or(stamp) },
             Shape::Spotlight { rect, ellipse } => Shape::Spotlight { rect, ellipse: o.round.unwrap_or(ellipse) },
             Shape::Step { center, number, labels, badge } => {
@@ -1073,6 +1089,7 @@ impl ShapeOptions {
             Shape::Rect { radius, .. } => ShapeOptions { radius: Some(*radius), round: Some(false), ..none },
             Shape::Ellipse { .. } => ShapeOptions { round: Some(true), ..none },
             Shape::Polygon { sides, star, .. } => ShapeOptions { sides: Some(*sides), star: Some(*star), ..none },
+            Shape::Line { bend, .. } => ShapeOptions { bend: Some(*bend), ..none },
             Shape::Callout { form, .. } => ShapeOptions { form: Some(*form), ..none },
             Shape::Stamp { stamp, .. } => ShapeOptions { stamp: Some(*stamp), ..none },
             Shape::Spotlight { ellipse, .. } => ShapeOptions { round: Some(*ellipse), ..none },
@@ -1205,6 +1222,36 @@ pub fn polygon_points(rect: Rect, sides: u32, star: bool) -> Vec<Pt> {
     unit.iter().map(|p| Pt::new(rect.x + (p.x - b.x) * sx, rect.y + (p.y - b.y) * sy).finite()).collect()
 }
 
+/// The most corners a polygon of clicked points keeps.
+pub const MAX_CORNERS: usize = 200;
+/// The most tails a callout has.
+pub const MAX_TAILS: usize = 8;
+
+/// The corners of a polygon: its clicked points (shares of `rect`) when it has three or more,
+/// else `sides` corners (or star points) filling `rect`.
+pub fn polygon_outline(rect: Rect, sides: u32, star: bool, corners: &[Pt]) -> Vec<Pt> {
+    if corners.len() < 3 {
+        return polygon_points(rect, sides, star);
+    }
+    corners.iter().take(MAX_CORNERS).map(|c| Pt::new(rect.x + c.x * rect.w, rect.y + c.y * rect.h).finite()).collect()
+}
+
+/// A polygon through `points` (on the picture), clicked one by one: the box round them and each
+/// as a share of it. None for fewer than three points or none apart.
+pub fn polygon_through(points: &[Pt]) -> Option<Shape> {
+    let points: Vec<Pt> = points.iter().take(MAX_CORNERS).map(|p| p.finite()).collect();
+    if points.len() < 3 {
+        return None;
+    }
+    let rect = Rect::bounding(&points);
+    if rect.w < 1.0 && rect.h < 1.0 {
+        return None;
+    }
+    let share = |v: f32, lo: f32, len: f32| if len > 0.0 { ((v - lo) / len).clamp(0.0, 1.0) } else { 0.5 };
+    let corners = points.iter().map(|p| Pt::new(share(p.x, rect.x, rect.w), share(p.y, rect.y, rect.h))).collect();
+    Some(Shape::Polygon { rect, sides: MIN_SIDES, star: false, corners })
+}
+
 /// Whether `p` is inside the closed outline through `points` (even-odd).
 pub fn inside_polygon(p: Pt, points: &[Pt]) -> bool {
     let mut inside = false;
@@ -1240,7 +1287,9 @@ pub enum Handle {
     Start,
     End,
     Tail,
-    /// The middle of an arrow, dragged to bend it.
+    /// A callout's other tails, by their place in its list of them.
+    TailAt(u8),
+    /// The middle of an arrow or a line, dragged to bend it.
     Bend,
     /// Above a box (or a selection), dragged round to turn it.
     Rotate,
@@ -1261,7 +1310,7 @@ impl Handle {
             Handle::Bottom => Pt::new(c.x, r.bottom()),
             Handle::BottomLeft => Pt::new(r.x, r.bottom()),
             Handle::Left => Pt::new(r.x, c.y),
-            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => c,
+            Handle::Start | Handle::End | Handle::Tail | Handle::TailAt(_) | Handle::Bend | Handle::Rotate => c,
         }
     }
 
@@ -1276,7 +1325,7 @@ impl Handle {
             Handle::Bottom => Handle::Top,
             Handle::BottomLeft => Handle::TopRight,
             Handle::Left => Handle::Right,
-            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => return None,
+            Handle::Start | Handle::End | Handle::Tail | Handle::TailAt(_) | Handle::Bend | Handle::Rotate => return None,
         })
     }
 
@@ -1293,7 +1342,7 @@ impl Handle {
             Handle::Bottom => y1 = p.y,
             Handle::BottomLeft => (x0, y1) = (p.x, p.y),
             Handle::Left => x0 = p.x,
-            Handle::Start | Handle::End | Handle::Tail | Handle::Bend | Handle::Rotate => return r,
+            Handle::Start | Handle::End | Handle::Tail | Handle::TailAt(_) | Handle::Bend | Handle::Rotate => return r,
         }
         let corner = matches!(self, Handle::TopLeft | Handle::TopRight | Handle::BottomRight | Handle::BottomLeft);
         if keep_aspect && corner && r.w > 0.0 && r.h > 0.0 {
@@ -1529,10 +1578,16 @@ impl Shape {
                 let grow = if *heads == ArrowHeads::None { half } else { arrow_head(style.width).1.max(half) };
                 Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)).inflate(grow)
             }
-            Shape::Line { from, to } => Rect::from_points(*from, *to).inflate(half),
+            Shape::Line { from, to, bend } => Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)).inflate(half),
             Shape::Pen { points } => Rect::bounding(points).inflate(half),
             Shape::Step { center, badge, .. } => badge.bounds(*center, step_radius(style.font_size)).inflate(half),
-            Shape::Callout { rect, tail, form, .. } => rect.inflate(form.bulge(*rect)).union(Rect::new(tail.x, tail.y, 0.0, 0.0)).inflate(half),
+            Shape::Callout { rect, tail, form, tails, .. } => {
+                let mut r = rect.inflate(form.bulge(*rect));
+                for t in std::iter::once(tail).chain(tails) {
+                    r = r.union(Rect::new(t.x, t.y, 0.0, 0.0));
+                }
+                r.inflate(half)
+            }
             // A highlight is its box, with no line round it.
             Shape::Spotlight { rect, .. } | Shape::Blur { rect } | Shape::Pixelate { rect } | Shape::Highlight { rect, .. } => *rect,
             _ => self.rect().unwrap_or_default().inflate(half),
@@ -1543,10 +1598,10 @@ impl Shape {
     pub fn extent(&self) -> Rect {
         match self {
             Shape::Arrow { from, to, bend, .. } => Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)),
-            Shape::Line { from, to } => Rect::from_points(*from, *to),
+            Shape::Line { from, to, bend } => Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)),
             Shape::Pen { points } => Rect::bounding(points),
             Shape::Step { center, .. } => Rect::new(center.x, center.y, 0.0, 0.0),
-            Shape::Callout { rect, tail, .. } => rect.union(Rect::new(tail.x, tail.y, 0.0, 0.0)),
+            Shape::Callout { rect, tail, tails, .. } => std::iter::once(tail).chain(tails).fold(*rect, |r, t| r.union(Rect::new(t.x, t.y, 0.0, 0.0))),
             _ => self.rect().unwrap_or_default(),
         }
     }
@@ -1558,7 +1613,7 @@ impl Shape {
             Shape::Arrow { from, to, bend, .. } => {
                 distance_to_polyline(p, &bent_points(*from, *to, *bend, CURVE_PIECES)) <= reach.max(arrow_reach(self, style))
             }
-            Shape::Line { from, to } => distance_to_segment(p, *from, *to) <= reach,
+            Shape::Line { from, to, bend } => distance_to_polyline(p, &bent_points(*from, *to, *bend, CURVE_PIECES)) <= reach,
             Shape::Pen { points } => distance_to_polyline(p, points) <= reach,
             Shape::Rect { rect, .. } => {
                 if !style.fill.is_transparent() {
@@ -1577,14 +1632,17 @@ impl Shape {
                 let d = (dx * dx + dy * dy).sqrt();
                 if !style.fill.is_transparent() { d <= 1.0 + reach / rx.min(ry) } else { (d - 1.0).abs() * rx.min(ry) <= reach }
             }
-            Shape::Polygon { rect, sides, star } => {
-                let corners = polygon_points(*rect, *sides, *star);
+            Shape::Polygon { rect, sides, star, corners } => {
+                let corners = polygon_outline(*rect, *sides, *star, corners);
                 let mut ring = corners.clone();
                 ring.extend(corners.first().copied());
                 distance_to_polyline(p, &ring) <= reach || (!style.fill.is_transparent() && inside_polygon(p, &corners))
             }
             Shape::Step { center, badge, .. } => badge.hit(*center, step_radius(style.font_size), p, reach),
-            Shape::Callout { rect, tail, .. } => rect.inflate(reach).contains(p) || distance_to_segment(p, rect.center(), *tail) <= reach.max(6.0),
+            Shape::Callout { rect, tail, tails, .. } => {
+                rect.inflate(reach).contains(p)
+                    || std::iter::once(tail).chain(tails).any(|t| distance_to_segment(p, rect.center(), *t) <= reach.max(6.0))
+            }
             _ => self.rect().is_some_and(|r| r.inflate(tol).contains(p)),
         }
     }
@@ -1593,15 +1651,16 @@ impl Shape {
     pub fn handles(&self, style: &Style) -> Vec<(Handle, Pt)> {
         match self {
             Shape::Arrow { from, to, bend, .. } => vec![(Handle::Start, *from), (Handle::End, *to), (Handle::Bend, bend_middle(*from, *to, *bend))],
-            Shape::Line { from, to } => vec![(Handle::Start, *from), (Handle::End, *to)],
+            Shape::Line { from, to, bend } => vec![(Handle::Start, *from), (Handle::End, *to), (Handle::Bend, bend_middle(*from, *to, *bend))],
             Shape::Step { .. } => Vec::new(),
             Shape::Pen { .. } => {
                 let b = self.bounds(style);
                 Handle::BOX.iter().map(|h| (*h, h.on(b))).collect()
             }
-            Shape::Callout { rect, tail, .. } => {
+            Shape::Callout { rect, tail, tails, .. } => {
                 let mut all: Vec<_> = Handle::BOX.iter().map(|h| (*h, h.on(*rect))).collect();
                 all.push((Handle::Tail, *tail));
+                all.extend(tails.iter().take(MAX_TAILS).enumerate().map(|(i, t)| (Handle::TailAt(i as u8), *t)));
                 all
             }
             _ => match self.rect() {
@@ -1617,8 +1676,13 @@ impl Shape {
         match (self, handle) {
             (Shape::Arrow { from, .. } | Shape::Line { from, .. }, Handle::Start) => *from = p,
             (Shape::Arrow { to, .. } | Shape::Line { to, .. }, Handle::End) => *to = p,
-            (Shape::Arrow { from, to, bend, .. }, Handle::Bend) => *bend = bend_through(*from, *to, p),
+            (Shape::Arrow { from, to, bend, .. } | Shape::Line { from, to, bend }, Handle::Bend) => *bend = bend_through(*from, *to, p),
             (Shape::Callout { tail, .. }, Handle::Tail) => *tail = p,
+            (Shape::Callout { tails, .. }, Handle::TailAt(i)) => {
+                if let Some(t) = tails.get_mut(usize::from(i)) {
+                    *t = p;
+                }
+            }
             (shape @ Shape::Pen { .. }, h) => {
                 let old = shape.bounds(style).inflate(-style.width.max(0.0) / 2.0);
                 let new = h.drag_rect(old, p, keep_aspect);
@@ -1648,7 +1712,7 @@ impl Shape {
     /// normalized again, so a turn or a flip stays a box).
     pub fn map_points(&mut self, f: &dyn Fn(Pt) -> Pt) {
         match self {
-            Shape::Arrow { from, to, bend, .. } => {
+            Shape::Arrow { from, to, bend, .. } | Shape::Line { from, to, bend } => {
                 // A mirror (a flip) turns the bow the other way round the line; a turn doesn't.
                 if let Some((n, _)) = left_of(*from, *to) {
                     let (a, b, side) = (f(*from), f(*to), f(from.add(n)));
@@ -1657,10 +1721,6 @@ impl Shape {
                         *bend = -*bend;
                     }
                 }
-                *from = f(*from).finite();
-                *to = f(*to).finite();
-            }
-            Shape::Line { from, to } => {
                 *from = f(*from).finite();
                 *to = f(*to).finite();
             }
@@ -1676,9 +1736,12 @@ impl Shape {
                 *rect = Rect::from_points(f(rect.min()), f(rect.max()));
             }
             Shape::Step { center, .. } => *center = f(*center).finite(),
-            Shape::Callout { rect, tail, .. } => {
+            Shape::Callout { rect, tail, tails, .. } => {
                 *rect = Rect::from_points(f(rect.min()), f(rect.max()));
                 *tail = f(*tail).finite();
+                for t in tails.iter_mut() {
+                    *t = f(*t).finite();
+                }
             }
             other => {
                 if let Some(rect) = other.rect_mut() {
@@ -1719,10 +1782,24 @@ impl Shape {
                 *rect = Rect::bounding(stroke).inflate(half).finite();
                 stroke.clear();
             }
-            Shape::Text { text, .. } | Shape::Callout { text, .. } => truncate_text(text, MAX_TEXT),
+            Shape::Text { text, .. } => truncate_text(text, MAX_TEXT),
+            Shape::Callout { text, tails, .. } => {
+                truncate_text(text, MAX_TEXT);
+                tails.truncate(MAX_TAILS - 1);
+            }
             Shape::Step { number, .. } => *number = (*number).min(9_999),
-            Shape::Arrow { bend, .. } => *bend = clamp_bend(*bend),
-            Shape::Polygon { sides, .. } => *sides = (*sides).clamp(MIN_SIDES, MAX_SIDES),
+            Shape::Arrow { bend, .. } | Shape::Line { bend, .. } => *bend = clamp_bend(*bend),
+            Shape::Polygon { sides, corners, .. } => {
+                *sides = (*sides).clamp(MIN_SIDES, MAX_SIDES);
+                corners.truncate(MAX_CORNERS);
+                for c in corners.iter_mut() {
+                    *c = Pt::new(c.x.clamp(0.0, 1.0), c.y.clamp(0.0, 1.0)).finite();
+                }
+                // Fewer than three corners is no outline: a polygon of `sides` instead.
+                if corners.len() < 3 {
+                    corners.clear();
+                }
+            }
             _ => {}
         }
         self
@@ -1782,7 +1859,7 @@ mod tests {
     #[test]
     fn hit_testing() {
         let s = style();
-        let line = Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(100.0, 0.0) };
+        let line = Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(100.0, 0.0), bend: 0.0 };
         assert!(line.hit(&s, Pt::new(50.0, 3.0), 2.0));
         assert!(!line.hit(&s, Pt::new(50.0, 10.0), 2.0));
         let rect = Shape::Rect { rect: Rect::new(0.0, 0.0, 100.0, 100.0), radius: 0.0 };
@@ -1831,8 +1908,8 @@ mod tests {
         let mut t = Shape::Text { rect: Rect::default(), text: "é".repeat(MAX_TEXT) };
         t = t.sanitized(0.0);
         assert!(t.text().unwrap().len() <= MAX_TEXT);
-        let nan = Shape::Line { from: Pt::new(f32::NAN, 1.0), to: Pt::new(f32::INFINITY, 2.0) }.sanitized(0.0);
-        assert_eq!(nan, Shape::Line { from: Pt::new(0.0, 1.0), to: Pt::new(0.0, 2.0) });
+        let nan = Shape::Line { from: Pt::new(f32::NAN, 1.0), to: Pt::new(f32::INFINITY, 2.0), bend: 0.0 }.sanitized(0.0);
+        assert_eq!(nan, Shape::Line { from: Pt::new(0.0, 1.0), to: Pt::new(0.0, 2.0), bend: 0.0 });
     }
 
     /// The highlighter draws boxes; a stroke it drew before (an older file, or a script giving
@@ -1866,8 +1943,13 @@ mod tests {
         let o: Object = serde_json::from_str(old).unwrap();
         let Shape::Callout { form, .. } = o.shape else { panic!("a callout") };
         assert_eq!(form, CalloutForm::Rounded);
-        let arrow =
-            Shape::Callout { rect: Rect::new(0.0, 0.0, 100.0, 40.0), tail: Pt::new(150.0, 20.0), text: String::new(), form: CalloutForm::Arrow };
+        let arrow = Shape::Callout {
+            rect: Rect::new(0.0, 0.0, 100.0, 40.0),
+            tail: Pt::new(150.0, 20.0),
+            text: String::new(),
+            form: CalloutForm::Arrow,
+            tails: Vec::new(),
+        };
         let v = serde_json::to_value(&arrow).unwrap();
         assert_eq!(v["form"], "arrow");
         assert_eq!(serde_json::from_value::<Shape>(v).unwrap(), arrow);
@@ -1913,17 +1995,17 @@ mod tests {
         let h = CalloutForm::Cloud.box_height(50.0);
         assert!((CalloutForm::Cloud.text_area(Rect::new(0.0, 0.0, 100.0, h)).h - 50.0).abs() < 0.01);
         // A cloud's bumps are in its bounds.
-        let cloud = Shape::Callout { rect: r, tail: Pt::new(100.0, 50.0), text: String::new(), form: CalloutForm::Cloud };
+        let cloud = Shape::Callout { rect: r, tail: Pt::new(100.0, 50.0), text: String::new(), form: CalloutForm::Cloud, tails: Vec::new() };
         assert!(cloud.bounds(&Style { width: 0.0, ..style() }).w > r.w);
     }
 
     #[test]
     fn shape_options_set_only_what_they_say() {
         let r = Rect::new(10.0, 10.0, 100.0, 50.0);
-        let callout = Shape::Callout { rect: r, tail: Pt::new(0.0, 0.0), text: "hi".into(), form: CalloutForm::Rounded };
+        let callout = Shape::Callout { rect: r, tail: Pt::new(0.0, 0.0), text: "hi".into(), form: CalloutForm::Rounded, tails: Vec::new() };
         let o =
             ShapeOptions { form: Some(CalloutForm::Arrow), tail: Some(TailSpot::Right), heads: Some(ArrowHeads::Both), ..ShapeOptions::default() };
-        let Shape::Callout { form, tail, text, rect } = o.applied(callout) else { panic!("still a callout") };
+        let Shape::Callout { form, tail, text, rect, .. } = o.applied(callout) else { panic!("still a callout") };
         assert_eq!((form, text.as_str(), rect), (CalloutForm::Arrow, "hi", r));
         assert_eq!(tail, TailSpot::Right.place(CalloutForm::Arrow, r));
         // Round turns a rectangle into an ellipse and back, keeping its box.
@@ -1934,7 +2016,7 @@ mod tests {
         let huge = ShapeOptions { radius: Some(1e9), ..ShapeOptions::default() };
         assert_eq!(huge.applied(Shape::Rect { rect: r, radius: 0.0 }), Shape::Rect { rect: r, radius: MAX_RADIUS });
         // Nothing said, nothing changed; a line has no options.
-        let line = Shape::Line { from: Pt::ZERO, to: Pt::new(5.0, 5.0) };
+        let line = Shape::Line { from: Pt::ZERO, to: Pt::new(5.0, 5.0), bend: 0.0 };
         assert_eq!(o.applied(line.clone()), line);
         assert!(ShapeOptions::default().is_empty() && !o.is_empty());
         // What a shape says of itself, and options merged.
@@ -2009,7 +2091,7 @@ mod tests {
         assert_eq!(polygon_points(r, 0, false).len(), 3);
         assert_eq!(polygon_points(r, 99, true).len(), 24);
         assert!(polygon_points(Rect::new(f32::NAN, 0.0, 0.0, 0.0), 5, true).iter().all(|p| p.x.is_finite() && p.y.is_finite()));
-        let shape = Shape::Polygon { rect: r, sides: 3, star: false };
+        let shape = Shape::Polygon { rect: r, sides: 3, star: false, corners: Vec::new() };
         let s = style();
         assert!(shape.hit(&s, Pt::new(60.0, 21.0), 2.0), "on its point");
         assert!(!shape.hit(&s, Pt::new(60.0, 70.0), 2.0), "inside an unfilled one");
@@ -2018,7 +2100,7 @@ mod tests {
         assert_eq!(shape.handles(&s).len(), Handle::BOX.len());
         // From a file: three corners unless it says, kept in range.
         let p: Shape = serde_json::from_str(r#"{"type":"polygon","rect":{"x":0,"y":0,"w":5,"h":5}}"#).unwrap();
-        assert_eq!(p, Shape::Polygon { rect: Rect::new(0.0, 0.0, 5.0, 5.0), sides: 3, star: false });
+        assert_eq!(p, Shape::Polygon { rect: Rect::new(0.0, 0.0, 5.0, 5.0), sides: 3, star: false, corners: Vec::new() });
         let p: Shape = serde_json::from_str(r#"{"type":"polygon","rect":{"x":0,"y":0,"w":5,"h":5},"sides":4000,"star":true}"#).unwrap();
         assert!(matches!(p.sanitized(1.0), Shape::Polygon { sides: 12, star: true, .. }));
     }
@@ -2027,17 +2109,20 @@ mod tests {
     fn shape_options_turn_boxes_into_polygons_and_back() {
         let r = Rect::new(0.0, 0.0, 50.0, 40.0);
         let star = ShapeOptions { sides: Some(5), star: Some(true), ..ShapeOptions::default() };
-        assert_eq!(star.applied(Shape::Rect { rect: r, radius: 3.0 }), Shape::Polygon { rect: r, sides: 5, star: true });
-        assert_eq!(star.applied(Shape::Ellipse { rect: r }), Shape::Polygon { rect: r, sides: 5, star: true });
+        assert_eq!(star.applied(Shape::Rect { rect: r, radius: 3.0 }), Shape::Polygon { rect: r, sides: 5, star: true, corners: Vec::new() });
+        assert_eq!(star.applied(Shape::Ellipse { rect: r }), Shape::Polygon { rect: r, sides: 5, star: true, corners: Vec::new() });
         let six = ShapeOptions { sides: Some(6), ..ShapeOptions::default() };
-        assert_eq!(six.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Polygon { rect: r, sides: 6, star: true });
+        assert_eq!(
+            six.applied(Shape::Polygon { rect: r, sides: 5, star: true, corners: Vec::new() }),
+            Shape::Polygon { rect: r, sides: 6, star: true, corners: Vec::new() }
+        );
         let round = ShapeOptions { round: Some(true), sides: Some(6), ..ShapeOptions::default() };
-        assert_eq!(round.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Ellipse { rect: r }, "round wins");
+        assert_eq!(round.applied(Shape::Polygon { rect: r, sides: 5, star: true, corners: Vec::new() }), Shape::Ellipse { rect: r }, "round wins");
         let square = ShapeOptions { round: Some(false), ..ShapeOptions::default() };
-        assert_eq!(square.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Rect { rect: r, radius: 0.0 });
+        assert_eq!(square.applied(Shape::Polygon { rect: r, sides: 5, star: true, corners: Vec::new() }), Shape::Rect { rect: r, radius: 0.0 });
         // A look that says nothing of corners leaves a rectangle a rectangle.
         assert_eq!(ShapeOptions::default().applied(Shape::Rect { rect: r, radius: 0.0 }), Shape::Rect { rect: r, radius: 0.0 });
-        assert_eq!(ShapeOptions::of(&Shape::Polygon { rect: r, sides: 7, star: false }).sides, Some(7));
+        assert_eq!(ShapeOptions::of(&Shape::Polygon { rect: r, sides: 7, star: false, corners: Vec::new() }).sides, Some(7));
         assert_eq!(Kind::Polygon.family(), Kind::Rect);
     }
 

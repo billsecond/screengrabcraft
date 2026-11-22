@@ -926,3 +926,52 @@ fn pictures_are_combined_or_laid_out_in_a_template() {
     s.undo();
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100), "undo puts the picture back");
 }
+
+/// A polygon through points clicked one by one, a bent line, a callout with several tails.
+#[test]
+fn polygons_of_points_bent_lines_and_callouts_with_several_tails() {
+    let mut s = session();
+    let id = add(&mut s, json!({"type": "polygon", "points": [{"x": 10, "y": 10}, {"x": 90, "y": 20}, {"x": 50, "y": 80}, {"x": 20, "y": 60}]}));
+    let o = s.doc.get(id).unwrap();
+    let Shape::Polygon { rect, corners, .. } = &o.shape else { panic!("a polygon") };
+    assert_eq!(*rect, Rect::new(10.0, 10.0, 80.0, 70.0));
+    assert_eq!(corners.len(), 4);
+    // It moves and resizes as a box, its corners with it.
+    s.execute("edit.nudge", &json!({"dx": 5, "dy": 0, "ids": [id.0]})).unwrap();
+    let outline = match &s.doc.get(id).unwrap().shape {
+        Shape::Polygon { rect, sides, star, corners } => screengrabcraft_model::object::polygon_outline(*rect, *sides, *star, corners),
+        _ => panic!(),
+    };
+    assert_eq!(outline.first().copied(), Some(Pt::new(15.0, 10.0)));
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}})).is_err());
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "points": "x"}})).is_err());
+
+    // A plain line bent, as an arrow is.
+    let line = add(&mut s, json!({"type": "line", "from": {"x": 10, "y": 50}, "to": {"x": 110, "y": 50}, "bend": 0.3}));
+    let Shape::Line { bend, .. } = s.doc.get(line).unwrap().shape else { panic!("a line") };
+    assert!((bend - 0.3).abs() < 1e-6);
+    assert!(s.doc.get(line).unwrap().hit(Pt::new(60.0, 20.0), 2.0), "the bow is where it is hit");
+    s.select(vec![line]);
+    s.execute("object.look", &json!({"options": {"bend": 0.0}})).unwrap();
+    assert!(matches!(s.doc.get(line).unwrap().shape, Shape::Line { bend, .. } if bend == 0.0));
+
+    // A callout given more tails, then one taken away.
+    let c = add(&mut s, json!({"type": "callout", "rect": {"x": 60, "y": 10, "w": 80, "h": 40}, "tail": {"x": 70, "y": 90}, "text": "Hi"}));
+    let out = s.execute("object.addTail", &json!({})).unwrap();
+    assert_eq!(out["tails"], 2);
+    let Shape::Callout { tails, .. } = &s.doc.get(c).unwrap().shape else { panic!() };
+    assert_eq!(tails.as_slice(), &[Pt::new(130.0, 90.0)], "across from the first");
+    s.execute("object.addTail", &json!({"id": c.0, "at": {"x": 190, "y": 30}})).unwrap();
+    assert_eq!(s.doc.get(c).unwrap().handles().iter().filter(|(h, _)| matches!(h, screengrabcraft_model::Handle::TailAt(_))).count(), 2);
+    assert_eq!(s.execute("object.removeTail", &json!({"index": 0})).unwrap()["tails"], 2);
+    assert_eq!(s.execute("object.removeTail", &json!({})).unwrap()["tails"], 1);
+    assert!(s.execute("object.removeTail", &json!({})).is_err(), "the first tail stays");
+    for _ in 0..7 {
+        s.execute("object.addTail", &json!({})).ok();
+    }
+    let Shape::Callout { tails, .. } = &s.doc.get(c).unwrap().shape else { panic!() };
+    assert_eq!(tails.len() + 1, screengrabcraft_model::object::MAX_TAILS);
+    // Not a callout: refused.
+    s.select(vec![line]);
+    assert!(s.execute("object.addTail", &json!({})).is_err());
+}
