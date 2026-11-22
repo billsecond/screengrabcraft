@@ -529,6 +529,9 @@ pub struct Timeline {
     /// The other sound lowered while the voice is heard.
     #[serde(default)]
     pub ducking: Ducking,
+    /// Words or a picture on every frame, in a corner (see [`crate::watermark`]).
+    #[serde(default)]
+    pub watermark: crate::watermark::Watermark,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -586,6 +589,7 @@ impl Timeline {
             markers: Vec::new(),
             keys: Default::default(),
             ducking: Default::default(),
+            watermark: Default::default(),
         }
     }
 
@@ -686,6 +690,7 @@ impl Timeline {
             markers: Vec::new(),
             keys: self.keys.checked(),
             ducking: Ducking { on: self.ducking.on, level: if self.ducking.level.is_finite() { self.ducking.level.clamp(0.0, 1.0) } else { 0.3 } },
+            watermark: self.watermark.checked(),
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -1524,6 +1529,7 @@ mod tests {
             markers: Vec::new(),
             keys: Default::default(),
             ducking: Default::default(),
+            watermark: Default::default(),
         }
     }
 

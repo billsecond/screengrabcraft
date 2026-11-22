@@ -545,6 +545,43 @@ impl Services for DesktopServices {
         });
     }
 
+    fn request_subtitles(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("subtitles-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Import Subtitles")
+                    .set_directory(&start)
+                    .add_filter("Subtitles", &["srt", "vtt"])
+                    .add_filter("All files", &["*"])
+                    .pick_file(),
+            );
+            let answer = match picked {
+                Some(f) => {
+                    let path = f.path().to_path_buf();
+                    let too_large = std::fs::metadata(&path).map(|m| m.len() > screengrabcraft_ui::services::MAX_SUBTITLES).unwrap_or(true);
+                    match std::fs::read(&path) {
+                        Ok(bytes) if !too_large => {
+                            DialogResult::Subtitles(vec![OpenedFile { name: f.file_name(), path: Some(path.to_string_lossy().to_string()), bytes }])
+                        }
+                        Ok(_) => {
+                            log::warn!("subtitles not brought in: {} is too large", f.file_name());
+                            DialogResult::Cancelled
+                        }
+                        Err(e) => {
+                            log::warn!("subtitles not read: {e}");
+                            DialogResult::Cancelled
+                        }
+                    }
+                }
+                None => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
     fn background_model(&self) -> Result<Arc<dyn Matting>, String> {
         self.model.get_or_init(screengrabcraft_desktop::models::background_model).clone()
     }

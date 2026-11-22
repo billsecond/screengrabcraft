@@ -32,6 +32,9 @@ pub struct OpenedFile {
     pub bytes: Vec<u8>,
 }
 
+/// The largest subtitle file read (bytes).
+pub const MAX_SUBTITLES: u64 = 16 * 1024 * 1024;
+
 /// What a file dialog came back with.
 #[derive(Clone, Debug)]
 pub enum DialogResult {
@@ -42,6 +45,8 @@ pub enum DialogResult {
     Import(Vec<String>),
     /// Video or sound files to transcribe (paths).
     Transcribe(Vec<String>),
+    /// A subtitle file (`.srt`, `.vtt`) to bring into the video editor as captions, read.
+    Subtitles(Vec<OpenedFile>),
     Cancelled,
 }
 
@@ -375,6 +380,11 @@ pub trait Services {
     /// Asks for video or sound files to transcribe; the answer comes through
     /// [`Services::poll_dialog`] as [`DialogResult::Transcribe`].
     fn request_transcribe(&self) {}
+
+    /// Asks for a subtitle file (`.srt` or `.vtt`) to bring in as the video's captions; the
+    /// answer comes through [`Services::poll_dialog`] as [`DialogResult::Subtitles`], the file
+    /// read (at most [`MAX_SUBTITLES`] bytes).
+    fn request_subtitles(&self) {}
 
     /// The model Remove Background runs (on a thread of the editor's own; reading its file is
     /// left to the model's first use), or why there is none here.

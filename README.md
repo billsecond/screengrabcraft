@@ -165,6 +165,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
   **Save the Frame as a Picture** (Ctrl+Shift+S, or the ruler's right button) saves the picture at
   the playhead, at the recording's own size, in the captures folder and opens it in the picture
   editor.
+- **A watermark**: Export Video's window puts words, or a picture from the Media Bin, on every
+  frame, in the corner you choose, as see-through and as large as you like. The preview shows it
+  too, and it stays with the edits.
+- **Subtitles brought in**: File › **Import Subtitles** reads a SubRip (`.srt`) or WebVTT
+  (`.vtt`) file timed on the video as it is now and makes it the video's captions; from then on
+  each line follows the track it's on, like the captions written down here.
 - **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows

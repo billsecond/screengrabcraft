@@ -171,6 +171,8 @@ impl Composer {
         if let Some(cues) = &self.captions {
             draw_captions(&mut out, &captions::showing(cues, t));
         }
+        // The watermark over everything.
+        crate::watermark::draw(&mut out, timeline, self.media.as_ref());
         out
     }
 
