@@ -408,6 +408,9 @@ impl VideoView {
                 // (Not set in from its heading: the cards keep the whole width of the panel.)
                 .show_unindented(ui, |ui| {
                     ui.add_space(4.0);
+                    if g == Group::Zoom {
+                        self.zoom_on_clicks_button(ed, ui, ctx);
+                    }
                     for row in cards.chunks(2) {
                         ui.horizontal(|ui| {
                             for tpl in row {
@@ -435,6 +438,30 @@ impl VideoView {
         }
         if !hovered {
             self.lib_hover = None;
+        }
+    }
+
+    /// Zoom on the Clicks: zooms that follow the recording's clicks (greyed out without any).
+    pub(super) fn zoom_on_clicks_button(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context) {
+        let t = Tokens::get(ctx);
+        let clicks = self.session.has_clicks();
+        if ui
+            .add_enabled(clicks, egui::Button::new("Zoom on the Clicks"))
+            .on_hover_text("A zoom for each run of clicks, in a little before and out a while after: ordinary zooms, to change or delete")
+            .on_disabled_hover_text("This recording kept no clicks")
+            .clicked()
+        {
+            self.zoom_on_clicks(ed, ctx);
+        }
+        ui.label(RichText::new("Or drag a zoom onto the timeline.").size(12.0).color(t.muted));
+        ui.add_space(6.0);
+    }
+
+    /// Zooms made on the clicks; the layer they're on is shown.
+    pub(super) fn zoom_on_clicks(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        match self.session.execute("video.zoomOnClicks", &json!({})) {
+            Ok(_) => self.item = None,
+            Err(e) => ed.error(ctx, e.to_string()),
         }
     }
 
@@ -523,6 +550,27 @@ impl VideoView {
         if media.is_empty() && self.importing.is_empty() {
             ui.add_space(20.0);
             ui.label(RichText::new("No media yet.").color(t.muted));
+        }
+        // A video made of the pictures: one after another from the playhead, a few seconds each.
+        let pictures = media.iter().filter(|m| m.kind == MediaKind::Picture).count();
+        if pictures > 0 {
+            ui.horizontal(|ui| {
+                let put = ui
+                    .button("Put the Pictures in Turn")
+                    .on_hover_text("Every picture here, one after another from the playhead on a layer of its own, each as large as fits the video")
+                    .clicked();
+                ui.add(egui::DragValue::new(&mut self.picture_secs).range(1.0..=30.0).speed(0.1).suffix(" s each"));
+                if put {
+                    let each = (self.picture_secs.clamp(1.0, 30.0) * 1e6) as u64;
+                    self.run(ed, ctx, "video.picturesInTurn", json!({"each": each, "at": self.playhead}));
+                }
+            });
+            ui.label(
+                RichText::new("For a narrated video, record your voice with Video Production and bring the recording in here.")
+                    .size(12.0)
+                    .color(t.muted),
+            );
+            ui.add_space(8.0);
         }
         let mut remove = None;
         for row in media.chunks(2) {

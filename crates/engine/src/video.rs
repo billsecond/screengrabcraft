@@ -41,6 +41,10 @@ pub struct VideoSession {
     /// How loud a track plays (dB), as the host measures it from the recording (the engine reads
     /// no sound itself): for evening levels out.
     measure: Option<Measure>,
+    /// The recording's clicks (its own time, shares of the screen): what zooms follow.
+    clicks: Vec<screengrabcraft_media::zoom::ClickAt>,
+    /// How wide the video is for its height (its screen's, else its camera's; 16:9 without).
+    aspect: f32,
 }
 
 /// Measures how loud track `n` of these edits plays (dB of the full scale), before its volume.
@@ -84,6 +88,18 @@ impl VideoSession {
         let timeline = rec.timeline.clone().unwrap_or_else(|| original.clone());
         let sources = rec.header.streams.iter().map(|s| (s.id, rec.stream_duration(s.id))).collect();
         let heard = rec.captions.as_ref().map(|c| c.cues.clone()).unwrap_or_default();
+        let picture = |kind| rec.header.streams.iter().find(|s| s.kind == kind && s.width > 0 && s.height > 0);
+        let screen = picture(screengrabcraft_media::recording::StreamKind::Screen);
+        let clicks = screen
+            .map(|s| {
+                let (w, h) = (s.width as f32, s.height as f32);
+                rec.pointer.clicks().iter().take(100_000).map(|c| screengrabcraft_media::zoom::ClickAt { t: c.t, x: c.x / w, y: c.y / h }).collect()
+            })
+            .unwrap_or_default();
+        let aspect = screen
+            .or_else(|| picture(screengrabcraft_media::recording::StreamKind::Camera))
+            .map(|s| s.width as f32 / s.height as f32)
+            .unwrap_or(16.0 / 9.0);
         VideoSession {
             timeline,
             original,
@@ -95,6 +111,8 @@ impl VideoSession {
             revision: 0,
             heard,
             measure: None,
+            clicks,
+            aspect,
         }
     }
 
@@ -108,6 +126,11 @@ impl VideoSession {
     /// evened out.
     pub fn set_measure(&mut self, m: Measure) {
         self.measure = Some(m);
+    }
+
+    /// Whether the recording kept any clicks (for zooms that follow them).
+    pub fn has_clicks(&self) -> bool {
+        !self.clicks.is_empty()
     }
 
     /// How long the recording is (µs): its longest track.
@@ -856,6 +879,70 @@ fn screen_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// Zooms that follow the recording's clicks, put on a layer of their own: ordinary zooms.
+fn zoom_on_clicks(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::zoom;
+    if s.clicks.is_empty() {
+        return Err(EngineError::Params("this recording kept no clicks to zoom on".to_string()));
+    }
+    let share = number(p, "share")?.unwrap_or(0.5).clamp(zoom::MIN_SHARE, 0.9);
+    let zooms = zoom::follow_clicks(&s.timeline, &s.clicks, share);
+    if zooms.is_empty() {
+        return Err(EngineError::Params("every click is already zoomed on, or cut out of the video".to_string()));
+    }
+    let mut layer = None;
+    let n = zooms.len();
+    for z in zooms {
+        let at = z.at;
+        let (l, _) = s.timeline.place(z, layer, at).map_err(edit_err)?;
+        layer = Some(l);
+    }
+    if let Some(l) = layer {
+        let _ = s.timeline.set_layer(l, None, None, Some("Zooms on the clicks"));
+    }
+    Ok(json!({"zooms": n, "layer": layer}))
+}
+
+/// Pictures of the media bin placed one after another on a layer of their own, each as large as
+/// fits the video, a few seconds each, faded from one to the next.
+fn pictures_in_turn(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{Anim, AnimKind, Item, MediaKind, Placement, What};
+    let ids: Vec<u32> = match p.get("media") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_u64).filter_map(|v| u32::try_from(v).ok()).take(500).collect(),
+        None => s.timeline.media.iter().filter(|m| m.kind == MediaKind::Picture).map(|m| m.id).collect(),
+        Some(_) => return Err(EngineError::Params("`media` is a list of the media bin's pictures (their ids)".to_string())),
+    };
+    let pictures: Vec<screengrabcraft_media::layers::MediaItem> =
+        ids.iter().filter_map(|id| s.timeline.media.iter().find(|m| m.id == *id && m.kind == MediaKind::Picture).cloned()).collect();
+    if pictures.is_empty() {
+        return Err(EngineError::Params("there are no pictures in the media bin to put in turn".to_string()));
+    }
+    let each = if p.get("each").is_some() { int(p, "each")?.clamp(500_000, 60_000_000) } else { 4_000_000 };
+    let mut at = if p.get("at").is_some() { int(p, "at")? } else { 0 };
+    let fade = Anim { kind: AnimKind::Fade, len: 400_000 };
+    let mut layer = None;
+    for m in &pictures {
+        // As wide as fits the video: the whole width, or less for a picture taller than it.
+        let shape = if m.width > 0 && m.height > 0 { m.width as f32 / m.height as f32 } else { s.aspect };
+        let w = (shape / s.aspect.max(0.01)).clamp(0.05, 1.0);
+        let item = Item {
+            len: each,
+            what: What::Media { id: m.id },
+            place: Placement { x: 0.5, y: 0.5, w, opacity: 1.0 },
+            intro: fade,
+            outro: fade,
+            ..Item::default()
+        };
+        let (l, _) = s.timeline.place(item, layer, at).map_err(edit_err)?;
+        layer = Some(l);
+        at = at.saturating_add(each);
+    }
+    if let Some(l) = layer {
+        let _ = s.timeline.set_layer(l, None, None, Some("Pictures"));
+    }
+    Ok(json!({"pictures": pictures.len(), "layer": layer, "end": at}))
+}
+
 /// Motion blur on what moves: on or off, and how long the shutter is open.
 fn motion_blur(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if !p.is_object() {
@@ -1234,6 +1321,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Move Clip",
         params: r#"{"track": n, "clip": n, "to": µs, "ripple"?: bool}: the clips grouped with it move as far; with `ripple` every later clip of their tracks moves along with them"#,
         run: move_clip,
+    },
+    VideoCommand {
+        id: "video.zoomOnClicks",
+        label: "Zoom on the Clicks",
+        params: r#"{"share"?: 0.1..0.9 of the screen shown}: zooms that follow the recording's clicks, on a layer of their own: one for each run of clicks near each other, in a little before the first and out a while after the last, touching ones panning from one to the next; ordinary zooms, to change or delete. None where a zoom is already"#,
+        run: zoom_on_clicks,
+    },
+    VideoCommand {
+        id: "video.picturesInTurn",
+        label: "Pictures in Turn",
+        params: r#"{"media"?: [id, ...] (every picture of the media bin if not given), "each"?: µs (4 s), "at"?: µs (0)}: pictures placed one after another on a layer of their own, each as large as fits the video, faded from one to the next"#,
+        run: pictures_in_turn,
     },
     VideoCommand {
         id: "video.motionBlur",
@@ -2146,6 +2245,58 @@ mod layer_tests {
         s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "plain"})).unwrap();
         let c = s.timeline.tracks[0].clips[0].look;
         assert!(c.colours_plain() && c.crop[0] == 100);
+    }
+
+    /// 20 s of a 160 × 90 screen, the pointer clicking at 3 s (top left) and at 12 s (bottom right).
+    fn clicking() -> VideoSession {
+        use screengrabcraft_media::pointer::{LEFT, SHOWING, Sample, Shape};
+        let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 160, height: 90, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 2, streams }).unwrap();
+        w.pointer_shape(&Shape { id: 1, hot: (0, 0), nominal: 8, pic: Raster::filled(8, 8, Color::rgb(0, 0, 0)).unwrap() }).unwrap();
+        for k in 0..40u64 {
+            let t = k * 500_000;
+            w.video_frame(0, t, &Raster::filled(160, 90, Color::rgb(200, 200, 200)).unwrap()).unwrap();
+            let (x, y) = if t < 8_000_000 { (32.0, 18.0) } else { (128.0, 72.0) };
+            let flags = SHOWING | if t == 3_000_000 || t == 12_000_000 { LEFT } else { 0 };
+            w.pointer(&Sample { t, x, y, flags, shape: 1 }).unwrap();
+        }
+        VideoSession::new(&Recording::open(Box::new(w.finish(20_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn zooms_follow_the_clicks_and_pictures_are_put_in_turn() {
+        use screengrabcraft_media::layers::What;
+        let mut s = clicking();
+        assert!(s.has_clicks());
+        let made = s.execute("video.zoomOnClicks", &json!({"share": 0.4})).unwrap();
+        assert_eq!(made["zooms"], 2);
+        assert_eq!(s.undo_label(), Some("Zoom on the Clicks"));
+        let layer = s.timeline.layers.last().unwrap();
+        assert_eq!(layer.name, "Zooms on the clicks");
+        let z = &layer.items;
+        assert!(z.iter().all(|i| matches!(i.what, What::Zoom)));
+        assert!((z[0].place.x - 0.2).abs() < 0.01 && (z[0].place.y - 0.2).abs() < 0.01, "{:?}", z[0].place);
+        assert!(z[0].at < 3_000_000 && z[0].end() > 3_000_000 && z[1].at < 12_000_000 && z[1].place.x > 0.7);
+        // Ordinary zooms: one is deleted like any; asked again, the clicks already zoomed on make none.
+        let (lid, first) = (layer.id, z[0].id);
+        s.execute("video.deleteItem", &json!({"layer": lid, "item": first})).unwrap();
+        assert_eq!(s.execute("video.zoomOnClicks", &json!({})).unwrap()["zooms"], 1);
+        assert!(s.execute("video.zoomOnClicks", &json!({})).is_err(), "every click is zoomed on");
+        assert!(session().execute("video.zoomOnClicks", &json!({})).is_err(), "no clicks kept");
+        // Pictures in turn: one after another from 1 s, a wide one as wide as the video, a tall one narrower.
+        let wide =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 320, "height": 180})).unwrap();
+        let tall = s.execute("video.addMedia", &json!({"kind": "picture", "name": "B.png", "path": "C:/B.png", "width": 90, "height": 160})).unwrap();
+        let put = s.execute("video.picturesInTurn", &json!({"media": [wide["id"], tall["id"]], "each": 3_000_000, "at": 1_000_000})).unwrap();
+        assert_eq!((put["pictures"].as_u64(), put["end"].as_u64()), (Some(2), Some(7_000_000)));
+        let l = s.timeline.layers.iter().find(|l| l.name == "Pictures").unwrap();
+        assert_eq!(l.items.iter().map(|i| (i.at, i.len)).collect::<Vec<_>>(), vec![(1_000_000, 3_000_000), (4_000_000, 3_000_000)]);
+        assert!((l.items[0].place.w - 1.0).abs() < 1e-4 && l.items[1].place.w < 0.4, "{} {}", l.items[0].place.w, l.items[1].place.w);
+        for bad in [json!({"media": [999]}), json!({"media": "all"}), json!({"each": "long"})] {
+            assert!(s.execute("video.picturesInTurn", &bad).is_err(), "{bad}");
+        }
+        // Every picture of the bin when none is named.
+        assert_eq!(s.execute("video.picturesInTurn", &json!({})).unwrap()["pictures"], 2);
     }
 
     #[test]

@@ -75,7 +75,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Drawing on the screen while recording | Missing | |
 | A recording survives a crash | Part | the recording file is written as it goes |
 | Desktop icons hidden while recording | Missing | |
-| A narrated video made from pictures | Missing | |
+| **A narrated video made from pictures** | Part | the Media bin's Put the Pictures in Turn: every picture one after another from the playhead, a few seconds each, as large as fits the video, fading from one to the next. They go over a recording (hide its screen for just them), not into a new empty video, and the voice isn't recorded over them in the editor: it's recorded with Video Production and brought in |
 
 ## Editing a picture
 
@@ -210,7 +210,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Items come and go: fade, slide, pop | Has | |
 | **Zoom into part of the screen and back (zoom and pan)** | Has (0.1.55) | smooth or at once; touching zooms pan from one to the next |
-| Zoom that follows the clicks by itself | Missing | |
+| **Zoom that follows the clicks by itself** | Has | Zoom on the Clicks (the Library's Zoom and Pan section, or the Edit menu): a zoom for each run of clicks the recording kept, in a little before the first and out a while after the last, those close together panning from one to the next; ordinary zooms, to change or delete |
 | **Keyframe animation (place, size, opacity over time)** | Has | keyframes added at the playhead from the item's panel (Motion), eased from one to the next; moving or resizing it then changes the keyframe there; a zoom's keyframes pan it |
 | Motion along a path | Missing | |
 | Transitions as items (fades, dips, wipes, stingers) | Has | |
@@ -295,7 +295,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 20. Masks and blend modes for layer items; ready-made colour looks for a clip (#109).
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
     bordered and shadowed (#111).
-22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch.
+22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch (#112).
+23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart).
 
 **Still to build, in this order**
 

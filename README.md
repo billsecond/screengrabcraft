@@ -192,7 +192,14 @@ the picture editor to the video editor. Its timeline has a row for each track:
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
   starts where another ends pans straight from one to the other. Only the screen and the pointer
-  are zoomed; the camera, titles and captions stay where they are.
+  are zoomed; the camera, titles and captions stay where they are. **Zoom on the Clicks** (at the
+  top of that section, or the Edit menu) makes a zoom for each run of clicks the recording kept:
+  in a little before the first, out a while after the last, panning between ones close together.
+  They're ordinary zooms, to move, change or delete.
+- **Pictures in turn**: the Media bin's Put the Pictures in Turn places every picture there one
+  after another from the playhead, a few seconds each (as many as asked), each as large as fits
+  the video, fading from one to the next. Hide the screen's track for a video of just them; for
+  a narrated one, record your voice with Video Production and bring that recording in too.
 - **Motion blur**: the side panel's Motion Blur (or a zoom's panel) blurs what moves along its way:
   items sliding, growing or moving by their keyframes, and zooms going in, out or panning. Each
   such moment is drawn five times over the shutter and blended, so it takes longer to make.
