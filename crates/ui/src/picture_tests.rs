@@ -334,3 +334,99 @@ fn the_tool_bar_is_customized() {
     assert!(h.state().settings.tool_bar.is_empty());
     h.get_by_label("Magnify (M)");
 }
+
+/// Presses and lets go of the right button at `p`.
+fn right_click(h: &mut Harness<'_, Editor>, p: egui::Pos2) {
+    h.hover_at(p);
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+/// The unknown words underlined while a text is typed, by where their line is.
+fn underlined(h: &Harness<'_, Editor>) -> Vec<(String, egui::Rect)> {
+    h.state().spell.shown.iter().map(|(m, r)| (m.word.clone(), *r)).collect()
+}
+
+/// While a text is typed, the words the word list doesn't know are underlined; a right click on
+/// one offers corrections, which take its place with the typing going on, and Add to Dictionary,
+/// kept in the settings; Check Spelling turns it all off. The whole typing is one undo step.
+#[test]
+fn misspelt_words_are_underlined_and_put_right_from_the_right_click_menu() {
+    use crate::spell::{ADD_WORD, CHECK_SPELLING};
+    assert!(crate::spell::ready_now(), "the word list reads");
+    let mut ed = editor();
+    let id = ed.session.doc.add(Shape::Text { rect: Rect::new(40.0, 40.0, 320.0, 60.0), text: String::new() }, Kind::Text.default_style()).unwrap();
+    let mut h = crate::tests::harness(ed);
+    h.run_steps(4);
+    h.state_mut().start_editing(id);
+    h.run_steps(2);
+    h.event(egui::Event::Text("Teh cat sat on Zorblax".to_string()));
+    h.run_steps(4);
+    let words: Vec<String> = underlined(&h).into_iter().map(|(w, _)| w).collect();
+    assert_eq!(words, ["Teh", "Zorblax"]);
+    shot(&mut h, "spelling-underlined");
+    // A right click on "Teh": its corrections, Add to Dictionary, Check Spelling.
+    let teh = underlined(&h).first().map(|(_, r)| r.center()).unwrap();
+    right_click(&mut h, teh);
+    let menu = h.state().spell.menu.clone().expect("the spelling menu is open");
+    let offered = menu.word.map(|(_, s)| s).unwrap_or_default();
+    assert!(offered.iter().any(|s| s == "The"), "{offered:?}");
+    h.get_by_label(ADD_WORD);
+    h.get_by_label(CHECK_SPELLING);
+    shot(&mut h, "spelling-menu");
+    click(&mut h, "The");
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.spell.menu.is_none(), "closed once one is taken");
+    assert_eq!(ed.editing, Some(id), "the typing goes on");
+    assert_eq!(ed.session.doc.get(id).and_then(|o| o.shape.text()), Some("The cat sat on Zorblax"));
+    assert_eq!(underlined(&h).into_iter().map(|(w, _)| w).collect::<Vec<_>>(), ["Zorblax"]);
+    // Typing goes on where the correction ended.
+    h.event(egui::Event::Text("!".to_string()));
+    h.run_steps(3);
+    assert_eq!(h.state().edit_buffer, "The! cat sat on Zorblax");
+    // Zorblax added to the dictionary: not underlined again, and kept.
+    let zorblax = underlined(&h).first().map(|(_, r)| r.center()).unwrap();
+    right_click(&mut h, zorblax);
+    click(&mut h, ADD_WORD);
+    h.run_steps(3);
+    assert_eq!(h.state().settings.own_words, ["Zorblax"]);
+    assert!(underlined(&h).is_empty());
+    assert_eq!(h.state().editing, Some(id));
+    // A right click elsewhere in the text has Check Spelling only; Esc closes the menu, not the box.
+    // (The right click put the cursor in the word clicked: to the end first.)
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::End);
+    h.run_steps(2);
+    h.event(egui::Event::Text(" Wrnog".to_string()));
+    h.run_steps(3);
+    assert_eq!(underlined(&h).into_iter().map(|(w, _)| w).collect::<Vec<_>>(), ["Wrnog"], "{}", h.state().edit_buffer);
+    // Where "Teh" was: "The" now, a word it knows.
+    let start = teh;
+    right_click(&mut h, start);
+    assert!(h.state().spell.menu.as_ref().is_some_and(|m| m.word.is_none()), "{:?}", h.state().spell.menu);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().spell.menu.is_none());
+    assert_eq!(h.state().editing, Some(id), "Esc closed the menu only");
+    // Check Spelling, off from the menu: nothing is underlined, and the setting is kept.
+    right_click(&mut h, start);
+    click(&mut h, CHECK_SPELLING);
+    h.run_steps(3);
+    assert!(h.state().settings.no_spell_check);
+    assert!(underlined(&h).is_empty());
+    // Done typing: everything typed is one undo step.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let ed = h.state();
+    assert!(ed.editing.is_none());
+    assert_eq!(ed.session.doc.get(id).and_then(|o| o.shape.text()), Some("The! cat sat on Zorblax Wrnog"));
+    assert_eq!(ed.session.undo_label(), Some("Type Text"));
+    // And on again from the Edit menu.
+    click(&mut h, "Edit");
+    click(&mut h, CHECK_SPELLING);
+    assert!(!h.state().settings.no_spell_check);
+}

@@ -303,6 +303,9 @@ pub fn open(ed: &mut Editor, dialog: Dialog) {
     ed.dialog = Some(dialog);
 }
 
+/// What About's section with the word list's copyright notices and licences is called.
+pub const WORD_LIST_NOTICES: &str = "The word list's notices";
+
 /// What Replace a Colour's eyedropper and its "only where it joins" box are called.
 pub const REPLACE_PICK: &str = "Pick the colour to replace from the picture";
 pub const REPLACE_JOINED: &str = "Only where it joins the point picked";
@@ -737,6 +740,18 @@ pub(crate) fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)>
             ui.label(
                 egui::RichText::new("MIT OR Apache-2.0. Fonts: PatroneOS Sans and PatroneOS Mono (SIL Open Font Licence).").small().color(t.muted),
             );
+            ui.label(
+                egui::RichText::new(
+                    "Spelling: symspell (MIT, github.com/reneklacan/symspell) with SymSpell's English word list by Wolf Garbe (MIT), made from Google Books Ngram data (CC BY 3.0) and SCOWL, unmodified.",
+                )
+                .small()
+                .color(t.muted),
+            );
+            egui::CollapsingHeader::new(egui::RichText::new(WORD_LIST_NOTICES).small()).show(ui, |ui| {
+                egui::ScrollArea::vertical().max_height(180.0).show(ui, |ui| {
+                    ui.label(egui::RichText::new(crate::spell::NOTICE).small().monospace());
+                });
+            });
             None
         }
     }

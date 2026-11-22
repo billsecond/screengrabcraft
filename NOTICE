@@ -30,3 +30,12 @@ Bundled model: IS-Net "general use" (Xuebin Qin, Hang Dai, Xiaobin Hu, Deng-Ping
 Luc Van Gool; https://github.com/xuebinqin/DIS), under the Apache License, Version 2.0, as ONNX
 by rembg (Daniel Gatis, https://github.com/danielgatis/rembg). Modified: its weights are kept in
 8 bits (assets/models/README.md).
+
+Bundled word list: SymSpell's English frequency dictionary (Wolf Garbe,
+https://github.com/wolfgarbe/SymSpell), unmodified, under the MIT License; made from Google Books
+Ngram data (Google, CC BY 3.0) and SCOWL (Kevin Atkinson and others, http://wordlist.aspell.net,
+under its permission notice). Every notice is in assets/dictionaries/NOTICE.txt and in the
+editor's About.
+
+Spelling checker: symspell (René Klačan, https://github.com/reneklacan/symspell), under the MIT
+License.
