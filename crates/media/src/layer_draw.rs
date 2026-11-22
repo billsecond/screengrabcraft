@@ -241,10 +241,14 @@ pub fn motion(item: &Item, t: u64, w: f32, h: f32) -> Motion {
     m
 }
 
-/// Where a media item's picture of `pw × ph` goes on a `w × h` video (before its motion).
+/// Where a media item's picture of `pw × ph` goes on a `w × h` video (before its motion and its
+/// turn): what its crop leaves of it, as wide as its place says.
 pub fn media_rect(item: &Item, pw: u32, ph: u32, w: f32, h: f32) -> Rect {
+    let look = item.look.clone().checked();
+    let [l, t, r, b] = look.crop;
+    let (kw, kh) = (pw.max(1) as f32 * (1.0 - l - r).max(0.1), ph.max(1) as f32 * (1.0 - t - b).max(0.1));
     let bw = (item.place.w * w).max(2.0);
-    let bh = bw * ph.max(1) as f32 / pw.max(1) as f32;
+    let bh = bw * kh / kw;
     Rect::new(item.place.x * w - bw / 2.0, item.place.y * h - bh / 2.0, bw, bh)
 }
 
@@ -485,18 +489,72 @@ fn transition(out: &mut Pixmap, kind: TransitionKind, p: f32) {
 
 /// Draws a picture (straight alpha) onto `out` in `rect`, moved and grown as `m` says.
 fn picture_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion) {
+    turned_at(out, pic, rect, m, 0.0, Pt::new(0.0, 0.0));
+}
+
+/// [`picture_at`], turned `degrees` clockwise about `pivot` (where it is before its motion).
+fn turned_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion, degrees: f32, pivot: Pt) {
     if m.alpha <= 0.0 || pic.width() == 0 || pic.height() == 0 {
         return;
     }
     let (sx, sy) = (rect.w / pic.width() as f32, rect.h / pic.height() as f32);
     let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
-    let t = Transform::from_scale(sx, sy)
+    let mut t = Transform::from_scale(sx, sy)
         .post_translate(rect.x, rect.y)
         .post_translate(-cx, -cy)
         .post_scale(m.scale.max(0.01), m.scale.max(0.01))
         .post_translate(cx + m.dx, cy + m.dy);
+    if degrees.abs() > 1.0e-3 && degrees.is_finite() {
+        t = t.post_rotate_at(degrees, pivot.x + m.dx, pivot.y + m.dy);
+    }
     let paint = PixmapPaint { opacity: m.alpha, quality: tiny_skia::FilterQuality::Bilinear, ..PixmapPaint::default() };
     out.draw_pixmap(0, 0, pic.as_ref(), &paint, t, None);
+}
+
+/// A picture or a video item's picture as its look frames it: what its crop leaves, in `rect`
+/// (before its motion), turned about its middle, its corners rounded, with a border round it and
+/// a soft shadow under it if it has them.
+fn framed_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion, look: &layers::ItemLook) {
+    if m.alpha <= 0.0 || pic.width() == 0 || pic.height() == 0 || rect.w < 1.0 || rect.h < 1.0 {
+        return;
+    }
+    let look = look.clone().checked();
+    let [l, t, r, b] = look.crop;
+    let (pw, ph) = (pic.width() as f32, pic.height() as f32);
+    // The part of the picture kept, in its pixels.
+    let (kx, ky) = (pw * l, ph * t);
+    let (kw, kh) = ((pw * (1.0 - l - r)).max(1.0), (ph * (1.0 - t - b)).max(1.0));
+    let (cx, cy) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let (hw, hh) = (rect.w / 2.0, rect.h / 2.0);
+    // Its own space, its middle at 0; grown or shrunk, turned, and moved where it goes.
+    let k = m.scale.max(0.01);
+    let place = Transform::from_scale(k, k).post_rotate(look.rotate).post_translate(cx + m.dx, cy + m.dy);
+    let radius = look.radius * rect.w.min(rect.h);
+    let Some(shape) = draw::rounded_rect(Rect::new(-hw, -hh, rect.w, rect.h), radius) else { return };
+    if look.shadow {
+        // A soft shadow: rounded boxes below and to the right, each larger and fainter.
+        let off = (rect.w.min(rect.h) * 0.04).max(2.0);
+        for step in 0..4 {
+            let grow = off * step as f32 * 0.5;
+            let r = Rect::new(-hw - grow + off, -hh - grow + off, rect.w + 2.0 * grow, rect.h + 2.0 * grow);
+            if let Some(s) = draw::rounded_rect(r, radius + grow) {
+                out.fill_path(&s, &paint(Color::BLACK, 0.12 * m.alpha), FillRule::Winding, place, None);
+            }
+        }
+    }
+    // (The picture is placed as the shape is: a shader isn't moved with the path.)
+    let to_shape = Transform::from_translate(-kx, -ky).post_scale(rect.w / kw, rect.h / kh).post_translate(-hw, -hh).post_concat(place);
+    let fill = Paint {
+        shader: tiny_skia::Pattern::new(pic.as_ref(), tiny_skia::SpreadMode::Pad, tiny_skia::FilterQuality::Bilinear, m.alpha, to_shape),
+        anti_alias: true,
+        ..Paint::default()
+    };
+    out.fill_path(&shape, &fill, FillRule::Winding, place, None);
+    if look.border > 0.0 {
+        let [r, g, b] = layers::color(&look.border_colour, [0xff, 0xff, 0xff]);
+        let stroke = Stroke { width: (look.border * rect.w).max(1.0), ..Stroke::default() };
+        out.stroke_path(&shape, &paint(Color::rgb(r, g, b), m.alpha), &stroke, place, None);
+    }
 }
 
 /// Pictures read from the media bin, made ready to draw (premultiplied), by media id and the
@@ -547,7 +605,12 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                 let at = if m_item.kind == MediaKind::Picture { 0 } else { item.from + (t - item.at) };
                 let Some(pic) = store.picture(*id, at) else { continue };
                 let Some(ready) = pictures.get(*id, &pic) else { continue };
-                picture_at(&mut pix, &ready, media_rect(item, pic.width(), pic.height(), w, h), m);
+                let rect = media_rect(item, pic.width(), pic.height(), w, h);
+                if item.look.is_plain() {
+                    picture_at(&mut pix, &ready, rect, m);
+                } else {
+                    framed_at(&mut pix, &ready, rect, m, &item.look);
+                }
             }
             What::Text { style: TextStyle::Blur, title, subtitle, color } => {
                 // What's under its box blurred (it draws nothing of its own), coming on and going
@@ -565,12 +628,20 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                 let Some(g) = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len, item.place.w) else { continue };
                 let secs = (t - item.at) as f32 / 1e6;
                 let at = stock_place(*style, &g, item.place, w, h);
-                let plain = m.alpha >= 0.999 && item.place.opacity >= 0.999 && m.dx == 0.0 && m.dy == 0.0 && (m.scale - 1.0).abs() < 1.0e-4;
+                let turn = item.look.clone().checked().rotate;
+                let plain = m.alpha >= 0.999
+                    && item.place.opacity >= 0.999
+                    && m.dx == 0.0
+                    && m.dy == 0.0
+                    && (m.scale - 1.0).abs() < 1.0e-4
+                    && turn.abs() < 1.0e-3;
                 if plain {
                     g.animation.render(&mut pix, secs, at);
                 } else if let Some(mut own) = Pixmap::new(w as u32, h as u32) {
                     g.animation.render(&mut own, secs, at);
-                    picture_at(&mut pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha });
+                    let r = moved(g.bounds, at);
+                    let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+                    turned_at(&mut pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
                 }
             }
             What::Text { style, title, subtitle, color } => {
@@ -582,7 +653,10 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
                     Some(p)
                 });
                 if let Some(p) = drawn {
-                    picture_at(&mut pix, &p, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha });
+                    let r = text_item(None, st, ti, su, co, place, w, h);
+                    let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+                    let turn = item.look.clone().checked().rotate;
+                    turned_at(&mut pix, &p, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
                 }
             }
             What::Transition { kind } => {
@@ -779,6 +853,72 @@ mod tests {
         let mut mixed = vec![0.0f32; 20];
         mix_layers(&mut mixed, &tl, &OnePicture(red), 48_000, 10);
         assert!(mixed.iter().all(|v| (*v - 0.5).abs() < 1e-6), "{mixed:?}");
+    }
+
+    #[test]
+    fn a_picture_is_cut_down_turned_bordered_rounded_and_shadowed() {
+        let mut tl = timeline();
+        let pic = tl
+            .add_media(layers::MediaItem { name: "Wide.png".into(), path: "C:/Wide.png".into(), width: 40, height: 20, ..Default::default() })
+            .unwrap();
+        // Its left half red, its right half blue; the right half cut off: a red square.
+        let mut wide = Raster::filled(40, 20, Color::rgb(255, 0, 0)).unwrap();
+        for y in 0..20 {
+            for x in 20..40 {
+                let i = ((y * 40 + x) * 4) as usize;
+                wide.pixels_mut()[i..i + 3].copy_from_slice(&[0, 0, 255]);
+            }
+        }
+        let look = layers::ItemLook { crop: [0.25, 0.0, 0.25, 0.0], ..layers::ItemLook::default() };
+        let item = Item {
+            what: What::Media { id: pic },
+            place: Placement { x: 0.5, y: 0.5, w: 0.4, opacity: 1.0 },
+            intro: layers::Anim { kind: AnimKind::None, len: 0 },
+            look: look.clone(),
+            ..Item::default()
+        };
+        let (layer, id) = tl.place(item, None, 0).unwrap();
+        let draw = |tl: &Timeline| {
+            let mut out = grey(100, 100);
+            draw_layers(&mut out, tl, &OnePicture(Arc::new(wide.clone())), 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+            out
+        };
+        let out = draw(&tl);
+        let r = |x, y| out.pixel(x, y).unwrap();
+        assert_eq!(media_rect(tl.item(layer, id).unwrap(), 40, 20, 100.0, 100.0), Rect::new(30.0, 30.0, 40.0, 40.0), "square, as cut");
+        assert!(r(50, 50).r > 200 && r(50, 50).b < 40, "{:?}", r(50, 50));
+        assert!(r(65, 35).r > 200, "no blue left: {:?}", r(65, 35));
+        assert_eq!(r(80, 50), Color::rgb(120, 120, 120), "nothing beyond it");
+        // A border, round corners and a shadow.
+        tl.set_item(layer, id, |i| {
+            i.look = layers::ItemLook { border: 0.05, border_colour: "#00ff00".into(), radius: 0.5, shadow: true, ..look.clone() }
+        })
+        .unwrap();
+        let out = draw(&tl);
+        let r = |x, y| out.pixel(x, y).unwrap();
+        assert!(r(50, 30).g > 200 && r(50, 30).r < 80, "the border at its top: {:?}", r(50, 30));
+        assert_eq!(r(31, 31), Color::rgb(120, 120, 120), "a round corner leaves the corner");
+        assert!(r(50, 72).r < 110, "the shadow under it: {:?}", r(50, 72));
+        // Turned a quarter: a square stays where it was.
+        tl.set_item(layer, id, |i| i.look = layers::ItemLook { rotate: 90.0, ..look.clone() }).unwrap();
+        let out = draw(&tl);
+        assert!(out.pixel(35, 35).unwrap().r > 200 && out.pixel(25, 50).unwrap() == Color::rgb(120, 120, 120));
+        // Hostile looks are made sensible.
+        let wild = layers::ItemLook {
+            rotate: f32::NAN,
+            crop: [9.0, -1.0, f32::INFINITY, 0.3],
+            border: 7.0,
+            border_colour: "red".into(),
+            radius: -2.0,
+            shadow: true,
+        }
+        .checked();
+        assert_eq!(
+            (wild.rotate, wild.crop, wild.border, wild.border_colour.as_str(), wild.radius),
+            (0.0, [0.45, 0.0, 0.0, 0.3], 0.1, "#ffffff", 0.0)
+        );
+        tl.set_item(layer, id, |i| i.look = wild.clone()).unwrap();
+        let _ = draw(&tl);
     }
 
     #[test]

@@ -3126,3 +3126,43 @@ fn subtitles_are_brought_in_as_captions_and_a_watermark_goes_on_every_frame() {
     };
     assert!(differ(0, 0) > 40 && differ(200, 140) == 0, "{} {}", differ(0, 0), differ(200, 140));
 }
+
+#[test]
+fn a_picture_item_is_framed_and_a_clip_coloured_from_their_panels() {
+    let mut h = harness();
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let pic = v
+            .session
+            .execute("video.addMedia", &serde_json::json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20}))
+            .unwrap();
+        let placed = v.session.execute("video.place", &serde_json::json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        v.item = Some((layer, item));
+        (layer, item)
+    };
+    h.run_steps(3);
+    // Its panel: turned, and framed: the shadow ticked.
+    for label in ["Turn", "Frame", "Crop the left", "Rounded corners"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    scroll_side_panel_to(&mut h, "Shadow");
+    h.get_by_label("Shadow").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.shadow);
+    shot(&mut h, "video-item-frame");
+    // The screen's clip: its colours and crop in its panel; As Recorded puts them back.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.selected = Some((0, 0));
+        v.session.execute("video.clipLook", &serde_json::json!({"track": 0, "clip": 0, "saturation": -100, "crop": [100, 100, 100, 100]})).unwrap();
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Brightness");
+    shot(&mut h, "video-clip-colour");
+    scroll_side_panel_to(&mut h, "As Recorded");
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
+}

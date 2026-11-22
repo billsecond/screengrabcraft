@@ -195,6 +195,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   cross-fade, through black, a wipe four ways, a push or a circle), from the clip's panel, its
   right button, or the Library's Between Clips section dropped on the cut. It plays across the
   cut, 0.5 to 3 s; where sound clips meet it's a cross-fade of their sound.
+- **Turned and framed**: an item's panel turns it (Turn); a picture's or a video's crops its
+  sides, puts a border of any colour round it, rounds its corners and gives it a soft shadow
+  (Frame). A screen or camera clip's panel makes it lighter or darker, changes its contrast and
+  colour (down to grey), and crops its edges (what's left fills the picture, its shape kept).
 - **Keyframes**: an item's panel adds a keyframe at the playhead (Motion); move the playhead on and
   move, resize or fade the item (on the picture or in the panel) and it goes there smoothly. A
   zoom's keyframes pan it along. The timeline shows each as a diamond on the item.

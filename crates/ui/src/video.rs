@@ -1930,6 +1930,10 @@ impl VideoView {
                                 self.run(ed, &ctx, "video.reverse", json!({"track": ti, "clip": ci, "reverse": back}));
                             }
                         }
+                        if !sound && let Some((ti, ci)) = self.selected {
+                            section(ui, "Colour and Crop", &mut false);
+                            self.clip_look_section(ed, ui, ti, ci);
+                        }
                         if let Some((ti, ci)) = self.selected.filter(|(_, ci)| *ci > 0) {
                             section(ui, if sound { "Cross-fade" } else { "Transition" }, &mut false);
                             self.transition_section(ed, ui, ti, ci);
