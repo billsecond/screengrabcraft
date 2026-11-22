@@ -879,6 +879,10 @@ pub struct EditorSettings {
     pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
+    /// The tool bar's tools after Favorites, in order, by name (View › Customize Tool Bar); none
+    /// for the usual ones. A tool left off is still picked by its key.
+    #[serde(deserialize_with = "or_default", skip_serializing_if = "Vec::is_empty")]
+    pub tool_bar: Vec<String>,
     /// Rulers along the top and the left of the picture, and the guides dragged out of them.
     #[serde(deserialize_with = "or_default")]
     pub show_rulers: bool,
@@ -1049,6 +1053,8 @@ impl EditorSettings {
             }
         }
         self.effect_presets = presets;
+        self.tool_bar.retain(|t| !t.is_empty() && t.len() <= 32);
+        self.tool_bar.truncate(64);
         self
     }
 

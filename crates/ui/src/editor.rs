@@ -133,6 +133,69 @@ impl Tool {
     pub fn is_shape(self) -> bool {
         matches!(self, Tool::Draw(Kind::Rect | Kind::Ellipse | Kind::Polygon))
     }
+
+    /// What the tool bar's button for it is kept as in the settings (the Shape button's for the
+    /// rectangle, the ellipse and the polygon).
+    pub fn id(self) -> &'static str {
+        match self {
+            Tool::Select => "move",
+            Tool::Hand => "hand",
+            Tool::Area => "selection",
+            Tool::Crop => "crop",
+            Tool::CutOut => "cutOut",
+            Tool::Measure => "measure",
+            Tool::Fill => "fill",
+            Tool::Eraser => "eraser",
+            Tool::Favorites => "favorites",
+            Tool::Draw(k) if Tool::Draw(k).is_shape() => "shape",
+            Tool::Draw(Kind::Arrow) => "arrow",
+            Tool::Draw(Kind::Line) => "line",
+            Tool::Draw(Kind::Text) => "text",
+            Tool::Draw(Kind::Callout) => "callout",
+            Tool::Draw(Kind::Stamp) => "stamp",
+            Tool::Draw(Kind::Step) => "step",
+            Tool::Draw(Kind::Pen) => "pen",
+            Tool::Draw(Kind::Highlight) => "highlighter",
+            Tool::Draw(Kind::Blur) => "blur",
+            Tool::Draw(Kind::Pixelate) => "pixelate",
+            Tool::Draw(Kind::Spotlight) => "spotlight",
+            Tool::Draw(Kind::Magnify) => "magnify",
+            Tool::Draw(_) => "other",
+        }
+    }
+
+    /// The tool bar's tool kept as `id`, if one is.
+    pub fn from_id(id: &str) -> Option<Tool> {
+        Tool::BAR.into_iter().find(|t| t.id() == id)
+    }
+
+    /// The default group of the tool bar a tool is in.
+    fn bar_group(self) -> usize {
+        Tool::BAR_GROUPS.iter().position(|g| g.iter().any(|t| t.id() == self.id())).unwrap_or(0)
+    }
+
+    /// The tool bar's tools after Favorites, as the owner chose them (View › Customize Tool Bar)
+    /// or the usual ones: each with whether a gap goes before it (where it starts another of the
+    /// usual groups than the tool before it).
+    pub fn bar_of(chosen: &[String]) -> Vec<(Tool, bool)> {
+        let mut tools: Vec<Tool> = Vec::new();
+        for t in chosen.iter().filter_map(|id| Tool::from_id(id)) {
+            if !tools.contains(&t) {
+                tools.push(t);
+            }
+        }
+        if chosen.is_empty() {
+            tools = Tool::BAR.to_vec();
+        }
+        let mut out = Vec::with_capacity(tools.len());
+        let mut last = None;
+        for t in tools {
+            let g = t.bar_group();
+            out.push((t, last != Some(g)));
+            last = Some(g);
+        }
+        out
+    }
 }
 
 /// What waits for the document to be saved (or, in a browser, for the owner to answer)
@@ -264,6 +327,8 @@ pub struct Editor {
     pub(crate) guides: Vec<crate::guides::Guide>,
     /// The last distance measured with the Measure tool, not kept on the picture.
     pub(crate) measured: Option<(screengrabcraft_model::Pt, screengrabcraft_model::Pt)>,
+    /// View › Customize Tool Bar, while its window is open.
+    pub(crate) customizing_bar: Option<crate::toolbar::BarDraft>,
     /// The guide being dragged.
     pub(crate) guide_drag: Option<usize>,
     /// A move of annotations under way, for snapping.
@@ -405,6 +470,7 @@ impl Editor {
             theme_draft: None,
             guides: Vec::new(),
             guide_drag: None,
+            customizing_bar: None,
             measured: None,
             snap: None,
             snap_lines: Vec::new(),
@@ -1410,6 +1476,7 @@ impl Editor {
         crate::canvas::show(self, ui);
         self.welcome_card(&ctx);
         crate::dialogs::show(self, &ctx);
+        crate::toolbar::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
         crate::compose::show(self, &ctx);
@@ -1928,6 +1995,10 @@ impl Editor {
                         self.settings.hide_tool_names = !names;
                         self.services.save_settings(&self.settings);
                     }
+                    if ui.button("Customize Tool Bar…").on_hover_text("Which tools the tool bar shows, and in what order").clicked() {
+                        self.customizing_bar = Some(crate::toolbar::BarDraft::of(&self.settings.tool_bar));
+                        ui.close();
+                    }
                     ui.menu_button("Theme", |ui| {
                         for (label, th) in [
                             ("Follow the system", screengrabcraft_model::Theme::System),
@@ -2198,31 +2269,31 @@ impl Editor {
                     on: self.tool == Tool::Favorites,
                     leads: false,
                 }];
-                for group in Tool::BAR_GROUPS {
-                    for (k, &tool) in group.iter().enumerate() {
-                        let Some((icon, label, key)) = tool.info() else { continue };
-                        tools.push(if tool.is_shape() {
-                            // The Shape button draws whichever of the two was picked last.
-                            BarTool {
-                                tool: self.shape_tool(),
-                                icon: Icon::Shape,
-                                tip: "Shape (R, O)".to_string(),
-                                name: "Shape",
-                                on: self.tool.is_shape(),
-                                leads: k == 0,
-                            }
-                        } else {
-                            let name = if label == "Step number" { "Step" } else { label };
-                            BarTool { tool, icon, tip: format!("{label} ({})", key.name()), name, on: self.tool == tool, leads: k == 0 }
-                        });
-                    }
+                // The tools the owner chose, in their order (View › Customize Tool Bar), or the usual ones.
+                for (tool, leads) in Tool::bar_of(&self.settings.tool_bar) {
+                    let Some((icon, label, key)) = tool.info() else { continue };
+                    tools.push(if tool.is_shape() {
+                        // The Shape button draws whichever of the two was picked last.
+                        BarTool {
+                            tool: self.shape_tool(),
+                            icon: Icon::Shape,
+                            tip: "Shape (R, O)".to_string(),
+                            name: "Shape",
+                            on: self.tool.is_shape(),
+                            leads,
+                        }
+                    } else {
+                        let name = if label == "Step number" { "Step" } else { label };
+                        BarTool { tool, icon, tip: format!("{label} ({})", key.name()), name, on: self.tool == tool, leads }
+                    });
                 }
+                let gaps = tools.iter().filter(|b| b.leads).count() as f32;
                 let name_font = egui::FontId::proportional(NAME_TEXT);
                 let cells: Vec<f32> = tools
                     .iter()
                     .map(|b| (ui.painter().layout_no_wrap(b.name.to_string(), name_font.clone(), t.text).size().x + 8.0).max(side))
                     .collect();
-                let named_width = cells.iter().sum::<f32>() + (tools.len() - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
+                let named_width = cells.iter().sum::<f32>() + tools.len().saturating_sub(1) as f32 * BAR_GAP + gaps * BAR_GROUP_GAP;
                 let mut picked = None;
                 self.named_bar_width = named_width;
                 // In a row with the sides when all of it fits; in a window too narrow for that (the
@@ -2275,7 +2346,8 @@ impl Editor {
                     // The bar is that much taller.
                     ui.allocate_rect(egui::Rect::from_min_max(bar.min, egui::pos2(bar.max.x, top + side + NAME_ROOM)), egui::Sense::hover());
                 } else {
-                    let width = TOOLS_ON_BAR as f32 * side + (TOOLS_ON_BAR - 1) as f32 * BAR_GAP + Tool::BAR_GROUPS.len() as f32 * BAR_GROUP_GAP;
+                    let n = tools.len() as f32;
+                    let width = n * side + (n - 1.0).max(0.0) * BAR_GAP + gaps * BAR_GROUP_GAP;
                     let middle = if left.right() + BAR_SPACE + width + BAR_SPACE <= right.left() {
                         let x = (bar.center().x - width / 2.0).min(right.left() - BAR_SPACE - width).max(left.right() + BAR_SPACE);
                         egui::Rect::from_min_size(egui::pos2(x, bar.top()), vec2(width, side))
@@ -2555,9 +2627,6 @@ pub(crate) fn welcome_row(ui: &mut Ui, icon: Icon, label: &str, key: &str) -> eg
     }
     resp
 }
-
-/// The tools on the tool bar: Favorites and every other tool.
-const TOOLS_ON_BAR: usize = 1 + Tool::BAR.len();
 
 /// A button on the tool bar, `side` points square, named by its tooltip.
 fn bar_button(ui: &mut Ui, side: f32, icon: Icon, tip: &str, on: bool, enabled: bool) -> egui::Response {

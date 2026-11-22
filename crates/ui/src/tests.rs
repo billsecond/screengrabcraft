@@ -2709,3 +2709,31 @@ fn pictures_are_combined_and_laid_out_in_a_template_from_the_image_menu() {
     assert_eq!((doc.count(Kind::Image), doc.count(Kind::Step), doc.count(Kind::Text)), (2, 2, 3));
     crate::quick_tests::shot(&mut h, "template-made");
 }
+
+/// A capture with the pointer in it, as the capture service keeps it (the pointer drawn in, and
+/// the side file with it as an annotation of its own): the editor opens it with the pointer as a
+/// picture annotation, which is moved or deleted like any other.
+#[test]
+fn the_captured_pointer_is_an_annotation_to_move_or_delete() {
+    let plain = Raster::filled(400, 300, Color::rgb(30, 90, 200)).unwrap();
+    let drawn = screengrabcraft_render::pointer::draw(&plain, 200.0, 150.0, 1.0).unwrap();
+    let doc = screengrabcraft_render::pointer::as_document(&plain, 200.0, 150.0, 1.0).unwrap();
+    let side_bytes = screengrabcraft_render::project::save_with_original(&doc, Some(&plain)).unwrap();
+    let png = screengrabcraft_render::encode(&drawn, ImageFormat::Png, 100).unwrap();
+    let disk = Disk::with(&[("captures/a.png", png), ("captures/a.sgcraft", side_bytes)]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    let ed = h.state();
+    assert!(ed.session.doc.base == plain, "the picture under it is the screen alone");
+    assert!(matches!(ed.session.doc.objects.as_slice(), [o] if matches!(o.shape, Shape::Image { .. })), "the pointer, a picture annotation");
+    // Clicked and deleted: the screen as it was, with no pointer.
+    h.state_mut().set_tool(Tool::Select);
+    let p = at(&h, 203.0, 158.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected().len(), 1);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert!(h.state().session.doc.objects.is_empty());
+    h.run_steps(6);
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert!(flat == plain, "written again without it");
+}

@@ -30,6 +30,7 @@ pub mod simplify;
 pub mod stamps;
 pub mod strip;
 pub mod theme;
+pub mod toolbar;
 pub mod transcribe;
 pub mod video;
 pub mod widgets;
