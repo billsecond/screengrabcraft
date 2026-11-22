@@ -155,6 +155,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
   as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
   sound, music and media go down while the microphone is heard, and back up after.
+- **Replace media, copy effects**: an item's right button (or its panel's Effects) has Replace
+  With, to show another file of the Media bin in its place, keeping its time, place, look, motion
+  and animations. Copy Effects and Paste Effects put one item's look, entrance, exit and motion on
+  another, or one clip's colours and crop (or its fades) and the transition into it on another.
 - **Join pieces back together**: a clip's right button joins it with the next one when that goes
   on from where it stops (pieces of a split, not moved apart); a track's right button joins all
   its pieces, and the ruler's every track's.

@@ -182,6 +182,24 @@ impl ClipLook {
 /// How many colours a clip can be given.
 pub const CLIP_COLOURS: u8 = 8;
 
+/// A clip's effects, copied to put on another: its colours and crop (a picture track's), how it
+/// fades in and out (a sound track's), and how the clip before turns into it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClipEffects {
+    pub look: ClipLook,
+    pub fade_in: u64,
+    pub fade_out: u64,
+    pub transition: Option<ClipTransition>,
+}
+
+impl Clip {
+    /// Its effects, to put on another clip.
+    pub fn effects(&self) -> ClipEffects {
+        ClipEffects { look: self.look, fade_in: self.fade_in, fade_out: self.fade_out, transition: self.transition }
+    }
+}
+
 /// How one clip turns into the next where they meet on a track.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1479,6 +1497,29 @@ impl Timeline {
         if let Some(c) = clips.get_mut(clip) {
             change(&mut c.look);
             c.look = c.look.checked();
+        }
+        Ok(())
+    }
+
+    /// Another clip's effects put on a clip, as fits its track: on a picture track its colours and
+    /// crop, on a sound track its fades (no longer than the clip); and the transition into it where
+    /// it meets the clip before (none there: left as it is).
+    pub fn paste_clip_effects(&mut self, track: usize, clip: usize, fx: ClipEffects) -> Result<(), EditError> {
+        let video = self.track(track)?.kind.is_video();
+        let (clips, mut c) = self.clip_mut(track, clip)?;
+        if video {
+            c.look = fx.look.checked();
+        } else {
+            let cap = |v: u64| v.min(MAX_FADE_US).min(c.len);
+            c.fade_in = cap(fx.fade_in);
+            c.fade_out = cap(fx.fade_out).min(c.len - c.fade_in);
+        }
+        let meets = clip.checked_sub(1).and_then(|p| clips.get(p)).is_some_and(|b| b.end() == c.at);
+        if meets {
+            c.transition = fx.transition.map(|x| checked_transition(x, !video));
+        }
+        if let Some(slot) = clips.get_mut(clip) {
+            *slot = c;
         }
         Ok(())
     }

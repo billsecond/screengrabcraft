@@ -811,6 +811,14 @@ impl VideoView {
                         });
                     }
                     self.item_sound_section(ed, ui, &ctx, layer, &item, &mut first);
+                    // Its media swapped, its effects copied or pasted.
+                    super::section(ui, "Effects", &mut first);
+                    ui.horizontal_wrapped(|ui| {
+                        if matches!(item.what, What::Media { .. }) {
+                            self.replace_menu(ed, ui, &ctx, layer, id);
+                        }
+                        self.effects_items(ed, ui, &ctx, json!({"layer": layer, "item": id}));
+                    });
                     ui.add_space(16.0);
                     if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                         self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));

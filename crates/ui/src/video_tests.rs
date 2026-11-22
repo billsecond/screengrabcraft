@@ -1235,6 +1235,86 @@ fn split_pieces_are_joined_back_from_the_right_button() {
     assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].clips[0].len, 4_000_000);
 }
 
+#[test]
+fn media_is_replaced_keeping_its_effects_and_effects_are_pasted_on_another() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::What;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string(), "C:/Pictures/Badge.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    h.state_mut()
+        .video
+        .as_mut()
+        .unwrap()
+        .session
+        .execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "rotate": 20, "border": 0.04}))
+        .unwrap();
+    h.run_steps(2);
+    let it = |h: &Harness<'_, Editor>, l: u32, i: u32| h.state().video.as_ref().unwrap().session.timeline.item(l, i).unwrap().clone();
+    let before = it(&h, layer, item);
+    // Its panel: Replace With, the other picture.
+    scroll_side_panel_to(&mut h, "Replace With");
+    shot(&mut h, "video-item-effects");
+    h.get_by_label("Replace With").click();
+    h.run_steps(2);
+    h.get_all_by_label("Badge.png").last().unwrap().click();
+    h.run_steps(3);
+    let after = it(&h, layer, item);
+    let badge = h.state().video.as_ref().unwrap().session.timeline.media[1].id;
+    assert_eq!(after.what, What::Media { id: badge });
+    assert_eq!(
+        (after.at, after.len, after.place, after.look.clone()),
+        (before.at, before.len, before.place, before.look.clone()),
+        "its effects kept"
+    );
+    // Its effects copied, and pasted on a title.
+    h.get_by_label("Copy Effects").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().copied_effects.is_some());
+    let (tl_, ti) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let p = v.session.execute("video.place", &serde_json::json!({"template": "news-name", "at": 0})).unwrap();
+        let chosen = (p["layer"].as_u64().unwrap() as u32, p["item"].as_u64().unwrap() as u32);
+        v.item = Some(chosen);
+        chosen
+    };
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Paste Effects");
+    h.get_by_label("Paste Effects").click();
+    h.run_steps(2);
+    let title = it(&h, tl_, ti);
+    assert!((title.look.rotate - 20.0).abs() < 1e-4, "{}", title.look.rotate);
+    // A clip's effects, from its right button: the screen's first half's look on its second half.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.session.execute("video.split", &serde_json::json!({"at": 2_000_000})).unwrap();
+        v.session.execute("video.clipLook", &serde_json::json!({"track": 0, "clip": 0, "look": "sepia"})).unwrap();
+        v.selected = Some((0, 0));
+    }
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    let rows = h.state().video.as_ref().unwrap().session.timeline.layers.len() as f32;
+    let (pps, scroll) = (h.state().video.as_ref().unwrap().pps, h.state().video.as_ref().unwrap().scrolled());
+    let screen_y = top + rows * 48.0 + 20.0;
+    right_click(&mut h, egui::pos2(lane.min.x + pps - scroll, screen_y));
+    h.get_by_label("Copy Effects").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 1));
+    h.run_steps(1);
+    right_click(&mut h, egui::pos2(lane.min.x + 3.0 * pps - scroll, screen_y));
+    h.get_by_label("Paste Effects").click();
+    h.run_steps(2);
+    let clips = &h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips;
+    assert_eq!(clips[1].look, clips[0].look);
+}
+
 /// A made-up voice at 48 kHz: bursts of tones at uneven times, quiet between.
 fn voice(secs: usize) -> Vec<i16> {
     let mut seed = 99u32;

@@ -564,6 +564,24 @@ pub struct Key {
 /// The most keyframes an item keeps.
 pub const MAX_KEYS: usize = 200;
 
+/// An item's effects, copied to put on another: its look (turned, framed, masked, blended, a
+/// device round it), how it comes and goes, and its motion.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItemEffects {
+    pub look: ItemLook,
+    pub intro: Anim,
+    pub outro: Anim,
+    pub keys: Vec<Key>,
+}
+
+impl Item {
+    /// Its effects, to put on another item.
+    pub fn effects(&self) -> ItemEffects {
+        ItemEffects { look: self.look.clone(), intro: self.intro, outro: self.outro, keys: self.keys.clone() }
+    }
+}
+
 impl Default for Item {
     fn default() -> Item {
         Item {
@@ -1252,6 +1270,58 @@ impl Timeline {
         if let Some(n) = name.and_then(crate::timeline::clean_name) {
             l.name = n;
         }
+        Ok(())
+    }
+
+    /// An item's media swapped for another of the bin's, its effects kept: where it is and how
+    /// long, its place, look, motion and animations. The new media must go on the same kind of
+    /// layer. A sound or a video plays from where the old one did if it's that long (else from
+    /// its start), and no longer than it is.
+    pub fn replace_media(&mut self, layer: u32, item: u32, media: u32) -> Result<(), EditError> {
+        let m = self.media.iter().find(|m| m.id == media).cloned().ok_or_else(|| bad("that media isn't in the bin"))?;
+        let kind = self.layer(layer).map(|l| l.kind).ok_or_else(|| bad("there's no such layer"))?;
+        let it = self.item(layer, item).cloned().ok_or_else(|| bad("there's no such item"))?;
+        if !matches!(it.what, What::Media { .. }) {
+            return Err(bad("only a picture, a sound or a video is replaced by other media"));
+        }
+        let mut new = Item { what: What::Media { id: media }, ..it };
+        new.sound_only = new.sound_only && m.kind == MediaKind::Video;
+        new.silent = new.silent && m.kind == MediaKind::Video;
+        if new.layer_kind(&self.media) != kind {
+            return Err(bad("that media goes on another kind of layer"));
+        }
+        if m.kind == MediaKind::Picture {
+            new.from = 0;
+        } else if m.duration > 0 {
+            if new.from.saturating_add(MIN_CLIP_US) > m.duration {
+                new.from = 0;
+            }
+            new.len = new.len.min(m.duration.saturating_sub(new.from)).max(MIN_CLIP_US);
+        }
+        let l = self.layer_mut(layer)?;
+        if let Some(slot) = l.items.iter_mut().find(|i| i.id == item) {
+            *slot = new;
+        }
+        Ok(())
+    }
+
+    /// Another item's effects put on an item: its look (turned, framed, masked, blended, a device
+    /// round it), how it comes and goes, and its motion (keyframes past its end left out; none: it
+    /// stays where it is). Its words, media and place on the timeline stay its own.
+    pub fn paste_item_effects(&mut self, layer: u32, item: u32, fx: ItemEffects) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        i.look = fx.look.checked();
+        i.intro = Anim { kind: fx.intro.kind, len: fx.intro.len.min(10_000_000) };
+        i.outro = Anim { kind: fx.outro.kind, len: fx.outro.len.min(10_000_000) };
+        let mut keys: Vec<Key> =
+            fx.keys.into_iter().take(MAX_KEYS).filter(|k| k.at <= i.len).map(|k| Key { at: k.at, place: k.place.clamped() }).collect();
+        keys.sort_by_key(|k| k.at);
+        keys.dedup_by_key(|k| k.at);
+        if let Some(k) = keys.first() {
+            i.place = k.place;
+        }
+        i.keys = keys;
         Ok(())
     }
 

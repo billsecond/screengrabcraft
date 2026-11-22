@@ -1176,6 +1176,48 @@ fn line_up(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({"moved": i128::from(now) - i128::from(at), "sure": sure}))
 }
 
+/// A clip's or an item's effects, to put on another with `video.pasteEffects` (nothing changes).
+fn copy_effects(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => {
+            let (i, k) = (index(p, "track")?, index(p, "clip")?);
+            let c = s.timeline.track(i).map_err(edit_err)?.clips.get(k).ok_or_else(|| edit_err(EditError::NoClip(i, k)))?;
+            Ok(json!({"effects": {"clip": c.effects()}}))
+        }
+        (None, Some(_)) => {
+            let it = s.timeline.item(id(p, "layer")?, id(p, "item")?).ok_or_else(|| EngineError::Params("there's no such item".to_string()))?;
+            Ok(json!({"effects": {"item": it.effects()}}))
+        }
+        _ => Err(EngineError::Params("say a `track` and `clip`, or a `layer` and `item`".to_string())),
+    }
+}
+
+/// Effects copied from a clip put on a clip, or from an item on an item.
+fn paste_effects(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let fx = p.get("effects").ok_or_else(|| EngineError::Params("`effects` is what `video.copyEffects` said".to_string()))?;
+    match (p.get("track"), p.get("layer"), fx.get("clip"), fx.get("item")) {
+        (Some(_), None, Some(c), None) => {
+            let c = serde_json::from_value(c.clone()).map_err(|_| EngineError::Params("those aren't a clip's effects".to_string()))?;
+            s.timeline.paste_clip_effects(unlocked(s, p)?, index(p, "clip")?, c).map_err(edit_err)?;
+        }
+        (None, Some(_), None, Some(i)) => {
+            let i = serde_json::from_value(i.clone()).map_err(|_| EngineError::Params("those aren't an item's effects".to_string()))?;
+            s.timeline.paste_item_effects(id(p, "layer")?, id(p, "item")?, i).map_err(edit_err)?;
+        }
+        (Some(_), None, None, Some(_)) | (None, Some(_), Some(_), None) => {
+            return Err(EngineError::Params("a clip's effects go on a clip, an item's on an item".to_string()));
+        }
+        _ => return Err(EngineError::Params("say a `track` and `clip`, or a `layer` and `item`, and the `effects`".to_string())),
+    }
+    Ok(json!({}))
+}
+
+/// An item's media swapped for another of the bin's, its effects kept.
+fn replace_media(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.replace_media(id(p, "layer")?, id(p, "item")?, id(p, "media")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 /// A video item's sound put apart from its picture, on a sound layer.
 fn separate_sound(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let (layer, item) = s.timeline.separate_sound(id(p, "layer")?, id(p, "item")?).map_err(edit_err)?;
@@ -1528,6 +1570,24 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: line_up,
     },
     VideoCommand {
+        id: "video.copyEffects",
+        label: "Copy Effects",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}: says its effects, to put on another with video.pasteEffects (nothing changes): a clip's colours and crop, fades and the transition into it; an item's look (turned, framed, masked, blended, a device round it), how it comes and goes, and its keyframes"#,
+        run: copy_effects,
+    },
+    VideoCommand {
+        id: "video.pasteEffects",
+        label: "Paste Effects",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}, "effects": what video.copyEffects said: a clip's effects put on a clip (as fits its track: colours and crop on a picture track, fades on a sound track; the transition where it meets the clip before), an item's on an item (its look, entrance and exit, and keyframes, those past its end left out); its words, media and time stay its own"#,
+        run: paste_effects,
+    },
+    VideoCommand {
+        id: "video.replaceMedia",
+        label: "Replace Media",
+        params: r#"{"layer": id, "item": id, "media": id}: the item shows (or plays) another of the media bin's files, of a kind for its layer, keeping its time, place, look, motion and animations; a sound or a video from where the old one played if it's that long, no longer than it is"#,
+        run: replace_media,
+    },
+    VideoCommand {
         id: "video.mono",
         label: "Mix to Mono",
         params: r#"{"track": n, "mono": bool} or {"layer": id, "mono": bool}: a sound track's (or a sound layer's) two sides mixed into one, heard the same from both speakers"#,
@@ -1847,6 +1907,54 @@ mod tests {
         ] {
             assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn effects_are_copied_and_pasted_and_media_replaced_keeping_them() {
+        let mut s = session();
+        // Clips: the screen's first half warm and cropped, pasted on its second half.
+        s.execute("video.split", &json!({"at": 2_000_000})).unwrap();
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "warm", "crop": [100, 0, 0, 0]})).unwrap();
+        s.execute("video.fade", &json!({"track": 1, "clip": 0, "in": 300_000})).unwrap();
+        let fx = s.execute("video.copyEffects", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!(s.undo_label(), Some("Fade"), "copying changes nothing");
+        s.execute("video.pasteEffects", &json!({"track": 0, "clip": 1, "effects": fx["effects"]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Paste Effects"));
+        assert_eq!(s.timeline.tracks[0].clips[1].look, s.timeline.tracks[0].clips[0].look);
+        let sound = s.execute("video.copyEffects", &json!({"track": 1, "clip": 0})).unwrap();
+        s.execute("video.pasteEffects", &json!({"track": 1, "clip": 1, "effects": sound["effects"]})).unwrap();
+        assert_eq!(s.timeline.tracks[1].clips[1].fade_in, 300_000);
+        // Items: a picture turned, bordered and moving, its effects on another picture.
+        let a = s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 40, "height": 40})).unwrap();
+        let b = s.execute("video.addMedia", &json!({"kind": "picture", "name": "B.png", "path": "C:/B.png", "width": 40, "height": 20})).unwrap();
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "S.wav", "path": "C:/S.wav", "duration": 2_000_000})).unwrap();
+        let pa = s.execute("video.place", &json!({"media": a["id"], "at": 0})).unwrap();
+        let pb = s.execute("video.place", &json!({"media": b["id"], "at": 0, "len": 1_000_000})).unwrap();
+        let (la, ia) = (pa["layer"].clone(), pa["item"].clone());
+        s.execute("video.setItem", &json!({"layer": la, "item": ia, "rotate": 30, "border": 0.05, "intro": "pop"})).unwrap();
+        s.execute("video.keyframe", &json!({"layer": la, "item": ia, "at": 0, "x": 0.2})).unwrap();
+        s.execute("video.keyframe", &json!({"layer": la, "item": ia, "at": 2_000_000, "x": 0.8})).unwrap();
+        let fx = s.execute("video.copyEffects", &json!({"layer": la, "item": ia})).unwrap();
+        s.execute("video.pasteEffects", &json!({"layer": pb["layer"], "item": pb["item"], "effects": fx["effects"]})).unwrap();
+        let ib = s.timeline.item(pb["layer"].as_u64().unwrap() as u32, pb["item"].as_u64().unwrap() as u32).unwrap().clone();
+        assert!((ib.look.rotate - 30.0).abs() < 1e-4 && ib.look.border > 0.0 && ib.intro.kind == screengrabcraft_media::layers::AnimKind::Pop);
+        assert_eq!(ib.keys.len(), 1, "the keyframe past its end left out");
+        assert!((ib.place.x - 0.2).abs() < 1e-4);
+        // A clip's effects don't go on an item, nor an item's on a clip.
+        let clip_fx = s.execute("video.copyEffects", &json!({"track": 0, "clip": 0})).unwrap();
+        assert!(s.execute("video.pasteEffects", &json!({"layer": la, "item": ia, "effects": clip_fx["effects"]})).is_err());
+        assert!(s.execute("video.pasteEffects", &json!({"track": 0, "clip": 0, "effects": fx["effects"]})).is_err());
+        assert!(s.execute("video.pasteEffects", &json!({"track": 0, "clip": 0, "effects": {"clip": "warm"}})).is_err());
+        // The picture replaced by the other: its effects and time kept.
+        let before = s.timeline.item(la.as_u64().unwrap() as u32, ia.as_u64().unwrap() as u32).unwrap().clone();
+        s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": b["id"]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Replace Media"));
+        let after = s.timeline.item(la.as_u64().unwrap() as u32, ia.as_u64().unwrap() as u32).unwrap().clone();
+        assert_eq!(after.what, screengrabcraft_media::layers::What::Media { id: b["id"].as_u64().unwrap() as u32 });
+        assert_eq!((after.at, after.len, after.look.clone(), after.keys.clone()), (before.at, before.len, before.look, before.keys));
+        // A sound doesn't go on a picture layer; nor what isn't in the bin.
+        assert!(s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": song["id"]})).is_err());
+        assert!(s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": 999})).is_err());
     }
 
     #[test]
