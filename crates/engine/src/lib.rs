@@ -7,6 +7,7 @@
 pub mod arrange;
 pub mod compose;
 pub mod details;
+pub mod edit_text;
 pub mod fx;
 pub mod registry;
 pub mod session;

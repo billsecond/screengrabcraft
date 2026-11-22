@@ -175,6 +175,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Hide Personal Details** (Image menu, the right-click menu): email addresses, phone numbers,
   card numbers and address lines found by the same reader, each covered with a blur, a pixelate
   or a solid box that stays an annotation to move or delete (Windows; faces aren't found).
+- **Edit Text in the Picture** (Image menu, the right-click menu): the lines of text found are
+  outlined; click one and it's covered with the colour round it and a text box takes its place in
+  the same size and colour, ready to type into (Windows; set in the computer's interface font).
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a

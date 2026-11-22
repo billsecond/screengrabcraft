@@ -536,13 +536,14 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         }
         ed.upload(&ctx);
         // The right button puts the eyedropper away rather than open the menu.
-        let picking = crate::eyedropper::active(&ctx);
+        let picking = crate::eyedropper::active(&ctx) || ed.edit_text.picking();
         input(ed, ui, &resp);
         if !picking {
             context_menu(ed, &ctx, &resp);
         }
         crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
+        crate::edit_text::paint(ed, ui, resp.hover_pos());
         text_editor(ed, ui);
     });
 }
@@ -591,6 +592,11 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     }
     if (space || ed.tool == Tool::Hand) && resp.hovered() {
         ctx.set_cursor_icon(CursorIcon::Grab);
+    }
+
+    // ---- Edit Text in the Picture: while its lines are offered, a click picks one ----
+    if crate::edit_text::input(ed, &ctx, resp) {
+        return;
     }
 
     // ---- the eyedropper: while it's out, a click on the picture takes the colour there and
@@ -1204,6 +1210,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
             }
             crate::grab_text::item(ed, ui);
             crate::details::item(ed, ui);
+            crate::edit_text::item(ed, ui);
             ui.separator();
         }
         let sel = ed.session.selected();
@@ -1270,6 +1277,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
         if ed.area.is_none() {
             crate::grab_text::item(ed, ui);
             crate::details::item(ed, ui);
+            crate::edit_text::item(ed, ui);
         }
         ui.separator();
         if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {
