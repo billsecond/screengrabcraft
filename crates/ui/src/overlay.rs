@@ -1580,6 +1580,29 @@ mod tests {
         }
     }
 
+    /// An open menu is listed in front of the windows (the capture service finds it): a click on
+    /// it keeps just the menu, a click beside it the window under it.
+    #[test]
+    fn an_open_menu_in_front_of_its_window_is_clicked_alone() {
+        use egui_kittest::kittest::Queryable as _;
+        let menu = OverlayWindow { rect: IRect::new(150, 100, 120, 160), title: "Menu".into() };
+        let notes = OverlayWindow { rect: IRect::new(100, 50, 400, 300), title: "Notes".into() };
+        for (at, rect, title) in [((200.0, 200.0), menu.rect, "Menu"), ((400.0, 300.0), notes.rect, "Notes")] {
+            let mut h = harness(Overlay::new(vec![screen_800()], vec![menu.clone(), notes.clone()], Purpose::VideoWindow));
+            h.run_steps(2);
+            click(&mut h, egui::pos2(at.0, at.1));
+            h.get_by_label("Start recording").click();
+            h.run_steps(2);
+            match h.state().outcome() {
+                Outcome::Chosen { area, title: t, .. } => {
+                    assert_eq!(*area, rect);
+                    assert_eq!(t.as_deref(), Some(title));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn a_window_to_record_is_clicked() {
         use egui_kittest::kittest::Queryable as _;
