@@ -6,6 +6,8 @@ use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKi
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Select,
+    /// A block of rubber over the line it rubbed out.
+    Eraser,
     Arrow,
     Line,
     Rect,
@@ -146,6 +148,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
     };
     let rect_at = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_two_pos(at(x0, y0), at(x1, y1));
     match icon {
+        Icon::Eraser => {
+            // A slanted block: its rubber end filled, at the bottom left, over a line on the page.
+            let body = vec![at(9.5, 2.5), at(17.5, 10.5), at(10.5, 17.5), at(2.5, 9.5)];
+            poly(body, true);
+            fill_poly(vec![at(6.0, 6.0), at(14.0, 14.0), at(10.5, 17.5), at(2.5, 9.5)], color);
+            line(at(11.5, 18.5), at(18.0, 18.5));
+        }
         Icon::Select => {
             fill_poly(vec![at(5.0, 2.0), at(15.0, 12.0), at(10.5, 12.5), at(13.5, 18.0), at(11.0, 19.0), at(8.2, 13.6), at(5.0, 16.5)], color);
         }

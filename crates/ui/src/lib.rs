@@ -20,6 +20,7 @@ pub mod playback;
 pub mod props;
 pub mod quick;
 pub mod recorder;
+pub mod selection;
 pub mod services;
 pub mod stamps;
 pub mod strip;

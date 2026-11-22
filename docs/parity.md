@@ -95,8 +95,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Gradient fills | Missing | |
 | Move, select, nudge, duplicate | Has | |
 | Selection tool: move, copy, cut, delete or crop to an area | Has | |
-| Ellipse, polygon or freehand selection; invert | Missing | |
-| Magic wand (select by colour) | Missing | |
+| **Ellipse, polygon or freehand selection; invert** | Has | the Selection tool's Box, Ellipse and Freehand (any outline, a polygon drawn round); Invert (Ctrl+Shift+I); moving, copying, deleting, cropping and the colour effects keep to the shape |
+| **Magic wand (select by colour)** | Has | with a tolerance, joined to the pixel clicked or anywhere |
 | Crop, trim borders | Has | |
 | **Cut Out: take a strip out and close the gap** | Has (0.1.56) | columns or rows; straight, saw or wave |
 | Blur, pixelate | Has | |
@@ -106,7 +106,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Edit text in the picture, in a matching font | Missing | |
 | Step numbers that count themselves | Has | |
 | **Steps as letters or Roman numerals; other badge shapes** | Has | A, B, C, a, b, c, I, II, III, i, ii, iii, each counting on its own; circle, rounded square, square, diamond, hexagon, pin |
-| Eraser | Part | Delete on a selected area makes it see-through |
+| **Eraser** | Has | a tool of its own (E): rubs the picture out to see-through, or to a colour, at a width |
 | Magnify, spotlight | Has | |
 | Eyedropper, any colour | Has | |
 | Remove background | Has | a model on this computer |
@@ -283,6 +283,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. More effects: hue, saturation and gamma, sepia, sharpen, blur, wavy and faded edges, a bevel,
    perspective, a page curl, a reflection, a watermark, capture details; on a selected area.
 9. Rotate, group, align, distribute and flip annotations; select all of one kind.
+10. Magic wand, an eraser, ellipse and freehand selections; invert the selection.
 
 **Still to build, in this order**
 
@@ -296,17 +297,16 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Hold a frame.
 9. Keys pressed shown in the video.
 10. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-11. Magic wand, eraser, ellipse and freehand selections.
-12. Camera background removed, or a colour removed.
-13. Transitions between clips; keyframe animation.
-14. Drawing on the screen while recording.
-15. Volume along a clip; music lowered under the voice; levels evened out.
-16. Tags, favourites, and captures sorted by program.
-17. Templates; several pictures combined into one.
-18. A picture per click made into a how-to guide.
-19. Groups, pushing later clips along, locked and solo tracks, clip colours.
-20. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-21. Print; batch changes; captures on a timer or at a set time.
-22. Cutting words from the transcript; filler words taken out.
-23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+11. Camera background removed, or a colour removed.
+12. Transitions between clips; keyframe animation.
+13. Drawing on the screen while recording.
+14. Volume along a clip; music lowered under the voice; levels evened out.
+15. Tags, favourites, and captures sorted by program.
+16. Templates; several pictures combined into one.
+17. A picture per click made into a how-to guide.
+18. Groups, pushing later clips along, locked and solo tracks, clip colours.
+19. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+20. Print; batch changes; captures on a timer or at a set time.
+21. Cutting words from the transcript; filler words taken out.
+22. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

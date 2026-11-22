@@ -22,6 +22,7 @@ pub mod matte;
 pub mod pdf;
 pub mod pointer;
 pub mod project;
+pub mod region;
 pub mod stamp;
 pub mod stitch;
 pub mod text;
