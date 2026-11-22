@@ -284,6 +284,7 @@ fn capture_buttons(ui: &mut Ui, delay: &mut u32, shortcut: &dyn Fn(CaptureMode) 
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
         (CaptureMode::Text, Icon::Text, "Copy the text in an area"),
+        (CaptureMode::Camera, Icon::Camera, "A still from the camera"),
     ];
     let recordings = [
         (CaptureMode::Production, Icon::Edit, "With the camera and sound, to edit"),
@@ -932,12 +933,33 @@ fn sources(ui: &mut Ui, id: &str, o: &mut VideoOptions, d: &Devices, camera: boo
     }
 }
 
+/// The countdown before a recording: on or off, and how many seconds (`secs`, 0 when off).
+fn countdown_row(ui: &mut Ui, secs: &mut u32) {
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        let mut on = *secs > 0;
+        if ui.checkbox(&mut on, "Count down before a recording starts").changed() {
+            *secs = if on { 3 } else { 0 };
+        }
+        if on {
+            ui.add(egui::DragValue::new(secs).range(1..=screengrabcraft_model::settings::RECORD_COUNTDOWN_MAX).suffix(" s"));
+        }
+    });
+    ui.label(
+        RichText::new("The seconds are shown over the area (a GIF, a video, Video Production), and gone before the recording starts.")
+            .size(12.0)
+            .color(t.muted),
+    );
+}
+
 fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let d = home.devices.get_or_insert_with(Devices::find);
     let mut s = svc.settings.clone();
     ui.heading("Recording");
     ui.add_space(8.0);
+    countdown_row(ui, &mut s.record_countdown);
+    ui.add_space(14.0);
     ui.label(RichText::new("Record Video").strong());
     ui.label(RichText::new("A small MP4 of an area, made as soon as you stop.").size(12.0).color(t.muted));
     ui.add_space(4.0);
@@ -1039,6 +1061,24 @@ mod tests {
         h.get_by_label("Quit ScreenGrabCraft").click();
         h.run_steps(1);
         assert_eq!(h.state().0, Some(Leave::Quit));
+    }
+
+    #[test]
+    fn the_countdown_before_a_recording_is_turned_off_and_on() {
+        let mut h = Harness::builder().with_size(vec2(560.0, 120.0)).build_ui_state(
+            |ui, secs: &mut u32| {
+                egui::CentralPanel::default().show(ui, |ui| countdown_row(ui, secs));
+            },
+            3u32,
+        );
+        h.run_steps(2);
+        let label = "Count down before a recording starts";
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(*h.state(), 0, "off");
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(*h.state(), 3, "on again: three seconds");
     }
 
     #[test]

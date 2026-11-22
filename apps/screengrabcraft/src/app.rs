@@ -46,6 +46,8 @@ pub enum Msg {
     Saved(Result<Done, String>),
     /// Grab Text's answer: the text read off the area, or why there is none.
     TextRead(Result<String, String>),
+    /// A still from the camera, or why there is none.
+    CameraStill(Result<Raster, String>),
 }
 
 /// The window a capture was taken from: its program and its title.
@@ -85,6 +87,37 @@ pub struct Countdown {
     pub until: Instant,
     /// The monitor the number is shown on (desktop units and scale).
     pub on: Option<(IRect, f32)>,
+}
+
+/// The countdown before a recording starts: what to start, when, and the area it's shown over
+/// (desktop units, and its monitor's scale).
+pub struct RecordCountdown {
+    again: Again,
+    pub until: Instant,
+    pub on: Option<(IRect, f32)>,
+}
+
+/// After a recording's countdown, its window is given this long to leave the screen before the
+/// recording starts, so it isn't in it.
+const RECORD_GAP: Duration = Duration::from_millis(300);
+
+/// Whether a recording counts down `secs` first: a GIF or a video does (a scrolling capture
+/// doesn't), when there are seconds to count.
+fn counts_down(again: &Again, secs: u32) -> bool {
+    secs > 0 && !matches!(again, Again::Area { kind: record::Kind::Scrolling, .. })
+}
+
+/// A still from camera `index` (else the first camera), as a picture.
+fn camera_picture(index: Option<u32>) -> Result<Raster, String> {
+    let cams = screengrabcraft_capture::camera::cameras();
+    let i = match index {
+        Some(i) if cams.iter().any(|(n, _)| *n == i) => i,
+        _ => cams.first().map(|(n, _)| *n).ok_or("no camera was found")?,
+    };
+    let f = screengrabcraft_capture::camera::take_still(i)?;
+    screengrabcraft_render::decode(&f.jpeg)
+        .or_else(|_| screengrabcraft_render::decode(&screengrabcraft_capture::camera::with_huffman_tables(&f.jpeg)))
+        .map_err(|e| e.to_string())
 }
 
 pub struct Notice {
@@ -128,6 +161,10 @@ pub struct Service {
     pub countdown: Option<Countdown>,
     /// A countdown just ended: the capture starts once its window has gone.
     pub after_countdown: Option<(CaptureMode, Instant)>,
+    /// The countdown before a recording starts.
+    pub record_countdown: Option<RecordCountdown>,
+    /// A still is being taken from the camera.
+    camera_busy: bool,
     pub freezing: Option<CaptureMode>,
     /// A worker is on a picture: repeating the last area, or keeping a capture.
     keeping: bool,
@@ -232,6 +269,8 @@ impl Service {
             overlay: None,
             countdown: None,
             after_countdown: None,
+            record_countdown: None,
+            camera_busy: false,
             freezing: None,
             keeping: false,
             keeping_held: false,
@@ -267,6 +306,8 @@ impl Service {
             || self.freezing.is_some()
             || self.countdown.is_some()
             || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
+            || self.camera_busy
             || self.production_at.is_some()
             || self.recording.is_some()
             || self.restarting.is_some()
@@ -317,8 +358,23 @@ impl Service {
     /// Starts a Video Production recording as the Recorder's choices say: the overlay first for an
     /// area chosen on the screen, else the recording at once. `aside` is true once the editor has
     /// been asked out of the picture.
+    /// The countdown before a recording was cancelled: nothing is recorded (Video Production goes
+    /// back to its Recorder).
+    pub fn cancel_record_countdown(&mut self) {
+        let Some(c) = self.record_countdown.take() else { return };
+        if matches!(c.again, Again::Video { mode: CaptureMode::Production, .. }) {
+            self.open_recorder();
+        }
+    }
+
     fn begin_production(&mut self, aside: bool) {
-        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.keeping {
+        if self.overlay.is_some()
+            || self.freezing.is_some()
+            || self.countdown.is_some()
+            || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
+            || self.keeping
+        {
             return;
         }
         if self.recording.is_some() {
@@ -349,7 +405,7 @@ impl Service {
         }
         let monitors = screengrabcraft_capture::monitors().unwrap_or_default();
         match record::production_screen(&r, &monitors, None) {
-            Ok((screen, place)) => self.start_again(Again::Video { mode: CaptureMode::Production, screen, desktop: place }),
+            Ok((screen, place)) => self.begin_recording(Again::Video { mode: CaptureMode::Production, screen, desktop: place }),
             Err(e) => self.notify("The recording could not start", e, None, None, true),
         }
     }
@@ -508,6 +564,13 @@ impl Service {
                 }
             }
             Msg::Picture(pic, source) => self.finish(pic, &source, Action::Default),
+            Msg::CameraStill(result) => {
+                self.camera_busy = false;
+                match result {
+                    Ok(pic) => self.finish(pic, "Camera", Action::Default),
+                    Err(e) => self.notify("No picture came from the camera", e, None, None, true),
+                }
+            }
             Msg::TextRead(result) => self.text_read(result),
             Msg::Saved(result) => {
                 self.keeping = false;
@@ -571,7 +634,13 @@ impl Service {
 
     /// Starts a capture of `mode` after `delay` seconds, from `preset` if it's one.
     fn start_with(&mut self, mode: CaptureMode, delay: u32, preset: Option<CapturePreset>) {
-        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.chosen.is_some() {
+        if self.overlay.is_some()
+            || self.freezing.is_some()
+            || self.countdown.is_some()
+            || self.after_countdown.is_some()
+            || self.chosen.is_some()
+            || self.record_countdown.is_some()
+        {
             return;
         }
         // While recording, still pictures can be taken (the recording goes on); not another recording.
@@ -589,6 +658,11 @@ impl Service {
         // Video Production starts at its Recorder, where the area and the inputs are chosen.
         if mode == CaptureMode::Production {
             self.open_recorder();
+            return;
+        }
+        // A still from the camera: no screen to choose from (after a wait, if one was asked for).
+        if mode == CaptureMode::Camera && delay == 0 {
+            self.camera_still();
             return;
         }
         if screengrabcraft_capture::permission() == screengrabcraft_capture::Permission::Denied {
@@ -787,10 +861,10 @@ impl Service {
         match run.mode {
             CaptureMode::Gif | CaptureMode::Scrolling => {
                 let kind = if run.mode == CaptureMode::Gif { record::Kind::Gif } else { record::Kind::Scrolling };
-                self.start_again(Again::Area { kind, monitor: m.id, area, desktop });
+                self.begin_recording(Again::Area { kind, monitor: m.id, area, desktop });
             }
             CaptureMode::Video | CaptureMode::Production => {
-                self.start_again(Again::Video { mode: run.mode, screen: record::Screen::Part { monitor: m.id, area }, desktop });
+                self.begin_recording(Again::Video { mode: run.mode, screen: record::Screen::Part { monitor: m.id, area }, desktop });
             }
             _ => {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
@@ -898,7 +972,46 @@ impl Service {
         }
     }
 
-    /// Starts a recording as `again` says (the first time, or again for Restart).
+    /// Starts a recording as `again` says, after its countdown (the settings' seconds, shown over
+    /// the area; a scrolling capture has none).
+    fn begin_recording(&mut self, again: Again) {
+        let secs = self.settings.record_countdown.min(screengrabcraft_model::settings::RECORD_COUNTDOWN_MAX);
+        if !counts_down(&again, secs) {
+            self.start_again(again);
+            return;
+        }
+        let desktop = match &again {
+            Again::Area { desktop, .. } | Again::Video { desktop, .. } => *desktop,
+        };
+        let (cx, cy) = (i64::from(desktop.x) + i64::from(desktop.w / 2), i64::from(desktop.y) + i64::from(desktop.h / 2));
+        let scale = screengrabcraft_capture::monitors().ok().and_then(|ms| ms.into_iter().find(|m| m.rect.contains(cx, cy)).map(|m| m.scale));
+        let until = Instant::now() + Duration::from_secs(u64::from(secs));
+        self.record_countdown = Some(RecordCountdown { again, until, on: Some((desktop, scale.unwrap_or(1.0))) });
+        self.ctx.request_repaint();
+    }
+
+    /// A still from Video Production's camera (else the first), on a worker thread: the camera
+    /// is started, given a moment to settle, and let go; [`Msg::CameraStill`] keeps the picture.
+    fn camera_still(&mut self) {
+        if self.camera_busy {
+            return;
+        }
+        self.camera_busy = true;
+        let index = self.settings.production.camera_index;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let spawned = std::thread::Builder::new().name("camera-still".into()).spawn(move || {
+            let r = std::panic::catch_unwind(|| camera_picture(index)).unwrap_or_else(|_| Err("the camera failed unexpectedly".to_string()));
+            let _ = tx.send(Msg::CameraStill(r));
+            ctx.request_repaint();
+        });
+        if let Err(e) = spawned {
+            self.camera_busy = false;
+            self.notify("No picture came from the camera", e.to_string(), None, None, true);
+        }
+    }
+
+    /// Starts a recording now, as `again` says (the first time once its countdown is over, or
+    /// again for Restart).
     fn start_again(&mut self, again: Again) {
         let started = match &again {
             Again::Area { kind, monitor, area, desktop } => {
@@ -1180,6 +1293,12 @@ impl Service {
             let preset = self.preset.take();
             self.start_with(mode, 0, preset);
         }
+        // A recording's countdown is over and its window has gone: it starts.
+        if self.record_countdown.as_ref().is_some_and(|c| Instant::now() >= c.until + RECORD_GAP)
+            && let Some(c) = self.record_countdown.take()
+        {
+            self.start_again(c.again);
+        }
         if let Some((at, aside)) = self.production_at
             && Instant::now() >= at
         {
@@ -1205,6 +1324,7 @@ impl Service {
             && self.chosen.is_none()
             && self.recording.is_none()
             && self.production_at.is_none()
+            && self.record_countdown.is_none()
             && !self.keeping
         {
             self.editor_aside = false;
@@ -1225,7 +1345,7 @@ impl Service {
         // once it has been: Windows shows a window without activating it only the first time, so
         // showing it again would take the keyboard from the program the owner is typing in.
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
-        let busy = busy || self.restarting.is_some();
+        let busy = busy || self.restarting.is_some() || self.record_countdown.is_some();
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
         let busy = busy || self.steps.busy();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
@@ -1246,6 +1366,7 @@ impl Service {
             || self.recording.is_some()
             || self.restarting.is_some()
             || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
             || self.production_at.is_some()
             || self.freezing.is_some()
         {
@@ -1330,6 +1451,7 @@ impl Service {
         }
         crate::steps::show(self, &ctx);
         crate::popups::countdown(self, &ctx);
+        crate::popups::record_countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
         crate::popups::recording_frame(self, &ctx);
         crate::popups::drawing(self, &ctx);
@@ -1632,6 +1754,17 @@ mod tests {
         assert_eq!(enter_button(&a(false, true, true)), Action::Copy);
         assert_eq!(enter_button(&a(false, false, true)), Action::Save);
         assert_eq!(enter_button(&a(false, false, false)), Action::Edit);
+    }
+
+    #[test]
+    fn a_gif_or_a_video_counts_down_first_and_a_scrolling_capture_does_not() {
+        let area = IRect::new(10, 20, 300, 200);
+        let gif = Again::Area { kind: record::Kind::Gif, monitor: 1, area, desktop: area };
+        let scrolling = Again::Area { kind: record::Kind::Scrolling, monitor: 1, area, desktop: area };
+        let video = Again::Video { mode: CaptureMode::Production, screen: record::Screen::Part { monitor: 1, area }, desktop: area };
+        assert!(counts_down(&gif, 3) && counts_down(&video, 1));
+        assert!(!counts_down(&scrolling, 3), "a scrolling capture starts at once");
+        assert!(!counts_down(&gif, 0) && !counts_down(&video, 0), "turned off");
     }
 
     #[test]

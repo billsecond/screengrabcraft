@@ -38,7 +38,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Captures again and again on a timer (time-lapse), or at a set time | Has | the Capture page: one every so many seconds of the screen with the pointer, all screens or the last area, skipping those where nothing changed; one at a time of day; saved straight to the captures folder, stopped from the tray |
 | A picture for each click, made into a numbered how-to guide | Has | Record Steps (the Capture page or the tray): each left click takes the window clicked with a red ring where the click was; Stop opens the guide, its steps to reorder, take out and word |
 | The guide saved as a document, slides, PDF, web page or Markdown | Part | a PDF (a page a step), a web page and Markdown, the pictures in a folder beside them; not a word-processor document or slides |
-| A still from the camera | Missing | |
+| A still from the camera | Part | Picture from the Camera (the tray, the Capture page, a shortcut, after a wait if asked): Video Production's camera; at most 640 × 480, as the camera is read for recordings; Windows and macOS |
 | A whole web page from its address | Missing | |
 | Printing from any program into the editor | Missing | |
 | HDR screens captured in their true colours | Missing | |
@@ -64,7 +64,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
 | Recording controls kept out of the video | Has | |
-| Countdown before recording | Part | the capture delay; no countdown of its own |
+| Countdown before recording | Has | 3 seconds by default (Settings › Recording: 1 to 10, or off), shown over the area and gone before the recording starts; a GIF, a video, Video Production |
 | Longest recording | Has | Settings |
 | Microphone heard as silent (muted or not allowed) said plainly | Has | after the recording |
 | Background noise taken out | Missing | |
@@ -284,7 +284,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 9. A picture per click made into a how-to guide (#74).
 10. Several areas in one capture; a freehand area (#78).
 11. A multi-page PDF of several captures (#80).
-12. Captures pinned at the front of the Recent strip.
+12. Captures pinned at the front of the Recent strip (#83).
+13. A countdown before a recording; a still from the camera.
 
 **Still to build, in this order**
 
