@@ -287,7 +287,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 12. The camera's background removed, with or without a green screen (#79).
 13. Transitions between clips; keyframe animation of an item's place, size and opacity (#85).
 14. Volume along a clip; the rest lowered under the voice; levels evened out (#88).
-15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours.
+15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours (#90).
 
 **Still to build, in this order**
 
