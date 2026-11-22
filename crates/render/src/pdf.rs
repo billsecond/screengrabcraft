@@ -25,6 +25,7 @@ pub fn single_page(r: &Raster) -> Result<Vec<u8>, CodecError> {
 }
 
 /// A picture's page, ready to write: its size in points, and its pixels and mask deflated.
+#[derive(Clone)]
 struct Page {
     w: u32,
     h: u32,
@@ -44,17 +45,70 @@ fn prepare(r: &Raster) -> Result<Page, CodecError> {
     Ok(Page { w, h, image: deflate(&rgb)?, mask: if has_alpha { Some(deflate(&alpha)?) } else { None } })
 }
 
+/// A PDF made a page at a time: each picture is deflated as it's added, so a long run of
+/// pictures (Batch Changes' one PDF) isn't held whole at once.
+#[derive(Clone, Default)]
+pub struct Builder {
+    pages: Vec<Page>,
+}
+
+impl std::fmt::Debug for Builder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pdf::Builder({} pages)", self.pages.len())
+    }
+}
+
+impl Builder {
+    pub fn new() -> Builder {
+        Builder::default()
+    }
+
+    /// Adds a page of `r` after the others; an error once there are [`MAX_PAGES`].
+    pub fn add(&mut self, r: &Raster) -> Result<(), CodecError> {
+        if self.pages.len() >= MAX_PAGES {
+            return Err(too_many());
+        }
+        self.pages.push(prepare(r)?);
+        Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.pages.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pages.is_empty()
+    }
+
+    /// The PDF of the pages added, in order (an error when there are none).
+    pub fn finish(&self) -> Result<Vec<u8>, CodecError> {
+        write(&self.pages)
+    }
+}
+
+fn too_many() -> CodecError {
+    CodecError::Write(format!("a PDF has 1 to {MAX_PAGES} pages"))
+}
+
 /// The pictures as a PDF, a page each, in order.
 pub fn pages(pictures: &[Raster]) -> Result<Vec<u8>, CodecError> {
     if pictures.is_empty() || pictures.len() > MAX_PAGES {
-        return Err(CodecError::Write(format!("a PDF has 1 to {MAX_PAGES} pages")));
+        return Err(too_many());
     }
     let prepared = pictures.iter().map(prepare).collect::<Result<Vec<Page>, CodecError>>()?;
+    write(&prepared)
+}
+
+/// The pages written out as a PDF.
+fn write(prepared: &[Page]) -> Result<Vec<u8>, CodecError> {
+    if prepared.is_empty() || prepared.len() > MAX_PAGES {
+        return Err(too_many());
+    }
     // Each page's objects: the page, its contents, its picture and the picture's mask, numbered
     // after the catalog (1) and the page tree (2).
     let mut next = 3usize;
     let mut ids = Vec::with_capacity(prepared.len());
-    for p in &prepared {
+    for p in prepared {
         let page = next;
         next += if p.mask.is_some() { 4 } else { 3 };
         ids.push(page);
@@ -171,5 +225,26 @@ mod tests {
             assert!(pdf[off..].starts_with(format!("{} 0 obj", i + 1).as_bytes()), "object {}", i + 1);
         }
         assert!(pages(&[]).is_err());
+    }
+
+    #[test]
+    fn a_pdf_made_a_page_at_a_time_is_the_same_as_one_made_at_once() {
+        let pics = [Raster::filled(40, 20, Color::RED).unwrap(), Raster::filled(4, 4, Color::rgba(0, 0, 0, 10)).unwrap()];
+        let mut b = Builder::new();
+        assert!(b.is_empty() && b.finish().is_err(), "no pages, no PDF");
+        for p in &pics {
+            b.add(p).unwrap();
+        }
+        assert_eq!(b.len(), 2);
+        assert_eq!(b.finish().unwrap(), pages(&pics).unwrap());
+        // No more than a PDF holds.
+        let dot = Raster::filled(1, 1, Color::WHITE).unwrap();
+        let mut full = Builder::new();
+        for _ in 0..MAX_PAGES {
+            full.add(&dot).unwrap();
+        }
+        assert!(full.add(&dot).is_err());
+        assert_eq!(full.len(), MAX_PAGES);
+        assert!(full.finish().is_ok());
     }
 }

@@ -877,6 +877,11 @@ struct DiskState {
     thumbs_asked: Vec<(String, u64)>,
     /// The captures' tags, favourites and programs, as the host keeps them.
     library: screengrabcraft_model::Library,
+    /// Where the next save dialog answers to save (else it's cancelled), what it was asked to
+    /// save, and its answer, waiting to be polled.
+    save_answer: Option<String>,
+    asked_save: Vec<String>,
+    dialog: Option<crate::services::DialogResult>,
 }
 
 /// A host with a fake disk, shared with the test.
@@ -919,6 +924,19 @@ impl Disk {
 }
 
 impl Services for Disk {
+    fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
+        let mut s = self.0.borrow_mut();
+        s.asked_save.push(suggested_name.to_string());
+        s.dialog = Some(match s.save_answer.take() {
+            Some(p) => crate::services::DialogResult::SaveTo(p),
+            None => crate::services::DialogResult::Cancelled,
+        });
+    }
+
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.0.borrow_mut().dialog.take()
+    }
+
     fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
         self.get(path).ok_or_else(|| "no such file".to_string())
     }
@@ -2236,6 +2254,97 @@ fn all_captures_hands_the_pictures_shown_to_batch_changes() {
     let files = h.state().batch.as_ref().map(|b| b.files.clone()).unwrap_or_default();
     assert_eq!(files.len(), 2);
     assert!(files.contains(&"captures/Capture 000.png".to_string()) && files.contains(&"captures/Capture 002.png".to_string()));
+}
+
+/// How many pages a PDF has, as its page tree says.
+fn pdf_pages(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("%PDF-1.4") && text.trim_end().ends_with("%%EOF"), "a PDF");
+    text.split("/Type /Pages").nth(1).and_then(|s| s.split("/Count ").nth(1)).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap()
+}
+
+#[test]
+fn batch_changes_make_one_pdf_a_page_each_saved_where_asked() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    // One PDF needs no change; the name pattern isn't asked.
+    h.state_mut().batch.as_mut().unwrap().format = Some(ImageFormat::Pdf);
+    h.run_steps(3);
+    assert!(h.query_by_label("Name").is_none());
+    crate::quick_tests::shot(&mut h, "batch-pdf");
+    // Asked where: cancelled, nothing is made.
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(6);
+    assert_eq!(disk.0.borrow().asked_save, ["Captures.pdf"]);
+    assert!(h.state().batch.as_ref().is_some_and(|b| b.progress.is_none() && !b.asking));
+    // Answered: a page for each picture that could be read, in order, there.
+    disk.0.borrow_mut().save_answer = Some("exports/Week".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let pdf = disk.get("exports/Week.pdf").expect("the PDF is written where asked, with its extension");
+    assert_eq!(pdf_pages(&pdf), 3);
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done && progress.pdf.is_none());
+    assert_eq!(progress.written, ["exports/Week.pdf"]);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Made a PDF of 3 pages: Week.pdf"));
+    crate::quick_tests::shot(&mut h, "batch-pdf-done");
+    // With a change first: each page is changed (half of 8x6 at 96 pixels to the inch).
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.get_by_label("Add a Change").click();
+    h.run_steps(3);
+    h.get_by_label("Resize").click();
+    h.run_steps(3);
+    disk.0.borrow_mut().save_answer = Some("exports/Small.pdf".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let small = String::from_utf8_lossy(&disk.get("exports/Small.pdf").unwrap()).to_string();
+    assert!(small.contains("/MediaBox [0 0 3.00 2.25]"), "{}", &small[..small.len().min(400)]);
+}
+
+#[test]
+fn all_captures_makes_a_pdf_of_the_pictures_shown_or_those_chosen() {
+    let disk = library_disk();
+    // Written again: the newest.
+    disk.put("captures/Capture 004.png", png(8, 6, Color::WHITE));
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    // Ctrl+click chooses (the tile in All captures, the larger of its two).
+    let tile = |h: &Harness<'_, Editor>, name: &str| {
+        let all: Vec<egui::Rect> = h.get_all_by_label(name).map(|n| n.rect()).collect();
+        all.into_iter().max_by(|a, b| a.width().total_cmp(&b.width())).unwrap()
+    };
+    for name in ["Capture 004.png", "Capture 001.png"] {
+        let at = tile(&h, name).center();
+        h.hover_at(at);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::COMMAND });
+        h.run_steps(3);
+    }
+    assert_eq!(h.state().chosen_captures, ["captures/Capture 004.png", "captures/Capture 001.png"]);
+    assert!(h.state().picture_path.is_none(), "chosen, not opened");
+    crate::quick_tests::shot(&mut h, "all-captures-chosen");
+    h.get_by_label("PDF of Chosen (2)\u{2026}").click();
+    h.run_steps(3);
+    let b = h.state().batch.clone().unwrap();
+    assert!(b.makes_pdf());
+    // Oldest first (Capture 004 was written last here).
+    assert_eq!(b.files, ["captures/Capture 001.png", "captures/Capture 004.png"]);
+    // None chosen: every picture shown.
+    h.state_mut().batch = None;
+    h.state_mut().chosen_captures.clear();
+    h.run_steps(2);
+    open_all_captures(&mut h);
+    h.get_by_label("PDF of These (6)\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(h.state().batch.as_ref().map(|b| b.files.len()), Some(6));
 }
 
 // ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----

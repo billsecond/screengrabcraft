@@ -250,6 +250,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Batch Changes** (File menu, or Batch Change These in All captures): the same changes (resize,
   border, shadow, torn edge, round corners, brightness and contrast, grayscale, invert, trim) made
   to many pictures at once, each saved beside its picture under a name pattern (`{name} changed`).
+- **A PDF of several captures**: in All captures, PDF of These makes one PDF of the pictures shown
+  (or of those chosen with Ctrl+click), a page each, oldest first; or choose "One PDF, a page each"
+  as Batch Changes' format. Where it goes is asked.
 
 The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 

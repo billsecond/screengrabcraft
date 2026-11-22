@@ -252,6 +252,8 @@ pub struct Editor {
     /// The capture whose tags are being changed in All captures, and the tag being typed.
     pub(crate) tagging: Option<String>,
     pub(crate) new_tag: String,
+    /// The captures chosen in All captures (Ctrl+click), for Batch Changes or a PDF.
+    pub(crate) chosen_captures: Vec<String>,
     pub services: Box<dyn Services>,
     /// Set when the window should close (the host closes it).
     pub quit_requested: bool,
@@ -344,6 +346,7 @@ impl Editor {
             library: Default::default(),
             tagging: None,
             new_tag: String::new(),
+            chosen_captures: Vec::new(),
             services,
             quit_requested: false,
             close_confirmed: false,
@@ -1177,6 +1180,9 @@ impl Editor {
                     self.video = Some(v);
                 }
             }
+            // Where Batch Changes' one PDF goes: the batch starts.
+            DialogResult::SaveTo(path) if self.batch.as_ref().is_some_and(|b| b.asking) => self.batch_pdf_to(ctx, Some(path)),
+            DialogResult::Cancelled if self.batch.as_ref().is_some_and(|b| b.asking) => self.batch_pdf_to(ctx, None),
             DialogResult::SaveTo(path) => {
                 if std::mem::take(&mut self.saving_video) {
                     if let Some(v) = self.video.as_mut() {

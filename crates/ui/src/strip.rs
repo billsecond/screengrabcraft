@@ -259,13 +259,52 @@ fn all_captures(ed: &mut Editor, ui: &mut Ui, items: &[RecentItem]) {
         }
         // Newest first, whatever order they came in.
         matching.sort_by_key(|i| std::cmp::Reverse(i.modified));
-        // The pictures shown, all changed at once.
-        let pictures: Vec<String> = matching.iter().filter(|i| !is_video(&i.path)).map(|i| i.path.clone()).collect();
+        // Those chosen (Ctrl+click) that are still listed, else the pictures shown: all changed
+        // at once, or made into one PDF.
+        ed.chosen_captures.retain(|p| listed.iter().any(|i| i.path == *p));
+        let mut pool: Vec<&RecentItem> =
+            if ed.chosen_captures.is_empty() { matching.clone() } else { listed.iter().filter(|i| ed.chosen_captures.contains(&i.path)).collect() };
+        pool.retain(|i| !is_video(&i.path));
+        pool.sort_by_key(|i| std::cmp::Reverse(i.modified));
+        let pictures: Vec<String> = pool.iter().map(|i| i.path.clone()).collect();
         if !pictures.is_empty() {
             let n = pictures.len();
-            let label = format!("Batch Change {} ({n})\u{2026}", if n == 1 { "This" } else { "These" });
-            if ui.button(label).on_hover_text("The same changes (a size, effects, a format, a name) made to every picture shown").clicked() {
-                ed.open_batch(pictures);
+            let chosen = !ed.chosen_captures.is_empty();
+            let these = if chosen {
+                "Chosen"
+            } else if n == 1 {
+                "This"
+            } else {
+                "These"
+            };
+            let mut close = false;
+            ui.horizontal_wrapped(|ui| {
+                let which = if chosen { "picture chosen" } else { "picture shown" };
+                if ui
+                    .button(format!("Batch Change {these} ({n})\u{2026}"))
+                    .on_hover_text(format!("The same changes (a size, effects, a format, a name) made to every {which}"))
+                    .clicked()
+                {
+                    ed.open_batch(pictures.clone());
+                    close = true;
+                }
+                if ui
+                    .button(format!("PDF of {these} ({n})\u{2026}"))
+                    .on_hover_text(format!("One PDF, a page for every {which}, oldest first"))
+                    .clicked()
+                {
+                    // In the order they were taken.
+                    ed.open_batch_pdf(pictures.iter().rev().cloned().collect());
+                    close = true;
+                }
+                if chosen && ui.button("Choose None").on_hover_text("Go back to every picture shown").clicked() {
+                    ed.chosen_captures.clear();
+                }
+                let how = if cfg!(target_os = "macos") { "Cmd+click" } else { "Ctrl+click" };
+                ui.label(egui::RichText::new(format!("{how} to choose")).size(11.5).color(t.muted))
+                    .on_hover_text(format!("{how} captures to choose some: the buttons then take only those"));
+            });
+            if close {
                 ui.close();
                 return;
             }
@@ -304,12 +343,31 @@ fn tile(ed: &mut Editor, ui: &mut Ui, item: &RecentItem) -> bool {
         return false;
     }
     let current = is_current(ed, &item.path);
+    let chosen = ed.chosen_captures.contains(&item.path);
     let pic = egui::Rect::from_min_size(rect.min, BIG);
-    let bg = if resp.hovered() { t.hover } else { t.panel };
+    let bg = if resp.hovered() {
+        t.hover
+    } else if chosen {
+        t.selected
+    } else {
+        t.panel
+    };
     ui.painter().rect_filled(pic, 5.0, bg);
     thumbnail(ed, ui, item, pic);
-    let ring = if current { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.border) };
+    let ring = if chosen {
+        Stroke::new(3.0, t.accent)
+    } else if current {
+        Stroke::new(2.0, t.accent)
+    } else {
+        Stroke::new(1.0, t.border)
+    };
     ui.painter().rect_stroke(pic, 5.0, ring, StrokeKind::Inside);
+    if chosen {
+        // A tick in the lower right corner.
+        let c = pos2(pic.max.x - 16.0, pic.max.y - 16.0);
+        ui.painter().circle_filled(c, 11.0, t.accent);
+        icons::paint(ui.painter(), egui::Rect::from_center_size(c, vec2(16.0, 16.0)), Icon::Check, Color32::WHITE);
+    }
     // The time, and the program it was taken from (or that it's a video).
     let program = ed.library.get(&item.path).program;
     let program = if program.chars().count() > 22 { format!("{}\u{2026}", program.chars().take(21).collect::<String>()) } else { program };
@@ -322,6 +380,18 @@ fn tile(ed: &mut Editor, ui: &mut Ui, item: &RecentItem) -> bool {
         return false;
     }
     let clicked = resp.on_hover_text(crate::tags::tooltip(ed, item)).clicked();
+    // Ctrl+click (Cmd on a Mac) chooses it, or not, for Batch Changes or a PDF.
+    let choosing = ui.input(|i| {
+        i.modifiers.command || i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. } if modifiers.command))
+    });
+    if clicked && choosing {
+        if chosen {
+            ed.chosen_captures.retain(|p| *p != item.path);
+        } else {
+            ed.chosen_captures.push(item.path.clone());
+        }
+        return false;
+    }
     if clicked && !current {
         ed.open_path(&ctx, &item.path);
     }
