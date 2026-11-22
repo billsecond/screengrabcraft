@@ -302,7 +302,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
 26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another (#118).
 27. Motion along a curved path; a picture pinned onto a slanted surface by its corners (#119).
-28. Words that write themselves on; a region of the screen frozen while the rest plays on.
+28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
 
 **Still to build, in this order**
 
