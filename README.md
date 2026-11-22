@@ -124,6 +124,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   ruler's right button) plays it from a quarter as fast to eight times as fast, on every track so
   they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
   that isn't as recorded says its speed on the timeline.
+- **Hold a frame**: H (or Edit, or the ruler's right button) holds the picture at the playhead
+  still for a while (2 s; the menus offer 1 to 5): every track waits, the sound is silent
+  meanwhile, and what follows moves along. Its panel holds it longer or shorter (or drag its end),
+  or takes the hold out again.
 - **Fades and noise**: click a sound clip and its panel fades its sound in at its start and out at
   its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
   track itself, on this computer; voices stay). The track's right button turns the noise off and

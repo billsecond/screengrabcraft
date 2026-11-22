@@ -187,7 +187,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Choose a stretch; play it | Has | |
 | Push later clips along when moving one | Missing | |
 | Join pieces back together | Part | Revert to Recording brings every track back |
-| Hold a frame (freeze) | Missing | |
+| **Hold a frame (freeze)** | Has | H, the Edit menu or the ruler's right button: every track waits while the picture is held, the sound silent; its end dragged, or its panel, holds it longer |
 | **Speed up or slow down a stretch** | Has | a quarter as fast to eight times (any speed from a tenth to ten times by command), every track together; voices keep their pitch |
 | Play a clip backwards | Missing | |
 | Line up clips by their sound | Missing | |
@@ -281,7 +281,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 6. Captions put right in the transcript: words, split, joined, moved (#64).
 7. The pointer in videos highlighted, spotlit or magnified; its clicks heard (#66).
 8. Markers on the timeline, kept as chapters in the MP4 (#69).
-9. A frame saved as a picture; just the chosen stretch; just the sound (WAV, M4A).
+9. A frame saved as a picture; just the chosen stretch; just the sound (WAV, M4A) (#71).
+10. Hold a frame: the picture held while every track waits.
 
 **Still to build, in this order**
 
@@ -289,24 +290,23 @@ By how much someone using it every day would miss each one. Built ones move to a
 2. Step badges as letters or Roman numerals, and other badge shapes.
 3. Polygons, triangles and stars; curved arrows.
 4. A stamp library with search, emoji, and pictures of your own as stamps.
-5. Hold a frame.
-6. Keys pressed shown in the video.
-7. Any font on the computer.
-8. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-9. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+5. Keys pressed shown in the video.
+6. Any font on the computer.
+7. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+8. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-10. Rotate, group and align annotations; select all of one kind.
-11. Magic wand, eraser, ellipse and freehand selections.
-12. Camera background removed, or a colour removed.
-13. Transitions between clips; keyframe animation.
-14. Drawing on the screen while recording.
-15. Volume along a clip; music lowered under the voice; levels evened out.
-16. Tags, favourites, and captures sorted by program.
-17. Templates; several pictures combined into one.
-18. A picture per click made into a how-to guide.
-19. Groups, pushing later clips along, locked and solo tracks, clip colours.
-20. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-21. Print; batch changes; captures on a timer or at a set time.
-22. Cutting words from the transcript; filler words taken out.
-23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+9. Rotate, group and align annotations; select all of one kind.
+10. Magic wand, eraser, ellipse and freehand selections.
+11. Camera background removed, or a colour removed.
+12. Transitions between clips; keyframe animation.
+13. Drawing on the screen while recording.
+14. Volume along a clip; music lowered under the voice; levels evened out.
+15. Tags, favourites, and captures sorted by program.
+16. Templates; several pictures combined into one.
+17. A picture per click made into a how-to guide.
+18. Groups, pushing later clips along, locked and solo tracks, clip colours.
+19. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+20. Print; batch changes; captures on a timer or at a set time.
+21. Cutting words from the transcript; filler words taken out.
+22. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

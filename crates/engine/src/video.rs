@@ -253,6 +253,19 @@ fn speed(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({"from": from, "to": end, "speed": f64::from(hundredths) / 100.0, "length": s.timeline.length()}))
 }
 
+/// The picture at a moment held for a while (a freeze frame): every track waits.
+fn hold_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (at, len) = (int(p, "at")?, int(p, "len")?);
+    let (from, to) = s.timeline.hold_frame(at, len).map_err(edit_err)?;
+    Ok(json!({"from": from, "to": to, "length": s.timeline.length()}))
+}
+
+/// A held frame held longer or shorter.
+fn hold_length(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_hold(index(p, "track")?, index(p, "clip")?, int(p, "len")?).map_err(edit_err)?;
+    Ok(json!({"length": s.timeline.length()}))
+}
+
 /// A sound clip's fades: how long its sound takes to come up at its start and go down at its end.
 fn fade(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let (track, clip) = (index(p, "track")?, index(p, "clip")?);
@@ -630,6 +643,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: speed,
     },
     VideoCommand {
+        id: "video.holdFrame",
+        label: "Hold Frame",
+        params: r#"{"at": µs, "len": µs}: the picture at that moment held for `len` (up to 10 minutes): every track waits, what follows moves along, the sound is silent meanwhile. Says the stretch held"#,
+        run: hold_frame,
+    },
+    VideoCommand {
+        id: "video.holdLength",
+        label: "Hold Length",
+        params: r#"{"track": n, "clip": n, "len": µs}: a held frame (that clip) held this long instead, with the other tracks' hold there; what follows moves to match"#,
+        run: hold_length,
+    },
+    VideoCommand {
         id: "video.fade",
         label: "Fade",
         params: r#"{"track": n, "clip": n, "in"?: µs, "out"?: µs}: how long a sound clip's sound takes to come up from silence at its start and go down to it at its end (0: at once)"#,
@@ -877,6 +902,29 @@ mod tests {
         for bad in [json!({"from": 0, "to": 1}), json!({"from": 0, "to": 9, "speed": 0}), json!({"from": 0, "to": 9, "speed": "fast"})] {
             assert!(s.execute("video.speed", &bad).is_err(), "{bad}");
         }
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn a_frame_is_held_made_longer_and_undone_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.holdFrame", &json!({"at": 2_000_000, "len": 1_500_000})).unwrap();
+        assert_eq!((r["from"].as_u64(), r["to"].as_u64(), r["length"].as_u64()), (Some(2_000_000), Some(3_500_000), Some(6_500_000)));
+        assert_eq!(s.undo_label(), Some("Hold Frame"));
+        assert_eq!(s.timeline.source_time(0, 3_000_000), Some(2_000_000), "the picture held");
+        assert_eq!(s.timeline.source_time(1, 3_000_000), None, "the sound silent");
+        s.execute("video.holdLength", &json!({"track": 0, "clip": 1, "len": 3_000_000})).unwrap();
+        assert_eq!(s.timeline.length(), 8_000_000);
+        for (id, bad) in [
+            ("video.holdFrame", json!({"at": 99_000_000, "len": 1_000_000})),
+            ("video.holdFrame", json!({"at": 0})),
+            ("video.holdLength", json!({"track": 0, "clip": 0, "len": 1_000_000})),
+            ("video.holdLength", json!({"track": 0, "clip": 9, "len": 1_000_000})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
     }
 

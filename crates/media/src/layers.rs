@@ -923,6 +923,44 @@ impl Timeline {
         }
     }
 
+    /// Pushes the layers' items from `at` on along by `len` (a frame held there): those after it
+    /// move; one over it that shows something (words, a picture) stays on through the gap, and a
+    /// sound or a video is split, its rest going on after it.
+    pub(crate) fn insert_time_layers(&mut self, at: u64, len: u64) {
+        let media = self.media.clone();
+        for l in &mut self.layers {
+            let mut out = Vec::with_capacity(l.items.len() + 1);
+            for i in &l.items {
+                if i.at >= at {
+                    out.push(Item { at: i.at.saturating_add(len), ..i.clone() });
+                } else if i.end() > at {
+                    let plays = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture));
+                    if plays {
+                        let first = at - i.at;
+                        out.push(Item { len: first, ..i.clone() });
+                        // The rest, a number of its own below.
+                        out.push(Item { id: 0, at: at.saturating_add(len), from: i.from.saturating_add(first), len: i.len - first, ..i.clone() });
+                    } else {
+                        out.push(Item { len: i.len.saturating_add(len), ..i.clone() });
+                    }
+                } else {
+                    out.push(i.clone());
+                }
+            }
+            out.retain(|i| i.len >= MIN_CLIP_US);
+            l.items = out;
+        }
+        let mut next = self.next_id();
+        for l in &mut self.layers {
+            for i in &mut l.items {
+                if i.id == 0 {
+                    i.id = next;
+                    next = next.saturating_add(1);
+                }
+            }
+        }
+    }
+
     /// Moves every layer's items as a speed change moved the tracks (`map`: where a moment of the
     /// timeline goes; it never goes back): an item in the stretch is sped up or slowed down with
     /// it, one after it moves along. A sound or video item still plays its own at its own speed,
