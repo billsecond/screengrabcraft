@@ -36,8 +36,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Scrolling capture, scrolled by hand | Has | |
 | **Scrolling capture that scrolls by itself** | Has | Windows: it turns the mouse wheel over the area and stops at the end of the page or at the longest picture; elsewhere, by hand |
 | Captures again and again on a timer (time-lapse), or at a set time | Has | the Capture page: one every so many seconds of the screen with the pointer, all screens or the last area, skipping those where nothing changed; one at a time of day; saved straight to the captures folder, stopped from the tray |
-| A picture for each click, made into a numbered how-to guide | Missing | |
-| The guide saved as a document, slides, PDF, web page or Markdown | Missing | |
+| A picture for each click, made into a numbered how-to guide | Has | Record Steps (the Capture page or the tray): each left click takes the window clicked with a red ring where the click was; Stop opens the guide, its steps to reorder, take out and word |
+| The guide saved as a document, slides, PDF, web page or Markdown | Part | a PDF (a page a step), a web page and Markdown, the pictures in a folder beside them; not a word-processor document or slides |
 | A still from the camera | Missing | |
 | A whole web page from its address | Missing | |
 | Printing from any program into the editor | Missing | |
@@ -280,7 +280,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 5. Capture presets; areas of a set size; shapes held while dragging (#62).
 6. Drawing on the screen while recording (Windows; #65).
 7. Tags, favourites, and captures sorted by the program they were taken from (#68).
-8. Print; batch changes; captures on a timer or at a set time.
+8. Print; batch changes; captures on a timer or at a set time (#72).
+9. A picture per click made into a how-to guide.
 
 **Still to build, in this order**
 
@@ -304,9 +305,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 17. Transitions between clips; keyframe animation.
 18. Volume along a clip; music lowered under the voice; levels evened out.
 19. Templates; several pictures combined into one.
-20. A picture per click made into a how-to guide.
-21. Groups, pushing later clips along, locked and solo tracks, clip colours.
-22. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-23. Cutting words from the transcript; filler words taken out.
-24. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+20. Groups, pushing later clips along, locked and solo tracks, clip colours.
+21. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+22. Cutting words from the transcript; filler words taken out.
+23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

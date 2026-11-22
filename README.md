@@ -74,6 +74,13 @@ seconds of the screen with the pointer, all screens or the last area, saved stra
 captures folder; one where nothing has changed since the last is skipped. Stop them from the tray.
 "One at" takes a single capture at a time of day.
 
+**How-to guides** (Record Steps, on the Capture page or in the tray): while it runs, each click takes
+a picture of the window clicked with a red ring where the click was (a small bar at the top counts
+the steps and stops it). Stop, and the guide window lists the numbered steps to put in order, take
+out and word, and saves the guide as a PDF, a web page or Markdown, the pictures in a folder beside
+it. The guide itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
+opens it again).
+
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
 or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes
 on; on Windows the screen frozen to choose the area, and what's said once it's kept, stay out of

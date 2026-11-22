@@ -8,6 +8,7 @@
 pub mod color;
 pub mod document;
 pub mod geom;
+pub mod guide;
 pub mod library;
 pub mod object;
 pub mod quick;

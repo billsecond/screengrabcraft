@@ -175,6 +175,8 @@ pub struct Service {
     pub captions: crate::captions::Captioner,
     /// Captures on a timer and at a set time (`crate::timed`).
     pub timed: crate::timed::Timed,
+    /// Step capture and its guide window (`crate::steps`).
+    pub steps: crate::steps::Steps,
 }
 
 impl Service {
@@ -254,6 +256,7 @@ impl Service {
             updates: crate::update::Updates::new(),
             captions: crate::captions::Captioner::default(),
             timed: crate::timed::Timed::default(),
+            steps: crate::steps::Steps::default(),
         }
     }
 
@@ -396,6 +399,13 @@ impl Service {
                     acted = true;
                     crate::update::ask_from_tray(self);
                 }
+                "--guide" => {
+                    acted = true;
+                    match it.next() {
+                        Some(p) => crate::steps::open(self, std::path::Path::new(p)),
+                        None => log::warn!("--guide names no guide"),
+                    }
+                }
                 "--quit" => {
                     acted = true;
                     self.quit = true;
@@ -450,6 +460,8 @@ impl Service {
                     Some(Item::DiscardRecording) => self.stop_recording(true),
                     Some(Item::TimedCaptures) => self.open_home(),
                     Some(Item::StopTimed) => crate::timed::stop(self),
+                    Some(Item::RecordSteps) => crate::steps::start(self),
+                    Some(Item::StopSteps) => crate::steps::stop(self, true),
                     Some(Item::Editor) => {
                         if let Err(e) = launch::open_editor(&[]) {
                             self.notify("The editor could not be started", e, None, None, true);
@@ -941,13 +953,18 @@ impl Service {
     }
 
     /// The tray's recording menu as things are now.
+    /// The tray's menu says whether steps are being recorded.
+    pub fn sync_steps(&mut self) {
+        self.sync_timed();
+    }
+
     /// The tray's menu says whether captures on a timer are running.
     pub fn sync_timed(&mut self) {
-        let running = self.timed.running();
+        let running = crate::tray::Running { timed: self.timed.running(), steps: self.steps.running() };
         if let Some(t) = &mut self.tray
-            && t.timed != running
+            && t.running != running
         {
-            t.timed = running;
+            t.running = running;
             t.rebuild(&self.settings, &self.keys);
         }
     }
@@ -1198,6 +1215,7 @@ impl Service {
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
         let busy = busy || self.restarting.is_some();
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
+        let busy = busy || self.steps.busy();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
             if need {
@@ -1298,6 +1316,7 @@ impl Service {
                 ctx.request_repaint();
             }
         }
+        crate::steps::show(self, &ctx);
         crate::popups::countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
         crate::popups::recording_frame(self, &ctx);
@@ -1312,6 +1331,10 @@ impl Service {
             for title in [OVERLAY_TITLE, crate::popups::COUNTDOWN_TITLE, crate::popups::NOTICE_TITLE] {
                 cloak::keep_out_of_captures(title);
             }
+        }
+        // The steps bar stays out of the steps' pictures.
+        if self.steps.running() {
+            cloak::keep_out_of_captures(crate::steps::BAR_TITLE);
         }
     }
 }
