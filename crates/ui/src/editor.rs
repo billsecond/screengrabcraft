@@ -1813,6 +1813,10 @@ impl Editor {
                             ui.close();
                         }
                     }
+                    if ui.button("Rotate by an Angle…").on_hover_text("Turn the picture by any angle; the annotations turn with it").clicked() {
+                        self.dialog = Some(Dialog::rotate_any());
+                        ui.close();
+                    }
                     if ui.button("Flip Horizontal").clicked() {
                         self.run(&ctx, "image.flip", json!({"horizontal": true}));
                         ui.close();
@@ -1952,7 +1956,24 @@ impl Editor {
     /// Runs an effect's command: the colour changes kept to the selected area if there is one,
     /// a watermark's picture lent, the capture's details filled in from what is known of it.
     /// Whether it worked.
-    pub(crate) fn apply_effect(&mut self, ctx: &egui::Context, id: &str, mut params: Value) -> bool {
+    pub(crate) fn apply_effect(&mut self, ctx: &egui::Context, id: &str, params: Value) -> bool {
+        let Some(params) = self.effect_params(ctx, id, params) else { return false };
+        let done = self.run(ctx, id, params).is_some();
+        self.session.lent.clear();
+        if done {
+            // A border, a shadow, a reflection or a tilt changes the picture's size.
+            self.view.fit_pending = true;
+        }
+        done
+    }
+
+    /// An effect's parameters as it is run here: the colour changes kept to the selected area if
+    /// there is one, a watermark's picture lent, the capture's details filled in from what is
+    /// known of it. None (and the owner told why) when it can't be run.
+    fn effect_params(&mut self, ctx: &egui::Context, id: &str, mut params: Value) -> Option<Value> {
+        if !params.is_object() {
+            params = json!({});
+        }
         if Dialog::takes_area(id)
             && let Some(area) = self.area_params()
         {
@@ -1963,7 +1984,7 @@ impl Editor {
                 Some((_, pic)) => self.session.lent = vec![pic.clone()],
                 None => {
                     self.error(ctx, "Choose a picture for the watermark first");
-                    return false;
+                    return None;
                 }
             }
         }
@@ -1975,7 +1996,21 @@ impl Editor {
                 params["program"] = self.capture_source().map_or(Value::Bool(false), Value::String);
             }
         }
-        let done = self.run(ctx, id, params).is_some();
+        Some(params)
+    }
+
+    /// Runs an effect preset's effects one after another, as one undo step (the command
+    /// `effect.preset`), each as [`Editor::apply_effect`] would. Whether it worked.
+    pub(crate) fn apply_preset(&mut self, ctx: &egui::Context, preset: &screengrabcraft_model::presets::EffectPreset) -> bool {
+        let mut steps = Vec::with_capacity(preset.steps.len());
+        for step in &preset.steps {
+            let Some(params) = self.effect_params(ctx, &step.effect, step.params.clone()) else {
+                self.session.lent.clear();
+                return false;
+            };
+            steps.push(json!({ "effect": step.effect, "params": params }));
+        }
+        let done = self.run(ctx, "effect.preset", json!({ "steps": steps })).is_some();
         self.session.lent.clear();
         if done {
             // A border, a shadow, a reflection or a tilt changes the picture's size.

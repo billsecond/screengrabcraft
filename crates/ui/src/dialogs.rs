@@ -45,6 +45,12 @@ pub enum Dialog {
     Round {
         radius: u32,
     },
+    /// The picture turned by any angle; the corners round it see-through or a colour.
+    RotateAny {
+        degrees: f32,
+        see_through: bool,
+        color: Color32,
+    },
     Brightness {
         brightness: f32,
         contrast: f32,
@@ -149,6 +155,10 @@ impl Dialog {
         Dialog::Torn { top: false, right: false, bottom: true, left: false, depth: 14 }
     }
 
+    pub fn rotate_any() -> Dialog {
+        Dialog::RotateAny { degrees: 15.0, see_through: true, color: Color32::WHITE }
+    }
+
     pub fn round() -> Dialog {
         Dialog::Round { radius: 16 }
     }
@@ -238,6 +248,7 @@ impl Dialog {
             Dialog::Shadow { .. } => "Drop Shadow",
             Dialog::Torn { .. } => "Torn Edge",
             Dialog::Round { .. } => "Round Corners",
+            Dialog::RotateAny { .. } => "Rotate by an Angle",
             Dialog::Brightness { .. } => "Brightness and Contrast",
             Dialog::Wavy { .. } => "Wavy Edge",
             Dialog::Faded { .. } => "Faded Edge",
@@ -340,6 +351,29 @@ pub(crate) fn body(d: &mut Dialog, ui: &mut Ui) -> Option<(&'static str, Value)>
             ui.add_space(8.0);
             ui.label(egui::RichText::new("A negative number takes that much away.").small().color(Tokens::get(ui.ctx()).muted));
             Some(("image.canvas", json!({"left": left, "top": top, "right": right, "bottom": bottom, "color": hex(*color)})))
+        }
+        Dialog::RotateAny { degrees, see_through, color } => {
+            settings(ui, "rotate", |ui| {
+                ui.label("Angle");
+                ui.add(egui::Slider::new(degrees, -180.0..=180.0).step_by(0.5).suffix("°"));
+                ui.end_row();
+                ui.label("Corners");
+                ui.horizontal(|ui| {
+                    ui.checkbox(see_through, "See-through");
+                    if !*see_through {
+                        egui::color_picker::color_edit_button_srgba(ui, color, egui::color_picker::Alpha::Opaque);
+                    }
+                });
+                ui.end_row();
+            });
+            ui.add_space(8.0);
+            let how = "Clockwise; below nought, the other way. The picture grows to hold it, and the annotations turn with it.";
+            ui.label(egui::RichText::new(how).small().color(Tokens::get(ui.ctx()).muted));
+            let mut params = json!({"degrees": degrees});
+            if !*see_through {
+                params["color"] = json!(hex(*color));
+            }
+            Some(("image.rotate", params))
         }
         Dialog::Border { width, color } => {
             settings(ui, "border", |ui| {

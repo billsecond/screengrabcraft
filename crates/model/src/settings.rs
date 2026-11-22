@@ -858,6 +858,10 @@ pub struct EditorSettings {
     /// go, not the others.
     #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
     pub own_themes: Vec<crate::quick::OwnTheme>,
+    /// Effect presets of the owner's own, shown after the ready-made ones. One that can't be read
+    /// is let go, not the others.
+    #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
+    pub effect_presets: Vec<crate::presets::EffectPreset>,
     /// The looks starred as favourites, in the order they were starred. One that can't be read
     /// is let go, not the others.
     #[serde(deserialize_with = "readable")]
@@ -1009,7 +1013,43 @@ impl EditorSettings {
             }
         }
         self.own_themes = kept;
+        // Presets fit to keep, none named as a ready-made one or as one before it.
+        let mut presets: Vec<crate::presets::EffectPreset> = Vec::new();
+        for p in std::mem::take(&mut self.effect_presets).into_iter().filter_map(crate::presets::EffectPreset::clamped) {
+            if crate::presets::is_ready_made(&p.name) || presets.iter().any(|k| k.name.eq_ignore_ascii_case(&p.name)) {
+                continue;
+            }
+            if presets.len() < crate::presets::MAX_PRESETS {
+                presets.push(p);
+            }
+        }
+        self.effect_presets = presets;
         self
+    }
+
+    /// Keeps an effect preset of the owner's own (one of the same name is replaced); its name as
+    /// kept, or why it can't be.
+    pub fn keep_preset(&mut self, name: &str, steps: Vec<crate::presets::EffectStep>) -> Result<String, String> {
+        let name = crate::presets::preset_name(name).ok_or_else(|| "Give the preset a name.".to_string())?;
+        if crate::presets::is_ready_made(&name) {
+            return Err(format!("{name} is a ready-made preset's name."));
+        }
+        let preset = crate::presets::EffectPreset { name: name.clone(), steps }
+            .clamped()
+            .ok_or_else(|| "A preset holds the picture's effects only.".to_string())?;
+        if let Some(p) = self.effect_presets.iter_mut().find(|p| p.name.eq_ignore_ascii_case(&name)) {
+            *p = preset;
+        } else if self.effect_presets.len() >= crate::presets::MAX_PRESETS {
+            return Err(format!("{} presets of your own are kept at most; delete one first.", crate::presets::MAX_PRESETS));
+        } else {
+            self.effect_presets.push(preset);
+        }
+        Ok(name)
+    }
+
+    /// Lets an effect preset of the owner's own go.
+    pub fn forget_preset(&mut self, name: &str) {
+        self.effect_presets.retain(|p| !p.name.eq_ignore_ascii_case(name));
     }
 
     /// The quick styles' theme in use.
@@ -1495,5 +1535,27 @@ mod tests {
         assert_eq!(e.own_themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Ok"], "short, built-in and twice-named ones let go");
         assert!(e.show_tray);
         assert!(!serde_json::to_string(&EditorSettings::default()).unwrap().contains("ownThemes"));
+    }
+
+    /// Effect presets of your own are kept by name; a ready-made name or one without an effect
+    /// isn't; one that can't be read is let go alone.
+    #[test]
+    fn effect_presets_are_kept_by_name() {
+        use crate::presets::EffectStep;
+        let border = || vec![EffectStep { effect: "effect.border".into(), params: serde_json::json!({"width": 3}) }];
+        let mut e = EditorSettings::default();
+        assert_eq!(e.keep_preset(" Mine ", border()), Ok("Mine".to_string()));
+        assert!(e.keep_preset("Soft shadow", border()).is_err(), "a ready-made name");
+        assert!(e.keep_preset("Bad", vec![EffectStep { effect: "image.crop".into(), params: serde_json::json!({}) }]).is_err());
+        assert!(e.keep_preset("MINE", border()).is_ok());
+        assert_eq!(e.effect_presets.len(), 1, "replaced");
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back.effect_presets, e.effect_presets);
+        e.forget_preset("mine");
+        assert!(e.effect_presets.is_empty());
+        let text = r#"{"effectPresets":[{"name":"Ok","steps":[{"effect":"effect.invert"}]},{"name":"No steps","steps":[]},{"name":"Old Photo","steps":[{"effect":"effect.invert"}]},5],"showTray":true}"#;
+        let e = EditorSettings::from_json(text);
+        assert_eq!(e.effect_presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Ok"]);
+        assert!(e.show_tray);
     }
 }

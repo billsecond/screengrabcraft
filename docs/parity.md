@@ -115,7 +115,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | The captured pointer moved or deleted | Missing | |
 | Quick styles in themes, favourites | Has | |
 | **Themes of your own** | Has | the theme menu's "New theme from the current colours…": four colours (the ones in use first, each changeable) and a name, kept in the editor's settings and listed after the built-in four; deleted from the same menu |
-| Effect presets | Missing | |
+| **Effect presets** | Has | at the top of the Effects pane: eight ready-made (Soft Shadow, Photo Frame, Rounded Card, Torn Paper, Old Photo, Faded Edges, Thin Line, Black and White), each one or a few effects applied with one click as one undo step; Keep as Preset… under any effect keeps its settings under a name, kept in the editor's settings (a right-click deletes one) |
 | Undo and redo, also after closing | Has | |
 | Flatten selected, flatten all | Has | |
 | Bring forward, send back | Has | |
@@ -155,7 +155,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Resize, rotate a quarter turn, flip | Has | |
-| Rotate by any angle | Missing | |
+| **Rotate by any angle** | Has | Image › Rotate by an Angle…: the picture grows to hold the turned one, the corners see-through or a colour, the annotations turned with it |
 | **Templates: pictures laid out in a frame with words** | Has | Image › Template…: steps in a row, down the page, in a grid, or before and after, with a title and each step's words; every part stays an annotation |
 | **Several pictures combined into one** | Has | Image › Combine Pictures…: side by side, stacked or in a grid, with recent captures or picture files |
 | Many pictures changed at once (batch) | Missing | |
@@ -290,6 +290,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 14. Edit text in the picture: a line read covered and typed over in its size and colour (Windows).
 15. Polygons of points clicked one by one; bent lines; callouts with several tails.
 16. Gradient fills; themes of your own for the quick styles.
+17. Effect presets; the picture rotated by any angle.
 
 **Still to build, in this order**
 

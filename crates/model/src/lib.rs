@@ -9,6 +9,7 @@ pub mod color;
 pub mod document;
 pub mod geom;
 pub mod object;
+pub mod presets;
 pub mod quick;
 pub mod raster;
 pub mod settings;

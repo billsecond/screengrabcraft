@@ -135,8 +135,73 @@ fn picture_changes_move_the_annotations_with_it() {
     assert_eq!(s.doc.get(id).unwrap().shape.rect().unwrap().x, 165.0);
     s.execute("image.canvas", &json!({"left": -5, "top": -5, "right": -5, "bottom": -5})).unwrap();
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
-    assert!(s.execute("image.rotate", &json!({"degrees": 45})).is_err());
+    assert!(s.execute("image.rotate", &json!({"degrees": "steep"})).is_err());
+    assert!(s.execute("image.rotate", &json!({"degrees": 45, "color": "grey"})).is_err());
     assert!(s.execute("image.crop", &json!({"x": 500, "y": 0, "w": 5, "h": 5})).is_err());
+}
+
+/// A turn by any angle grows the picture to hold it, the corners see-through or a colour, and the
+/// annotations turn with it, round its middle.
+#[test]
+fn the_picture_turns_by_any_angle_with_its_annotations() {
+    let mut s = Session::new(Document::new(Raster::filled(200, 100, Color::rgb(30, 90, 200)).unwrap()));
+    // An arrow from the middle to the right edge's middle, and a box at the middle.
+    let arrow = add(&mut s, json!({"type": "arrow", "from": {"x": 100, "y": 50}, "to": {"x": 200, "y": 50}}));
+    let rect = add(&mut s, json!({"type": "rect", "rect": {"x": 90, "y": 40, "w": 20, "h": 20}}));
+    s.execute("image.rotate", &json!({"degrees": 30})).unwrap();
+    let (w, h) = (s.doc.width(), s.doc.height());
+    let (ew, eh) =
+        (200.0 * 30f32.to_radians().cos() + 100.0 * 30f32.to_radians().sin(), 200.0 * 30f32.to_radians().sin() + 100.0 * 30f32.to_radians().cos());
+    assert_eq!((w, h), (ew.ceil() as u32, eh.ceil() as u32), "as big as the turned picture");
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0), "see-through corners");
+    let c = Pt::new(w as f32 / 2.0, h as f32 / 2.0);
+    assert!(s.doc.base.pixel(c.x as u32, c.y as u32).is_some_and(|p| p.a == 255 && p.b > 190 && p.r < 40), "the picture in the middle");
+    let Some(Shape::Arrow { from, to, .. }) = s.doc.get(arrow).map(|o| o.shape.clone()) else { panic!("the arrow") };
+    assert!(from.distance(c) < 0.6, "its start stays at the middle: {from:?} {c:?}");
+    let end = Pt::new(c.x + 100.0 * 30f32.to_radians().cos(), c.y + 100.0 * 30f32.to_radians().sin());
+    assert!(to.distance(end) < 0.6, "its end turned clockwise: {to:?} {end:?}");
+    let o = s.doc.get(rect).unwrap();
+    assert!((o.rotation - 30.0).abs() < 1e-3 && o.shape.pivot().distance(c) < 0.6, "the box turned in place");
+    assert_eq!(s.undo_label(), Some("Rotate"));
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+    // Coloured corners; a whole turn changes nothing.
+    s.execute("image.rotate", &json!({"degrees": -45, "color": "#FFFFFF"})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::WHITE));
+    let before = s.doc.clone();
+    s.execute("image.rotate", &json!({"degrees": 360})).unwrap();
+    assert_eq!(s.doc, before);
+}
+
+/// A preset runs its effects one after another as one undo step; a ready-made one by name; a step
+/// that isn't an effect, or fails, changes nothing.
+#[test]
+fn an_effect_preset_is_one_step() {
+    let mut s = session();
+    let (w, h) = (s.doc.width(), s.doc.height());
+    let steps = json!([{"effect": "effect.border", "params": {"width": 4}}, {"effect": "effect.border", "params": {"width": 6}}]);
+    assert_eq!(s.execute("effect.preset", &json!({"steps": steps})).unwrap()["applied"], 2);
+    assert_eq!((s.doc.width(), s.doc.height()), (w + 20, h + 20));
+    assert_eq!(s.undo_label(), Some("Effect Preset"));
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (w, h));
+    assert!(!s.can_undo(), "one step");
+    s.execute("effect.preset", &json!({"name": "thin line"})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (w + 2, h + 2));
+    for bad in [
+        json!({}),
+        json!({"name": "Teapot"}),
+        json!({"steps": []}),
+        json!({"steps": [{"effect": "image.crop", "params": {"x": 0, "y": 0, "w": 5, "h": 5}}]}),
+        json!({"steps": [{"effect": "effect.preset", "params": {"name": "Thin Line"}}]}),
+        json!({"steps": [{"effect": "effect.border", "params": 5}]}),
+        json!({"steps": [{"effect": "effect.border"}, {"effect": "effect.watermark", "params": {"picture": 3}}]}),
+        json!({"steps": vec![json!({"effect": "effect.invert"}); 9]}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("effect.preset", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before, "{bad}");
+    }
 }
 
 #[test]
