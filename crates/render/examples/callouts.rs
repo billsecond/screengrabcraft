@@ -18,7 +18,7 @@ fn main() -> Result<(), String> {
         }
     }
     // The callout quick styles of the first theme, down the right.
-    for (i, p) in presets(Kind::Callout, theme("Bold")).iter().enumerate() {
+    for (i, p) in presets(Kind::Callout, &theme("Bold", &[])).iter().enumerate() {
         let rect = Rect::new(1260.0, 40.0 + i as f32 * 58.0, 110.0, 36.0);
         let form = p.look.options.form.unwrap_or_default();
         let tail = p.look.options.tail.unwrap_or_default().place(form, Rect::new(rect.x, rect.y, rect.w, rect.h * 0.6));

@@ -254,6 +254,8 @@ pub struct Editor {
     pub(crate) saving_video: bool,
     /// The stamp library's search.
     pub(crate) stamp_query: String,
+    /// A theme of your own being made under the Quick Styles heading.
+    pub(crate) theme_draft: Option<crate::quick::ThemeDraft>,
     /// A picture of your own the Stamp tool places (by its name), instead of a drawn stamp.
     pub(crate) own_stamp: Option<String>,
     /// The names of the pictures kept as stamps, as last asked of the host.
@@ -386,6 +388,7 @@ impl Editor {
             saving_video: false,
             stamp_query: String::new(),
             own_stamp: None,
+            theme_draft: None,
             own_stamps: None,
             own_stamp_pictures: std::collections::HashMap::new(),
             adding_stamp: false,

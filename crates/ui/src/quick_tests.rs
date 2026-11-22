@@ -6,7 +6,7 @@ use egui_kittest::kittest::Queryable as _;
 use screengrabcraft_model::{CalloutForm, Color, Kind, Pt, Rect, Shape, Style};
 
 use crate::editor::{Editor, Tool};
-use crate::tests::{at, drag, editor, harness, ready, ready_tall};
+use crate::tests::{at, drag, editor, ready, ready_tall};
 
 /// Saves what the window looks like, when asked (`SGC_SHOTS=folder`).
 pub(crate) fn shot(h: &mut Harness<'_, Editor>, name: &str) {
@@ -128,7 +128,8 @@ fn every_tool_button_picks_its_tool_and_shows_it_picked() {
 
 #[test]
 fn the_shape_button_draws_a_rectangle_or_an_ellipse() {
-    let mut h = harness(editor());
+    // As tall as a full-HD screen: the shape picker is under four rows of quick styles.
+    let mut h = crate::tests::harness_sized(editor(), egui::vec2(1200.0, 1080.0));
     h.run_steps(4);
     click(&mut h, "Shape (R, O)");
     assert_eq!(h.state().tool, Tool::Draw(Kind::Rect));
@@ -317,7 +318,7 @@ fn every_tool_has_quick_styles_in_its_panel() {
     for (tool, ..) in Tool::ALL {
         let mut h = ready_tall(editor(), tool);
         let presets = match tool {
-            Tool::Draw(k) => screengrabcraft_model::quick::presets(k, screengrabcraft_model::quick::theme("")),
+            Tool::Draw(k) => screengrabcraft_model::quick::presets(k, &screengrabcraft_model::quick::theme("", &[])),
             _ => continue,
         };
         for p in &presets {

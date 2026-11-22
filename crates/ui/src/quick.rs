@@ -322,36 +322,140 @@ pub(crate) fn grid_of(ui: &mut Ui, n: usize, columns: usize, mut each: impl FnMu
     }
 }
 
-/// The heading of a quick styles section, with the theme menu.
-fn heading(ed: &mut Editor, ui: &mut Ui) {
+/// What the theme menu's entry for a theme of your own, and the form making one, are called.
+pub(crate) const THEME_MENU: &str = "Quick style theme";
+pub(crate) const NEW_THEME: &str = "New theme from the current colours…";
+pub(crate) const THEME_NAME: &str = "Theme name";
+pub(crate) const SAVE_THEME: &str = "Save theme";
+
+/// A theme of your own being made: its name and its four colours, as they are chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ThemeDraft {
+    pub name: String,
+    pub colors: [Color; 4],
+    /// Why it couldn't be kept, the last time Save was clicked.
+    pub problem: Option<String>,
+}
+
+/// The colours in use where the panel is: the look of the tool (or the selection) shown, or the
+/// Fill tool's when there is no kind.
+fn colours_in_use(ed: &Editor, kind: Option<Kind>) -> Vec<Color> {
+    let Some(kind) = kind else {
+        let f = ed.settings.fill;
+        return if f.gradient.is_none() { vec![f.color] } else { vec![f.color, f.gradient.to] };
+    };
+    let s = current_look(ed, kind).style;
+    let mut out = vec![s.fill];
+    if !s.gradient.is_none() {
+        out.push(s.gradient.to);
+    }
+    out.extend([s.stroke, s.text_color, s.text_outline]);
+    out
+}
+
+/// A name for a new theme that no theme has yet.
+fn free_theme_name(ed: &Editor) -> String {
+    let taken = |n: &str| quick::is_built_in(n) || ed.settings.own_themes.iter().any(|t| t.name.eq_ignore_ascii_case(n));
+    (1..=quick::MAX_OWN_THEMES + 1)
+        .map(|i| if i == 1 { "My theme".to_string() } else { format!("My theme {i}") })
+        .find(|n| !taken(n))
+        .unwrap_or_else(|| "My theme".to_string())
+}
+
+/// The heading of a quick styles section, with the theme menu: the built-in themes, then those of
+/// your own, a new one made from the colours in use (`kind`'s, or the Fill tool's when none), and
+/// the one in use deleted when it is your own.
+fn heading(ed: &mut Editor, ui: &mut Ui, kind: Option<Kind>) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Quick Styles").strong().color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let current = quick::theme(&ed.settings.quick_theme).name;
-            egui::ComboBox::from_id_salt("quick-theme")
-                .selected_text(current)
-                .width(86.0)
-                .show_ui(ui, |ui| {
-                    for th in &quick::THEMES {
-                        if ui.selectable_label(th.name == current, th.name).clicked() {
-                            ed.settings.quick_theme = th.name.to_string();
-                            ed.services.save_settings(&ed.settings);
-                        }
+            let current = ed.settings.quick_theme().name.to_string();
+            let own = !quick::is_built_in(&current);
+            let mut pick = None;
+            let mut new = false;
+            let mut forget = false;
+            let menu = egui::ComboBox::from_id_salt("quick-theme").selected_text(current.as_str()).width(96.0).show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                for (i, th) in quick::themes(&ed.settings.own_themes).iter().enumerate() {
+                    if i == quick::THEMES.len() {
+                        ui.separator();
                     }
-                })
-                .response
-                .on_hover_text("The colours the quick styles come in");
+                    if ui.selectable_label(th.name == current, th.name.as_ref()).clicked() {
+                        pick = Some(th.name.to_string());
+                    }
+                }
+                ui.separator();
+                new = ui.selectable_label(false, NEW_THEME).on_hover_text("A theme of your own: four colours, named").clicked();
+                if own {
+                    forget = ui.selectable_label(false, format!("Delete {current}")).clicked();
+                }
+            });
+            menu.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, THEME_MENU));
+            menu.response.on_hover_text("The colours the quick styles come in");
+            if let Some(name) = pick {
+                ed.settings.quick_theme = name;
+                ed.services.save_settings(&ed.settings);
+            }
+            if new {
+                let colors = quick::colours_for_theme(&colours_in_use(ed, kind), &ed.settings.quick_theme());
+                ed.theme_draft = Some(ThemeDraft { name: free_theme_name(ed), colors, problem: None });
+            }
+            if forget {
+                ed.settings.forget_theme(&current);
+                ed.services.save_settings(&ed.settings);
+            }
         });
     });
     ui.add_space(4.0);
+    theme_form(ed, ui);
+}
+
+/// A theme of your own being made, under the heading: its name, its four colours (each with the
+/// colour menu), Save and Cancel.
+fn theme_form(ed: &mut Editor, ui: &mut Ui) {
+    let Some(mut draft) = ed.theme_draft.clone() else { return };
+    let t = Tokens::get(ui.ctx());
+    let mut done = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("New theme").strong());
+        ui.add_space(2.0);
+        let field = egui::TextEdit::singleline(&mut draft.name).hint_text(THEME_NAME).char_limit(quick::MAX_THEME_NAME).desired_width(f32::INFINITY);
+        ui.add(field).widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, THEME_NAME));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
+            for (i, c) in draft.colors.iter_mut().enumerate() {
+                crate::props::colour_button(ui, &format!("Theme colour {}", i + 1), &format!("{}", i + 1), c, false, false);
+            }
+        });
+        if let Some(p) = &draft.problem {
+            ui.label(egui::RichText::new(p).size(12.0).color(t.danger));
+        }
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(SAVE_THEME).fill(t.accent)).clicked() {
+                match ed.settings.keep_theme(&draft.name, draft.colors) {
+                    Ok(_) => {
+                        ed.services.save_settings(&ed.settings);
+                        done = true;
+                    }
+                    Err(why) => draft.problem = Some(why),
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                done = true;
+            }
+        });
+    });
+    ui.add_space(6.0);
+    ed.theme_draft = if done { None } else { Some(draft) };
 }
 
 /// The quick styles of a drawing tool, or of the selected annotations.
 pub(crate) fn section(ed: &mut Editor, ui: &mut Ui, kind: Kind) {
     let ctx = ui.ctx().clone();
-    heading(ed, ui);
-    let presets = quick::presets(kind, quick::theme(&ed.settings.quick_theme));
+    heading(ed, ui, Some(kind));
+    let presets = quick::presets(kind, &ed.settings.quick_theme());
     let current = current_look(ed, kind);
     let shape = shape_kind(ed, kind);
     let mut picked = None;
@@ -387,8 +491,8 @@ pub(crate) fn section(ed: &mut Editor, ui: &mut Ui, kind: Kind) {
 
 /// The Fill tool's colours, as tiles.
 pub(crate) fn fill_section(ed: &mut Editor, ui: &mut Ui) {
-    heading(ed, ui);
-    let colours = quick::fill_colors(quick::theme(&ed.settings.quick_theme));
+    heading(ed, ui, None);
+    let colours = quick::fill_colors(&ed.settings.quick_theme());
     let mut picked = None;
     let now = ed.settings.fill.color;
     grid(ui, colours.len(), |ui, i, size| {

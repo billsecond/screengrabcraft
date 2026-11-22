@@ -888,6 +888,121 @@ impl<'de> Deserialize<'de> for FontName {
     }
 }
 
+/// Which way a gradient runs: none (the inside is one colour), straight across, or out from the
+/// middle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GradientKind {
+    #[default]
+    None,
+    /// From one side to the other, at an angle.
+    Linear,
+    /// From the middle out to the corners.
+    Radial,
+}
+
+impl GradientKind {
+    pub const ALL: [GradientKind; 3] = [GradientKind::None, GradientKind::Linear, GradientKind::Radial];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            GradientKind::None => "One colour",
+            GradientKind::Linear => "Linear",
+            GradientKind::Radial => "Radial",
+        }
+    }
+
+    /// Its name in commands and files.
+    pub fn name(self) -> &'static str {
+        match self {
+            GradientKind::None => "none",
+            GradientKind::Linear => "linear",
+            GradientKind::Radial => "radial",
+        }
+    }
+}
+
+/// A fill that goes from the fill colour to a second one: across the shape at an angle, or from
+/// its middle out. Kept in a style, so it is small and copied freely.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Gradient {
+    pub kind: GradientKind,
+    /// The colour it ends in; the fill colour is where it starts.
+    pub to: Color,
+    /// Which way a linear one runs, in degrees: 0 from left to right, 90 from top to bottom.
+    pub angle: f32,
+}
+
+impl Default for Gradient {
+    fn default() -> Gradient {
+        Gradient { kind: GradientKind::None, to: Color::WHITE, angle: 90.0 }
+    }
+}
+
+impl<'de> Deserialize<'de> for Gradient {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Gradient, D::Error> {
+        // Anything unreadable in it is its default, never an error: a style is never lost over it.
+        let v = serde_json::Value::deserialize(d)?;
+        let d = Gradient::default();
+        let kind = v.get("kind").and_then(|k| serde_json::from_value::<GradientKind>(k.clone()).ok()).unwrap_or_default();
+        let to = v.get("to").and_then(|c| serde_json::from_value::<Color>(c.clone()).ok()).unwrap_or(d.to);
+        let angle = v.get("angle").and_then(serde_json::Value::as_f64).map(|a| a as f32).unwrap_or(d.angle);
+        Ok(Gradient { kind, to, angle }.clamped())
+    }
+}
+
+impl Gradient {
+    pub fn is_none(&self) -> bool {
+        self.kind == GradientKind::None
+    }
+
+    /// The angle as a turn of 0 to 360 degrees (the default when it isn't a number).
+    pub fn clamped(self) -> Gradient {
+        let angle = if self.angle.is_finite() { self.angle.rem_euclid(360.0) } else { Gradient::default().angle };
+        Gradient { angle, ..self }
+    }
+
+    /// How far along the gradient (0 at its start colour, 1 at its end) the point `p` is, for a
+    /// gradient laid over `area`: along the angle from one side of the area to the other, or out
+    /// from its middle to its corners.
+    pub fn share(&self, area: Rect, p: Pt) -> f32 {
+        let c = area.center();
+        let t = match self.kind {
+            GradientKind::None => 0.0,
+            GradientKind::Linear => {
+                let (a, b) = self.ends(area);
+                let d = b.sub(a);
+                let len2 = d.x * d.x + d.y * d.y;
+                if len2 > 0.0 { (p.sub(a).x * d.x + p.sub(a).y * d.y) / len2 } else { 0.0 }
+            }
+            GradientKind::Radial => {
+                let (rx, ry) = Gradient::radii(area);
+                let (dx, dy) = ((p.x - c.x) / rx, (p.y - c.y) / ry);
+                (dx * dx + dy * dy).sqrt()
+            }
+        };
+        if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 }
+    }
+
+    /// Where a linear gradient over `area` starts and ends: the line through the area's middle at
+    /// the angle, as long as the area is across that way.
+    pub fn ends(&self, area: Rect) -> (Pt, Pt) {
+        let c = area.center();
+        let a = self.angle.to_radians();
+        let (dx, dy) = (a.cos(), a.sin());
+        let half = (area.w / 2.0 * dx).abs() + (area.h / 2.0 * dy).abs();
+        let half = if half.is_finite() { half.max(0.5) } else { 0.5 };
+        (Pt::new(c.x - dx * half, c.y - dy * half), Pt::new(c.x + dx * half, c.y + dy * half))
+    }
+
+    /// How far a radial gradient over `area` reaches across and down: to its corners.
+    pub fn radii(area: Rect) -> (f32, f32) {
+        let r = |v: f32| if v.is_finite() { (v / 2.0 * std::f32::consts::SQRT_2).max(0.5) } else { 0.5 };
+        (r(area.w), r(area.h))
+    }
+}
+
 /// How an annotation looks. Every field has a default, so files written by later versions with
 /// more to say still open.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -921,6 +1036,10 @@ pub struct Style {
     /// computer hasn't it).
     #[serde(skip_serializing_if = "FontName::is_bundled")]
     pub font: FontName,
+    /// The inside going from the fill colour to a second one (closed shapes, callouts and text
+    /// boxes); none for one colour.
+    #[serde(skip_serializing_if = "Gradient::is_none")]
+    pub gradient: Gradient,
 }
 
 impl Default for Style {
@@ -942,6 +1061,7 @@ impl Default for Style {
             text_outline: Color::TRANSPARENT,
             text_outline_width: 3.0,
             font: FontName::BUNDLED,
+            gradient: Gradient { kind: GradientKind::None, to: Color::WHITE, angle: 90.0 },
         }
     }
 }
@@ -965,8 +1085,15 @@ impl Style {
             font_size: fix(self.font_size, MIN_FONT, MAX_FONT, d.font_size),
             strength: fix(self.strength, 0.0, 200.0, d.strength),
             text_outline_width: fix(self.text_outline_width, 0.0, MAX_TEXT_OUTLINE, d.text_outline_width),
+            gradient: self.gradient.clamped(),
             ..self
         }
+    }
+
+    /// Whether the inside of a closed shape is coloured at all: the fill colour, or the gradient's
+    /// second one, can be seen.
+    pub fn has_fill(&self) -> bool {
+        self.fill.a > 0 || (!self.gradient.is_none() && self.gradient.to.a > 0)
     }
 
     /// Lengths in the style (line width, font size, text outline) scaled by `f`, for a picture
@@ -1834,6 +1961,48 @@ mod tests {
 
     fn style() -> Style {
         Style::default()
+    }
+
+    /// A gradient runs from one side of its area to the other at its angle, or out from the
+    /// middle to the corners; it is written only when there is one, and anything unreadable in a
+    /// file is its default, never a lost style.
+    #[test]
+    fn gradients_run_across_or_out_and_read_anything() {
+        let area = Rect::new(10.0, 20.0, 100.0, 50.0);
+        let down = Gradient { kind: GradientKind::Linear, to: Color::BLACK, angle: 90.0 };
+        assert!(down.share(area, Pt::new(60.0, 20.0)) < 1e-4, "the top is where it starts");
+        assert!(down.share(area, Pt::new(60.0, 70.0)) > 0.9999, "the bottom where it ends");
+        assert!((down.share(area, Pt::new(10.0, 45.0)) - 0.5).abs() < 1e-4, "halfway down");
+        let across = Gradient { angle: 0.0, ..down };
+        assert!(across.share(area, Pt::new(10.0, 0.0)) < 1e-4 && across.share(area, Pt::new(110.0, 0.0)) > 0.9999);
+        let back = Gradient { angle: 180.0, ..down };
+        assert!(back.share(area, Pt::new(10.0, 45.0)) > 0.9999, "180 degrees runs right to left");
+        let out = Gradient { kind: GradientKind::Radial, ..down };
+        assert!(out.share(area, area.center()) < 1e-4);
+        assert!((out.share(area, Pt::new(110.0, 70.0)) - 1.0).abs() < 1e-4, "the corners are where it ends");
+        assert_eq!(Gradient::default().share(area, Pt::new(110.0, 70.0)), 0.0, "none is the fill colour throughout");
+        // Nonsense areas and angles stay in range.
+        for g in [Gradient { angle: f32::NAN, ..down }, Gradient { angle: 1e30, ..out }] {
+            let t = g.clamped().share(Rect::new(0.0, 0.0, f32::INFINITY, 0.0), Pt::new(f32::NAN, 3.0));
+            assert!((0.0..=1.0).contains(&t));
+        }
+        assert_eq!(Gradient { angle: -90.0, ..down }.clamped().angle, 270.0);
+
+        let plain = serde_json::to_string(&Style::default()).unwrap();
+        assert!(!plain.contains("gradient"), "written only when there is one");
+        let s = Style { fill: Color::RED, gradient: down, ..Style::default() };
+        let back: Style = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        assert!(s.has_fill() && !Style::default().has_fill());
+        assert!(Style { gradient: down, ..Style::default() }.has_fill(), "a gradient from nothing to a colour shows");
+        for bad in [r#"{"gradient":7}"#, r#"{"gradient":{"kind":"teapot","to":"blue","angle":"steep"}}"#, r#"{"gradient":null}"#] {
+            let s: Style = serde_json::from_str(bad).unwrap();
+            assert!(s.gradient.is_none(), "{bad}");
+        }
+        let s: Style = serde_json::from_str(r##"{"gradient":{"kind":"radial","to":"#00FF00"}}"##).unwrap();
+        assert_eq!((s.gradient.kind, s.gradient.to, s.gradient.angle), (GradientKind::Radial, Color::rgb(0, 255, 0), 90.0));
+        assert_eq!(Color::BLACK.mix(Color::WHITE, 0.5), Color::rgb(128, 128, 128));
+        assert_eq!(Color::BLACK.mix(Color::WHITE, f32::NAN), Color::BLACK);
     }
 
     #[test]

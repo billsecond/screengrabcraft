@@ -168,7 +168,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
-  tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+  tool, and a look made by hand can be kept too. Themes of your own: "New theme from the current
+  colours…" in the theme menu makes one of the colours in use, named and kept with the four. See
+  [the editor's tools](docs/editor-tools.md).
 - **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
   area selected, read on this computer by Windows' own text reader and shown to copy (put anything
   right first). On macOS and Linux it isn't there yet.
@@ -219,7 +221,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Colours (a palette that reads well for people who see red and green alike, and any colour),
   thickness, opacity, shadows, dashes.
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
-  close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
+  close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it;
+  a linear or radial gradient to a second colour, too.
 - **Crop**, **resize**, canvas size, rotate, flip, trim borders.
 - **Cut Out** (U): drag across the picture over what to take out (columns, or rows) and the rest
   is joined, straight or with a saw or a wave and a thin see-through gap. Annotations past the strip
@@ -243,7 +246,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen draws over things); its handles take hold even when the press is a little off.
-- Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
+- Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour), or a
+  **gradient**: linear at any angle, or radial, to a second colour (the Fill menu).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.

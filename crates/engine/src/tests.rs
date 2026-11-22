@@ -62,6 +62,7 @@ fn undo_and_redo_put_back_exactly() {
     assert!(!s.can_undo());
     let id = add(&mut s, json!({"type": "arrow", "from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 50}}));
     assert_eq!(s.undo_label(), Some("Add Annotation"));
+    s.select(vec![id]);
     s.execute("object.style", &json!({"ids": [id.0], "style": {"stroke": "#00FF00", "width": 9}})).unwrap();
     assert_eq!(s.doc.get(id).unwrap().style.stroke, Color::rgb(0, 255, 0));
     assert!(s.undo());
@@ -362,11 +363,38 @@ fn a_fill_colours_one_area_in_one_undo_step() {
         json!({"x": 1, "y": 1, "color": 12}),
         json!({"x": 1, "y": 1, "color": "yellow"}),
         json!({"x": 1, "y": 1, "color": "#FFFFFF", "tolerance": "lots"}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": "linear"}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "sideways", "to": "#000000"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear", "to": "black"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear", "to": "#000000", "angle": "up"}}),
     ] {
         let before = s.doc.clone();
         assert!(s.execute("image.fill", &bad).is_err(), "{bad}");
         assert_eq!(s.doc, before);
     }
+}
+
+/// A fill with a gradient goes from its colour to the second one across the area filled; a
+/// shape's gradient is a style like any other.
+#[test]
+fn fills_and_shapes_take_gradients() {
+    let mut s = square_on_blue();
+    let g = json!({"kind": "linear", "to": "#000000", "angle": 0});
+    s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFFFFF", "gradient": g})).unwrap();
+    let (left, right) = (s.doc.base.pixel(20, 20).unwrap(), s.doc.base.pixel(39, 20).unwrap());
+    assert!(left.r > 220 && right.r < 30, "white to black across the square: {left:?} {right:?}");
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)), "the blue round it stays");
+    let none = json!({"x": 0, "y": 0, "color": "#00FF00", "gradient": {"kind": "none"}});
+    s.execute("image.fill", &none).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(0, 255, 0)), "none is one colour");
+    let id = s.doc.add(Shape::Rect { rect: Rect::new(4.0, 4.0, 20.0, 20.0), radius: 0.0 }, screengrabcraft_model::Style::default()).unwrap();
+    s.select(vec![id]);
+    s.execute("object.style", &json!({"ids": [id.0], "style": {"fill": "#FF0000", "gradient": {"kind": "radial", "to": "#0000FF"}}})).unwrap();
+    let style = s.doc.get(id).map(|o| o.style).unwrap();
+    assert_eq!((style.gradient.kind, style.gradient.to), (screengrabcraft_model::GradientKind::Radial, Color::rgb(0, 0, 255)));
+    s.execute("object.update", &json!({"id": id.0, "style": {"gradient": null}})).unwrap();
+    assert!(s.doc.get(id).is_some_and(|o| o.style.gradient.is_none()), "taken away");
 }
 
 /// A model that calls the left half of any picture background.

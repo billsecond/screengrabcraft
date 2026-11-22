@@ -5,7 +5,7 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
+use screengrabcraft_model::{Color, Document, Gradient, GradientKind, Kind, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::matte::{self, Region};
 use screengrabcraft_render::{effects, region};
 use serde_json::{Value, json};
@@ -112,7 +112,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Change Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, "font"?: "a font on the computer by name (empty for the built-in one)", …}}"##,
+        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, "font"?: "a font on the computer by name (empty for the built-in one)", "gradient"?: {"kind": "none"|"linear"|"radial", "to": "#RRGGBB", "angle"?: 90} (the inside from the fill colour to "to"), …}}"##,
         has_selection,
         restyle
     ),
@@ -325,7 +325,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Fill",
         "Image",
         None,
-        r##"{"x": px, "y": px, "color": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 32} → {"filled": pixels} — the area round the pixel at x, y that is within tolerance (0 to 255 a channel) of its colour becomes the colour (a transparent one clears it)"##,
+        r##"{"x": px, "y": px, "color": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 32, "gradient"?: {"kind": "linear"|"radial", "to": "#RRGGBB", "angle"?: 90 (linear: 0 left to right, 90 top to bottom)}} → {"filled": pixels} — the area round the pixel at x, y that is within tolerance (0 to 255 a channel) of its colour becomes the colour (a transparent one clears it), or a gradient from it to "to" across the area"##,
         always,
         fill_area
     ),
@@ -526,6 +526,37 @@ pub(crate) fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
         Some(Value::String(s)) => Color::from_hex(s).ok_or_else(|| EngineError::Params(format!("`{key}` must be a colour like #RRGGBB"))),
         Some(_) => Err(EngineError::Params(format!("`{key}` must be a colour like #RRGGBB"))),
     }
+}
+
+/// A gradient: none when not given; otherwise its kind, the colour it ends in and, for a linear
+/// one, its angle. Nonsense is an error.
+pub(crate) fn gradient_param(p: &Value) -> Result<Gradient> {
+    let g = match p.get("gradient") {
+        None | Some(Value::Null) => return Ok(Gradient::default()),
+        Some(g @ Value::Object(_)) => g,
+        Some(_) => {
+            return Err(EngineError::Params("`gradient` is {\"kind\": \"linear\"|\"radial\", \"to\": \"#RRGGBB\", \"angle\"?: 90}".to_string()));
+        }
+    };
+    let kind = match g.get("kind").and_then(Value::as_str) {
+        Some(k) => GradientKind::ALL
+            .into_iter()
+            .find(|g| g.name().eq_ignore_ascii_case(k.trim()))
+            .ok_or_else(|| EngineError::Params("a gradient's `kind` is \"linear\", \"radial\" or \"none\"".to_string()))?,
+        None => return Err(EngineError::Params("a gradient's `kind` is \"linear\", \"radial\" or \"none\"".to_string())),
+    };
+    if kind == GradientKind::None {
+        return Ok(Gradient::default());
+    }
+    if g.get("to").is_none_or(Value::is_null) {
+        return Err(EngineError::Params("a gradient's `to` is the colour it ends in, like #RRGGBB".to_string()));
+    }
+    let to = color(g, "to", Color::WHITE)?;
+    let angle = match g.get("angle") {
+        None | Some(Value::Null) => Gradient::default().angle,
+        Some(_) => num(g, "angle").ok_or_else(|| EngineError::Params("a gradient's `angle` is in degrees".to_string()))?,
+    };
+    Ok(Gradient { kind, to, angle }.clamped())
 }
 
 /// The ids a command acts on: `ids` if given, else the selection (unless `required`).
@@ -1049,7 +1080,8 @@ fn fill_area(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let colour = color(p, "color", Color::TRANSPARENT)?;
     let tolerance = int(p, "tolerance", 32, 0, 255)? as u8;
-    let (picture, filled) = effects::fill(&s.doc.base, x, y, colour, tolerance)?;
+    let gradient = gradient_param(p)?;
+    let (picture, filled) = effects::fill_with(&s.doc.base, x, y, colour, gradient, tolerance)?;
     if filled > 0 {
         s.doc.base = picture;
     }

@@ -1,0 +1,139 @@
+//! Gradient fills and themes of your own, driven headless the way a person uses them.
+
+use egui_kittest::Harness;
+use egui_kittest::kittest::Queryable as _;
+use screengrabcraft_model::{Color, Document, GradientKind, Kind, Raster, Rect, Shape, Style};
+
+use crate::editor::{Editor, Tool};
+use crate::quick_tests::shot;
+use crate::tests::{at, click_at, editor, ready_tall};
+
+fn click(h: &mut Harness<'_, Editor>, label: &str) {
+    h.get_by_label(label).click();
+    h.run_steps(3);
+}
+
+/// Clicks the first of the nodes called `label` (a button whose menu, open, has its name at the top).
+fn click_first(h: &mut Harness<'_, Editor>, label: &str) {
+    if let Some(n) = h.get_all_by_label(label).next() {
+        n.click();
+    }
+    h.run_steps(3);
+}
+
+/// The editor on a white picture with a blue square in the middle.
+fn square_picture() -> Editor {
+    let mut r = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..200 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 200, 255]);
+        }
+    }
+    let mut ed = editor();
+    ed.session.replace(Document::new(r));
+    ed
+}
+
+/// A selected box's Fill menu has the gradient: linear (with its angle) or radial, a second
+/// colour beside the fill, and the two swapped.
+#[test]
+fn a_shape_takes_a_gradient_from_its_fill_menu() {
+    let mut ed = editor();
+    let style = Style { fill: Color::rgb(0xE5, 0x39, 0x35), ..Kind::Rect.default_style() };
+    let id = ed.session.doc.add(Shape::Rect { rect: Rect::new(40.0, 40.0, 220.0, 140.0), radius: 0.0 }, style).unwrap();
+    ed.session.select(vec![id]);
+    let mut h = ready_tall(ed, Tool::Select);
+    assert!(h.query_by_label(crate::props::GRADIENT_TO).is_none(), "one colour: no second one");
+    click(&mut h, "Fill colour");
+    click(&mut h, "Linear");
+    let g = h.state().session.doc.get(id).map(|o| o.style.gradient).unwrap();
+    assert_eq!((g.kind, g.to, g.angle), (GradientKind::Linear, Color::WHITE, 90.0), "down to white at first");
+    h.get_by_label("Angle");
+    click(&mut h, "Radial");
+    assert_eq!(h.state().session.doc.get(id).map(|o| o.style.gradient.kind), Some(GradientKind::Radial));
+    click(&mut h, "Swap the two colours");
+    let s = h.state().session.doc.get(id).map(|o| o.style).unwrap();
+    assert_eq!((s.fill, s.gradient.to), (Color::WHITE, Color::rgb(0xE5, 0x39, 0x35)));
+    // The second colour has a button of its own by the fill, and the tool keeps the gradient.
+    h.get_by_label(crate::props::GRADIENT_TO);
+    assert_eq!(h.state().tool_style(Kind::Rect).gradient.kind, GradientKind::Radial);
+    shot(&mut h, "gradient-menu");
+    click_first(&mut h, "Fill colour");
+    shot(&mut h, "gradient-shape");
+    // One colour again takes it away.
+    click_first(&mut h, "Fill colour");
+    click(&mut h, "One colour");
+    assert!(h.state().session.doc.get(id).is_some_and(|o| o.style.gradient.is_none()));
+}
+
+/// The Fill tool fills the area clicked with a gradient, from its colour to the second one, down
+/// the area (not the whole picture).
+#[test]
+fn the_fill_tool_fills_with_a_gradient() {
+    let mut h = ready_tall(square_picture(), Tool::Fill);
+    click(&mut h, "Linear");
+    assert_eq!(h.state().settings.fill.gradient.kind, GradientKind::Linear);
+    h.get_by_label(crate::props::GRADIENT_TO);
+    let p = at(&h, 200.0, 150.0);
+    click_at(&mut h, p);
+    let ed = h.state();
+    let (top, bottom) = (ed.session.doc.base.pixel(200, 100).unwrap(), ed.session.doc.base.pixel(200, 199).unwrap());
+    assert!(top.g < 80 && bottom.g > 220, "from red at the top of the square to white at its bottom: {top:?} {bottom:?}");
+    assert_eq!(ed.session.doc.base.pixel(20, 20), Some(Color::WHITE), "the white round it isn't touched");
+    shot(&mut h, "gradient-fill-tool");
+}
+
+/// A theme of your own: made from the colours in use, named, saved in the settings, listed after
+/// the built-in themes and its quick styles drawn in its colours; deleted from the same menu.
+#[test]
+fn a_theme_of_your_own_is_made_from_the_current_colours() {
+    let mut ed = editor();
+    let mine = Color::rgb(0x12, 0x34, 0x99);
+    ed.settings.styles.insert(Kind::Callout, Style { fill: mine, ..Kind::Callout.default_style() });
+    let mut h = ready_tall(ed, Tool::Draw(Kind::Callout));
+    click(&mut h, crate::quick::THEME_MENU);
+    for name in ["Soft", "Vivid", "Mono"] {
+        h.get_by_label(name);
+    }
+    click(&mut h, crate::quick::NEW_THEME);
+    let draft = h.state().theme_draft.clone().unwrap();
+    assert_eq!(draft.name, "My theme");
+    assert_eq!(draft.colors.first(), Some(&mine), "the callout's fill first");
+    shot(&mut h, "theme-new");
+    click(&mut h, crate::quick::THEME_NAME);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Team".into()));
+    h.run_steps(2);
+    click(&mut h, crate::quick::SAVE_THEME);
+    let ed = h.state();
+    assert!(ed.theme_draft.is_none());
+    assert_eq!(ed.settings.own_themes.first().map(|t| t.name.as_str()), Some("Team"));
+    assert_eq!(ed.settings.quick_theme, "Team", "put in use");
+    // Its quick styles are named for its colours and drawn in them.
+    click(&mut h, "Blue, tail down left");
+    assert_eq!(h.state().tool_style(Kind::Callout).fill, mine);
+    shot(&mut h, "theme-own");
+    // Listed after the built-in ones; picking another and back again works as for them.
+    click(&mut h, crate::quick::THEME_MENU);
+    click(&mut h, "Vivid");
+    assert_eq!(h.state().settings.quick_theme, "Vivid");
+    click(&mut h, crate::quick::THEME_MENU);
+    click(&mut h, "Team");
+    click(&mut h, crate::quick::THEME_MENU);
+    click(&mut h, "Delete Team");
+    assert!(h.state().settings.own_themes.is_empty());
+    assert_eq!(h.state().settings.quick_theme().name, "Bold");
+    // A built-in name isn't taken: the form says why and stays.
+    click(&mut h, crate::quick::THEME_MENU);
+    click(&mut h, crate::quick::NEW_THEME);
+    click(&mut h, crate::quick::THEME_NAME);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Soft".into()));
+    h.run_steps(2);
+    click(&mut h, crate::quick::SAVE_THEME);
+    assert!(h.state().theme_draft.as_ref().is_some_and(|d| d.problem.is_some()));
+    assert!(h.state().settings.own_themes.is_empty());
+    click(&mut h, "Cancel");
+    assert!(h.state().theme_draft.is_none());
+}
