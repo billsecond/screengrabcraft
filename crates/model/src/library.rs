@@ -1,7 +1,8 @@
 //! What the owner knows of each capture beyond the file itself: its tags, whether it's a
-//! favourite, and the program (and window) it was taken from. The capture service writes where a
-//! capture came from when it keeps one; the editor's All captures adds tags and favourites, and
-//! filters and searches by them.
+//! favourite, whether it's pinned at the front of the Recent strip, and the program (and window)
+//! it was taken from. The capture service writes where a capture came from when it keeps one; the
+//! editor's All captures adds tags and favourites, and filters and searches by them; the strip
+//! pins.
 //!
 //! The library is a small file of its own (the host's; nothing here reads or writes it), keyed by
 //! each capture's path. Everything in it comes from a file, so everything is clamped as it's read.
@@ -28,6 +29,9 @@ pub struct CaptureInfo {
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub favorite: bool,
+    /// Kept at the front of the Recent strip.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     /// The program whose window it was taken from (empty when it isn't known: an area of the
     /// screen, a whole screen).
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -40,7 +44,7 @@ pub struct CaptureInfo {
 impl CaptureInfo {
     /// Whether there's nothing to keep.
     pub fn is_empty(&self) -> bool {
-        self.tags.is_empty() && !self.favorite && self.program.is_empty() && self.title.is_empty()
+        self.tags.is_empty() && !self.favorite && !self.pinned && self.program.is_empty() && self.title.is_empty()
     }
 
     /// Whether it has this tag (whatever its capitals).
@@ -272,7 +276,13 @@ mod tests {
 
     #[test]
     fn the_filter_shows_favourites_a_program_a_tag_and_what_is_searched_for() {
-        let fav = CaptureInfo { favorite: true, program: "Notes".into(), tags: vec!["Plans".into()], title: "Shopping list".into() };
+        let fav = CaptureInfo {
+            favorite: true,
+            program: "Notes".into(),
+            tags: vec!["Plans".into()],
+            title: "Shopping list".into(),
+            ..CaptureInfo::default()
+        };
         let other = CaptureInfo { program: "Browser".into(), ..CaptureInfo::default() };
         let mut f = Filter::default();
         assert!(f.is_empty() && f.shows("a.png", &fav) && f.shows("b.png", &other));

@@ -161,7 +161,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Many pictures changed at once (batch) | Has | Batch Changes (File menu, or All captures for the pictures shown): resize, the effects, grayscale, invert, trim, in order; a format and a name pattern; each saved beside its picture, none written over |
 | Print | Part | the Image Editor's File menu and Ctrl+P, through Windows' own printing window; greyed out elsewhere |
 | Recent captures strip; delete to the bin | Has | |
-| Pin captures in the strip | Missing | |
+| Pin captures in the strip | Has | right-click a capture in the strip, Pin to the Front: the pinned stay first, with a pin on them, and are remembered |
 | All captures by day, with search | Has | |
 | Captures sorted by program or website, tags, favourites | Part | All captures filters by favourites, the program a window was taken from and tags, and searches them and the window's title; a website only by its page's title |
 | Captures folder of your choosing | Has | |
@@ -283,7 +283,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Print; batch changes; captures on a timer or at a set time (#72).
 9. A picture per click made into a how-to guide (#74).
 10. Several areas in one capture; a freehand area (#78).
-11. A multi-page PDF of several captures.
+11. A multi-page PDF of several captures (#80).
+12. Captures pinned at the front of the Recent strip.
 
 **Still to build, in this order**
 

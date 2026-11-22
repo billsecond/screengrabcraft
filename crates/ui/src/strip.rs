@@ -52,9 +52,12 @@ pub fn listed_in(kind: crate::editor::EditorKind, path: &str) -> bool {
     is_video(path) == (kind == crate::editor::EditorKind::Video)
 }
 
-/// The captures this editor lists, newest first as the host gave them.
+/// The captures this editor lists: the pinned ones first, then the rest, each newest first as the
+/// host gave them.
 fn listed(ed: &Editor) -> Vec<RecentItem> {
-    ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).cloned().collect()
+    let mut items: Vec<RecentItem> = ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).cloned().collect();
+    items.sort_by_key(|i| !ed.library.captures.get(&i.path).is_some_and(|c| c.pinned));
+    items
 }
 
 /// Whether a capture is a video (a recording or an MP4).
@@ -214,6 +217,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
                     let ring = if current { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.border) };
                     ui.painter().rect_stroke(rect, 5.0, ring, StrokeKind::Inside);
                     crate::tags::strip_star(ed, ui, rect, item);
+                    crate::tags::strip_pin(ed, ui, rect, item);
                     let resp = resp.on_hover_text(crate::tags::tooltip(ed, item));
                     // A right click: Favorites and tags.
                     resp.context_menu(|ui| crate::tags::menu(ed, ui, item, &items));
