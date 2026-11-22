@@ -95,13 +95,33 @@ impl Services for WebServices {
         let (answers, ctx) = (self.answers.clone(), self.ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .add_filter("Pictures and projects", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "sgcraft"])
+                .add_filter("Pictures and projects", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "sgcraft"])
                 .pick_file()
                 .await;
             let answer = match picked {
                 Some(f) => {
                     let bytes = f.read().await;
                     DialogResult::Opened(vec![OpenedFile { name: f.file_name(), path: None, bytes }])
+                }
+                None => DialogResult::Cancelled,
+            };
+            answers.borrow_mut().push(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn request_subtitles(&self) {
+        let (answers, ctx) = (self.answers.clone(), self.ctx.clone());
+        wasm_bindgen_futures::spawn_local(async move {
+            let picked = rfd::AsyncFileDialog::new().add_filter("Subtitles", &["srt", "vtt"]).pick_file().await;
+            let answer = match picked {
+                Some(f) => {
+                    let bytes = f.read().await;
+                    if bytes.len() as u64 > screengrabcraft_ui::services::MAX_SUBTITLES {
+                        DialogResult::Cancelled
+                    } else {
+                        DialogResult::Subtitles(vec![OpenedFile { name: f.file_name(), path: None, bytes }])
+                    }
                 }
                 None => DialogResult::Cancelled,
             };

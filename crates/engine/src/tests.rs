@@ -62,6 +62,7 @@ fn undo_and_redo_put_back_exactly() {
     assert!(!s.can_undo());
     let id = add(&mut s, json!({"type": "arrow", "from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 50}}));
     assert_eq!(s.undo_label(), Some("Add Annotation"));
+    s.select(vec![id]);
     s.execute("object.style", &json!({"ids": [id.0], "style": {"stroke": "#00FF00", "width": 9}})).unwrap();
     assert_eq!(s.doc.get(id).unwrap().style.stroke, Color::rgb(0, 255, 0));
     assert!(s.undo());
@@ -134,8 +135,73 @@ fn picture_changes_move_the_annotations_with_it() {
     assert_eq!(s.doc.get(id).unwrap().shape.rect().unwrap().x, 165.0);
     s.execute("image.canvas", &json!({"left": -5, "top": -5, "right": -5, "bottom": -5})).unwrap();
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
-    assert!(s.execute("image.rotate", &json!({"degrees": 45})).is_err());
+    assert!(s.execute("image.rotate", &json!({"degrees": "steep"})).is_err());
+    assert!(s.execute("image.rotate", &json!({"degrees": 45, "color": "grey"})).is_err());
     assert!(s.execute("image.crop", &json!({"x": 500, "y": 0, "w": 5, "h": 5})).is_err());
+}
+
+/// A turn by any angle grows the picture to hold it, the corners see-through or a colour, and the
+/// annotations turn with it, round its middle.
+#[test]
+fn the_picture_turns_by_any_angle_with_its_annotations() {
+    let mut s = Session::new(Document::new(Raster::filled(200, 100, Color::rgb(30, 90, 200)).unwrap()));
+    // An arrow from the middle to the right edge's middle, and a box at the middle.
+    let arrow = add(&mut s, json!({"type": "arrow", "from": {"x": 100, "y": 50}, "to": {"x": 200, "y": 50}}));
+    let rect = add(&mut s, json!({"type": "rect", "rect": {"x": 90, "y": 40, "w": 20, "h": 20}}));
+    s.execute("image.rotate", &json!({"degrees": 30})).unwrap();
+    let (w, h) = (s.doc.width(), s.doc.height());
+    let (ew, eh) =
+        (200.0 * 30f32.to_radians().cos() + 100.0 * 30f32.to_radians().sin(), 200.0 * 30f32.to_radians().sin() + 100.0 * 30f32.to_radians().cos());
+    assert_eq!((w, h), (ew.ceil() as u32, eh.ceil() as u32), "as big as the turned picture");
+    assert_eq!(s.doc.base.pixel(0, 0).map(|c| c.a), Some(0), "see-through corners");
+    let c = Pt::new(w as f32 / 2.0, h as f32 / 2.0);
+    assert!(s.doc.base.pixel(c.x as u32, c.y as u32).is_some_and(|p| p.a == 255 && p.b > 190 && p.r < 40), "the picture in the middle");
+    let Some(Shape::Arrow { from, to, .. }) = s.doc.get(arrow).map(|o| o.shape.clone()) else { panic!("the arrow") };
+    assert!(from.distance(c) < 0.6, "its start stays at the middle: {from:?} {c:?}");
+    let end = Pt::new(c.x + 100.0 * 30f32.to_radians().cos(), c.y + 100.0 * 30f32.to_radians().sin());
+    assert!(to.distance(end) < 0.6, "its end turned clockwise: {to:?} {end:?}");
+    let o = s.doc.get(rect).unwrap();
+    assert!((o.rotation - 30.0).abs() < 1e-3 && o.shape.pivot().distance(c) < 0.6, "the box turned in place");
+    assert_eq!(s.undo_label(), Some("Rotate"));
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+    // Coloured corners; a whole turn changes nothing.
+    s.execute("image.rotate", &json!({"degrees": -45, "color": "#FFFFFF"})).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::WHITE));
+    let before = s.doc.clone();
+    s.execute("image.rotate", &json!({"degrees": 360})).unwrap();
+    assert_eq!(s.doc, before);
+}
+
+/// A preset runs its effects one after another as one undo step; a ready-made one by name; a step
+/// that isn't an effect, or fails, changes nothing.
+#[test]
+fn an_effect_preset_is_one_step() {
+    let mut s = session();
+    let (w, h) = (s.doc.width(), s.doc.height());
+    let steps = json!([{"effect": "effect.border", "params": {"width": 4}}, {"effect": "effect.border", "params": {"width": 6}}]);
+    assert_eq!(s.execute("effect.preset", &json!({"steps": steps})).unwrap()["applied"], 2);
+    assert_eq!((s.doc.width(), s.doc.height()), (w + 20, h + 20));
+    assert_eq!(s.undo_label(), Some("Effect Preset"));
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (w, h));
+    assert!(!s.can_undo(), "one step");
+    s.execute("effect.preset", &json!({"name": "thin line"})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (w + 2, h + 2));
+    for bad in [
+        json!({}),
+        json!({"name": "Teapot"}),
+        json!({"steps": []}),
+        json!({"steps": [{"effect": "image.crop", "params": {"x": 0, "y": 0, "w": 5, "h": 5}}]}),
+        json!({"steps": [{"effect": "effect.preset", "params": {"name": "Thin Line"}}]}),
+        json!({"steps": [{"effect": "effect.border", "params": 5}]}),
+        json!({"steps": [{"effect": "effect.border"}, {"effect": "effect.watermark", "params": {"picture": 3}}]}),
+        json!({"steps": vec![json!({"effect": "effect.invert"}); 9]}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("effect.preset", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before, "{bad}");
+    }
 }
 
 #[test]
@@ -151,6 +217,29 @@ fn steps_number_themselves_and_duplicates_count_on() {
     let out = s.execute("edit.duplicate", &json!({"ids": [b.0]})).unwrap();
     let c = ObjectId(out["ids"][0].as_u64().unwrap());
     assert_eq!(num(&s, c), 3);
+}
+
+/// Steps in letters or Roman numerals count on their own beside numbered ones; a quick style or
+/// the picker changes how a badge counts and its outline, keeping its place in the count.
+#[test]
+fn steps_count_in_letters_on_their_own_and_change_their_badge() {
+    let mut s = session();
+    add(&mut s, json!({"type": "step", "center": {"x": 10, "y": 10}}));
+    let a = add(&mut s, json!({"type": "step", "center": {"x": 30, "y": 10}, "labels": "upper", "badge": "diamond"}));
+    let b = add(&mut s, json!({"type": "step", "center": {"x": 50, "y": 10}, "labels": "upper"}));
+    let label = |s: &Session, id| s.doc.get(id).unwrap().shape.step_label().unwrap();
+    assert_eq!((label(&s, a), label(&s, b)), ("A".to_string(), "B".to_string()));
+    let out = s.execute("edit.duplicate", &json!({"ids": [b.0]})).unwrap();
+    let c = ObjectId(out["ids"][0].as_u64().unwrap());
+    assert_eq!(label(&s, c), "C");
+    s.execute("object.look", &json!({"ids": [a.0, b.0], "options": {"labels": "roman", "badge": "pin"}})).unwrap();
+    assert_eq!((label(&s, a), label(&s, b)), ("I".to_string(), "II".to_string()));
+    assert!(matches!(s.doc.get(a).unwrap().shape, Shape::Step { badge: screengrabcraft_model::BadgeShape::Pin, .. }));
+    // Nonsense changes nothing.
+    let before = s.doc.clone();
+    assert!(s.execute("object.look", &json!({"ids": [a.0], "options": {"badge": "teapot"}})).is_err());
+    assert!(s.execute("object.add", &json!({"object": {"type": "step", "center": {"x": 1, "y": 1}, "labels": 5}})).is_err());
+    assert_eq!(s.doc, before);
 }
 
 #[test]
@@ -314,6 +403,58 @@ fn a_colour_goes_everywhere_or_from_a_pixel() {
 }
 
 #[test]
+fn a_colour_is_replaced_everywhere_or_where_it_joins_a_point() {
+    // Two red squares on blue: everywhere, both; from a point in one, only that one.
+    let two = || {
+        let mut s = square_on_blue();
+        for y in 2..8 {
+            for x in 2..8 {
+                let i = (y * 60 + x) * 4;
+                s.doc.base.pixels_mut()[i..i + 4].copy_from_slice(&[229, 57, 53, 255]);
+            }
+        }
+        s
+    };
+    let yellow = Color::rgb(0xFF, 0xD6, 0x00);
+    let mut s = two();
+    let out = s.execute("effect.replaceColor", &json!({"color": "#E53935", "with": "#FFD600"})).unwrap();
+    assert_eq!(out["replaced"], 20 * 20 + 6 * 6);
+    assert_eq!((s.doc.base.pixel(30, 20), s.doc.base.pixel(4, 4)), (Some(yellow), Some(yellow)));
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)));
+    assert_eq!(s.undo_label(), Some("Replace a Colour"));
+    s.undo();
+    assert!(!s.can_undo());
+    // The colour of the pixel clicked, only where it joins it.
+    let out = s.execute("effect.replaceColor", &json!({"x": 30, "y": 20, "with": "#FFD600", "contiguous": true})).unwrap();
+    assert_eq!(out["replaced"], 20 * 20);
+    assert_eq!(out["color"], "#E53935");
+    assert_eq!(s.doc.base.pixel(4, 4), Some(Color::rgb(229, 57, 53)), "the other square stays");
+    // Kept to an area: only the part of the big square in it, and the point must be in it.
+    let mut s = two();
+    s.execute("effect.replaceColor", &json!({"color": "#E53935", "with": "#FFD600", "area": {"x": 0, "y": 0, "w": 30, "h": 40}})).unwrap();
+    assert_eq!((s.doc.base.pixel(25, 20), s.doc.base.pixel(35, 20)), (Some(yellow), Some(Color::rgb(229, 57, 53))));
+    assert_eq!(s.doc.base.pixel(4, 4), Some(yellow));
+    let mut s = two();
+    let joined = json!({"x": 35, "y": 20, "with": "#FFD600", "contiguous": true, "area": {"x": 0, "y": 0, "w": 30, "h": 40}});
+    assert!(s.execute("effect.replaceColor", &joined).is_err(), "the point is outside the area");
+    // Nothing of the colour, or nothing to put in its place: an error that changes nothing.
+    for bad in [
+        json!({"color": "#00FF00", "with": "#FFD600", "tolerance": 3}),
+        json!({"color": "#E53935"}),
+        json!({"with": "#FFD600"}),
+        json!({"color": "#E53935", "with": "#FFD600", "contiguous": true}),
+        json!({"x": 500, "y": 5, "with": "#FFD600"}),
+        json!({"color": "#E53935", "with": "yellowish"}),
+        json!({"color": "#E53935", "with": "#FFD600", "tolerance": "lots"}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("effect.replaceColor", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+    assert!(!s.can_undo());
+}
+
+#[test]
 fn a_fill_colours_one_area_in_one_undo_step() {
     let mut s = square_on_blue();
     let out = s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFD600"})).unwrap();
@@ -339,11 +480,38 @@ fn a_fill_colours_one_area_in_one_undo_step() {
         json!({"x": 1, "y": 1, "color": 12}),
         json!({"x": 1, "y": 1, "color": "yellow"}),
         json!({"x": 1, "y": 1, "color": "#FFFFFF", "tolerance": "lots"}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": "linear"}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "sideways", "to": "#000000"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear", "to": "black"}}),
+        json!({"x": 1, "y": 1, "color": "#FFFFFF", "gradient": {"kind": "linear", "to": "#000000", "angle": "up"}}),
     ] {
         let before = s.doc.clone();
         assert!(s.execute("image.fill", &bad).is_err(), "{bad}");
         assert_eq!(s.doc, before);
     }
+}
+
+/// A fill with a gradient goes from its colour to the second one across the area filled; a
+/// shape's gradient is a style like any other.
+#[test]
+fn fills_and_shapes_take_gradients() {
+    let mut s = square_on_blue();
+    let g = json!({"kind": "linear", "to": "#000000", "angle": 0});
+    s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFFFFF", "gradient": g})).unwrap();
+    let (left, right) = (s.doc.base.pixel(20, 20).unwrap(), s.doc.base.pixel(39, 20).unwrap());
+    assert!(left.r > 220 && right.r < 30, "white to black across the square: {left:?} {right:?}");
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)), "the blue round it stays");
+    let none = json!({"x": 0, "y": 0, "color": "#00FF00", "gradient": {"kind": "none"}});
+    s.execute("image.fill", &none).unwrap();
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(0, 255, 0)), "none is one colour");
+    let id = s.doc.add(Shape::Rect { rect: Rect::new(4.0, 4.0, 20.0, 20.0), radius: 0.0 }, screengrabcraft_model::Style::default()).unwrap();
+    s.select(vec![id]);
+    s.execute("object.style", &json!({"ids": [id.0], "style": {"fill": "#FF0000", "gradient": {"kind": "radial", "to": "#0000FF"}}})).unwrap();
+    let style = s.doc.get(id).map(|o| o.style).unwrap();
+    assert_eq!((style.gradient.kind, style.gradient.to), (screengrabcraft_model::GradientKind::Radial, Color::rgb(0, 0, 255)));
+    s.execute("object.update", &json!({"id": id.0, "style": {"gradient": null}})).unwrap();
+    assert!(s.doc.get(id).is_some_and(|o| o.style.gradient.is_none()), "taken away");
 }
 
 /// A model that calls the left half of any picture background.
@@ -444,7 +612,16 @@ fn a_quick_style_changes_the_selection_in_one_undo_step() {
     assert_eq!(c.style.fill, Color::rgb(0x1E, 0x88, 0xE5));
     assert_eq!(c.style.font_size, size, "the text keeps its size");
     let a = s.doc.get(arrow).unwrap();
-    assert_eq!(a.shape, Shape::Arrow { from: Pt::new(100.0, 20.0), to: Pt::new(150.0, 60.0), heads: screengrabcraft_model::ArrowHeads::Both });
+    assert_eq!(
+        a.shape,
+        Shape::Arrow {
+            from: Pt::new(100.0, 20.0),
+            to: Pt::new(150.0, 60.0),
+            heads: screengrabcraft_model::ArrowHeads::Both,
+            bend: 0.0,
+            head: Default::default()
+        }
+    );
     assert_eq!(s.undo_label(), Some("Apply Quick Style"));
     assert!(s.undo());
     assert!(matches!(s.doc.get(callout).unwrap().shape, Shape::Callout { form: screengrabcraft_model::CalloutForm::Rounded, .. }));
@@ -575,4 +752,453 @@ fn cut_out_takes_a_strip_out_and_moves_the_annotations_with_the_picture() {
     assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": "zigzag"})).is_err());
     assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": 3})).is_err());
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+}
+
+#[test]
+fn a_qr_code_made_on_the_picture_is_read_back_and_reading_changes_nothing() {
+    let mut s = Session::new(Document::new(Raster::filled(600, 400, Color::WHITE).unwrap()));
+    let out = s.execute("image.makeQr", &json!({"text": "https://example.com/menu", "size": 180})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.selected(), vec![id], "selected, to be moved");
+    let o = s.doc.get(id).unwrap();
+    assert_eq!(o.shape.kind(), Kind::Image);
+    let r = o.shape.rect().unwrap();
+    assert!(r.w == r.h && r.w <= 180.0 && r.w >= 120.0, "{r:?}");
+    assert!((r.x + r.w / 2.0 - 300.0).abs() <= 1.0 && (r.y + r.h / 2.0 - 200.0).abs() <= 1.0, "in the middle: {r:?}");
+    assert_eq!(s.undo_label(), Some("Make a QR Code"));
+    // Read from the picture as shown, with where it is; reading is no edit.
+    let doc = s.doc.clone();
+    let read = s.execute("image.readQr", &json!({})).unwrap();
+    assert_eq!(read["codes"][0]["text"], "https://example.com/menu");
+    assert_eq!(read["codes"][0]["link"], true);
+    let x = read["codes"][0]["rect"]["x"].as_f64().unwrap() as f32;
+    assert!(x > r.x && x < r.x + r.w * 0.2, "{x} in {r:?}");
+    assert_eq!(s.doc, doc);
+    assert_eq!(s.undo_label(), Some("Make a QR Code"));
+    // In an area: where it is on the whole picture; an area without it has none.
+    let read = s.execute("image.readQr", &json!({"x": 150, "y": 50, "w": 300, "h": 300})).unwrap();
+    let x2 = read["codes"][0]["rect"]["x"].as_f64().unwrap() as f32;
+    assert!((x2 - x).abs() <= 2.0, "{x2} {x}");
+    let read = s.execute("image.readQr", &json!({"x": 0, "y": 0, "w": 100, "h": 100})).unwrap();
+    assert_eq!(read["codes"].as_array().map(Vec::len), Some(0));
+    // Placed where asked; nothing, too much or a wrong size is refused and changes nothing.
+    let out = s.execute("image.makeQr", &json!({"text": "Table 4", "x": 10, "y": 20, "size": 40})).unwrap();
+    let r = s.doc.get(ObjectId(out["id"].as_u64().unwrap())).unwrap().shape.rect().unwrap();
+    assert_eq!((r.x, r.y), (10.0, 20.0));
+    let before = s.doc.clone();
+    for bad in [json!({}), json!({"text": "  "}), json!({"text": "x".repeat(5000)}), json!({"text": "a", "size": "big"}), json!({"text": 5})] {
+        assert!(s.execute("image.makeQr", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+    assert!(s.execute("image.readQr", &json!({"x": 900, "y": 0, "w": 10, "h": 10})).is_err());
+}
+
+/// Polygons and stars come in from scripts and are kept in range; an arrow bends and stays bent
+/// through a flip the other way round.
+#[test]
+fn polygons_stars_and_curved_arrows() {
+    let mut s = session();
+    let p = add(&mut s, json!({"type": "polygon", "rect": {"x": 10, "y": 10, "w": 60, "h": 50}, "sides": 5, "star": true}));
+    let tri = add(&mut s, json!({"type": "polygon", "rect": {"x": 80, "y": 10, "w": 60, "h": 50}}));
+    let big = add(&mut s, json!({"type": "polygon", "rect": {"x": 80, "y": 10, "w": 60, "h": 50}, "sides": 1000}));
+    let shape = |s: &Session, id| s.doc.get(id).unwrap().shape.clone();
+    assert!(matches!(shape(&s, p), Shape::Polygon { sides: 5, star: true, .. }));
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 3, star: false, .. }), "a triangle unless it says");
+    assert!(matches!(shape(&s, big), Shape::Polygon { sides: 12, .. }), "at most twelve");
+    // A look turns a triangle into a hexagon, or into an ellipse and back.
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"sides": 6}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 6, .. }));
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"round": true}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Ellipse { .. }));
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"sides": 4}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 4, .. }));
+    // A curved arrow, bent by a look, straightened, and a bend out of range kept in it.
+    let a = add(&mut s, json!({"type": "arrow", "from": {"x": 10, "y": 80}, "to": {"x": 110, "y": 80}, "bend": 0.3}));
+    let bend = |s: &Session, id| match s.doc.get(id).unwrap().shape {
+        Shape::Arrow { bend, .. } => bend,
+        _ => f32::NAN,
+    };
+    assert_eq!(bend(&s, a), 0.3);
+    s.execute("object.look", &json!({"ids": [a.0], "options": {"bend": 0, "head": "dot"}})).unwrap();
+    assert_eq!(bend(&s, a), 0.0);
+    assert!(matches!(shape(&s, a), Shape::Arrow { head: screengrabcraft_model::HeadShape::Dot, .. }));
+    let wild = add(&mut s, json!({"type": "arrow", "from": {"x": 10, "y": 80}, "to": {"x": 110, "y": 80}, "bend": 1e9}));
+    assert_eq!(bend(&s, wild), screengrabcraft_model::object::MAX_BEND);
+    // A flip mirrors the bend, so the arrow bows the way it did on the picture.
+    s.execute("object.look", &json!({"ids": [a.0], "options": {"bend": 0.3}})).unwrap();
+    let before = screengrabcraft_model::object::bend_middle(Pt::new(10.0, 80.0), Pt::new(110.0, 80.0), 0.3);
+    s.execute("image.flip", &json!({"horizontal": true})).unwrap();
+    let Shape::Arrow { from, to, bend, .. } = shape(&s, a) else { panic!("an arrow") };
+    let after = screengrabcraft_model::object::bend_middle(from, to, bend);
+    assert!((after.y - before.y).abs() < 0.01 && (after.x - (200.0 - before.x)).abs() < 0.01, "{before:?} {after:?}");
+    let before = s.doc.clone();
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "rect": {"x": 0, "y": 0, "w": 5, "h": 5}, "sides": "many"}})).is_err());
+    assert_eq!(s.doc, before);
+}
+
+/// Every stamp can be added by its name, as `object.add`'s params say.
+#[test]
+fn every_stamp_is_added_by_its_name() {
+    let mut s = session();
+    let doc = crate::registry::find("object.add").map(|c| c.params).unwrap_or_default();
+    for k in screengrabcraft_model::StampKind::ALL {
+        let name = serde_json::to_value(k).unwrap();
+        let name = name.as_str().unwrap();
+        assert!(doc.contains(&format!("\"{name}\"")), "{name} is in object.add's params");
+        let id = add(&mut s, json!({"type": "stamp", "rect": {"x": 10, "y": 10, "w": 40, "h": 40}, "stamp": name}));
+        assert!(matches!(s.doc.get(id).unwrap().shape, Shape::Stamp { stamp, .. } if stamp == k));
+    }
+}
+
+/// The colour effects keep to an area when given one, each in one undo step.
+#[test]
+fn colour_effects_change_the_whole_picture_or_an_area() {
+    // Red with a black line across the area (a flat picture stays flat when blurred).
+    let red = || {
+        let mut r = Raster::filled(60, 40, Color::rgb(220, 30, 30)).unwrap();
+        for x in 10..30 {
+            let i = (15 * 60 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+        Session::new(Document::new(r))
+    };
+    let area = json!({"x": 10, "y": 10, "w": 20, "h": 10});
+    for (id, params) in [
+        ("effect.grayscale", json!({})),
+        ("effect.invert", json!({})),
+        ("effect.sepia", json!({})),
+        ("effect.brightness", json!({"brightness": 40})),
+        ("effect.hueSaturation", json!({"hue": 120})),
+        ("effect.hueSaturation", json!({"gamma": 2})),
+        ("effect.replaceColor", json!({"color": "#DC1E1E", "with": "#1E5AC8"})),
+        ("effect.blur", json!({"radius": 3})),
+    ] {
+        let mut s = red();
+        let before = s.doc.base.clone();
+        s.execute(id, &params).unwrap();
+        assert_ne!(s.doc.base.pixels(), before.pixels(), "{id} on all of it");
+        assert!(s.can_undo());
+        let mut s = red();
+        let mut with_area = params.clone();
+        with_area["area"] = area.clone();
+        let before = s.doc.base.clone();
+        s.execute(id, &with_area).unwrap();
+        assert_ne!(s.doc.base.pixel(15, 14), before.pixel(15, 14), "{id} in the area");
+        assert_eq!(s.doc.base.pixel(50, 35), before.pixel(50, 35), "{id} not outside it");
+        assert_eq!(s.doc.base.pixel(5, 5), before.pixel(5, 5), "{id} not outside it");
+    }
+    // An area off the picture, or nonsense, changes nothing.
+    let mut s = red();
+    assert!(s.execute("effect.sepia", &json!({"area": {"x": 100, "y": 100, "w": 5, "h": 5}})).is_err());
+    assert!(s.execute("effect.sepia", &json!({"area": "all"})).is_err());
+    assert!(!s.can_undo());
+}
+
+/// Perspective moves the annotations with the picture; a reflection and details below grow it.
+#[test]
+fn shape_effects_and_what_they_do_to_the_annotations() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 10, "w": 40, "h": 20}}));
+    let was = s.doc.get(a).unwrap().shape.rect().unwrap();
+    let out = s.execute("effect.perspective", &json!({"horizontal": 60})).unwrap();
+    assert!(out["width"].as_u64().unwrap() < 200);
+    let now = s.doc.get(a).unwrap().shape.rect().unwrap();
+    assert!(now.x < was.x && now.y > was.y, "it moved with the far side: {was:?} → {now:?}");
+    for (id, params) in [
+        ("effect.wavyEdge", json!({"top": true})),
+        ("effect.fadedEdge", json!({})),
+        ("effect.bevel", json!({})),
+        ("effect.pageCurl", json!({"corner": "topLeft"})),
+        ("effect.sharpen", json!({})),
+    ] {
+        let mut s = session();
+        let before = s.doc.base.clone();
+        s.execute(id, &params).unwrap();
+        assert!(!s.doc.base.same_pixels(&before) && (s.doc.width(), s.doc.height()) == (200, 100), "{id}");
+    }
+    assert!(session().execute("effect.pageCurl", &json!({"corner": "middle"})).is_err());
+    let mut s = session();
+    s.execute("effect.reflection", &json!({"height": 50, "gap": 10})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 160));
+}
+
+/// A watermark of words or of a lent picture; capture details from the document or as given.
+#[test]
+fn watermarks_and_capture_details() {
+    let mut s = session();
+    assert!(s.execute("effect.watermark", &json!({})).is_err(), "nothing to make it of");
+    assert!(s.execute("effect.watermark", &json!({"picture": 0})).is_err(), "no picture lent");
+    s.execute("effect.watermark", &json!({"text": "DRAFT", "color": "#FF0000", "opacity": 100, "place": "tiled", "angle": -30})).unwrap();
+    assert!(s.doc.base.pixels().as_chunks::<4>().0.iter().any(|p| p[1] < 200), "drawn");
+    let mut s = session();
+    s.lent = vec![Raster::filled(10, 10, Color::rgb(0, 0, 255)).unwrap()];
+    s.execute("effect.watermark", &json!({"picture": 0, "opacity": 100, "size": 50})).unwrap();
+    assert_eq!(s.doc.base.pixel(100, 50), Some(Color::rgb(0, 0, 255)));
+    assert!(s.execute("effect.watermark", &json!({"picture": 1})).is_err());
+    // Details: what the document knows, or what is given.
+    let mut s = session();
+    s.doc.meta.captured = Some("2026-11-21T14:05:09+01:00".into());
+    s.doc.meta.source = Some("Notepad".into());
+    let out = s.execute("effect.captureDetails", &json!({})).unwrap();
+    assert_eq!(out["text"], "2026-11-21 14:05  ·  Notepad  ·  200 × 100 pixels");
+    let out = s.execute("effect.captureDetails", &json!({"time": false, "program": "A window", "size": false, "place": "below"})).unwrap();
+    assert_eq!(out["text"], "A window");
+    assert!(s.doc.height() > 100, "a strip below");
+    let nothing = json!({"time": false, "program": false, "size": false});
+    assert!(session().execute("effect.captureDetails", &nothing).is_err());
+}
+
+/// Turning, grouping, lining up, spreading out and mirroring annotations, each one undo step.
+#[test]
+fn annotations_are_turned_grouped_lined_up_and_mirrored() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 20}}));
+    let b = add(&mut s, json!({"type": "rect", "rect": {"x": 80, "y": 40, "w": 20, "h": 20}}));
+    let c = add(&mut s, json!({"type": "arrow", "from": {"x": 150, "y": 20}, "to": {"x": 190, "y": 20}}));
+    // Turned: a box keeps its turn, an arrow has its points turned.
+    s.execute("object.rotate", &json!({"ids": [a], "degrees": 30})).unwrap();
+    assert_eq!(s.doc.get(a).unwrap().rotation, 30.0);
+    assert_eq!(s.undo_label(), Some("Rotate"));
+    s.execute("object.rotate", &json!({"ids": [c], "degrees": 90})).unwrap();
+    assert!(
+        matches!(s.doc.get(c).unwrap().shape, Shape::Arrow { from, to, .. } if (from.x - 170.0).abs() < 0.01 && (to.y - from.y - 40.0).abs() < 0.01)
+    );
+    s.execute("object.rotate", &json!({"ids": [a], "angle": 0})).unwrap();
+    assert_eq!(s.doc.get(a).unwrap().rotation, 0.0);
+    // Grouped: selecting one selects both, and they line up as one.
+    let out = s.execute("object.group", &json!({"ids": [a, b]})).unwrap();
+    assert!(out["group"].as_u64().is_some());
+    s.select(vec![b]);
+    assert_eq!(s.selected(), vec![a, b]);
+    s.execute("object.align", &json!({"ids": [a, b, c], "to": "top"})).unwrap();
+    let top = |s: &Session, id| s.doc.get(id).unwrap().bounds().y;
+    assert!((top(&s, a) - top(&s, c)).abs() < 0.01, "the group's top is on the arrow's");
+    assert!(top(&s, b) - top(&s, a) > 25.0, "and the group kept its shape");
+    // One group alone lines up on the picture.
+    s.execute("object.align", &json!({"ids": [a], "to": "right"})).unwrap();
+    assert!((s.doc.bounds_of(&[a, b]).unwrap().right() - 200.0).abs() < 0.01);
+    // A duplicate of a group is a group of its own.
+    let copies = s.execute("edit.duplicate", &json!({"ids": [a, b]})).unwrap();
+    let copies: Vec<ObjectId> = copies["ids"].as_array().unwrap().iter().map(|v| ObjectId(v.as_u64().unwrap())).collect();
+    let g = |s: &Session, id| s.doc.get(id).unwrap().group;
+    assert!(g(&s, copies[0]).is_some() && g(&s, copies[0]) == g(&s, copies[1]) && g(&s, copies[0]) != g(&s, a));
+    s.execute("object.ungroup", &json!({"ids": [a]})).unwrap();
+    assert_eq!((g(&s, a), g(&s, b)), (None, None));
+    // Spread out: needs three.
+    assert!(s.execute("object.distribute", &json!({"ids": [a, b]})).is_err());
+    s.execute("object.distribute", &json!({"ids": [a, b, c], "horizontal": false})).unwrap();
+    // Mirrored across.
+    let before = s.doc.get(b).unwrap().shape.rect().unwrap();
+    s.execute("object.flip", &json!({"ids": [b]})).unwrap();
+    assert_eq!(s.doc.get(b).unwrap().shape.rect().unwrap(), before, "a box alone mirrors onto itself");
+    s.execute("object.rotate", &json!({"ids": [b], "degrees": 20})).unwrap();
+    s.execute("object.flip", &json!({"ids": [b]})).unwrap();
+    assert_eq!(s.doc.get(b).unwrap().rotation, -20.0);
+}
+
+/// Every annotation of a kind selected; old files (with no turns or groups) still open.
+#[test]
+fn every_one_of_a_kind_is_selected_and_old_annotations_still_read() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "arrow", "from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 50}}));
+    add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 40, "h": 20}}));
+    let c = add(&mut s, json!({"type": "arrow", "from": {"x": 60, "y": 1}, "to": {"x": 90, "y": 50}}));
+    s.select(vec![a]);
+    let out = s.execute("edit.selectKind", &json!({})).unwrap();
+    assert_eq!((out["selected"].as_u64(), s.selected()), (Some(2), vec![a, c]));
+    assert!(!s.can_undo() || s.undo_label() != Some("Select All of a Kind"), "selecting is no undo step");
+    s.execute("edit.selectKind", &json!({"kind": "rect"})).unwrap();
+    assert_eq!(s.selected().len(), 1);
+    assert!(s.execute("edit.selectKind", &json!({"kind": "teapot"})).is_err());
+    let old: screengrabcraft_model::Object =
+        serde_json::from_value(json!({"id": 4, "type": "rect", "rect": {"x": 0, "y": 0, "w": 5, "h": 5}})).unwrap();
+    assert_eq!((old.rotation, old.group), (0.0, None));
+    // Written without them when there are none, with them when there are.
+    let v = serde_json::to_value(&old).unwrap();
+    assert!(v.get("rotation").is_none() && v.get("group").is_none());
+    let turned = screengrabcraft_model::Object { rotation: 12.5, group: Some(3), ..old };
+    let v = serde_json::to_value(&turned).unwrap();
+    assert_eq!((v["rotation"].as_f64(), v["group"].as_u64()), (Some(12.5), Some(3)));
+}
+
+/// An ellipse, a freehand outline, the magic wand and an inverted area are moved, deleted and
+/// cropped as their shapes; the eraser rubs out what it passes over.
+#[test]
+fn shaped_areas_the_magic_wand_and_the_eraser() {
+    // White with a blue square in the middle.
+    let blue_square = || {
+        let mut r = Raster::filled(100, 80, Color::WHITE).unwrap();
+        for y in 30..50 {
+            for x in 40..60 {
+                let i = (y * 100 + x) * 4;
+                r.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 255, 255]);
+            }
+        }
+        Session::new(Document::new(r))
+    };
+    let alpha = |s: &Session, x, y| s.doc.base.pixel(x, y).map_or(0, |c| c.a);
+    // An ellipse: its box's corners stay.
+    let mut s = blue_square();
+    s.execute("image.erase", &json!({"x": 10, "y": 10, "w": 40, "h": 30, "shape": "ellipse"})).unwrap();
+    assert_eq!((alpha(&s, 30, 25), alpha(&s, 11, 11)), (0, 255));
+    // The wand takes the blue square, joined to the pixel, and lifts it out as a piece.
+    let mut s = blue_square();
+    let out = s.execute("image.lift", &json!({"shape": "wand", "seed": {"x": 45, "y": 35}, "tolerance": 10})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.doc.get(id).unwrap().shape.rect(), Some(Rect::new(40.0, 30.0, 20.0, 20.0)));
+    assert_eq!((alpha(&s, 45, 35), alpha(&s, 10, 10)), (0, 255));
+    // Inverted: everything but the square goes.
+    let mut s = blue_square();
+    s.execute("image.erase", &json!({"shape": "wand", "seed": {"x": 45, "y": 35}, "invert": true})).unwrap();
+    assert_eq!((alpha(&s, 45, 35), alpha(&s, 10, 10)), (255, 0));
+    // A freehand triangle cropped to: the box round it, see-through outside it.
+    let mut s = blue_square();
+    let tri = json!({"shape": "freehand", "points": [{"x": 0, "y": 0}, {"x": 60, "y": 0}, {"x": 0, "y": 60}]});
+    let out = s.execute("image.crop", &tri).unwrap();
+    assert!(out["width"].as_u64().unwrap() <= 62 && out["height"].as_u64().unwrap() <= 62);
+    assert_eq!((alpha(&s, 5, 5), alpha(&s, 55, 55)), (255, 0));
+    // A colour change kept to an ellipse.
+    let mut s = blue_square();
+    s.execute("effect.invert", &json!({"area": {"x": 0, "y": 0, "w": 100, "h": 80, "shape": "ellipse"}})).unwrap();
+    assert_eq!((s.doc.base.pixel(50, 5), s.doc.base.pixel(1, 1)), (Some(Color::BLACK), Some(Color::WHITE)));
+    // Nonsense changes nothing.
+    let mut s = blue_square();
+    assert!(s.execute("image.erase", &json!({"shape": "teapot", "x": 0, "y": 0, "w": 5, "h": 5})).is_err());
+    assert!(s.execute("image.erase", &json!({"shape": "wand", "seed": {"x": -5, "y": 0}})).is_err());
+    assert!(!s.can_undo());
+    // The eraser: see-through along the stroke, or a colour.
+    let mut s = blue_square();
+    s.execute("image.eraseStroke", &json!({"points": [{"x": 5, "y": 70}, {"x": 95, "y": 70}], "width": 8})).unwrap();
+    assert_eq!((alpha(&s, 50, 70), alpha(&s, 50, 60)), (0, 255));
+    s.execute("image.eraseStroke", &json!({"points": [{"x": 50, "y": 40}], "width": 10, "color": "#FF0000"})).unwrap();
+    assert_eq!(s.doc.base.pixel(50, 40), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(s.undo_label(), Some("Erase"));
+    assert!(s.execute("image.eraseStroke", &json!({"points": [{"x": 500, "y": 500}]})).is_err());
+}
+
+/// Pictures combined into one, or laid out in a template of annotations; one undo step each.
+#[test]
+fn pictures_are_combined_or_laid_out_in_a_template() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 50, "h": 30}}));
+    assert!(s.execute("image.combine", &json!({})).is_err(), "nothing lent to combine with");
+    s.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap(), Raster::filled(40, 140, Color::rgb(0, 255, 0)).unwrap()];
+    let out = s.execute("image.combine", &json!({"layout": "across", "gap": 10, "background": "#000000"})).unwrap();
+    assert_eq!((out["width"].as_u64(), out["height"].as_u64()), (Some(10 + 200 + 10 + 80 + 10 + 40 + 10), Some(160)));
+    // This picture first, centred in its row: its annotations moved with it.
+    assert_eq!((s.doc.base.pixel(15, 35), s.doc.base.pixel(15, 25)), (Some(Color::WHITE), Some(Color::BLACK)));
+    assert_eq!(s.doc.base.pixel(250, 75), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(s.doc.get(a).unwrap().shape.rect().unwrap().min(), Pt::new(20.0, 40.0));
+    assert_eq!(s.undo_label(), Some("Combine Pictures"));
+    s.undo();
+    s.execute("image.combine", &json!({"layout": "grid", "columns": 2})).unwrap();
+    assert!(s.doc.height() > 200);
+    assert!(s.execute("image.combine", &json!({"layout": "sideways"})).is_err());
+    // A template: a page of annotations (the pictures, the title, the steps).
+    let mut s = session();
+    s.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap()];
+    s.execute("image.template", &json!({"title": "How to", "steps": ["Open it", "Click it"]})).unwrap();
+    assert_eq!(s.doc.count(Kind::Image), 2);
+    assert_eq!(s.doc.count(Kind::Step), 2);
+    assert_eq!(s.doc.count(Kind::Text), 3, "the title and two steps");
+    for layout in ["stepsDown", "beforeAfter", "grid"] {
+        let mut t = session();
+        t.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap()];
+        t.execute("image.template", &json!({"layout": layout})).unwrap();
+        assert!(t.doc.count(Kind::Image) == 2, "{layout}");
+    }
+    assert!(session().execute("image.template", &json!({"layout": "beforeAfter"})).is_err(), "before and after needs two");
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100), "undo puts the picture back");
+}
+
+/// A polygon through points clicked one by one, a bent line, a callout with several tails.
+#[test]
+fn polygons_of_points_bent_lines_and_callouts_with_several_tails() {
+    let mut s = session();
+    let id = add(&mut s, json!({"type": "polygon", "points": [{"x": 10, "y": 10}, {"x": 90, "y": 20}, {"x": 50, "y": 80}, {"x": 20, "y": 60}]}));
+    let o = s.doc.get(id).unwrap();
+    let Shape::Polygon { rect, corners, .. } = &o.shape else { panic!("a polygon") };
+    assert_eq!(*rect, Rect::new(10.0, 10.0, 80.0, 70.0));
+    assert_eq!(corners.len(), 4);
+    // It moves and resizes as a box, its corners with it.
+    s.execute("edit.nudge", &json!({"dx": 5, "dy": 0, "ids": [id.0]})).unwrap();
+    let outline = match &s.doc.get(id).unwrap().shape {
+        Shape::Polygon { rect, sides, star, corners } => screengrabcraft_model::object::polygon_outline(*rect, *sides, *star, corners),
+        _ => panic!(),
+    };
+    assert_eq!(outline.first().copied(), Some(Pt::new(15.0, 10.0)));
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "points": [{"x": 1, "y": 1}, {"x": 2, "y": 2}]}})).is_err());
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "points": "x"}})).is_err());
+
+    // A plain line bent, as an arrow is.
+    let line = add(&mut s, json!({"type": "line", "from": {"x": 10, "y": 50}, "to": {"x": 110, "y": 50}, "bend": 0.3}));
+    let Shape::Line { bend, .. } = s.doc.get(line).unwrap().shape else { panic!("a line") };
+    assert!((bend - 0.3).abs() < 1e-6);
+    assert!(s.doc.get(line).unwrap().hit(Pt::new(60.0, 20.0), 2.0), "the bow is where it is hit");
+    s.select(vec![line]);
+    s.execute("object.look", &json!({"options": {"bend": 0.0}})).unwrap();
+    assert!(matches!(s.doc.get(line).unwrap().shape, Shape::Line { bend, .. } if bend == 0.0));
+
+    // A callout given more tails, then one taken away.
+    let c = add(&mut s, json!({"type": "callout", "rect": {"x": 60, "y": 10, "w": 80, "h": 40}, "tail": {"x": 70, "y": 90}, "text": "Hi"}));
+    let out = s.execute("object.addTail", &json!({})).unwrap();
+    assert_eq!(out["tails"], 2);
+    let Shape::Callout { tails, .. } = &s.doc.get(c).unwrap().shape else { panic!() };
+    assert_eq!(tails.as_slice(), &[Pt::new(130.0, 90.0)], "across from the first");
+    s.execute("object.addTail", &json!({"id": c.0, "at": {"x": 190, "y": 30}})).unwrap();
+    assert_eq!(s.doc.get(c).unwrap().handles().iter().filter(|(h, _)| matches!(h, screengrabcraft_model::Handle::TailAt(_))).count(), 2);
+    assert_eq!(s.execute("object.removeTail", &json!({"index": 0})).unwrap()["tails"], 2);
+    assert_eq!(s.execute("object.removeTail", &json!({})).unwrap()["tails"], 1);
+    assert!(s.execute("object.removeTail", &json!({})).is_err(), "the first tail stays");
+    for _ in 0..7 {
+        s.execute("object.addTail", &json!({})).ok();
+    }
+    let Shape::Callout { tails, .. } = &s.doc.get(c).unwrap().shape else { panic!() };
+    assert_eq!(tails.len() + 1, screengrabcraft_model::object::MAX_TAILS);
+    // Not a callout: refused.
+    s.select(vec![line]);
+    assert!(s.execute("object.addTail", &json!({})).is_err());
+}
+
+/// A measurement is a dimension line and its length on a label, grouped, selected, one step.
+#[test]
+fn a_measurement_is_a_line_and_its_length_grouped() {
+    let mut s = session();
+    let out = s.execute("object.measure", &json!({"from": {"x": 20, "y": 60}, "to": {"x": 140, "y": 60}})).unwrap();
+    assert_eq!(out["text"], "120 px");
+    assert_eq!(out["length"].as_f64(), Some(120.0));
+    assert_eq!(s.doc.objects.len(), 2);
+    let (line, label) = (&s.doc.objects[0], &s.doc.objects[1]);
+    assert!(matches!(line.shape, Shape::Arrow { heads: screengrabcraft_model::ArrowHeads::Both, head: screengrabcraft_model::HeadShape::Bar, .. }));
+    assert_eq!(label.shape.text(), Some("120 px"));
+    assert!(line.group.is_some() && line.group == label.group, "grouped");
+    let b = label.shape.rect().unwrap();
+    assert!(b.bottom() < 60.0 && (b.center().x - 80.0).abs() < 1.0, "above the middle of the line: {b:?}");
+    assert_eq!(s.selected().len(), 2);
+    assert_eq!(s.undo_label(), Some("Measure"));
+    s.undo();
+    assert!(s.doc.objects.is_empty(), "one step");
+    for bad in [
+        json!({}),
+        json!({"from": {"x": 1, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 1, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": "far", "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 1e9, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 1}, "color": "red"}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("object.measure", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+/// A measurement's label goes on the other side of its line when it would be off the picture.
+#[test]
+fn a_measurement_label_stays_on_the_picture() {
+    let mut s = session();
+    s.execute("object.measure", &json!({"from": {"x": 4, "y": 20}, "to": {"x": 4, "y": 90}})).unwrap();
+    let label = s.doc.objects.iter().find_map(|o| o.shape.text().and(o.shape.rect())).unwrap();
+    assert!(label.x > 4.0, "to the right of a line at the left edge: {label:?}");
+    assert!(s.doc.bounds().encloses(label));
 }

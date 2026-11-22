@@ -5,23 +5,36 @@
 //! through [`services::Services`]; this crate itself builds for the browser.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod arrange;
 pub mod autosave;
 pub mod background;
+pub mod batch;
 pub mod canvas;
+pub mod compose;
+pub mod details;
 pub mod dialogs;
+pub mod edit_text;
 pub mod editor;
 pub mod effects;
 pub mod eyedropper;
 pub mod grab_text;
+pub mod guide;
+pub mod guides;
 pub mod icons;
 pub mod overlay;
 pub mod playback;
 pub mod props;
+pub mod qr;
 pub mod quick;
 pub mod recorder;
+pub mod selection;
 pub mod services;
+pub mod simplify;
+pub mod stamps;
 pub mod strip;
+pub mod tags;
 pub mod theme;
+pub mod toolbar;
 pub mod transcribe;
 pub mod video;
 pub mod widgets;
@@ -66,7 +79,11 @@ pub fn setup(ctx: &egui::Context, theme: screengrabcraft_model::Theme) {
 }
 
 #[cfg(test)]
+mod picture_tests;
+#[cfg(test)]
 mod quick_tests;
+#[cfg(test)]
+mod shapes_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

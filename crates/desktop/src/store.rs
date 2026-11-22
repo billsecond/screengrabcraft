@@ -115,6 +115,97 @@ fn merged(base: &EditorSettings, ours: &EditorSettings, now: &EditorSettings) ->
     serde_json::from_value(n).unwrap_or_else(|_| ours.clone())
 }
 
+// ---- what the owner keeps to use again (the video editor's templates and themes) ----
+
+/// The most files of a kind read, and the largest.
+const MAX_KEPT_FILES: usize = 200;
+const MAX_KEPT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// A name as a kept file's: letters, digits, spaces, dashes and underscores (anything else made
+/// `_`), at most 80 of them; never empty.
+pub fn kept_file_name(name: &str) -> String {
+    let s: String = name.trim().chars().take(80).map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' }).collect();
+    let s = s.trim().to_string();
+    // Names Windows keeps for its devices (`CON`, `NUL`, `COM1` …) aren't a file's.
+    let lower = s.to_ascii_lowercase();
+    let device = ["con", "prn", "aux", "nul"].contains(&lower.as_str())
+        || ((lower.starts_with("com") || lower.starts_with("lpt")) && lower.len() == 4 && lower.ends_with(|c: char| c.is_ascii_digit()));
+    match () {
+        _ if s.is_empty() => "unnamed".to_string(),
+        _ if device => format!("{s}_"),
+        _ => s,
+    }
+}
+
+/// The folder of a kind kept, in `dir` (a name of the program's, never a path).
+fn kept_dir(dir: &Path, folder: &str) -> Option<PathBuf> {
+    (!folder.is_empty() && folder.chars().all(|c| c.is_ascii_lowercase() || c == '-')).then(|| dir.join(folder))
+}
+
+/// The files kept in `folder` of `dir`: each one's name (its file's, without `.json`) and what's
+/// in it, in the order of their names.
+pub fn kept_in(dir: &Path, folder: &str) -> Vec<(String, Vec<u8>)> {
+    let Some(d) = kept_dir(dir, folder) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&d) else { return Vec::new() };
+    let mut out: Vec<(String, Vec<u8>)> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+        .filter(|e| e.metadata().is_ok_and(|m| m.is_file() && m.len() <= MAX_KEPT_BYTES))
+        .take(MAX_KEPT_FILES)
+        .filter_map(|e| {
+            let name = e.path().file_stem()?.to_string_lossy().to_string();
+            Some((name, std::fs::read(e.path()).ok()?))
+        })
+        .collect();
+    out.sort_by_key(|a| a.0.to_lowercase());
+    out
+}
+
+/// Keeps `bytes` in `folder` of `dir` under `name` (written whole, by way of a temporary file).
+pub fn keep_in(dir: &Path, folder: &str, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let d = kept_dir(dir, folder).ok_or("that isn't a folder of the program's")?;
+    if bytes.len() as u64 > MAX_KEPT_BYTES {
+        return Err("it's too large to keep".to_string());
+    }
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    write_atomic(&d.join(format!("{}.json", kept_file_name(name))), bytes).map_err(|e| e.to_string())
+}
+
+/// Lets go of the file kept in `folder` of `dir` under `name` (one that isn't there is let be).
+pub fn forget_in(dir: &Path, folder: &str, name: &str) -> Result<(), String> {
+    let d = kept_dir(dir, folder).ok_or("that isn't a folder of the program's")?;
+    match std::fs::remove_file(d.join(format!("{}.json", kept_file_name(name)))) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// [`kept_in`] the settings folder (nothing in a run that keeps no settings).
+pub fn kept(folder: &str) -> Vec<(String, Vec<u8>)> {
+    if paths::no_prefs() {
+        return Vec::new();
+    }
+    paths::settings_dir().map(|d| kept_in(&d, folder)).unwrap_or_default()
+}
+
+/// [`keep_in`] the settings folder.
+pub fn keep(folder: &str, name: &str, bytes: &[u8]) -> Result<(), String> {
+    if paths::no_prefs() {
+        return Err("this run keeps no settings".to_string());
+    }
+    let dir = paths::ensure_settings_dir().ok_or("there is no settings folder")?;
+    keep_in(&dir, folder, name, bytes)
+}
+
+/// [`forget_in`] the settings folder.
+pub fn forget(folder: &str, name: &str) -> Result<(), String> {
+    if paths::no_prefs() {
+        return Err("this run keeps no settings".to_string());
+    }
+    let dir = paths::settings_dir().ok_or("there is no settings folder")?;
+    forget_in(&dir, folder, name)
+}
+
 /// When the settings file was last changed (the editor reloads the captures folder from it).
 pub fn settings_modified() -> Option<std::time::SystemTime> {
     let path = paths::settings_dir()?.join(SETTINGS);
@@ -157,6 +248,28 @@ mod tests {
         assert_eq!(std::fs::read(&jpg).unwrap(), b"jpeg 39");
         let left = std::fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().contains(".tmp-")).count();
         assert_eq!(left, 0, "no temporary files left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn templates_and_themes_are_kept_in_a_folder_of_their_own_and_let_go() {
+        let dir = std::env::temp_dir().join(format!("screengrabcraft-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(kept_in(&dir, "video-templates").is_empty());
+        keep_in(&dir, "video-templates", "My intro", b"{\"a\": 1}").unwrap();
+        keep_in(&dir, "video-templates", "a/b\\..\\c:d", b"2").unwrap();
+        keep_in(&dir, "video-templates", "My intro", b"3").unwrap();
+        let k = kept_in(&dir, "video-templates");
+        let names: Vec<&str> = k.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["a_b____c_d", "My intro"], "kept under safe names, inside the folder");
+        assert_eq!(k[1].1, b"3", "the same name replaced");
+        assert!(keep_in(&dir, "../elsewhere", "x", b"1").is_err());
+        assert!(kept_in(&dir, "..").is_empty());
+        assert_eq!(kept_file_name("CON"), "CON_");
+        assert_eq!(kept_file_name("  "), "unnamed");
+        forget_in(&dir, "video-templates", "My intro").unwrap();
+        forget_in(&dir, "video-templates", "Not there").unwrap();
+        assert_eq!(kept_in(&dir, "video-templates").len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

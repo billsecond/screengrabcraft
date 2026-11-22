@@ -9,7 +9,7 @@
 //! here turns a device on: the microphone's meter is the service's, and only when asked.
 
 use egui::{Align, Align2, Color32, FontId, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
-use screengrabcraft_model::settings::{FIXED_MAX, FIXED_MIN, FIXED_SIZES, VideoOptions};
+use screengrabcraft_model::settings::{CAMERA_BORDER_MAX, FIXED_MAX, FIXED_MIN, FIXED_SIZES, VideoOptions};
 use screengrabcraft_model::{MonitorChoice, RecordArea, RecorderOptions};
 
 use crate::icons::{self, Icon};
@@ -454,8 +454,16 @@ fn camera_card(ui: &mut Ui, on: bool, o: &mut VideoOptions, d: &RecorderDevices,
             let f = (rect.width() / s.x.max(1.0)).min(rect.height() / s.y.max(1.0));
             let shown = Rect::from_center_size(rect.center(), s * f);
             p.rect_filled(rect, 8.0, Color32::BLACK);
-            let resp = ui.put(shown, egui::Image::new((texture.id(), s * f)).corner_radius(8));
+            // As it will be in the video: mirrored, and its border.
+            let uv =
+                if o.camera_mirror { Rect::from_min_max(pos2(1.0, 0.0), pos2(0.0, 1.0)) } else { Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)) };
+            let resp = ui.put(shown, egui::Image::new((texture.id(), s * f)).uv(uv).corner_radius(8));
             resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Image, true, "The camera's picture"));
+            if o.camera_border > 0 {
+                let c = o.camera_border_color;
+                let width = (f32::from(o.camera_border.min(CAMERA_BORDER_MAX)) / 100.0 * shown.height()).max(1.0);
+                ui.painter().rect_stroke(shown, 8.0, Stroke::new(width, Color32::from_rgb(c.r, c.g, c.b)), StrokeKind::Inside);
+            }
         }
         (true, CameraPreview::Failed(why)) => {
             p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
@@ -481,6 +489,24 @@ fn camera_card(ui: &mut Ui, on: bool, o: &mut VideoOptions, d: &RecorderDevices,
     egui::ComboBox::from_id_salt("recorder-camera").width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
         for (i, name) in list {
             ui.selectable_value(&mut o.camera_index, Some(*i), name);
+        }
+    });
+    // How it looks in the video (the video editor can change it after).
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut o.camera_mirror, "Mirror").on_hover_text("The camera flipped left to right, as you see yourself in a mirror");
+        let mut border = o.camera_border > 0;
+        if ui.checkbox(&mut border, "Border").on_hover_text("A line round the camera in the video").changed() {
+            o.camera_border = if border { 3 } else { 0 };
+        }
+        if border {
+            let c = o.camera_border_color;
+            let mut c32 = Color32::from_rgb(c.r, c.g, c.b);
+            let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, "The border's colour"));
+            if r.on_hover_text("The border's colour").changed() {
+                o.camera_border_color = screengrabcraft_model::Color::rgb(c32.r(), c32.g(), c32.b());
+            }
         }
     });
 }
@@ -1061,6 +1087,34 @@ mod tests {
         press(&mut h, "Camera");
         assert!(!h.state().settings.production.camera);
         assert!(h.query_by_label("The camera's picture").is_none());
+    }
+
+    #[test]
+    fn the_camera_is_mirrored_and_bordered_as_chosen() {
+        let mut s = Settings::default();
+        s.production.camera = true;
+        let mut h = harness(s, devices());
+        // Left half light, right half dark: the picture shows which way round it is.
+        let half: Vec<egui::Color32> =
+            (0..64 * 48).map(|i| if i % 64 < 32 { egui::Color32::from_gray(230) } else { egui::Color32::from_gray(40) }).collect();
+        let texture = h.ctx.load_texture("camera-test", egui::ColorImage::new([64, 48], half), egui::TextureOptions::LINEAR);
+        h.state_mut().camera = CameraPreview::Live(texture);
+        h.run_steps(2);
+        assert!(h.query_by_label("The border's colour").is_none(), "no border: no colour to choose");
+        press(&mut h, "Mirror");
+        press(&mut h, "Border");
+        let o = &h.state().settings.production;
+        assert!(o.camera_mirror);
+        assert_eq!(o.camera_border, 3);
+        assert_eq!(o.camera_border_color, screengrabcraft_model::Color::WHITE);
+        h.get_by_label("The border's colour");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recorder-camera-look.png"));
+        }
+        press(&mut h, "Border");
+        assert_eq!(h.state().settings.production.camera_border, 0);
     }
 
     #[test]

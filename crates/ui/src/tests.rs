@@ -566,7 +566,7 @@ fn a_snapped_line_stops_at_the_edge_on_its_angle() {
     let (a, b) = (at(&h, 200.0, 150.0), at(&h, 470.0, 400.0));
     shift_drag(&mut h, a, b);
     let ed = h.state();
-    let Some(Shape::Line { from, to }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
+    let Some(Shape::Line { from, to, .. }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
     assert!(picture(ed).contains(to), "{to:?}");
     assert!(((to.x - from.x).abs() - (to.y - from.y).abs()).abs() < 0.5, "still at 45 degrees: {from:?} to {to:?}");
 }
@@ -816,7 +816,7 @@ fn a_thicker_line_or_bigger_badge_stays_on_the_picture() {
     let mut ed = editor();
     let style = Kind::Step.default_style();
     let center = screengrabcraft_model::Pt::new(385.0, 150.0);
-    let id = ed.session.doc.add(Shape::Step { center, number: 1 }, style).unwrap();
+    let id = ed.session.doc.add(Shape::step(center, 1), style).unwrap();
     ed.session.doc.bring_inside(id);
     ed.session.select(vec![id]);
     let bigger = screengrabcraft_model::Style { font_size: 60.0, ..style };
@@ -875,6 +875,15 @@ struct DiskState {
     fail_trash: bool,
     made: u32,
     thumbs_asked: Vec<(String, u64)>,
+    /// The captures' tags, favourites and programs, as the host keeps them.
+    library: screengrabcraft_model::Library,
+    /// Where the next save dialog answers to save (else it's cancelled), what it was asked to
+    /// save, and its answer, waiting to be polled.
+    save_answer: Option<String>,
+    asked_save: Vec<String>,
+    dialog: Option<crate::services::DialogResult>,
+    /// The captures handed to a program the owner chose (Open With).
+    opened_with: Vec<String>,
 }
 
 /// A host with a fake disk, shared with the test.
@@ -917,6 +926,28 @@ impl Disk {
 }
 
 impl Services for Disk {
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        self.0.borrow_mut().opened_with.push(path.to_string());
+        Ok(())
+    }
+
+    fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
+        let mut s = self.0.borrow_mut();
+        s.asked_save.push(suggested_name.to_string());
+        s.dialog = Some(match s.save_answer.take() {
+            Some(p) => crate::services::DialogResult::SaveTo(p),
+            None => crate::services::DialogResult::Cancelled,
+        });
+    }
+
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.0.borrow_mut().dialog.take()
+    }
+
     fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
         self.get(path).ok_or_else(|| "no such file".to_string())
     }
@@ -976,6 +1007,23 @@ impl Services for Disk {
     fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {
         self.0.borrow_mut().thumbs_asked.push((path.to_string(), modified));
         Raster::filled(20, 10, Color::rgb(0, 0, 255)).ok()
+    }
+
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        let s = self.0.borrow();
+        let mut out = screengrabcraft_model::Library::default();
+        for p in paths {
+            out.set(p, s.library.get(p));
+        }
+        out
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_engine::library::run(&mut self.0.borrow_mut().library, id, params).map_err(|e| e.to_string())
+    }
+
+    fn file_exists(&self, path: &str) -> bool {
+        self.0.borrow().files.contains_key(path)
     }
 }
 
@@ -1124,7 +1172,13 @@ fn a_side_file_from_before_still_opens_and_the_picture_is_its_original() {
     // Saved by an older version: no original in it, and the picture beside it never rewritten.
     let mut doc = Document::new(Raster::filled(200, 100, Color::WHITE).unwrap());
     doc.add(
-        Shape::Arrow { from: screengrabcraft_model::Pt::new(5.0, 5.0), to: screengrabcraft_model::Pt::new(50.0, 50.0), heads: Default::default() },
+        Shape::Arrow {
+            from: screengrabcraft_model::Pt::new(5.0, 5.0),
+            to: screengrabcraft_model::Pt::new(50.0, 50.0),
+            heads: Default::default(),
+            bend: 0.0,
+            head: Default::default(),
+        },
         Kind::Arrow.default_style(),
     )
     .unwrap();
@@ -1623,7 +1677,10 @@ fn the_file_menu_has_room_between_its_items() {
 
 #[test]
 fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_another() {
-    let mut h = harness(editor());
+    // Where it is put exactly, not snapped to the picture's middle on the way.
+    let mut ed = editor();
+    ed.settings.no_snap = true;
+    let mut h = harness(ed);
     h.run_steps(2);
     h.state_mut().set_tool(Tool::Draw(Kind::Stamp));
     let p = at(&h, 150.0, 120.0);
@@ -1819,6 +1876,7 @@ fn the_eyedropper_takes_a_colour_from_the_picture_for_the_selection() {
                 tail: screengrabcraft_model::Pt::new(40.0, 130.0),
                 text: "Hi".into(),
                 form: screengrabcraft_model::CalloutForm::Rounded,
+                tails: Vec::new(),
             },
             Kind::Callout.default_style(),
         )
@@ -1964,13 +2022,442 @@ fn all_captures_lists_every_capture_and_opens_the_one_picked() {
     assert_eq!(h.get_all_by_label("Capture 000.png").count(), 2, "in the strip and in the menu");
     // A search narrows it down; the oldest is there too.
     crate::quick_tests::shot(&mut h, "all-captures-grid");
-    h.state_mut().capture_search = "117".into();
+    h.state_mut().capture_filter.search = "117".into();
     h.run_steps(3);
     crate::quick_tests::shot(&mut h, "all-captures");
     let item = h.get_all_by_label("Capture 117.png").last().map(|n| n.rect()).expect("in the menu");
     click_at(&mut h, item.center());
     h.run_steps(4);
     assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 117.png"));
+}
+
+// ---- tags, favourites and the program a capture was taken from ----
+
+/// Six captures: two from Notes (the first a favourite), one from a browser, the second and the
+/// third tagged.
+fn library_disk() -> Disk {
+    use screengrabcraft_model::CaptureInfo;
+    let disk = many_captures(6);
+    let info = |program: &str, tags: &[&str], favorite: bool| CaptureInfo {
+        program: program.into(),
+        title: format!("{program} window"),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        favorite,
+        ..CaptureInfo::default()
+    };
+    let mut s = disk.0.borrow_mut();
+    s.library.set("captures/Capture 000.png", info("Notes", &[], true));
+    s.library.set("captures/Capture 001.png", info("Browser", &["receipts"], false));
+    s.library.set("captures/Capture 002.png", info("Notes", &["receipts", "plans"], false));
+    drop(s);
+    disk
+}
+
+/// The captures All captures shows (each is in the strip as well).
+fn in_all_captures(h: &Harness<'_, Editor>) -> Vec<usize> {
+    (0..6).filter(|i| h.get_all_by_label(&format!("Capture {i:03}.png")).count() == 2).collect()
+}
+
+fn open_all_captures(h: &mut Harness<'_, Editor>) {
+    h.get_by_label("All captures (6)").click();
+    h.run_steps(3);
+}
+
+#[test]
+fn all_captures_filters_by_favourites_program_and_tag_and_searches_them() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5]);
+    crate::quick_tests::shot(&mut h, "all-captures-filters");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0], "favourites only");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 2], "taken from Notes");
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [2], "from Notes and tagged receipts");
+    crate::quick_tests::shot(&mut h, "all-captures-filtered");
+    h.get_by_label("Notes (2)").click();
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5], "every filter off again");
+    // The search goes through the program, the window's title and the tags too.
+    for (search, shown) in [("browser", vec![1]), ("plans", vec![2]), ("notes window", vec![0, 2]), ("005", vec![5])] {
+        h.state_mut().capture_filter.search = search.into();
+        h.run_steps(3);
+        assert_eq!(in_all_captures(&h), shown, "{search}");
+    }
+}
+
+#[test]
+fn a_star_makes_a_favourite_and_its_tags_are_added_and_taken_off_in_all_captures() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    let path = "captures/Capture 003.png";
+    h.get_by_label("Add Capture 003.png to Favorites").click();
+    h.run_steps(3);
+    assert!(disk.0.borrow().library.get(path).favorite, "kept by the host");
+    assert!(h.state().library.get(path).favorite, "and shown");
+    h.get_by_label("Remove Capture 003.png from Favorites");
+    // Its tags: one typed, one another capture has.
+    h.get_by_label("Tags of Capture 003.png").click();
+    h.run_steps(3);
+    h.state_mut().new_tag = "  bug  report ".into();
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    h.get_by_label("+ receipts").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["bug report", "receipts"]);
+    crate::quick_tests::shot(&mut h, "all-captures-tags");
+    h.get_by_label("bug report  \u{00d7}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["receipts"]);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 2, "the row's heading and the button");
+    h.get_by_label("Done").click();
+    h.run_steps(3);
+    assert_eq!(h.state().tagging, None);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 1, "the row is gone");
+    // The capture wasn't opened by any of it.
+    assert_eq!(h.state().picture_path, None);
+}
+
+#[test]
+fn a_right_click_in_the_strip_makes_a_favourite_and_tags_it() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    crate::quick_tests::shot(&mut h, "strip-menu");
+    h.get_by_label("Add to Favorites").click();
+    h.run_steps(3);
+    let path = "captures/Capture 004.png";
+    assert!(disk.0.borrow().library.get(path).favorite);
+    right_click(&mut h, thumb.center());
+    h.get_by_label("plans").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["plans"]);
+}
+
+/// The captures in the strip, left to right (each is named by its thumbnail).
+fn strip_order(h: &Harness<'_, Editor>) -> Vec<usize> {
+    let mut at: Vec<(f32, usize)> = (0..6).map(|i| (h.get_by_label(&format!("Capture {i:03}.png")).rect().min.x, i)).collect();
+    at.sort_by(|a, b| a.0.total_cmp(&b.0));
+    at.into_iter().map(|(_, i)| i).collect()
+}
+
+#[test]
+fn a_capture_pinned_in_the_strip_stays_first_and_is_remembered() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [0, 1, 2, 3, 4, 5]);
+    for name in ["Capture 004.png", "Capture 002.png"] {
+        let thumb = h.get_by_label(name).rect();
+        right_click(&mut h, thumb.center());
+        h.get_by_label("Pin to the Front").click();
+        h.run_steps(3);
+    }
+    assert!(disk.0.borrow().library.get("captures/Capture 004.png").pinned, "kept by the host");
+    // The pinned first (newest first among them, as the rest), then the others.
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    assert_eq!(h.state().toast_text(), Some("Pinned at the front of the strip"));
+    crate::quick_tests::shot(&mut h, "strip-pinned");
+    // Remembered: a new editor on the same captures has them first too.
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    // Unpinned, it goes back among the others.
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    h.get_by_label("Unpin from the Front").click();
+    h.run_steps(3);
+    assert!(!disk.0.borrow().library.get("captures/Capture 004.png").pinned);
+    assert_eq!(strip_order(&h), [2, 0, 1, 3, 4, 5]);
+}
+
+#[test]
+fn a_capture_deleted_from_the_strip_leaves_the_library_too() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    delete_from_strip(&mut h, "Capture 002.png");
+    assert!(disk.0.borrow().library.get("captures/Capture 002.png").is_empty());
+    assert!(!disk.0.borrow().library.get("captures/Capture 001.png").is_empty(), "the others stay");
+}
+
+// ---- Print and Batch Changes ----
+
+/// A host with a printer: what it was asked to print.
+#[derive(Clone, Default)]
+struct Printer(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Printer {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_print(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn print(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+fn file_menu_item(h: &mut Harness<'_, Editor>, item: &str) {
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    h.get_by_label_contains(item).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn print_sends_the_picture_as_shown_and_is_greyed_out_where_there_is_no_printing() {
+    let printer = Printer::default();
+    let mut ed = Editor::new(Box::new(printer.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Print\u{2026}");
+    assert_eq!(printer.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // Ctrl+P too.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert_eq!(printer.0.borrow().len(), 2);
+    // No printing here: greyed out, and the key says why.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Print\u{2026}")).is_disabled());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("Printing needs")), "{:?}", h.state().toast_text());
+}
+
+/// A host with a system window for choosing a program: the pictures handed to it.
+#[derive(Clone, Default)]
+struct Opener(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Opener {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn open_with_hands_the_picture_as_shown_to_a_program_and_is_greyed_out_where_it_cant() {
+    let opener = Opener::default();
+    let mut ed = Editor::new(Box::new(opener.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Open With\u{2026}");
+    assert_eq!(opener.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // No window for it here: greyed out.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Open With\u{2026}")).is_disabled());
+}
+
+#[test]
+fn a_capture_in_the_strip_is_opened_with_a_program_from_its_menu() {
+    let disk = many_captures(3);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 001.png").rect();
+    right_click(&mut h, thumb.center());
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/strip-open-with.png"));
+    }
+    h.get_by_label("Open With\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().opened_with, vec!["captures/Capture 001.png".to_string()]);
+}
+
+fn decoded(disk: &Disk, path: &str) -> Raster {
+    screengrabcraft_render::decode(&disk.get(path).unwrap_or_else(|| panic!("{path} was not written"))).unwrap()
+}
+
+#[test]
+fn batch_changes_resize_and_grey_every_picture_beside_it_and_say_which_could_not_be() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let originals: Vec<Vec<u8>> = (0..3).map(|i| disk.get(&format!("captures/Capture {i:03}.png")).unwrap()).collect();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    file_menu_item(&mut h, "Batch Changes\u{2026}");
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    for change in ["Resize", "Grayscale"] {
+        h.get_by_label("Add a Change").click();
+        h.run_steps(3);
+        h.get_by_label(change).click();
+        h.run_steps(3);
+    }
+    if let Some(b) = h.state_mut().batch.as_mut() {
+        b.pattern = "{name} small".into();
+        b.format = Some(ImageFormat::Png);
+    }
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "batch-changes");
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    crate::quick_tests::shot(&mut h, "batch-done");
+    for i in 0..3 {
+        let out = decoded(&disk, &format!("captures/Capture {i:03} small.png"));
+        assert_eq!((out.width(), out.height()), (4, 3), "half of 8x6");
+        assert_eq!(disk.get(&format!("captures/Capture {i:03}.png")).as_ref(), originals.get(i), "the original stays as it was");
+    }
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done);
+    assert_eq!(progress.written.len(), 3);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Changed 3; 1 couldn't be"));
+    // Again: new names, nothing written over.
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.run_steps(2);
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    assert!(disk.get("captures/Capture 000 small (2).png").is_some());
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().batch.is_none());
+}
+
+#[test]
+fn all_captures_hands_the_pictures_shown_to_batch_changes() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    h.get_by_label("Batch Change These (2)\u{2026}").click();
+    h.run_steps(3);
+    let files = h.state().batch.as_ref().map(|b| b.files.clone()).unwrap_or_default();
+    assert_eq!(files.len(), 2);
+    assert!(files.contains(&"captures/Capture 000.png".to_string()) && files.contains(&"captures/Capture 002.png".to_string()));
+}
+
+/// How many pages a PDF has, as its page tree says.
+fn pdf_pages(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("%PDF-1.4") && text.trim_end().ends_with("%%EOF"), "a PDF");
+    text.split("/Type /Pages").nth(1).and_then(|s| s.split("/Count ").nth(1)).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap()
+}
+
+#[test]
+fn batch_changes_make_one_pdf_a_page_each_saved_where_asked() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    // One PDF needs no change; the name pattern isn't asked.
+    h.state_mut().batch.as_mut().unwrap().format = Some(ImageFormat::Pdf);
+    h.run_steps(3);
+    assert!(h.query_by_label("Name").is_none());
+    crate::quick_tests::shot(&mut h, "batch-pdf");
+    // Asked where: cancelled, nothing is made.
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(6);
+    assert_eq!(disk.0.borrow().asked_save, ["Captures.pdf"]);
+    assert!(h.state().batch.as_ref().is_some_and(|b| b.progress.is_none() && !b.asking));
+    // Answered: a page for each picture that could be read, in order, there.
+    disk.0.borrow_mut().save_answer = Some("exports/Week".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let pdf = disk.get("exports/Week.pdf").expect("the PDF is written where asked, with its extension");
+    assert_eq!(pdf_pages(&pdf), 3);
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done && progress.pdf.is_none());
+    assert_eq!(progress.written, ["exports/Week.pdf"]);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Made a PDF of 3 pages: Week.pdf"));
+    crate::quick_tests::shot(&mut h, "batch-pdf-done");
+    // With a change first: each page is changed (half of 8x6 at 96 pixels to the inch).
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.get_by_label("Add a Change").click();
+    h.run_steps(3);
+    h.get_by_label("Resize").click();
+    h.run_steps(3);
+    disk.0.borrow_mut().save_answer = Some("exports/Small.pdf".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let small = String::from_utf8_lossy(&disk.get("exports/Small.pdf").unwrap()).to_string();
+    assert!(small.contains("/MediaBox [0 0 3.00 2.25]"), "{}", &small[..small.len().min(400)]);
+}
+
+#[test]
+fn all_captures_makes_a_pdf_of_the_pictures_shown_or_those_chosen() {
+    let disk = library_disk();
+    // Written again: the newest.
+    disk.put("captures/Capture 004.png", png(8, 6, Color::WHITE));
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    // Ctrl+click chooses (the tile in All captures, the larger of its two).
+    let tile = |h: &Harness<'_, Editor>, name: &str| {
+        let all: Vec<egui::Rect> = h.get_all_by_label(name).map(|n| n.rect()).collect();
+        all.into_iter().max_by(|a, b| a.width().total_cmp(&b.width())).unwrap()
+    };
+    for name in ["Capture 004.png", "Capture 001.png"] {
+        let at = tile(&h, name).center();
+        h.hover_at(at);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::COMMAND });
+        h.run_steps(3);
+    }
+    assert_eq!(h.state().chosen_captures, ["captures/Capture 004.png", "captures/Capture 001.png"]);
+    assert!(h.state().picture_path.is_none(), "chosen, not opened");
+    crate::quick_tests::shot(&mut h, "all-captures-chosen");
+    h.get_by_label("PDF of Chosen (2)\u{2026}").click();
+    h.run_steps(3);
+    let b = h.state().batch.clone().unwrap();
+    assert!(b.makes_pdf());
+    // Oldest first (Capture 004 was written last here).
+    assert_eq!(b.files, ["captures/Capture 001.png", "captures/Capture 004.png"]);
+    // None chosen: every picture shown.
+    h.state_mut().batch = None;
+    h.state_mut().chosen_captures.clear();
+    h.run_steps(2);
+    open_all_captures(&mut h);
+    h.get_by_label("PDF of These (6)\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(h.state().batch.as_ref().map(|b| b.files.len()), Some(6));
 }
 
 // ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----
@@ -2506,4 +2993,262 @@ fn cut_out_takes_the_strip_dragged_across_out_and_joins_the_rest() {
     let p = at(&h, 50.0, 50.0);
     click_at(&mut h, p);
     assert_eq!(h.state().session.doc.width(), 400);
+}
+
+/// A box is turned by the round handle above it; a turned box is resized along its own sides;
+/// two grouped with Ctrl+G are selected and moved as one; the right-click menu arranges them.
+#[test]
+fn a_box_is_turned_by_its_handle_and_a_group_moves_as_one() {
+    use screengrabcraft_model::{ObjectId, Pt};
+    let mut h = harness(editor());
+    h.run_steps(4);
+    let add = |h: &mut Harness<'_, Editor>, x: f32, colour: &str| {
+        let obj = serde_json::json!({"type": "rect", "rect": {"x": x, "y": 100, "w": 120, "h": 60}, "style": {"fill": colour, "shadow": false}});
+        let out = h.state_mut().session.execute("object.add", &serde_json::json!({ "object": obj })).unwrap();
+        ObjectId(out["id"].as_u64().unwrap())
+    };
+    let a = add(&mut h, 40.0, "#1E88E5");
+    h.state_mut().set_tool(Tool::Select);
+    h.state_mut().session.select(vec![a]);
+    h.run_steps(2);
+    let (pivot, knob) = h.state().turn_handle().unwrap();
+    assert_eq!(pivot, Pt::new(100.0, 130.0));
+    assert!((knob.x - 100.0).abs() < 0.01 && knob.y < 100.0, "{knob:?}");
+    // Round to the right of its middle: a quarter turn, the way a clock goes.
+    let (from, to) = (h.state().view.to_screen(knob), at(&h, 200.0, 130.0));
+    drag(&mut h, from, to);
+    let turned = h.state().session.doc.get(a).unwrap().rotation;
+    assert!((turned - 90.0).abs() < 2.0, "{turned}");
+    assert_eq!(h.state().session.undo_label(), Some("Rotate"));
+    crate::quick_tests::shot(&mut h, "turned-box");
+    // Its corner handle is where the turned corner shows, and pulls along the box's own side.
+    let (_, corner) =
+        h.state().session.doc.get(a).unwrap().handles().into_iter().find(|(k, _)| *k == screengrabcraft_model::Handle::BottomRight).unwrap();
+    let c = h.state().view.to_screen(corner);
+    assert!(h.state().handle_at(c).is_some_and(|(_, k)| k == screengrabcraft_model::Handle::BottomRight));
+    // Shift snaps the turn to steps of 15°.
+    h.state_mut().session.execute("object.rotate", &serde_json::json!({"angle": 0})).unwrap();
+    // A second box; both selected, grouped by Ctrl+G.
+    let b = add(&mut h, 220.0, "#43A047");
+    h.state_mut().session.select(vec![a, b]);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::G);
+    h.run_steps(3);
+    let g = h.state().session.doc.get(a).unwrap().group;
+    assert!(g.is_some() && h.state().session.doc.get(b).unwrap().group == g, "grouped");
+    // A click on one selects both, and a drag moves both.
+    let p = at(&h, 270.0, 130.0);
+    let away = at(&h, 380.0, 280.0);
+    crate::tests::click_at(&mut h, away);
+    assert!(h.state().session.selected().is_empty());
+    crate::tests::click_at(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![a, b]);
+    let left = |h: &Harness<'_, Editor>, id| h.state().session.doc.get(id).unwrap().shape.rect().unwrap().x;
+    let down = at(&h, 270.0, 200.0);
+    drag(&mut h, p, down);
+    assert_eq!((left(&h, a), left(&h, b)), (40.0, 220.0), "moved down together");
+    assert!(h.state().session.doc.get(a).unwrap().shape.rect().unwrap().y > 150.0);
+    // The group has a turning handle too.
+    assert!(h.state().turn_handle().is_some());
+    crate::quick_tests::shot(&mut h, "group-selected");
+    // The right-click menu arranges them.
+    let on = at(&h, 270.0, 200.0);
+    right_click(&mut h, on);
+    crate::quick_tests::shot(&mut h, "arrange-right-click");
+    let sub = h.get_by_label_contains("Rotate and Flip").rect().center();
+    h.hover_at(sub);
+    h.run_steps(3);
+    h.get_by_label_contains("Rotate and Flip").click();
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "arrange-menu");
+    h.get_by_label("Flip Across").click();
+    h.run_steps(3);
+    assert_eq!((left(&h, a), left(&h, b)), (220.0, 40.0), "mirrored round their middle");
+    assert_eq!(h.state().session.undo_label(), Some("Flip Annotations"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::G);
+    h.run_steps(3);
+    assert_eq!(h.state().session.doc.get(a).unwrap().group, None, "ungrouped");
+}
+
+/// The Selection tool selects an ellipse, a freehand outline or a colour (the magic wand), the
+/// selection turns inside out, and what is done to it keeps to its shape; the eraser rubs out.
+#[test]
+fn ellipse_freehand_and_wand_selections_and_the_eraser() {
+    let mut ed = editor();
+    // White with a blue square.
+    let mut pic = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..180 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            pic.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 220, 255]);
+        }
+    }
+    ed.session.replace(Document::new(pic));
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Area);
+    h.run_steps(2);
+    let alpha = |h: &Harness<'_, Editor>, x, y| h.state().session.doc.base.pixel(x, y).map_or(0, |c| c.a);
+    // The magic wand: a click on the blue takes the square.
+    h.state_mut().area_mode = crate::selection::AreaMode::Wand;
+    let blue = at(&h, 200.0, 140.0);
+    click_at(&mut h, blue);
+    assert_eq!(h.state().area, Some(screengrabcraft_model::Rect::new(150.0, 100.0, 100.0, 80.0)));
+    crate::quick_tests::shot(&mut h, "magic-wand");
+    // Inverted, then deleted: the white goes, the blue stays.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::I);
+    h.run_steps(3);
+    assert_eq!(h.state().area, Some(h.state().session.doc.bounds()));
+    crate::quick_tests::shot(&mut h, "selection-inverted");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 10, 10), alpha(&h, 200, 140)), (0, 255));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+    // An ellipse dragged out, then deleted: its box's corner stays.
+    h.state_mut().area_mode = crate::selection::AreaMode::Ellipse;
+    let (a, b) = (at(&h, 20.0, 20.0), at(&h, 120.0, 100.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area_shape().is_some());
+    crate::quick_tests::shot(&mut h, "ellipse-selection");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 70, 60), alpha(&h, 22, 22)), (0, 255));
+    // A freehand outline round a corner.
+    h.state_mut().area_mode = crate::selection::AreaMode::Freehand;
+    for (x, y) in [(300.0, 200.0), (390.0, 200.0), (390.0, 290.0), (300.0, 290.0)] {
+        let p = at(&h, x, y);
+        if (x, y) == (300.0, 200.0) {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+        } else {
+            h.hover_at(p);
+        }
+        h.run_steps(1);
+    }
+    let end = at(&h, 300.0, 210.0);
+    h.drop_at(end);
+    h.run_steps(3);
+    assert!(matches!(h.state().area_shape().map(|c| &c.shape), Some(screengrabcraft_render::region::AreaShape::Freehand { .. })));
+    // The eraser: a drag rubs out a line.
+    h.state_mut().set_tool(Tool::Eraser);
+    h.state_mut().eraser_width = 10.0;
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "eraser-panel");
+    let (a, b) = (at(&h, 20.0, 250.0), at(&h, 280.0, 250.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.undo_label(), Some("Erase"));
+    assert_eq!((alpha(&h, 150, 250), alpha(&h, 150, 240)), (0, 255));
+}
+
+/// Combine Pictures puts this picture and others (a recent capture, files) together; Template
+/// lays them out on a page with a title and the steps' words, every part an annotation.
+#[test]
+fn pictures_are_combined_and_laid_out_in_a_template_from_the_image_menu() {
+    use crate::compose::ComposeKind;
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.get_by_label("Image").click();
+    h.run_steps(2);
+    h.get_by_label("Combine Pictures…").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_some());
+    // A picture file picked (as the host hands it over).
+    let pic = Raster::filled(120, 90, Color::rgb(0, 0, 255)).unwrap();
+    let bytes = screengrabcraft_render::encode(&pic, ImageFormat::Png, 92).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes: bytes.clone() }]);
+    h.run_steps(3);
+    h.get_by_label_contains("blue.png");
+    crate::quick_tests::shot(&mut h, "combine-pictures");
+    h.get_by_label("Combine").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_none());
+    assert_eq!(h.state().session.undo_label(), Some("Combine Pictures"));
+    assert!(h.state().session.doc.width() > 400 + 120);
+    assert!(h.state().session.lent.is_empty());
+    // A template of the two, with a title and the steps' words.
+    h.state_mut().session.undo();
+    h.state_mut().open_compose(ComposeKind::Template);
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes }]);
+    if let Some(c) = &mut h.state_mut().compose {
+        c.title = "How to do it".into();
+        c.steps = vec!["Open the menu".into(), "Pick the blue one".into()];
+    }
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "template-window");
+    h.get_by_label("Make").click();
+    h.run_steps(6);
+    let doc = &h.state().session.doc;
+    assert_eq!((doc.count(Kind::Image), doc.count(Kind::Step), doc.count(Kind::Text)), (2, 2, 3));
+    crate::quick_tests::shot(&mut h, "template-made");
+}
+
+/// A capture with the pointer in it, as the capture service keeps it (the pointer drawn in, and
+/// the side file with it as an annotation of its own): the editor opens it with the pointer as a
+/// picture annotation, which is moved or deleted like any other.
+#[test]
+fn the_captured_pointer_is_an_annotation_to_move_or_delete() {
+    let plain = Raster::filled(400, 300, Color::rgb(30, 90, 200)).unwrap();
+    let drawn = screengrabcraft_render::pointer::draw(&plain, 200.0, 150.0, 1.0).unwrap();
+    let doc = screengrabcraft_render::pointer::as_document(&plain, 200.0, 150.0, 1.0).unwrap();
+    let side_bytes = screengrabcraft_render::project::save_with_original(&doc, Some(&plain)).unwrap();
+    let png = screengrabcraft_render::encode(&drawn, ImageFormat::Png, 100).unwrap();
+    let disk = Disk::with(&[("captures/a.png", png), ("captures/a.sgcraft", side_bytes)]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    let ed = h.state();
+    assert!(ed.session.doc.base == plain, "the picture under it is the screen alone");
+    assert!(matches!(ed.session.doc.objects.as_slice(), [o] if matches!(o.shape, Shape::Image { .. })), "the pointer, a picture annotation");
+    // Clicked and deleted: the screen as it was, with no pointer.
+    h.state_mut().set_tool(Tool::Select);
+    let p = at(&h, 203.0, 158.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected().len(), 1);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert!(h.state().session.doc.objects.is_empty());
+    h.run_steps(6);
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert!(flat == plain, "written again without it");
+}
+
+/// Batch Changes keeps an effect's settings before its window is drawn: what it would run is what
+/// the effect's own window applies, for every effect (the picture and capture work met here).
+#[test]
+fn a_dialogs_batch_command_is_what_its_window_applies() {
+    use crate::dialogs::{Dialog, body, command};
+    let doc = Document::new(Raster::filled(40, 30, Color::WHITE).unwrap());
+    let all = [
+        Dialog::resize(&doc),
+        Dialog::canvas(),
+        Dialog::border(),
+        Dialog::shadow(),
+        Dialog::torn(),
+        Dialog::rotate_any(),
+        Dialog::round(),
+        Dialog::brightness(),
+        Dialog::wavy(),
+        Dialog::faded(),
+        Dialog::bevel(),
+        Dialog::perspective(),
+        Dialog::curl(),
+        Dialog::reflection(),
+        Dialog::hue(),
+        Dialog::replace(),
+        Dialog::sharpen(),
+        Dialog::blur(),
+        Dialog::watermark(),
+        Dialog::details(),
+    ];
+    type Shown = (Dialog, Option<(&'static str, serde_json::Value)>);
+    for d in all {
+        let mut h = Harness::builder().with_size(egui::vec2(600.0, 700.0)).build_ui_state(|ui, s: &mut Shown| s.1 = body(&mut s.0, ui), (d, None));
+        h.step();
+        let (d, shown) = h.state();
+        assert!(shown.is_some(), "{}", d.title());
+        assert_eq!(&command(d), shown, "{}", d.title());
+    }
 }

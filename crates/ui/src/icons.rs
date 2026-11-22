@@ -6,6 +6,8 @@ use egui::{Align2, Color32, FontId, Painter, Pos2, Rect, Shape, Stroke, StrokeKi
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Select,
+    /// A block of rubber over the line it rubbed out.
+    Eraser,
     Arrow,
     Line,
     Rect,
@@ -59,6 +61,8 @@ pub enum Icon {
     Marquee,
     /// The Cut Out tool: a picture in two parts, a strip taken out between their saw-toothed edges.
     CutOut,
+    /// The Measure tool: a ruler lying slantwise, its marks along one edge.
+    Measure,
     /// Put a window away (in the tray).
     Minimize,
     /// Start again: a circling arrow.
@@ -98,6 +102,15 @@ pub enum Icon {
     AlignLeft,
     AlignCentre,
     AlignRight,
+    /// A capture's tags: a luggage tag with its hole.
+    Tag,
+    /// A favourite: the star of [`Icon::Favorites`], filled.
+    Starred,
+    /// Kept at the front: a pin.
+    Pin,
+    /// A freehand area: an uneven loop drawn round something, in dashes, with the line it was
+    /// drawn with trailing off.
+    Freehand,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -146,6 +159,13 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
     };
     let rect_at = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_two_pos(at(x0, y0), at(x1, y1));
     match icon {
+        Icon::Eraser => {
+            // A slanted block: its rubber end filled, at the bottom left, over a line on the page.
+            let body = vec![at(9.5, 2.5), at(17.5, 10.5), at(10.5, 17.5), at(2.5, 9.5)];
+            poly(body, true);
+            fill_poly(vec![at(6.0, 6.0), at(14.0, 14.0), at(10.5, 17.5), at(2.5, 9.5)], color);
+            line(at(11.5, 18.5), at(18.0, 18.5));
+        }
         Icon::Select => {
             fill_poly(vec![at(5.0, 2.0), at(15.0, 12.0), at(10.5, 12.5), at(13.5, 18.0), at(11.0, 19.0), at(8.2, 13.6), at(5.0, 16.5)], color);
         }
@@ -344,6 +364,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 ],
                 false,
             );
+        }
+        Icon::Measure => {
+            // The ruler, slantwise from the lower left to the upper right.
+            poly(vec![at(2.0, 14.0), at(14.0, 2.0), at(18.0, 6.0), at(6.0, 18.0), at(2.0, 14.0)], false);
+            for (i, len) in [(0.0f32, 2.5f32), (1.0, 1.5), (2.0, 2.5), (3.0, 1.5), (4.0, 2.5)] {
+                let (x, y) = (4.5 + i * 2.4, 11.5 - i * 2.4);
+                line(at(x, y), at(x + len * 0.7, y + len * 0.7));
+            }
         }
         Icon::Crop => {
             poly(vec![at(6.0, 2.0), at(6.0, 14.0), at(18.0, 14.0)], false);
@@ -567,6 +595,53 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 };
                 line(at(x0, y), at(x0 + long, y));
             }
+        }
+        Icon::Tag => {
+            // A tag hanging from its corner: a square with one corner cut to a point, and its hole.
+            poly(vec![at(3.0, 9.0), at(9.0, 3.0), at(17.0, 3.0), at(17.0, 11.0), at(11.0, 17.0)], true);
+            p.circle_stroke(at(13.2, 6.8), 1.5 * u, stroke);
+        }
+        Icon::Starred => {
+            let mut pts = Vec::new();
+            for i in 0..10 {
+                let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::PI / 5.0;
+                let r = if i % 2 == 0 { 8.6 } else { 3.6 };
+                pts.push(at(10.0 + a.cos() * r, 10.8 + a.sin() * r));
+            }
+            // A star isn't convex: its middle and each point filled on their own.
+            let mid: Vec<Pos2> = pts.iter().skip(1).step_by(2).copied().collect();
+            fill_poly(mid.clone(), color);
+            for k in 0..5 {
+                let tip = pts.get(k * 2).copied();
+                let (a, b) = (mid.get((k + 4) % 5).copied(), mid.get(k).copied());
+                if let (Some(tip), Some(a), Some(b)) = (tip, a, b) {
+                    fill_poly(vec![a, tip, b], color);
+                }
+            }
+        }
+        Icon::Pin => {
+            // A push pin: its round head, the collar and the point.
+            p.circle_stroke(at(10.0, 6.0), 3.6 * u, stroke);
+            line(at(6.0, 11.0), at(14.0, 11.0));
+            line(at(8.0, 9.4), at(8.0, 11.0));
+            line(at(12.0, 9.4), at(12.0, 11.0));
+            line(at(10.0, 11.0), at(10.0, 18.0));
+        }
+        Icon::Freehand => {
+            // An uneven loop, wider at the top right, in dashes; and its tail, solid.
+            let loop_at = |i: usize| {
+                let a = i as f32 / 18.0 * std::f32::consts::TAU;
+                let r = 6.2 + 1.3 * (a * 2.0 + 0.6).sin() + 0.7 * (a * 3.0).cos();
+                at(10.5 + a.cos() * r, 8.5 + a.sin() * r * 0.8)
+            };
+            let pts: Vec<Pos2> = (0..=18).map(loop_at).collect();
+            p.extend(Shape::dashed_line(&pts, stroke, 2.2 * u, 1.5 * u));
+            p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(
+                [at(5.2, 13.6), at(3.0, 16.0), at(6.5, 18.5), at(4.0, 19.0)],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            )));
         }
     }
 }

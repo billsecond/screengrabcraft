@@ -13,16 +13,16 @@ fn main() -> Result<(), String> {
         for (col, spot) in spots.iter().enumerate() {
             let rect = Rect::new(80.0 + col as f32 * 300.0, 70.0 + row as f32 * 180.0, 150.0, 60.0);
             let tail = spot.place(*form, rect);
-            let shape = Shape::Callout { rect, tail, text: form.label().to_string(), form: *form };
+            let shape = Shape::Callout { rect, tail, text: form.label().to_string(), form: *form, tails: Vec::new() };
             d.add(shape, Kind::Callout.default_style()).map_err(|e| e.to_string())?;
         }
     }
     // The callout quick styles of the first theme, down the right.
-    for (i, p) in presets(Kind::Callout, theme("Bold")).iter().enumerate() {
+    for (i, p) in presets(Kind::Callout, &theme("Bold", &[])).iter().enumerate() {
         let rect = Rect::new(1260.0, 40.0 + i as f32 * 58.0, 110.0, 36.0);
         let form = p.look.options.form.unwrap_or_default();
         let tail = p.look.options.tail.unwrap_or_default().place(form, Rect::new(rect.x, rect.y, rect.w, rect.h * 0.6));
-        let shape = Shape::Callout { rect, tail, text: "Aa".into(), form };
+        let shape = Shape::Callout { rect, tail, text: "Aa".into(), form, tails: Vec::new() };
         d.add(shape, p.look.style).map_err(|e| e.to_string())?;
     }
     let pic = screengrabcraft_render::render(&d).ok_or("render failed")?;

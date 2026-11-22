@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use screengrabcraft_media::recording::Recording;
-use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, Timeline};
+use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, MAX_CAMERA_BORDER, Timeline};
+use screengrabcraft_model::Color;
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result};
@@ -36,7 +37,29 @@ pub struct VideoSession {
     /// Changed since it was last saved.
     pub dirty: bool,
     revision: u64,
+    /// The recording's captions as they were heard: what putting them right starts from.
+    heard: Vec<screengrabcraft_media::captions::Cue>,
+    /// How loud a track plays (dB), as the host measures it from the recording (the engine reads
+    /// no sound itself): for evening levels out.
+    measure: Option<Measure>,
+    /// What one part of the edits plays on its own, as the host hears it from the recording and the
+    /// media (the engine reads no sound itself): for lining sounds up.
+    listen: Option<Listen>,
+    /// The recording's clicks (its own time, shares of the screen): what zooms follow.
+    clicks: Vec<screengrabcraft_media::zoom::ClickAt>,
+    /// Where the recording's pointer was while it showed (its own time, the screen's pixels), a
+    /// sample every 30 ms or so: what a redrawn path of it starts from.
+    way: Vec<(u64, f32, f32)>,
+    /// How wide the video is for its height (its screen's, else its camera's; 16:9 without).
+    aspect: f32,
 }
+
+/// Measures how loud track `n` of these edits plays (dB of the full scale), before its volume.
+pub type Measure = Box<dyn Fn(&Timeline, usize) -> Option<f32> + Send + Sync>;
+
+/// What a part of these edits plays on its own: `count` mono samples at
+/// [`screengrabcraft_media::align::RATE`] from timeline time `from` (µs).
+pub type Listen = Box<dyn Fn(&Timeline, screengrabcraft_media::align::Part, u64, usize) -> Vec<f32> + Send + Sync>;
 
 fn edit_err(e: EditError) -> EngineError {
     match e {
@@ -60,13 +83,84 @@ fn index(p: &Value, key: &str) -> Result<usize> {
     usize::try_from(int(p, key)?).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
 }
 
+/// The track asked for, if its clips can be changed (it isn't locked).
+fn unlocked(s: &VideoSession, p: &Value) -> Result<usize> {
+    let track = index(p, "track")?;
+    if s.timeline.tracks.get(track).is_some_and(|t| t.locked) {
+        return Err(EngineError::Params("that track is locked: unlock it first".to_string()));
+    }
+    Ok(track)
+}
+
 impl VideoSession {
     /// The recording's own edits if it has some, else every track whole.
     pub fn new(rec: &Recording) -> VideoSession {
         let original = Timeline::new(rec);
         let timeline = rec.timeline.clone().unwrap_or_else(|| original.clone());
         let sources = rec.header.streams.iter().map(|s| (s.id, rec.stream_duration(s.id))).collect();
-        VideoSession { timeline, original, sources, undo: Vec::new(), redo: Vec::new(), pending: None, dirty: false, revision: 0 }
+        let heard = rec.captions.as_ref().map(|c| c.cues.clone()).unwrap_or_default();
+        let picture = |kind| rec.header.streams.iter().find(|s| s.kind == kind && s.width > 0 && s.height > 0);
+        let screen = picture(screengrabcraft_media::recording::StreamKind::Screen);
+        let clicks = screen
+            .map(|s| {
+                let (w, h) = (s.width as f32, s.height as f32);
+                rec.pointer.clicks().iter().take(100_000).map(|c| screengrabcraft_media::zoom::ClickAt { t: c.t, x: c.x / w, y: c.y / h }).collect()
+            })
+            .unwrap_or_default();
+        let mut way: Vec<(u64, f32, f32)> = Vec::new();
+        for p in rec.pointer.samples().iter().filter(|p| p.flags & screengrabcraft_media::pointer::SHOWING != 0) {
+            if way.last().is_none_or(|l| p.t >= l.0.saturating_add(30_000)) && way.len() < 400_000 {
+                way.push((p.t, p.x, p.y));
+            }
+        }
+        let aspect = screen
+            .or_else(|| picture(screengrabcraft_media::recording::StreamKind::Camera))
+            .map(|s| s.width as f32 / s.height as f32)
+            .unwrap_or(16.0 / 9.0);
+        VideoSession {
+            timeline,
+            original,
+            sources,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            pending: None,
+            dirty: false,
+            revision: 0,
+            heard,
+            measure: None,
+            listen: None,
+            clicks,
+            way,
+            aspect,
+        }
+    }
+
+    /// The recording's captions as heard, when they come after it was opened (made meanwhile):
+    /// what putting them right starts from. Lines already put right stay so.
+    pub fn set_heard(&mut self, captions: Option<&screengrabcraft_media::captions::Captions>) {
+        self.heard = captions.map(|c| c.cues.clone()).unwrap_or_default();
+    }
+
+    /// How the host measures how loud a track plays (see [`Measure`]): without it, levels can't be
+    /// evened out.
+    pub fn set_measure(&mut self, m: Measure) {
+        self.measure = Some(m);
+    }
+
+    /// How the host listens to a part of the edits (see [`Listen`]): without it, sounds can't be
+    /// lined up.
+    pub fn set_listen(&mut self, l: Listen) {
+        self.listen = Some(l);
+    }
+
+    /// Whether the recording kept any clicks (for zooms that follow them).
+    pub fn has_clicks(&self) -> bool {
+        !self.clicks.is_empty()
+    }
+
+    /// How long the recording is (µs): its longest track.
+    fn longest(&self) -> u64 {
+        self.sources.values().copied().max().unwrap_or(0)
     }
 
     /// Changes with every edit (for knowing when to save or redraw).
@@ -187,14 +281,14 @@ fn cut(s: &mut VideoSession, p: &Value) -> Result<Value> {
 
 fn lift(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let (from, to) = (int(p, "from")?, int(p, "to")?);
-    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
     s.timeline.lift(from, to, track).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn split(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let at = int(p, "at")?;
-    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
     let made = s.timeline.split(at, track).map_err(edit_err)?;
     if made == 0 {
         return Err(EngineError::Failed("there's no clip to split there".to_string()));
@@ -203,24 +297,87 @@ fn split(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn delete_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.delete_clip(index(p, "track")?, index(p, "clip")?).map_err(edit_err)?;
+    s.timeline.delete_clip(unlocked(s, p)?, index(p, "clip")?).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn trim_start(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.trim_start(index(p, "track")?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
+    let track = unlocked(s, p)?;
+    let source = s.source_len(track);
+    s.timeline.trim_start(track, index(p, "clip")?, int(p, "to")?, source).map_err(edit_err)?;
     Ok(json!({}))
 }
 
+/// A clip (and those grouped with it) played backwards, or forwards again.
+fn reverse(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    let now = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).is_some_and(|c| c.reverse);
+    let back = match p.get("reverse") {
+        None | Some(Value::Null) => !now,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`reverse` must be true or false".to_string()))?,
+    };
+    let n = s.timeline.set_reverse(track, clip, back).map_err(edit_err)?;
+    Ok(json!({"reverse": back, "clips": n}))
+}
+
 fn trim_end(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    let track = index(p, "track")?;
+    let track = unlocked(s, p)?;
     let source = s.source_len(track);
     s.timeline.trim_end(track, index(p, "clip")?, int(p, "to")?, source).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn move_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.move_clip(index(p, "track")?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
+    let ripple = p.get("ripple").and_then(Value::as_bool).unwrap_or(false);
+    s.timeline.move_clips(index(p, "track")?, index(p, "clip")?, int(p, "to")?, ripple).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A stretch played faster or slower: on every track (and the layers), or one.
+fn speed(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::timeline::{MAX_SPEED, MIN_SPEED};
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    let x = p
+        .get("speed")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .ok_or_else(|| EngineError::Params("`speed` must be a number above 0: 2 is twice as fast, 0.5 half as fast".to_string()))?;
+    let hundredths = (x * 100.0).round().clamp(f64::from(MIN_SPEED), f64::from(MAX_SPEED)) as u16;
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let end = s.timeline.set_speed(from, to, hundredths, track).map_err(edit_err)?;
+    Ok(json!({"from": from, "to": end, "speed": f64::from(hundredths) / 100.0, "length": s.timeline.length()}))
+}
+
+/// The picture at a moment held for a while (a freeze frame): every track waits.
+fn hold_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (at, len) = (int(p, "at")?, int(p, "len")?);
+    let (from, to) = s.timeline.hold_frame(at, len).map_err(edit_err)?;
+    Ok(json!({"from": from, "to": to, "length": s.timeline.length()}))
+}
+
+/// A held frame held longer or shorter.
+fn hold_length(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_hold(index(p, "track")?, index(p, "clip")?, int(p, "len")?).map_err(edit_err)?;
+    Ok(json!({"length": s.timeline.length()}))
+}
+
+/// A sound clip's fades: how long its sound takes to come up at its start and go down at its end.
+fn fade(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    let given = |key: &str| -> Result<Option<u64>> { if p.get(key).is_some_and(|v| !v.is_null()) { int(p, key).map(Some) } else { Ok(None) } };
+    let (fade_in, fade_out) = (given("in")?, given("out")?);
+    if fade_in.is_none() && fade_out.is_none() {
+        return Err(EngineError::Params("say how long a fade: `in`, `out` or both, in µs".to_string()));
+    }
+    s.timeline.set_fade(track, clip, fade_in, fade_out).map_err(edit_err)?;
+    let c = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).copied().unwrap_or_default();
+    Ok(json!({"in": c.fade_in, "out": c.fade_out}))
+}
+
+/// How much of a sound track's background noise is taken out.
+fn denoise(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let amount = number(p, "amount")?.ok_or_else(|| EngineError::Params("`amount` is missing: 0 takes nothing out, 1 the most".to_string()))?;
+    s.timeline.set_denoise(index(p, "track")?, amount).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -250,6 +407,35 @@ fn camera(s: &mut VideoSession, p: &Value) -> Result<Value> {
         let size = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`size` must be a number".to_string()))?;
         c.size = (size as f32).clamp(0.1, 0.5);
     }
+    if let Some(v) = p.get("border") {
+        let border = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`border` must be a number".to_string()))?;
+        c.border = (border as f32).clamp(0.0, MAX_CAMERA_BORDER);
+    }
+    if let Some(v) = p.get("borderColor") {
+        c.border_color = serde_json::from_value::<Color>(v.clone())
+            .map_err(|_| EngineError::Params("`borderColor` is a colour, \"#RRGGBB\" or \"#RRGGBBAA\"".to_string()))?;
+    }
+    if let Some(v) = p.get("mirror") {
+        c.mirror = v.as_bool().ok_or_else(|| EngineError::Params("`mirror` must be true or false".to_string()))?;
+    }
+    Ok(json!({}))
+}
+
+fn camera_full(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let full = match p.get("full") {
+        None => true,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`full` must be true or false".to_string()))?,
+    };
+    if p.get("stretch").is_some_and(|v| !v.is_null()) {
+        if full {
+            return Err(EngineError::Params("a stretch by its number is only taken away (`full`: false)".to_string()));
+        }
+        let k = index(p, "stretch")?;
+        s.timeline.remove_camera_full(k).map_err(edit_err)?;
+        return Ok(json!({}));
+    }
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    s.timeline.set_camera_full(from, to, full).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -260,22 +446,169 @@ fn captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
             Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
         }
     };
-    let (show, burn) = (flag("show")?, flag("burn")?);
+    let (show, burn, words) = (flag("show")?, flag("burn")?, flag("words")?);
     let c = &mut s.timeline.captions;
+    if let Some(v) = words {
+        c.words = v;
+    }
     if let Some(v) = show {
         c.show = v;
     }
     if let Some(v) = burn {
         c.burn = v;
     }
-    Ok(json!({"show": c.show, "burn": c.burn}))
+    Ok(json!({"show": c.show, "burn": c.burn, "words": c.words}))
 }
 
 fn revert(s: &mut VideoSession, _: &Value) -> Result<Value> {
-    // The media bin stays (it's only what was brought in); the layers go.
+    // The media bin stays (it's only what was brought in), and the captions put right; the
+    // layers go.
     let media = std::mem::take(&mut s.timeline.media);
+    let corrected = s.timeline.corrected.take();
     s.timeline = s.original.clone();
     s.timeline.media = media;
+    s.timeline.corrected = corrected;
+    Ok(json!({}))
+}
+
+// ---- the captions put right (see `screengrabcraft_media::captions::edit`) ----
+
+/// The captions to put right: those already put right, else a copy of those heard.
+fn corrected(s: &mut VideoSession) -> &mut Vec<screengrabcraft_media::captions::Cue> {
+    let heard = &s.heard;
+    s.timeline.corrected.get_or_insert_with(|| heard.clone())
+}
+
+fn caption_text(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (line, words) = (index(p, "line")?, text(p, "text")?.ok_or_else(|| EngineError::Params("`text` is missing".to_string()))?);
+    screengrabcraft_media::captions::edit::text(corrected(s), line, &words).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_split(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let at = if p.get("at").is_some_and(|v| !v.is_null()) { Some(index(p, "at")?) } else { None };
+    screengrabcraft_media::captions::edit::split(corrected(s), line, at).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_join(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    screengrabcraft_media::captions::edit::join(corrected(s), line).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+fn caption_times(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let given = |key: &str| -> Result<Option<u64>> { if p.get(key).is_some_and(|v| !v.is_null()) { int(p, key).map(Some) } else { Ok(None) } };
+    let (start, end) = (given("start")?, given("end")?);
+    if start.is_none() && end.is_none() {
+        return Err(EngineError::Params("say where the line goes: `start`, `end` or both, in µs of the recording".to_string()));
+    }
+    let longest = s.longest();
+    screengrabcraft_media::captions::edit::times(corrected(s), line, start, end, longest).map_err(EngineError::Failed)?;
+    Ok(json!({}))
+}
+
+/// Words of the recording's captions cut out of the video, and out of their lines.
+fn cut_picks(s: &mut VideoSession, picks: &[(usize, Vec<usize>)]) -> Result<Value> {
+    let mut cues = corrected(s).clone();
+    let done = screengrabcraft_media::captions::cut_words(&mut s.timeline, &mut cues, picks).map_err(EngineError::Failed)?;
+    s.timeline.corrected = Some(cues);
+    Ok(json!({"words": done.words, "cut": done.cut, "at": done.at, "length": s.timeline.length()}))
+}
+
+/// Words of a line cut out of the video, by their places in it.
+fn cut_words(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let line = index(p, "line")?;
+    let list = p
+        .get("words")
+        .and_then(Value::as_array)
+        .ok_or_else(|| EngineError::Params("`words` is a list of the words' places in the line, from 0".to_string()))?;
+    let mut picks = Vec::new();
+    for v in list.iter().take(screengrabcraft_media::captions::MAX_TEXT) {
+        picks.push(
+            v.as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or_else(|| EngineError::Params("each of `words` is a word's place in the line, from 0".to_string()))?,
+        );
+    }
+    cut_picks(s, &[(line, picks)])
+}
+
+/// The filler words (um, uh, er…, or those given) cut out of the video wherever they're said.
+fn cut_fillers(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::captions::{FILLERS, bare, fillers};
+    let list: Vec<String> = match p.get("words") {
+        None | Some(Value::Null) => FILLERS.iter().map(|w| w.to_string()).collect(),
+        Some(Value::Array(a)) => {
+            let mut out = Vec::new();
+            for v in a.iter().take(100) {
+                out.push(bare(v.as_str().ok_or_else(|| EngineError::Params("each of `words` is a word".to_string()))?));
+            }
+            out
+        }
+        Some(_) => return Err(EngineError::Params("`words` is a list of words".to_string())),
+    };
+    let cues = corrected(s).clone();
+    let picks = fillers(&cues, &s.timeline, &list);
+    if picks.is_empty() {
+        return Err(EngineError::Failed("there are no filler words (um, uh, er…) in the transcript".to_string()));
+    }
+    cut_picks(s, &picks)
+}
+
+/// Subtitles brought in (SubRip or WebVTT, timed on the video as edited) as the recording's
+/// captions, following its edits from then on: instead of those it had, or with them.
+fn import_captions(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::captions::{Captions, from_subtitles, from_timeline};
+    let words = text(p, "text")?.ok_or_else(|| EngineError::Params("`text` is the subtitles, as written in a .srt or .vtt file".to_string()))?;
+    let replace = match p.get("replace") {
+        None | Some(Value::Null) => true,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`replace` must be true or false".to_string()))?,
+    };
+    let lines = from_subtitles(&words);
+    if lines.is_empty() {
+        return Err(EngineError::Failed("there are no subtitles in it (SubRip .srt or WebVTT .vtt)".to_string()));
+    }
+    let (cues, left) = from_timeline(&lines, &s.timeline);
+    if cues.is_empty() {
+        return Err(EngineError::Failed("none of its lines falls where the video has a microphone or the computer's sound to follow".to_string()));
+    }
+    let n = cues.len();
+    let mut all = if replace { Vec::new() } else { corrected(s).clone() };
+    all.extend(cues);
+    let longest = s.longest();
+    s.timeline.corrected = Some(Captions { cues: all, model: String::new() }.checked(longest).cues);
+    Ok(json!({"lines": n, "left": left}))
+}
+
+// ---- markers: moments marked on the timeline, the chapters of the video made ----
+
+fn add_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?;
+    let i = s.timeline.add_marker(int(p, "at")?, name.as_deref()).map_err(edit_err)?;
+    Ok(json!({"marker": i}))
+}
+
+fn remove_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.remove_marker(index(p, "marker")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn rename_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?.ok_or_else(|| EngineError::Params("`name` is missing".to_string()))?;
+    s.timeline.rename_marker(index(p, "marker")?, &name).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn move_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let i = s.timeline.move_marker(index(p, "marker")?, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"marker": i}))
+}
+
+fn captions_heard(s: &mut VideoSession, _: &Value) -> Result<Value> {
+    s.timeline.corrected = None;
     Ok(json!({}))
 }
 
@@ -286,8 +619,8 @@ fn id(p: &Value, key: &str) -> Result<u32> {
     u32::try_from(v).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
 }
 
-/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path, and
-/// whether its clicks are ringed.
+/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path,
+/// whether its clicks are ringed (and heard), and whether it's highlighted, spotlit or magnified.
 fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if !p.is_object() {
         return Err(EngineError::Params("the pointer's look is given as an object".to_string()));
@@ -299,12 +632,50 @@ fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
         }
     };
     let (show, clicks, size, smooth) = (flag("show")?, flag("clicks")?, number(p, "size")?, number(p, "smooth")?);
+    let (highlight, spotlight, magnify, click_sound) = (flag("highlight")?, flag("spotlight")?, flag("magnify")?, flag("clickSound")?);
     let mut look = s.timeline.pointer;
     look.show = show.unwrap_or(look.show);
     look.clicks = clicks.unwrap_or(look.clicks);
+    look.highlight = highlight.unwrap_or(look.highlight);
+    look.spotlight = spotlight.unwrap_or(look.spotlight);
+    look.magnify = magnify.unwrap_or(look.magnify);
+    look.click_sound = click_sound.unwrap_or(look.click_sound);
     look.size = size.unwrap_or(look.size);
     look.smooth = smooth.unwrap_or(look.smooth);
+    if let Some(v) = p.get("kind") {
+        look.kind =
+            serde_json::from_value(v.clone()).map_err(|_| EngineError::Params("`kind` is recorded, arrow, dark, hand, dot or ring".to_string()))?;
+    }
     s.timeline.pointer = look.checked();
+    Ok(json!({}))
+}
+
+/// How the shortcuts pressed while recording are shown on the video.
+fn keys(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::keys::Place;
+    if !p.is_object() {
+        return Err(EngineError::Params("how the keys look is given as an object".to_string()));
+    }
+    let flag = |key: &str| -> Result<Option<bool>> {
+        match p.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
+        }
+    };
+    let (show, light, size) = (flag("show")?, flag("light")?, number(p, "size")?);
+    let place = match p.get("place") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Place>(v.clone())
+                .map_err(|_| EngineError::Params("`place` is topLeft, top, topRight, bottomLeft, bottom or bottomRight".to_string()))?,
+        ),
+    };
+    let mut look = s.timeline.keys;
+    look.show = show.unwrap_or(look.show);
+    look.light = light.unwrap_or(look.light);
+    look.place = place.unwrap_or(look.place);
+    look.size = size.unwrap_or(look.size);
+    s.timeline.keys = look.checked();
     Ok(json!({}))
 }
 
@@ -358,6 +729,10 @@ fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
         (None, Some(_)) => Item { what: What::Media { id: id(p, "media")? }, ..Item::default() },
         (None, None) => return Err(EngineError::Params("say what to place: `template` or `media`".to_string())),
     };
+    // A library item in the theme chosen: its colours and face.
+    if let Some(th) = theme_param(p)? {
+        th.restyle(&mut item);
+    }
     if let What::Text { title, subtitle, .. } = &mut item.what {
         if let Some(t) = text(p, "title")? {
             *title = t;
@@ -371,6 +746,84 @@ fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
     }
     let (layer, item) = s.timeline.place(item, layer_or_new(p, "layer")?, int(p, "at")?).map_err(edit_err)?;
     Ok(json!({"layer": layer, "item": item}))
+}
+
+/// Narration recorded over the video (a sound file the host wrote): into the media bin, and on a
+/// sound layer of its own named for it from where it was recorded.
+fn add_narration(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{Anim, AnimKind, Item, LayerKind, MediaItem, MediaKind, What};
+    let path = text(p, "path")?.filter(|t| !t.trim().is_empty()).ok_or_else(|| EngineError::Params("`path` is the take's file".to_string()))?;
+    let duration = int(p, "duration")?;
+    if duration < screengrabcraft_media::timeline::MIN_CLIP_US {
+        return Err(EngineError::Params("the take is too short to keep".to_string()));
+    }
+    let name = text(p, "name")?.unwrap_or_else(|| "Narration".to_string());
+    let media = s.timeline.add_media(MediaItem { id: 0, name, path, kind: MediaKind::Sound, duration, width: 0, height: 0 }).map_err(edit_err)?;
+    let none = Anim { kind: AnimKind::None, len: 0 };
+    let item = Item { len: duration, what: What::Media { id: media }, intro: none, outro: none, ..Item::default() };
+    let (layer, item) = s.timeline.place(item, None, int(p, "at")?).map_err(edit_err)?;
+    // Named for what it is: Narration, Narration 2 …
+    let taken = |n: &str| s.timeline.layers.iter().any(|l| l.name == n && l.kind == LayerKind::Sound);
+    let name = (1..=screengrabcraft_media::layers::MAX_LAYERS + 1)
+        .map(|k| if k == 1 { "Narration".to_string() } else { format!("Narration {k}") })
+        .find(|n| !taken(n))
+        .unwrap_or_else(|| "Narration".to_string());
+    s.timeline.set_layer(layer, None, None, Some(&name)).map_err(edit_err)?;
+    Ok(json!({"media": media, "layer": layer, "item": item}))
+}
+
+/// A theme given as `"theme"`: `{"name", "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}`,
+/// if it's given (null: none).
+fn theme_param(p: &Value) -> Result<Option<screengrabcraft_media::yours::VideoTheme>> {
+    match p.get("theme") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Object(_)) => serde_json::from_value::<screengrabcraft_media::yours::VideoTheme>(v.clone())
+            .map(|t| Some(t.checked()))
+            .map_err(|_| EngineError::Params("`theme` is {name, main, mark, words: #rrggbb, font: sans, slanted or mono}".to_string())),
+        Some(_) => Err(EngineError::Params("`theme` is an object".to_string())),
+    }
+}
+
+/// Every title, lower third, callout and graphic on the layers in a theme's colours and face.
+fn apply_theme(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let theme = theme_param(p)?.ok_or_else(|| EngineError::Params("say which `theme`".to_string()))?;
+    Ok(json!({"items": s.timeline.apply_theme(&theme)}))
+}
+
+/// The layers' items (or those chosen) as a template to keep: nothing on the timeline changes.
+fn make_template(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?.unwrap_or_default();
+    let chosen: Option<Vec<(u32, u32)>> = match p.get("items") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .take(screengrabcraft_media::layers::MAX_ITEMS)
+                .map(|pair| match pair.as_array().map(Vec::as_slice) {
+                    Some([l, i]) => match (l.as_u64().and_then(|v| u32::try_from(v).ok()), i.as_u64().and_then(|v| u32::try_from(v).ok())) {
+                        (Some(l), Some(i)) => Ok((l, i)),
+                        _ => Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+                    },
+                    _ => Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Some(_) => return Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+    };
+    let t = s.timeline.make_template(&name, chosen.as_deref()).map_err(edit_err)?;
+    let items = t.item_count();
+    let template = serde_json::to_value(&t).map_err(|e| EngineError::Failed(e.to_string()))?;
+    Ok(json!({"template": template, "items": items}))
+}
+
+/// A template kept before put on layers of its own from `at`.
+fn use_template(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let t = match p.get("template") {
+        Some(v @ Value::Object(_)) => serde_json::from_value::<screengrabcraft_media::yours::OwnTemplate>(v.clone())
+            .map_err(|_| EngineError::Params("`template` is one made by video.makeTemplate".to_string()))?,
+        _ => return Err(EngineError::Params("`template` is one made by video.makeTemplate".to_string())),
+    };
+    let used = s.timeline.use_template(&t, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"layers": used.layers, "items": used.items}))
 }
 
 fn move_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -389,25 +842,136 @@ fn delete_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    use screengrabcraft_media::layers::{AnimKind, What};
+    use screengrabcraft_media::layers::{AnimKind, BlendMode, MaskShape, What};
     let (title, subtitle, color) = (text(p, "title")?, text(p, "subtitle")?, text(p, "color")?);
+    let font = match p.get("font") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<screengrabcraft_media::layers::TextFont>(v.clone())
+                .map_err(|_| EngineError::Params("`font` is sans, slanted or mono".to_string()))?,
+        ),
+    };
     let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
+    // A frozen region's height.
+    let freeze_h = number(p, "h")?;
     let anim = |k: &str| -> Result<Option<AnimKind>> {
         match p.get(k) {
             None => Ok(None),
             Some(v) => serde_json::from_value::<AnimKind>(v.clone())
                 .map(Some)
-                .map_err(|_| EngineError::Params(format!("`{k}` is none, fade, slideLeft, slideRight, slideUp or pop"))),
+                .map_err(|_| EngineError::Params(format!("`{k}` is none, fade, slideLeft, slideRight, slideUp, pop or write"))),
         }
     };
     let (intro, outro) = (anim("intro")?, anim("outro")?);
+    // How it's framed: turned, cut down, bordered, rounded, shadowed.
+    let (rotate, border, radius) = (number(p, "rotate")?, number(p, "border")?, number(p, "radius")?);
+    let border_colour = text(p, "borderColour")?;
+    let shadow = match p.get("shadow") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`shadow` must be true or false".to_string()))?),
+    };
+    let crop = match p.get("crop") {
+        None => None,
+        Some(v) => {
+            let sides: Vec<f32> =
+                v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect()).unwrap_or_default();
+            match sides.as_slice() {
+                [l, t, r, b] => Some([*l, *t, *r, *b]),
+                _ => return Err(EngineError::Params("`crop` is [left, top, right, bottom], shares of the picture".to_string())),
+            }
+        }
+    };
     let (intro_len, outro_len) = (
         if p.get("introLen").is_some() { Some(int(p, "introLen")?) } else { None },
         if p.get("outroLen").is_some() { Some(int(p, "outroLen")?) } else { None },
     );
+    // How it's laid on what's under it, and the shape it's shown in (or that's cut out of it).
+    let blend = match p.get("blend") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<BlendMode>(v.clone())
+                .map_err(|_| EngineError::Params("`blend` is normal, multiply, screen, overlay, darken or lighten".to_string()))?,
+        ),
+    };
+    let mask = match p.get("mask") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<MaskShape>(v.clone())
+                .map_err(|_| EngineError::Params("`mask` is none, rectangle, rounded, ellipse, diamond, star or heart".to_string()))?,
+        ),
+    };
+    let mask_area = match p.get("maskArea") {
+        None => None,
+        Some(v) => {
+            let n: Vec<f32> =
+                v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect()).unwrap_or_default();
+            match n.as_slice() {
+                [x, y, w, h] => Some([*x, *y, *w, *h]),
+                _ => return Err(EngineError::Params("`maskArea` is [x, y, width, height], shares of the item".to_string())),
+            }
+        }
+    };
+    let mask_cut = match p.get("maskCut") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`maskCut` must be true or false".to_string()))?),
+    };
+    let device = device_param(p)?;
+    let yes_no = |k: &str| -> Result<Option<bool>> {
+        match p.get(k) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{k}` must be true or false"))),
+        }
+    };
+    let (silent, path, pinned) = (yes_no("silent")?, yes_no("path")?, yes_no("pinned")?);
+    // A pinned picture's four corners, each moved by [across, down] (shares of the video).
+    let pin = match p.get("pin") {
+        None => None,
+        Some(v) => {
+            let corners: Vec<[f32; 2]> = v
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| {
+                            let n: Vec<f32> = c.as_array()?.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect();
+                            match n.as_slice() {
+                                [x, y] => Some([*x, *y]),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            match corners.as_slice() {
+                [a, b, c, d] => Some([*a, *b, *c, *d]),
+                _ => {
+                    return Err(EngineError::Params(
+                        "`pin` is four corners, [[x, y], …], top left, top right, bottom right, bottom left".to_string(),
+                    ));
+                }
+            }
+        }
+    };
     s.timeline
         .set_item(id(p, "layer")?, id(p, "item")?, |i| {
-            if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
+            if let Some(v) = silent {
+                i.silent = v;
+            }
+            if let Some(v) = path {
+                i.path = v;
+            }
+            if let Some(v) = pinned {
+                i.look.pinned = v;
+            }
+            if let Some(v) = pin {
+                i.look.pin = v;
+            }
+            if let (Some(v), What::Freeze { h }) = (freeze_h, &mut i.what) {
+                *h = v;
+            }
+            if let What::Text { title: t, subtitle: st, color: c, font: f, .. } = &mut i.what {
+                if let Some(v) = font {
+                    *f = v;
+                }
                 if let Some(v) = title {
                     *t = v;
                 }
@@ -435,8 +999,633 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             if let Some(l) = outro_len {
                 i.outro.len = l.min(10_000_000);
             }
+            let look = &mut i.look;
+            for (slot, v) in [(&mut look.rotate, rotate), (&mut look.border, border), (&mut look.radius, radius)] {
+                if let Some(v) = v {
+                    *slot = v;
+                }
+            }
+            if let Some(c) = crop {
+                look.crop = c;
+            }
+            if let Some(c) = border_colour {
+                look.border_colour = c;
+            }
+            if let Some(v) = shadow {
+                look.shadow = v;
+            }
+            if let Some(b) = blend {
+                look.blend = b;
+            }
+            if let Some(m) = mask {
+                look.mask.shape = m;
+            }
+            if let Some([x, y, w, h]) = mask_area {
+                (look.mask.x, look.mask.y, look.mask.w, look.mask.h) = (x, y, w, h);
+            }
+            if let Some(c) = mask_cut {
+                look.mask.cut = c;
+            }
+            if let Some(d) = device {
+                look.device = d;
+            }
+            i.look = std::mem::take(&mut i.look).checked();
         })
         .map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A device to draw round a picture: `"device"` if it's given.
+fn device_param(p: &Value) -> Result<Option<screengrabcraft_media::frame::Device>> {
+    match p.get("device") {
+        None => Ok(None),
+        Some(v) => {
+            serde_json::from_value(v.clone()).map(Some).map_err(|_| EngineError::Params("`device` is none, laptop, phone or browser".to_string()))
+        }
+    }
+}
+
+/// A colour given as `#rrggbb`, if it's given.
+fn colour_param(p: &Value, key: &str) -> Result<Option<String>> {
+    match text(p, key)? {
+        None => Ok(None),
+        Some(c) => {
+            let t = c.trim().trim_start_matches('#');
+            if t.len() != 6 || !t.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(EngineError::Params(format!("`{key}` is a colour, #rrggbb")));
+            }
+            Ok(Some(format!("#{}", t.to_ascii_lowercase())))
+        }
+    }
+}
+
+/// How the recording's own screen is framed: smaller on a background, rounded, bordered,
+/// shadowed, a device round it.
+fn screen_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("the screen's frame is given as an object".to_string()));
+    }
+    let (size, radius, border) = (number(p, "size")?, number(p, "radius")?, number(p, "border")?);
+    let (background, border_colour) = (colour_param(p, "background")?, colour_param(p, "borderColour")?);
+    let shadow = match p.get("shadow") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`shadow` must be true or false".to_string()))?),
+    };
+    let device = device_param(p)?;
+    let mut f = s.timeline.frame.clone();
+    f.size = size.unwrap_or(f.size);
+    f.radius = radius.unwrap_or(f.radius);
+    f.border = border.unwrap_or(f.border);
+    f.background = background.unwrap_or(f.background);
+    f.border_colour = border_colour.unwrap_or(f.border_colour);
+    f.shadow = shadow.unwrap_or(f.shadow);
+    f.device = device.unwrap_or(f.device);
+    s.timeline.frame = f.checked();
+    Ok(json!({}))
+}
+
+/// Zooms that follow the recording's clicks, put on a layer of their own: ordinary zooms.
+fn zoom_on_clicks(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::zoom;
+    if s.clicks.is_empty() {
+        return Err(EngineError::Params("this recording kept no clicks to zoom on".to_string()));
+    }
+    let share = number(p, "share")?.unwrap_or(0.5).clamp(zoom::MIN_SHARE, 0.9);
+    let zooms = zoom::follow_clicks(&s.timeline, &s.clicks, share);
+    if zooms.is_empty() {
+        return Err(EngineError::Params("every click is already zoomed on, or cut out of the video".to_string()));
+    }
+    let mut layer = None;
+    let n = zooms.len();
+    for z in zooms {
+        let at = z.at;
+        let (l, _) = s.timeline.place(z, layer, at).map_err(edit_err)?;
+        layer = Some(l);
+    }
+    if let Some(l) = layer {
+        let _ = s.timeline.set_layer(l, None, None, Some("Zooms on the clicks"));
+    }
+    Ok(json!({"zooms": n, "layer": layer}))
+}
+
+/// Pictures of the media bin placed one after another on a layer of their own, each as large as
+/// fits the video, a few seconds each, faded from one to the next.
+fn pictures_in_turn(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{Anim, AnimKind, Item, MediaKind, Placement, What};
+    let ids: Vec<u32> = match p.get("media") {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_u64).filter_map(|v| u32::try_from(v).ok()).take(500).collect(),
+        None => s.timeline.media.iter().filter(|m| m.kind == MediaKind::Picture).map(|m| m.id).collect(),
+        Some(_) => return Err(EngineError::Params("`media` is a list of the media bin's pictures (their ids)".to_string())),
+    };
+    let pictures: Vec<screengrabcraft_media::layers::MediaItem> =
+        ids.iter().filter_map(|id| s.timeline.media.iter().find(|m| m.id == *id && m.kind == MediaKind::Picture).cloned()).collect();
+    if pictures.is_empty() {
+        return Err(EngineError::Params("there are no pictures in the media bin to put in turn".to_string()));
+    }
+    let each = if p.get("each").is_some() { int(p, "each")?.clamp(500_000, 60_000_000) } else { 4_000_000 };
+    let mut at = if p.get("at").is_some() { int(p, "at")? } else { 0 };
+    let fade = Anim { kind: AnimKind::Fade, len: 400_000 };
+    let mut layer = None;
+    for m in &pictures {
+        // As wide as fits the video: the whole width, or less for a picture taller than it.
+        let shape = if m.width > 0 && m.height > 0 { m.width as f32 / m.height as f32 } else { s.aspect };
+        let w = (shape / s.aspect.max(0.01)).clamp(0.05, 1.0);
+        let item = Item {
+            len: each,
+            what: What::Media { id: m.id },
+            place: Placement { x: 0.5, y: 0.5, w, opacity: 1.0 },
+            intro: fade,
+            outro: fade,
+            ..Item::default()
+        };
+        let (l, _) = s.timeline.place(item, layer, at).map_err(edit_err)?;
+        layer = Some(l);
+        at = at.saturating_add(each);
+    }
+    if let Some(l) = layer {
+        let _ = s.timeline.set_layer(l, None, None, Some("Pictures"));
+    }
+    Ok(json!({"pictures": pictures.len(), "layer": layer, "end": at}))
+}
+
+/// Motion blur on what moves: on or off, and how long the shutter is open.
+fn motion_blur(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("motion blur is given as an object".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let amount = number(p, "amount")?;
+    let mut b = s.timeline.motion_blur;
+    b.on = on.unwrap_or(b.on);
+    b.amount = amount.unwrap_or(b.amount);
+    s.timeline.motion_blur = b.checked();
+    Ok(json!({}))
+}
+
+/// A rectangle of the screen frozen for a stretch: held as it was at the stretch's start while the
+/// rest plays on, on a layer of its own.
+fn freeze_region(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    if to <= from {
+        return Err(EngineError::Params("the stretch to freeze is empty".to_string()));
+    }
+    let screen = s.timeline.find(screengrabcraft_media::recording::StreamKind::Screen);
+    if screen.and_then(|i| s.timeline.source_time(i, from)).is_none() {
+        return Err(EngineError::Params("the screen isn't playing where the stretch starts".to_string()));
+    }
+    let v = |k: &str, or: f32| -> Result<f32> { Ok(number(p, k)?.unwrap_or(or)) };
+    let item = screengrabcraft_media::layers::freeze_item(v("x", 0.5)?, v("y", 0.5)?, v("w", 0.4)?, v("h", 0.3)?, to - from);
+    let (layer, item) = s.timeline.place(item, layer_or_new(p, "layer")?, from).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
+}
+
+/// The pointer hidden over a stretch of the timeline.
+fn hide_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.hide_pointer(int(p, "from")?, int(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The pointer shown again over a stretch of the timeline, or (no stretch) everywhere.
+fn show_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if p.get("from").is_none() && p.get("to").is_none() {
+        s.timeline.pointer_hidden.clear();
+        return Ok(json!({}));
+    }
+    s.timeline.show_pointer(int(p, "from")?, int(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The pointer's way over a stretch made a path through points, to be moved.
+fn redraw_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if s.way.is_empty() {
+        return Err(EngineError::Params("this recording kept no pointer".to_string()));
+    }
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    // One every half second by default, the ends too.
+    let points = if p.get("points").is_some() {
+        int(p, "points")?.min(64) as usize
+    } else {
+        ((to.saturating_sub(from) / 500_000).min(64) as usize).saturating_add(1)
+    };
+    let way = &s.way;
+    let at = |t: u64| -> Option<(f32, f32)> {
+        // Where it was then: on the line between the samples either side.
+        let i = way.partition_point(|w| w.0 <= t);
+        let a = way.get(i.checked_sub(1)?)?;
+        let Some(b) = way.get(i) else { return Some((a.1, a.2)) };
+        let f = (t - a.0) as f32 / b.0.saturating_sub(a.0).max(1) as f32;
+        Some((a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f))
+    };
+    let n = s.timeline.redraw_pointer(from, to, points, at).map_err(edit_err)?;
+    Ok(json!({"path": n}))
+}
+
+/// The redrawn path of the pointer that `path` names.
+fn pointer_path<'a>(s: &'a mut VideoSession, p: &Value) -> Result<&'a mut screengrabcraft_media::pointer::Path> {
+    let n = int(p, "path")? as usize;
+    s.timeline.pointer_paths.get_mut(n).ok_or_else(|| EngineError::Params("there's no such redrawn path of the pointer".to_string()))
+}
+
+/// A point of the pointer's redrawn path moved.
+fn pointer_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (x, y) = (number(p, "x")?, number(p, "y")?);
+    let (Some(x), Some(y)) = (x, y) else { return Err(EngineError::Params("`x` and `y` say where it goes".to_string())) };
+    let k = int(p, "point")? as usize;
+    let path = pointer_path(s, p)?;
+    let q = path.points.get_mut(k).ok_or_else(|| EngineError::Params("there's no such point on that path".to_string()))?;
+    (q.x, q.y) = (x.clamp(-1.0e6, 1.0e6), y.clamp(-1.0e6, 1.0e6));
+    Ok(json!({}))
+}
+
+/// The pointer's redrawn path made straight, from its first point to its last.
+fn straighten_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let path = pointer_path(s, p)?;
+    if path.points.len() > 2 {
+        let (Some(a), Some(b)) = (path.points.first().copied(), path.points.last().copied()) else { return Ok(json!({})) };
+        path.points = vec![a, b];
+    }
+    Ok(json!({}))
+}
+
+/// A redrawn path of the pointer taken away, or (none named) every one.
+fn pointer_as_recorded(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if p.get("path").is_none() {
+        s.timeline.pointer_paths.clear();
+        return Ok(json!({}));
+    }
+    let n = int(p, "path")? as usize;
+    if n >= s.timeline.pointer_paths.len() {
+        return Err(EngineError::Params("there's no such redrawn path of the pointer".to_string()));
+    }
+    s.timeline.pointer_paths.remove(n);
+    Ok(json!({}))
+}
+
+/// A picture track's clip's colours and crop.
+fn clip_look(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let level = |key: &str| -> Result<Option<i8>> {
+        match number(p, key)? {
+            None => Ok(None),
+            Some(v) => Ok(Some(v.round().clamp(-100.0, 100.0) as i8)),
+        }
+    };
+    let (brightness, contrast, saturation) = (level("brightness")?, level("contrast")?, level("saturation")?);
+    let crop = match p.get("crop") {
+        None => None,
+        Some(v) => {
+            let sides: Vec<u16> = v
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f.round().clamp(0.0, 1000.0) as u16).collect())
+                .unwrap_or_default();
+            match sides.as_slice() {
+                [l, t, r, b] => Some([*l, *t, *r, *b]),
+                _ => return Err(EngineError::Params("`crop` is [left, top, right, bottom], thousandths of the picture".to_string())),
+            }
+        }
+    };
+    // A ready-made look sets every colour (what else is given then changes it); "plain" none.
+    let named = match text(p, "look")? {
+        None => None,
+        Some(k) if k == "plain" => Some(screengrabcraft_media::timeline::ClipLook::PLAIN),
+        Some(k) => Some(screengrabcraft_media::timeline::LOOKS.iter().find(|n| n.key == k).map(|n| n.look).ok_or_else(|| {
+            let keys: Vec<&str> = screengrabcraft_media::timeline::LOOKS.iter().map(|n| n.key).collect();
+            EngineError::Params(format!("`look` is plain or one of {}", keys.join(", ")))
+        })?),
+    };
+    let tint = match text(p, "tint")? {
+        None => None,
+        Some(c) => {
+            let t = c.trim().trim_start_matches('#');
+            if t.len() != 6 || !t.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                return Err(EngineError::Params("`tint` is a colour, #rrggbb".to_string()));
+            }
+            Some(screengrabcraft_media::layers::color(&c, [0, 0, 0]))
+        }
+    };
+    let tint_amount = number(p, "tintAmount")?.map(|v| v.round().clamp(0.0, 100.0) as u8);
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    s.timeline
+        .set_clip_look(track, clip, |l| {
+            if let Some(n) = &named {
+                *l = l.with_colours_of(n);
+            }
+            l.tint = tint.unwrap_or(l.tint);
+            l.tint_amount = tint_amount.unwrap_or(l.tint_amount);
+            l.brightness = brightness.unwrap_or(l.brightness);
+            l.contrast = contrast.unwrap_or(l.contrast);
+            l.saturation = saturation.unwrap_or(l.saturation);
+            l.crop = crop.unwrap_or(l.crop);
+        })
+        .map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn flag(p: &Value, key: &str) -> Result<bool> {
+    p.get(key).and_then(Value::as_bool).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false")))
+}
+
+fn lock(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_locked(index(p, "track")?, flag(p, "locked")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn solo(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_solo(index(p, "track")?, flag(p, "solo")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A sound track's (or a sound layer's) two sides mixed into one.
+fn mono(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let on = flag(p, "mono")?;
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => s.timeline.set_mono(index(p, "track")?, on).map_err(edit_err)?,
+        (None, Some(_)) => s.timeline.set_layer_mono(id(p, "layer")?, on).map_err(edit_err)?,
+        _ => return Err(EngineError::Params("say a `track` or a `layer`".to_string())),
+    }
+    Ok(json!({}))
+}
+
+/// A clip and the next one, going on from where it stops, made one again.
+fn join(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.join(unlocked(s, p)?, index(p, "clip")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// Every piece of a track (or of every unlocked track) going on from the one before joined to it.
+fn join_all(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
+    let n = s.timeline.join_all(track).map_err(edit_err)?;
+    if n == 0 {
+        return Err(EngineError::Params("there are no pieces going on from each other to join".to_string()));
+    }
+    Ok(json!({"joined": n}))
+}
+
+/// A part of the edits named in params: `{"track": n}` (with `"clip": n`, that clip), or
+/// `{"layer": id, "item": id}`. With where it is on the timeline (all of a track's clips).
+fn sound_part(s: &VideoSession, p: &Value) -> Result<(screengrabcraft_media::align::Part, Option<usize>, u64, u64)> {
+    use screengrabcraft_media::align::Part;
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => {
+            let i = index(p, "track")?;
+            let t = s.timeline.track(i).map_err(edit_err)?;
+            if t.kind.is_video() {
+                return Err(EngineError::Params("only a sound track is lined up by its sound".to_string()));
+            }
+            match p.get("clip") {
+                Some(_) => {
+                    let k = index(p, "clip")?;
+                    let c = t.clips.get(k).ok_or_else(|| edit_err(EditError::NoClip(i, k)))?;
+                    Ok((Part::Track(i), Some(k), c.at, c.end()))
+                }
+                None => Ok((Part::Track(i), None, t.clips.first().map_or(0, |c| c.at), t.clips.last().map_or(0, |c| c.end()))),
+            }
+        }
+        (None, Some(_)) => {
+            let (layer, item) = (id(p, "layer")?, id(p, "item")?);
+            let it = s.timeline.item(layer, item).ok_or_else(|| EngineError::Params("there's no such item".to_string()))?;
+            if !it.plays_sound(&s.timeline.media) {
+                return Err(EngineError::Params("that item has no sound to line up".to_string()));
+            }
+            Ok((Part::Item { layer, item }, None, it.at, it.end()))
+        }
+        _ => Err(EngineError::Params("say a `track` (and `clip`) or a `layer` and `item`".to_string())),
+    }
+}
+
+/// A clip (or an item) moved so its sound is in step with another's: the same voice recorded
+/// twice lined up by ear.
+fn line_up(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::align::{self, Part};
+    let listen = s.listen.as_ref().ok_or_else(|| EngineError::Failed("sound can't be listened to here".to_string()))?;
+    let within = if p.get("within").is_some() { int(p, "within")?.clamp(100_000, align::MOST_WITHIN) } else { 5_000_000 };
+    let (moving, clip, at, end) = sound_part(s, p)?;
+    if let Part::Track(_) = moving
+        && clip.is_none()
+    {
+        return Err(EngineError::Params("say which `clip` of the track moves".to_string()));
+    }
+    let with = p
+        .get("with")
+        .ok_or_else(|| EngineError::Params(r#"say what to line it up `with`: {"track": n} or {"layer": id, "item": id}"#.to_string()))?;
+    let (fixed, _, _, _) = sound_part(s, with)?;
+    if fixed == moving {
+        return Err(EngineError::Params("a sound is lined up with another, not with itself".to_string()));
+    }
+    let len = end.saturating_sub(at).min(align::MOST_LISTENED);
+    let heard = listen(&s.timeline, moving, at, align::to_samples(len) as usize);
+    let from = at.saturating_sub(within);
+    let lead = align::to_samples(at - from) as i64;
+    let other = listen(&s.timeline, fixed, from, align::to_samples((at - from).saturating_add(len).saturating_add(within)) as usize);
+    let (shift, sure) = align::offset(&other, &heard, lead, align::to_samples(within) as i64)
+        .ok_or_else(|| EngineError::Params("there's too little heard in one of them to line them up".to_string()))?;
+    if sure < align::SURE {
+        return Err(EngineError::Params("they don't sound alike enough to line up".to_string()));
+    }
+    let to = u64::try_from((i64::try_from(at).unwrap_or(i64::MAX) + align::to_us(shift)).max(0)).unwrap_or(0);
+    let now = match (moving, clip) {
+        (Part::Track(i), Some(k)) => {
+            if s.timeline.tracks.get(i).is_some_and(|t| t.locked) {
+                return Err(EngineError::Params("that track is locked: unlock it first".to_string()));
+            }
+            s.timeline.move_clips(i, k, to, false).map_err(edit_err)?;
+            s.timeline.tracks.get(i).and_then(|t| t.clips.get(k)).map_or(at, |c| c.at)
+        }
+        (Part::Item { layer, item }, _) => {
+            s.timeline.move_item(layer, item, Some(layer), to).map_err(edit_err)?;
+            s.timeline.item(layer, item).map_or(at, |i| i.at)
+        }
+        _ => at,
+    };
+    Ok(json!({"moved": i128::from(now) - i128::from(at), "sure": sure}))
+}
+
+/// A clip's or an item's effects, to put on another with `video.pasteEffects` (nothing changes).
+fn copy_effects(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => {
+            let (i, k) = (index(p, "track")?, index(p, "clip")?);
+            let c = s.timeline.track(i).map_err(edit_err)?.clips.get(k).ok_or_else(|| edit_err(EditError::NoClip(i, k)))?;
+            Ok(json!({"effects": {"clip": c.effects()}}))
+        }
+        (None, Some(_)) => {
+            let it = s.timeline.item(id(p, "layer")?, id(p, "item")?).ok_or_else(|| EngineError::Params("there's no such item".to_string()))?;
+            Ok(json!({"effects": {"item": it.effects()}}))
+        }
+        _ => Err(EngineError::Params("say a `track` and `clip`, or a `layer` and `item`".to_string())),
+    }
+}
+
+/// Effects copied from a clip put on a clip, or from an item on an item.
+fn paste_effects(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let fx = p.get("effects").ok_or_else(|| EngineError::Params("`effects` is what `video.copyEffects` said".to_string()))?;
+    match (p.get("track"), p.get("layer"), fx.get("clip"), fx.get("item")) {
+        (Some(_), None, Some(c), None) => {
+            let c = serde_json::from_value(c.clone()).map_err(|_| EngineError::Params("those aren't a clip's effects".to_string()))?;
+            s.timeline.paste_clip_effects(unlocked(s, p)?, index(p, "clip")?, c).map_err(edit_err)?;
+        }
+        (None, Some(_), None, Some(i)) => {
+            let i = serde_json::from_value(i.clone()).map_err(|_| EngineError::Params("those aren't an item's effects".to_string()))?;
+            s.timeline.paste_item_effects(id(p, "layer")?, id(p, "item")?, i).map_err(edit_err)?;
+        }
+        (Some(_), None, None, Some(_)) | (None, Some(_), Some(_), None) => {
+            return Err(EngineError::Params("a clip's effects go on a clip, an item's on an item".to_string()));
+        }
+        _ => return Err(EngineError::Params("say a `track` and `clip`, or a `layer` and `item`, and the `effects`".to_string())),
+    }
+    Ok(json!({}))
+}
+
+/// An item's media swapped for another of the bin's, its effects kept.
+fn replace_media(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.replace_media(id(p, "layer")?, id(p, "item")?, id(p, "media")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A video item's sound put apart from its picture, on a sound layer.
+fn separate_sound(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (layer, item) = s.timeline.separate_sound(id(p, "layer")?, id(p, "item")?).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
+}
+
+fn clip_colour(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let colour = match p.get("colour") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(u8::try_from(index(p, "colour")?).map_err(|_| EngineError::Params("`colour` is 0 to 7, or null".to_string()))?),
+    };
+    s.timeline.set_clip_colour(index(p, "track")?, index(p, "clip")?, colour).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// Clips put in a group of their own: they move together.
+fn group(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let list = p.get("clips").and_then(Value::as_array).ok_or_else(|| EngineError::Params("`clips` is a list of [track, clip]".to_string()))?;
+    let mut clips = Vec::new();
+    for pair in list.iter().take(1_000) {
+        let n = |k: usize| pair.get(k).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+        match (n(0), n(1)) {
+            (Some(t), Some(c)) => clips.push((t, c)),
+            _ => return Err(EngineError::Params("each of `clips` is [track, clip]".to_string())),
+        }
+    }
+    let g = s.timeline.group(&clips).map_err(edit_err)?;
+    Ok(json!({"group": g}))
+}
+
+fn ungroup(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.ungroup(index(p, "track")?, index(p, "clip")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A point of a sound track's volume line: added, changed or moved.
+fn volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let point = if p.get("point").is_some_and(|v| !v.is_null()) { Some(index(p, "point")?) } else { None };
+    let k = s.timeline.set_volume_point(unlocked(s, p)?, point, int(p, "at")?, number(p, "level")?).map_err(edit_err)?;
+    Ok(json!({"point": k}))
+}
+
+fn remove_volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let point = if all { None } else { Some(index(p, "point")?) };
+    s.timeline.remove_volume_point(unlocked(s, p)?, point).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The rest of the sound lowered while the voice (the microphone) is heard.
+fn ducking(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("say `on` and or `level`".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let d = &mut s.timeline.ducking;
+    d.on = on.unwrap_or(d.on);
+    if let Some(l) = number(p, "level")? {
+        d.level = l.clamp(0.0, 1.0);
+    }
+    Ok(json!({"on": d.on, "level": d.level}))
+}
+
+/// How loud speech and music are made when levels are evened out (dB of the full scale).
+const LEVEL_TARGET: f32 = -20.0;
+
+/// Each sound track (or one) made as loud as the others: its volume set so what it plays comes
+/// to `target` dB (as near as the volume goes).
+fn levels(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let measure = s.measure.as_ref().ok_or_else(|| EngineError::Failed("levels can't be measured here".to_string()))?;
+    let target = number(p, "target")?.unwrap_or(LEVEL_TARGET).clamp(-40.0, -6.0);
+    let which: Vec<usize> = if p.get("track").is_some_and(|t| !t.is_null()) {
+        vec![index(p, "track")?]
+    } else {
+        s.timeline.tracks.iter().enumerate().filter(|(_, t)| !t.kind.is_video()).map(|(i, _)| i).collect()
+    };
+    let mut done = Vec::new();
+    for i in which {
+        let t = s.timeline.track(i).map_err(edit_err)?;
+        if t.kind.is_video() {
+            return Err(EngineError::Params("only a sound track has a level".to_string()));
+        }
+        // Nothing heard on it: left as it is.
+        let Some(db) = measure(&s.timeline, i).filter(|d| d.is_finite()) else { continue };
+        let volume = 10f32.powf((target - db) / 20.0).clamp(0.0, 2.0);
+        done.push((i, volume));
+    }
+    let mut out = Vec::new();
+    for (i, v) in done {
+        s.timeline.set_volume(i, v).map_err(edit_err)?;
+        out.push(json!({"track": i, "volume": v}));
+    }
+    Ok(json!({"tracks": out}))
+}
+
+/// The transition from the clip before into a clip, where they meet (or none).
+fn transition(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::timeline::Blend;
+    let kind = match p.get("kind") {
+        None => {
+            return Err(EngineError::Params(
+                "`kind` is missing: crossFade, dipBlack, wipeLeft, wipeRight, wipeUp, wipeDown, push, circle or none".to_string(),
+            ));
+        }
+        Some(Value::String(k)) if k == "none" => None,
+        Some(v) => Some(serde_json::from_value::<Blend>(v.clone()).map_err(|_| {
+            EngineError::Params("`kind` is crossFade, dipBlack, wipeLeft, wipeRight, wipeUp, wipeDown, push, circle or none".to_string())
+        })?),
+    };
+    let len = if p.get("len").is_some_and(|v| !v.is_null()) { Some(int(p, "len")?) } else { None };
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    s.timeline.set_transition(track, clip, kind, len).map_err(edit_err)?;
+    let x = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).and_then(|c| c.transition);
+    Ok(json!({"kind": x.map(|x| x.kind), "len": x.map(|x| x.len)}))
+}
+
+/// A keyframe of a layer item at a moment: its place, size and opacity then.
+fn keyframe(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
+    let (layer, item) = (id(p, "layer")?, id(p, "item")?);
+    let key = s
+        .timeline
+        .set_key(layer, item, int(p, "at")?, |place| {
+            for (slot, v) in [(&mut place.x, x), (&mut place.y, y), (&mut place.w, w), (&mut place.opacity, opacity)] {
+                if let Some(v) = v {
+                    *slot = v;
+                }
+            }
+        })
+        .map_err(edit_err)?;
+    let keys = s.timeline.item(layer, item).map_or(0, |i| i.keys.len());
+    Ok(json!({"key": key, "keys": keys}))
+}
+
+fn remove_keyframe(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let key = if all { None } else { Some(index(p, "key")?) };
+    s.timeline.remove_key(id(p, "layer")?, id(p, "item")?, key).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -471,6 +1660,95 @@ fn delete_layer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// The watermark on every frame: words or a picture of the media bin, in a corner.
+fn watermark(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::MediaKind;
+    if !p.is_object() {
+        return Err(EngineError::Params("the watermark is given as an object".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let picture = match p.get("picture") {
+        None => None,
+        Some(Value::Null) => Some(None),
+        Some(_) => {
+            let pid = id(p, "picture")?;
+            if !s.timeline.media.iter().any(|m| m.id == pid && m.kind == MediaKind::Picture) {
+                return Err(EngineError::Params(format!("there's no picture {pid} in the media bin")));
+            }
+            Some(Some(pid))
+        }
+    };
+    let corner = match p.get("corner") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Corner>(v.clone())
+                .map_err(|_| EngineError::Params("`corner` is topLeft, topRight, bottomLeft or bottomRight".to_string()))?,
+        ),
+    };
+    let (words, opacity, size) = (text(p, "words")?, number(p, "opacity")?, number(p, "size")?);
+    let w = &mut s.timeline.watermark;
+    w.on = on.unwrap_or(w.on);
+    w.words = words.unwrap_or_else(|| w.words.clone());
+    w.picture = picture.unwrap_or(w.picture);
+    w.corner = corner.unwrap_or(w.corner);
+    w.opacity = opacity.unwrap_or(w.opacity);
+    w.size = size.unwrap_or(w.size);
+    *w = w.clone().checked();
+    Ok(json!({"on": w.on, "shows": w.shows()}))
+}
+
+/// What's taken away from the camera's picture: nothing, a colour (a green screen), or the
+/// background (learnt by the background model, see `screengrabcraft_media::keyer`).
+fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::keyer::Remove;
+    use screengrabcraft_media::timeline::Behind;
+    if !p.is_object() {
+        return Err(EngineError::Params("what's taken away is given as an object".to_string()));
+    }
+    let remove = match p.get("remove") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Remove>(v.clone()).map_err(|_| EngineError::Params("`remove` is nothing, colour or background".to_string()))?,
+        ),
+    };
+    let colour = match text(p, "colour")? {
+        None => None,
+        Some(c) => {
+            let h = c.trim().trim_start_matches('#');
+            let byte = |i: usize| h.get(i..i + 2).and_then(|s| u8::from_str_radix(s, 16).ok());
+            match (h.len(), byte(0), byte(2), byte(4)) {
+                (6, Some(r), Some(g), Some(b)) => Some([r, g, b]),
+                _ => return Err(EngineError::Params("`colour` is #rrggbb".to_string())),
+            }
+        }
+    };
+    let tolerance = number(p, "tolerance")?;
+    // What shows behind: the screen, the camera blurred, or a picture of the media bin.
+    let behind = match p.get("behind").and_then(Value::as_str) {
+        None if p.get("behind").is_some() => return Err(EngineError::Params("`behind` is screen, blur or picture".to_string())),
+        None => None,
+        Some("screen") => Some(Behind::Screen),
+        Some("blur") => Some(Behind::Blur),
+        Some("picture") => {
+            let m = id(p, "picture")?;
+            if !s.timeline.media.iter().any(|x| x.id == m && x.kind == screengrabcraft_media::layers::MediaKind::Picture) {
+                return Err(EngineError::Params("`picture` is a picture of the media bin".to_string()));
+            }
+            Some(Behind::Picture(m))
+        }
+        Some(_) => return Err(EngineError::Params("`behind` is screen, blur or picture".to_string())),
+    };
+    let c = &mut s.timeline.camera;
+    c.behind = behind.unwrap_or(c.behind);
+    c.remove = remove.unwrap_or(c.remove);
+    c.key_colour = colour.unwrap_or(c.key_colour);
+    c.key_tolerance = tolerance.map_or(c.key_tolerance, |t| t.clamp(0.0, 1.0));
+    Ok(json!({}))
+}
+
 fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if p.get("corner").is_some_and(|v| !v.is_null()) || p.get("x").is_none() {
         // Back in its corner.
@@ -497,28 +1775,293 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand { id: "video.deleteClip", label: "Delete Clip", params: r#"{"track": n, "clip": n}: leaves a gap"#, run: delete_clip },
     VideoCommand { id: "video.trimStart", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_start },
     VideoCommand { id: "video.trimEnd", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_end },
-    VideoCommand { id: "video.moveClip", label: "Move Clip", params: r#"{"track": n, "clip": n, "to": µs}"#, run: move_clip },
+    VideoCommand {
+        id: "video.moveClip",
+        label: "Move Clip",
+        params: r#"{"track": n, "clip": n, "to": µs, "ripple"?: bool}: the clips grouped with it move as far; with `ripple` every later clip of their tracks moves along with them"#,
+        run: move_clip,
+    },
+    VideoCommand {
+        id: "video.zoomOnClicks",
+        label: "Zoom on the Clicks",
+        params: r#"{"share"?: 0.1..0.9 of the screen shown}: zooms that follow the recording's clicks, on a layer of their own: one for each run of clicks near each other, in a little before the first and out a while after the last, touching ones panning from one to the next; ordinary zooms, to change or delete. None where a zoom is already"#,
+        run: zoom_on_clicks,
+    },
+    VideoCommand {
+        id: "video.picturesInTurn",
+        label: "Pictures in Turn",
+        params: r#"{"media"?: [id, ...] (every picture of the media bin if not given), "each"?: µs (4 s), "at"?: µs (0)}: pictures placed one after another on a layer of their own, each as large as fits the video, faded from one to the next"#,
+        run: pictures_in_turn,
+    },
+    VideoCommand {
+        id: "video.motionBlur",
+        label: "Motion Blur",
+        params: r#"{"on"?: bool, "amount"?: 0.1..1 of a 25th of a second}: what moves on the picture (items sliding, growing or moving by their keyframes; zooms going in, out or panning) blurred along its way"#,
+        run: motion_blur,
+    },
+    VideoCommand {
+        id: "video.freezeRegion",
+        label: "Freeze a Region",
+        params: r#"{"from": µs, "to": µs, "x"?, "y"?: its middle, "w"?, "h"?: its size (shares of the screen; 0.5, 0.5, 0.4, 0.3), "layer"?: id}: a rectangle of the screen held as it was at `from` until `to` while the rest plays on (an item on a layer, moved, resized and timed like any other; `video.setItem`'s `h` changes its height). The pointer still shows over it"#,
+        run: freeze_region,
+    },
+    VideoCommand {
+        id: "video.hidePointer",
+        label: "Hide the Pointer",
+        params: r#"{"from": µs, "to": µs}: the mouse pointer (and its clicks, seen and heard) hidden over that stretch of the timeline; it stays hidden over what the screen showed there through later edits"#,
+        run: hide_pointer,
+    },
+    VideoCommand {
+        id: "video.showPointer",
+        label: "Show the Pointer",
+        params: r#"{"from"?: µs, "to"?: µs}: the pointer shown again over that stretch, or with neither, everywhere"#,
+        run: show_pointer,
+    },
+    VideoCommand {
+        id: "video.redrawPointer",
+        label: "Edit the Pointer's Path",
+        params: r#"{"from": µs, "to": µs, "points"?: 2..64}: the pointer's way over that stretch of the timeline (to the end of the screen's clip there at most) made a path through points, by default one every half second, each where it was then, to be moved with `video.pointerPoint`; a path there before is replaced. Gives {"path": n}. It stays with what the screen showed there through later edits"#,
+        run: redraw_pointer,
+    },
+    VideoCommand {
+        id: "video.pointerPoint",
+        label: "Move the Pointer",
+        params: r#"{"path": n, "point": n, "x": px, "y": px}: a point of the pointer's redrawn path moved (the screen's own pixels); it goes through it on a smooth curve"#,
+        run: pointer_point,
+    },
+    VideoCommand {
+        id: "video.straightenPointer",
+        label: "Straighten the Pointer's Path",
+        params: r#"{"path": n}: the pointer's redrawn path made straight: from its first point to its last, its points between gone"#,
+        run: straighten_pointer,
+    },
+    VideoCommand {
+        id: "video.pointerAsRecorded",
+        label: "Pointer as Recorded",
+        params: r#"{"path"?: n}: that redrawn path taken away (the pointer goes as recorded there), or with none, every one"#,
+        run: pointer_as_recorded,
+    },
+    VideoCommand {
+        id: "video.screenFrame",
+        label: "Screen Frame",
+        params: r##"{"size"?: 0.5..1 of the video, "background"?: "#rrggbb", "radius"?: 0..0.2 of its shorter side, "border"?: 0..0.05 of its width, "borderColour"?: "#rrggbb", "shadow"?: bool, "device"?: "none"|"laptop"|"phone"|"browser"}: the recording's own screen made smaller on a background colour, its corners rounded, a border round it, a soft shadow under it, a device drawn round it (the screen made small enough for it to fit)"##,
+        run: screen_frame,
+    },
+    VideoCommand {
+        id: "video.clipLook",
+        label: "Colour and Crop",
+        params: r##"{"track": n, "clip": n, "look"?: "plain"|"warm"|"cool"|"vivid"|"faded"|"dramatic"|"blackAndWhite"|"sepia"|"night", "brightness"?: -100..100, "contrast"?: -100..100, "saturation"?: -100..100, "tint"?: "#rrggbb", "tintAmount"?: 0..100, "crop"?: [left, top, right, bottom] 0..450 thousandths}: a picture track's clip lighter or darker, with more or less contrast and colour, tinted towards a colour, and its edges cut off (what's left fills the picture, its shape kept); a ready-made `look` sets all its colours first"##,
+        run: clip_look,
+    },
+    VideoCommand {
+        id: "video.lock",
+        label: "Lock Track",
+        params: r#"{"track": n, "locked": bool}: its clips stay as they are (cuts, speeds and holds of the whole video still move it)"#,
+        run: lock,
+    },
+    VideoCommand {
+        id: "video.solo",
+        label: "Play Alone",
+        params: r#"{"track": n, "solo": bool}: while any sound track plays alone, only those are heard"#,
+        run: solo,
+    },
+    VideoCommand {
+        id: "video.join",
+        label: "Join Clips",
+        params: r#"{"track": n, "clip": n}: the clip and the next one made one again, when the next goes on from where it stops (touching, from the same recording, as fast, the same way, with the same look)"#,
+        run: join,
+    },
+    VideoCommand {
+        id: "video.joinAll",
+        label: "Join the Pieces",
+        params: r#"{"track"?: n}: every clip of the track (or of every unlocked track) going on from the one before it joined to it: the pieces of splits made one again. Says how many joins"#,
+        run: join_all,
+    },
+    VideoCommand {
+        id: "video.lineUp",
+        label: "Line Up by Sound",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}, "with": {"track": n} or {"layer": id, "item": id}, "within"?: µs (5 s; 0.1 to 30 s): the clip (with the clips grouped with it) or the item moved so its sound is in step with the other's: the two waves compared at every shift within reach (the same voice recorded twice). Says how far it moved (µs) and how alike they sound (0 to 1)"#,
+        run: line_up,
+    },
+    VideoCommand {
+        id: "video.copyEffects",
+        label: "Copy Effects",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}: says its effects, to put on another with video.pasteEffects (nothing changes): a clip's colours and crop, fades and the transition into it; an item's look (turned, framed, masked, blended, a device round it), how it comes and goes, and its keyframes"#,
+        run: copy_effects,
+    },
+    VideoCommand {
+        id: "video.pasteEffects",
+        label: "Paste Effects",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}, "effects": what video.copyEffects said: a clip's effects put on a clip (as fits its track: colours and crop on a picture track, fades on a sound track; the transition where it meets the clip before), an item's on an item (its look, entrance and exit, and keyframes, those past its end left out); its words, media and time stay its own"#,
+        run: paste_effects,
+    },
+    VideoCommand {
+        id: "video.replaceMedia",
+        label: "Replace Media",
+        params: r#"{"layer": id, "item": id, "media": id}: the item shows (or plays) another of the media bin's files, of a kind for its layer, keeping its time, place, look, motion and animations; a sound or a video from where the old one played if it's that long, no longer than it is"#,
+        run: replace_media,
+    },
+    VideoCommand {
+        id: "video.mono",
+        label: "Mix to Mono",
+        params: r#"{"track": n, "mono": bool} or {"layer": id, "mono": bool}: a sound track's (or a sound layer's) two sides mixed into one, heard the same from both speakers"#,
+        run: mono,
+    },
+    VideoCommand {
+        id: "video.separateSound",
+        label: "Separate the Sound",
+        params: r#"{"layer": id, "item": id}: a video item's sound taken apart from its picture: the same stretch of its sound on a sound layer at the same moment, the video silent; from then on each moves, trims and is deleted on its own. Says the sound's layer and item"#,
+        run: separate_sound,
+    },
+    VideoCommand {
+        id: "video.clipColour",
+        label: "Clip Colour",
+        params: r#"{"track": n, "clip": n, "colour": 0..7 | null}: its colour on the timeline (null: its track's)"#,
+        run: clip_colour,
+    },
+    VideoCommand {
+        id: "video.group",
+        label: "Group",
+        params: r#"{"clips": [[track, clip], …]}: two or more clips put in a group of their own: they move together"#,
+        run: group,
+    },
+    VideoCommand { id: "video.ungroup", label: "Ungroup", params: r#"{"track": n, "clip": n}: the group that clip is in taken apart"#, run: ungroup },
+    VideoCommand {
+        id: "video.speed",
+        label: "Speed",
+        params: r#"{"from": µs, "to": µs, "speed": 0.1..10, "track"?: n}: plays the stretch faster or slower (2 twice as fast, 0.5 half, 1 as recorded) on every track, or one; what follows moves up to follow on, voices keep their pitch. Says where the stretch now ends"#,
+        run: speed,
+    },
+    VideoCommand {
+        id: "video.reverse",
+        label: "Play Backwards",
+        params: r#"{"track": n, "clip": n, "reverse"?: bool}: the clip (and the clips grouped with it) plays its stretch of the recording from its end to its start, the picture and the sound turned round; without `reverse`, the other way from how it plays now. Lines and keys pressed aren't shown on it"#,
+        run: reverse,
+    },
+    VideoCommand {
+        id: "video.holdFrame",
+        label: "Hold Frame",
+        params: r#"{"at": µs, "len": µs}: the picture at that moment held for `len` (up to 10 minutes): every track waits, what follows moves along, the sound is silent meanwhile. Says the stretch held"#,
+        run: hold_frame,
+    },
+    VideoCommand {
+        id: "video.holdLength",
+        label: "Hold Length",
+        params: r#"{"track": n, "clip": n, "len": µs}: a held frame (that clip) held this long instead, with the other tracks' hold there; what follows moves to match"#,
+        run: hold_length,
+    },
+    VideoCommand {
+        id: "video.fade",
+        label: "Fade",
+        params: r#"{"track": n, "clip": n, "in"?: µs, "out"?: µs}: how long a sound clip's sound takes to come up from silence at its start and go down to it at its end (0: at once)"#,
+        run: fade,
+    },
+    VideoCommand {
+        id: "video.denoise",
+        label: "Background Noise",
+        params: r#"{"track": n, "amount": 0..1}: takes a sound track's steady background noise (a fan, a hum, hiss) out, learnt from the track itself; 0 takes nothing out"#,
+        run: denoise,
+    },
     VideoCommand { id: "video.mute", label: "Mute", params: r#"{"track": n, "muted": bool}"#, run: mute },
     VideoCommand { id: "video.volume", label: "Volume", params: r#"{"track": n, "volume": 0..2}"#, run: volume },
     VideoCommand {
         id: "video.camera",
         label: "Camera",
-        params: r#"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5}"#,
+        params: r##"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5, "border"?: 0..0.1 (a share of the picture's shorter side, 0 is none), "borderColor"?: "#RRGGBB", "mirror"?: bool}"##,
         run: camera,
+    },
+    VideoCommand {
+        id: "video.cameraFull",
+        label: "Camera Full Screen",
+        params: r#"{"from": µs, "to": µs, "full"?: bool (true)}: the camera fills the picture then, the screen in its place (false: as before); or {"stretch": n, "full": false}: that stretch taken away"#,
+        run: camera_full,
     },
     VideoCommand {
         id: "video.captions",
         label: "Captions",
-        params: r#"{"show"?: bool, "burn"?: bool}: the captions on the picture in the editor, and burned into the video made"#,
+        params: r#"{"show"?: bool, "burn"?: bool, "words"?: bool}: the captions on the picture in the editor, and burned into the video made; with `words`, each word lit up as it's said (its time worked out from its line's by its length)"#,
         run: captions,
     },
     VideoCommand {
         id: "video.pointer",
         label: "Pointer",
-        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool}: the mouse pointer on the video"#,
+        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool, "highlight"?: bool, "spotlight"?: bool, "magnify"?: bool, "clickSound"?: bool, "kind"?: "recorded"|"arrow"|"dark"|"hand"|"dot"|"ring"}: the mouse pointer on the video: rings at its clicks, a yellow disc under it, the picture dimmed but round it, a lens showing what's round it twice as large, a click heard at each click; the recorded pointer, or one of another look drawn in its place (a white or black arrow, a hand, a dot, a ring)"#,
         run: pointer,
     },
+    VideoCommand {
+        id: "video.keys",
+        label: "Keys Pressed",
+        params: r#"{"show"?: bool, "place"?: "topLeft"|"top"|"topRight"|"bottomLeft"|"bottom"|"bottomRight", "size"?: 0.5..2.5, "light"?: bool}: the shortcuts pressed while recording, shown on the video as keys for a moment after each press"#,
+        run: keys,
+    },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
+    VideoCommand {
+        id: "video.captionText",
+        label: "Edit Caption",
+        params: r#"{"line": n, "text": text}: a line of the recording's captions (its place among them, in order) put right; no words: the line goes"#,
+        run: caption_text,
+    },
+    VideoCommand {
+        id: "video.captionSplit",
+        label: "Split Caption",
+        params: r#"{"line": n, "at"?: n}: the line cut in two between words, near its `at`th character (else its middle), its time shared as its words are"#,
+        run: caption_split,
+    },
+    VideoCommand {
+        id: "video.captionJoin",
+        label: "Join Captions",
+        params: r#"{"line": n}: the line and the same speaker's next line made one"#,
+        run: caption_join,
+    },
+    VideoCommand {
+        id: "video.captionTimes",
+        label: "Move Caption",
+        params: r#"{"line": n, "start"?: µs, "end"?: µs}: when the line starts and ends, in the recording's time"#,
+        run: caption_times,
+    },
+    VideoCommand {
+        id: "video.cutWords",
+        label: "Cut Words",
+        params: r#"{"line": n, "words": [n, …]}: words of a line of the recording's captions (their places in it, from 0) cut out of the video: where they're said is taken out of every track, closing the gap, and the words out of the line. A line's words are timed by their length (the speech model times lines only). Says how many words, how long was cut (µs) and where the first cut is"#,
+        run: cut_words,
+    },
+    VideoCommand {
+        id: "video.cutFillers",
+        label: "Take Out Filler Words",
+        params: r#"{"words"?: [text, …]}: every filler word (um, uh, er and the like, or the words given) said in the video cut out of it, as Cut Words does"#,
+        run: cut_fillers,
+    },
+    VideoCommand {
+        id: "video.importCaptions",
+        label: "Import Subtitles",
+        params: r#"{"text": the subtitles, "replace"?: bool}: SubRip (.srt) or WebVTT (.vtt) timed on the video as edited, made the recording's captions (instead of those it has, or with them: `replace` false); each follows its speaker's track from then on (`You:` and `Others:` lines theirs, the rest the microphone's). Says how many lines came in and how many fell where nothing is heard"#,
+        run: import_captions,
+    },
+    VideoCommand {
+        id: "video.addMarker",
+        label: "Add Marker",
+        params: r#"{"at": µs, "name"?: text}: marks a moment on the timeline (a chapter of the video made); its place among the markers"#,
+        run: add_marker,
+    },
+    VideoCommand {
+        id: "video.removeMarker",
+        label: "Delete Marker",
+        params: r#"{"marker": n}: its place among the markers, in order"#,
+        run: remove_marker,
+    },
+    VideoCommand { id: "video.renameMarker", label: "Rename Marker", params: r#"{"marker": n, "name": text}"#, run: rename_marker },
+    VideoCommand {
+        id: "video.moveMarker",
+        label: "Move Marker",
+        params: r#"{"marker": n, "at": µs}: not onto another marker; its new place among them"#,
+        run: move_marker,
+    },
+    VideoCommand {
+        id: "video.captionsHeard",
+        label: "Captions as Heard",
+        params: "{}: every line put right goes back to how it was heard",
+        run: captions_heard,
+    },
     VideoCommand {
         id: "video.addMedia",
         label: "Import Media",
@@ -529,8 +2072,32 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.place",
         label: "Add to the Timeline",
-        params: r#"{"template": key | "media": id, "at": µs, "layer"?: id|"new", "title"?: text, "subtitle"?: text, "len"?: µs}: where it fits, never over another"#,
+        params: r##"{"template": key | "media": id, "at": µs, "layer"?: id|"new", "title"?: text, "subtitle"?: text, "len"?: µs, "theme"?: {"main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}}: where it fits, never over another (a library item in the theme's colours and face)"##,
         run: place,
+    },
+    VideoCommand {
+        id: "video.addNarration",
+        label: "Record Narration",
+        params: r#"{"path": the take's sound file, "duration": µs, "at": µs, "name"?: text}: into the media bin and on a sound layer of its own (Narration, Narration 2 …) from there"#,
+        run: add_narration,
+    },
+    VideoCommand {
+        id: "video.applyTheme",
+        label: "Apply the Theme",
+        params: r##"{"theme": {"name"?, "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}}: every title, lower third, callout and graphic on the layers in its colours (main: bars, boxes and cards; mark: highlights, circles, arrows, clicks; words: a plain title) and its face; how many changed"##,
+        run: apply_theme,
+    },
+    VideoCommand {
+        id: "video.makeTemplate",
+        label: "Make a Template",
+        params: r#"{"name": text, "items"?: [[layer, item], …]}: the layers' items (all, or these) as a template to keep, timed from the first, with the media they show; nothing changes"#,
+        run: make_template,
+    },
+    VideoCommand {
+        id: "video.useTemplate",
+        label: "Add the Template",
+        params: r#"{"template": what video.makeTemplate made, "at": µs}: its items on layers of their own from there, its media into the bin"#,
+        run: use_template,
     },
     VideoCommand {
         id: "video.moveItem",
@@ -543,8 +2110,50 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs}"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "font"?: "sans"|"slanted"|"mono", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop"|"write" (write: words written on letter by letter, anything else wiped on from its left), "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left), "h"?: 0.02..1 (a frozen region's height, a share of the screen)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
+    },
+    VideoCommand {
+        id: "video.volumePoint",
+        label: "Volume Point",
+        params: r#"{"track": n, "at": µs, "level"?: 0..2, "point"?: n}: a point of a sound track's volume line at that moment (on one of its clips): how loud it is there (else what the line has there). With `point`, that point moved there. The line runs straight from point to point and stays with the sound through edits; its place among the points"#,
+        run: volume_point,
+    },
+    VideoCommand {
+        id: "video.removeVolumePoint",
+        label: "Remove Volume Point",
+        params: r#"{"track": n, "point": n} or {"track": n, "all": true}: none left, it's as loud all along"#,
+        run: remove_volume_point,
+    },
+    VideoCommand {
+        id: "video.ducking",
+        label: "Lower Under the Voice",
+        params: r#"{"on"?: bool, "level"?: 0..1}: the rest of the sound (the computer's, music and media) lowered to `level` while the microphone's voice is heard, coming back up after"#,
+        run: ducking,
+    },
+    VideoCommand {
+        id: "video.levels",
+        label: "Even Out Levels",
+        params: r#"{"track"?: n, "target"?: -40..-6 dB}: each sound track (or one) given the volume that makes what it plays as loud as the target (-20 dB of the full scale; as near as the volume goes); says each track's volume"#,
+        run: levels,
+    },
+    VideoCommand {
+        id: "video.transition",
+        label: "Transition",
+        params: r#"{"track": n, "clip": n, "kind": "crossFade"|"dipBlack"|"wipeLeft"|"wipeRight"|"wipeUp"|"wipeDown"|"push"|"circle"|"none", "len"?: µs}: how the clip before turns into this one where they meet (0.1 to 5 s, across the cut; on a sound track a cross-fade)"#,
+        run: transition,
+    },
+    VideoCommand {
+        id: "video.keyframe",
+        label: "Keyframe",
+        params: r#"{"layer": id, "item": id, "at": µs, "x"?, "y"?, "w"?, "opacity"?: 0..1}: a keyframe of the item at that moment of the timeline (in it): where it is, how large and how see-through then (what isn't given: as it is there now); one there already is changed. It moves eased from one keyframe to the next"#,
+        run: keyframe,
+    },
+    VideoCommand {
+        id: "video.removeKeyframe",
+        label: "Remove Keyframe",
+        params: r#"{"layer": id, "item": id, "key": n} or {"layer", "item", "all": true}: with none left it stays where the last had it"#,
+        run: remove_keyframe,
     },
     VideoCommand { id: "video.layer", label: "Layer", params: r#"{"layer": id, "hidden"?: bool, "volume"?: 0..2, "name"?: text}"#, run: layer },
     VideoCommand { id: "video.deleteLayer", label: "Delete Layer", params: r#"{"layer": id}"#, run: delete_layer },
@@ -565,6 +2174,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Move Layer",
         params: r#"{"layer": id, "to": n}: its place among the layers, 0 at the back"#,
         run: move_layer,
+    },
+    VideoCommand {
+        id: "video.watermark",
+        label: "Watermark",
+        params: r#"{"on"?: bool, "words"?: text, "picture"?: media id | null, "corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "opacity"?: 0..1, "size"?: 0.02..0.3}: words (or a picture of the media bin, instead of them) on every frame of the video, in a corner, as see-through as `opacity` says, as tall as `size` of the video's height"#,
+        run: watermark,
+    },
+    VideoCommand {
+        id: "video.cameraKey",
+        label: "Camera Background",
+        params: r##"{"remove"?: "nothing"|"colour"|"background", "colour"?: "#rrggbb", "tolerance"?: 0..1, "behind"?: "screen"|"blur"|"picture", "picture"?: media id}: what's taken away from the camera's picture so the screen shows round you: a colour (a green screen; how far from it still goes), or the background (learnt from a few of the camera's pictures by the background model, the camera kept still); and what shows there instead: the screen, the camera's own picture blurred, or a picture of the media bin (`picture` names it)"##,
+        run: camera_key,
     },
     VideoCommand {
         id: "video.cameraAt",
@@ -596,6 +2217,355 @@ mod tests {
 
     fn session() -> VideoSession {
         VideoSession::new(&recording())
+    }
+
+    #[test]
+    fn a_videos_sound_is_separated_and_tracks_and_layers_are_mixed_to_mono() {
+        let mut s = session();
+        let v = s.execute("video.addMedia", &json!({"kind": "video", "name": "Demo.mp4", "path": "C:/Demo.mp4", "duration": 3_000_000})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": v["id"], "at": 1_000_000})).unwrap();
+        let (vl, vi) = (placed["layer"].clone(), placed["item"].clone());
+        let sound = s.execute("video.separateSound", &json!({"layer": vl, "item": vi})).unwrap();
+        assert_eq!(s.undo_label(), Some("Separate the Sound"));
+        let (sl, si) = (sound["layer"].as_u64().unwrap() as u32, sound["item"].as_u64().unwrap() as u32);
+        let it = s.timeline.item(sl, si).unwrap();
+        assert!(it.sound_only && it.at == 1_000_000);
+        assert!(s.timeline.item(vl.as_u64().unwrap() as u32, vi.as_u64().unwrap() as u32).unwrap().silent);
+        assert!(s.execute("video.separateSound", &json!({"layer": vl, "item": vi})).is_err(), "once");
+        // Its sound brought back with the video: heard with it again.
+        s.execute("video.setItem", &json!({"layer": vl, "item": vi, "silent": false})).unwrap();
+        assert!(!s.timeline.item(vl.as_u64().unwrap() as u32, vi.as_u64().unwrap() as u32).unwrap().silent);
+        assert!(s.execute("video.setItem", &json!({"layer": vl, "item": vi, "silent": "no"})).is_err());
+        // Mono: the microphone track, the sound layer; not the screen, nor a picture layer.
+        s.execute("video.mono", &json!({"track": 1, "mono": true})).unwrap();
+        assert!(s.timeline.tracks[1].mono);
+        assert_eq!(s.undo_label(), Some("Mix to Mono"));
+        s.execute("video.mono", &json!({"layer": sl, "mono": true})).unwrap();
+        assert!(s.timeline.layer(sl).unwrap().mono);
+        for bad in [
+            json!({"track": 0, "mono": true}),
+            json!({"layer": vl, "mono": true}),
+            json!({"track": 1}),
+            json!({"mono": true}),
+            json!({"track": 1, "layer": sl, "mono": true}),
+        ] {
+            assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_cameras_background_is_blurred_or_a_picture_and_captions_light_up_word_by_word() {
+        use screengrabcraft_media::timeline::Behind;
+        let mut s = session();
+        s.execute("video.cameraKey", &json!({"remove": "colour", "behind": "blur"})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Blur);
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Beach.png", "path": "C:/Beach.png", "width": 40, "height": 30})).unwrap();
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "Song.mp3", "path": "C:/Song.mp3", "duration": 2_000_000})).unwrap();
+        s.execute("video.cameraKey", &json!({"behind": "picture", "picture": pic["id"]})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Picture(pic["id"].as_u64().unwrap() as u32));
+        assert_eq!(s.undo_label(), Some("Camera Background"));
+        for bad in
+            [json!({"behind": "picture", "picture": song["id"]}), json!({"behind": "picture"}), json!({"behind": "beach"}), json!({"behind": 3})]
+        {
+            assert!(s.execute("video.cameraKey", &bad).is_err(), "{bad}");
+        }
+        assert!(matches!(s.timeline.camera.behind, Behind::Picture(_)), "unchanged by junk");
+        s.execute("video.cameraKey", &json!({"behind": "screen"})).unwrap();
+        assert_eq!(s.timeline.camera.behind, Behind::Screen);
+        // The captions lit up word by word.
+        assert_eq!(s.execute("video.captions", &json!({"words": true})).unwrap()["words"], true);
+        assert!(s.timeline.captions.words);
+        assert!(s.execute("video.captions", &json!({"words": "yes"})).is_err());
+    }
+
+    #[test]
+    fn a_region_is_frozen_for_a_stretch_and_words_write_themselves_on() {
+        use screengrabcraft_media::layers::{AnimKind, What};
+        let mut s = session();
+        let made = s.execute("video.freezeRegion", &json!({"from": 500_000, "to": 1_500_000, "x": 0.8, "y": 0.2, "w": 0.3, "h": 0.2})).unwrap();
+        assert_eq!(s.undo_label(), Some("Freeze a Region"));
+        let (l, i) = (made["layer"].as_u64().unwrap() as u32, made["item"].as_u64().unwrap() as u32);
+        let it = s.timeline.item(l, i).unwrap().clone();
+        assert!(matches!(it.what, What::Freeze { h } if (h - 0.2).abs() < 1e-6));
+        assert_eq!((it.at, it.len, it.place.x), (500_000, 1_000_000, 0.8));
+        // Its height changed like the rest of it, kept within the screen.
+        s.execute("video.setItem", &json!({"layer": l, "item": i, "h": 7, "w": 0.5})).unwrap();
+        let it = s.timeline.item(l, i).unwrap();
+        assert!(matches!(it.what, What::Freeze { h } if h == 1.0) && it.place.w == 0.5);
+        for bad in [
+            json!({"from": 5, "to": 5}),
+            json!({"from": 1}),
+            json!({"from": 0, "to": 10, "x": "left"}),
+            json!({"from": 90_000_000, "to": 99_000_000}),
+        ] {
+            assert!(s.execute("video.freezeRegion", &bad).is_err(), "{bad}");
+        }
+        // A title written on and rubbed off.
+        let t = s.execute("video.place", &json!({"template": "title", "at": 0})).unwrap();
+        s.execute("video.setItem", &json!({"layer": t["layer"], "item": t["item"], "intro": "write", "outro": "write"})).unwrap();
+        let it = s.timeline.item(t["layer"].as_u64().unwrap() as u32, t["item"].as_u64().unwrap() as u32).unwrap();
+        assert!(it.intro.kind == AnimKind::Write && it.outro.kind == AnimKind::Write);
+        assert!(s.execute("video.setItem", &json!({"layer": t["layer"], "item": t["item"], "intro": "scribble"})).is_err());
+    }
+
+    #[test]
+    fn an_item_moves_along_a_path_and_a_picture_is_pinned_by_its_corners() {
+        let mut s = session();
+        let a = s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 40, "height": 40})).unwrap();
+        let p = s.execute("video.place", &json!({"media": a["id"], "at": 0})).unwrap();
+        let (l, i) = (p["layer"].clone(), p["item"].clone());
+        s.execute("video.setItem", &json!({"layer": l, "item": i, "path": true, "pinned": true, "pin": [[0, 0], [0.1, -0.1], [0, 0], [-5, 9]]}))
+            .unwrap();
+        let it = s.timeline.item(l.as_u64().unwrap() as u32, i.as_u64().unwrap() as u32).unwrap();
+        assert!(it.path && it.look.pinned);
+        assert_eq!(it.look.pin, [[0.0, 0.0], [0.1, -0.1], [0.0, 0.0], [-1.0, 1.0]], "kept within the video's size either way");
+        for bad in [json!({"pin": [[0, 0]]}), json!({"pin": "corners"}), json!({"pin": [[0, 0], [0, 0], [0, 0], [0, "x"]]}), json!({"path": 1})] {
+            let mut q = bad.clone();
+            q["layer"] = l.clone();
+            q["item"] = i.clone();
+            assert!(s.execute("video.setItem", &q).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn effects_are_copied_and_pasted_and_media_replaced_keeping_them() {
+        let mut s = session();
+        // Clips: the screen's first half warm and cropped, pasted on its second half.
+        s.execute("video.split", &json!({"at": 2_000_000})).unwrap();
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "warm", "crop": [100, 0, 0, 0]})).unwrap();
+        s.execute("video.fade", &json!({"track": 1, "clip": 0, "in": 300_000})).unwrap();
+        let fx = s.execute("video.copyEffects", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!(s.undo_label(), Some("Fade"), "copying changes nothing");
+        s.execute("video.pasteEffects", &json!({"track": 0, "clip": 1, "effects": fx["effects"]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Paste Effects"));
+        assert_eq!(s.timeline.tracks[0].clips[1].look, s.timeline.tracks[0].clips[0].look);
+        let sound = s.execute("video.copyEffects", &json!({"track": 1, "clip": 0})).unwrap();
+        s.execute("video.pasteEffects", &json!({"track": 1, "clip": 1, "effects": sound["effects"]})).unwrap();
+        assert_eq!(s.timeline.tracks[1].clips[1].fade_in, 300_000);
+        // Items: a picture turned, bordered and moving, its effects on another picture.
+        let a = s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 40, "height": 40})).unwrap();
+        let b = s.execute("video.addMedia", &json!({"kind": "picture", "name": "B.png", "path": "C:/B.png", "width": 40, "height": 20})).unwrap();
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "S.wav", "path": "C:/S.wav", "duration": 2_000_000})).unwrap();
+        let pa = s.execute("video.place", &json!({"media": a["id"], "at": 0})).unwrap();
+        let pb = s.execute("video.place", &json!({"media": b["id"], "at": 0, "len": 1_000_000})).unwrap();
+        let (la, ia) = (pa["layer"].clone(), pa["item"].clone());
+        s.execute("video.setItem", &json!({"layer": la, "item": ia, "rotate": 30, "border": 0.05, "intro": "pop"})).unwrap();
+        s.execute("video.keyframe", &json!({"layer": la, "item": ia, "at": 0, "x": 0.2})).unwrap();
+        s.execute("video.keyframe", &json!({"layer": la, "item": ia, "at": 2_000_000, "x": 0.8})).unwrap();
+        let fx = s.execute("video.copyEffects", &json!({"layer": la, "item": ia})).unwrap();
+        s.execute("video.pasteEffects", &json!({"layer": pb["layer"], "item": pb["item"], "effects": fx["effects"]})).unwrap();
+        let ib = s.timeline.item(pb["layer"].as_u64().unwrap() as u32, pb["item"].as_u64().unwrap() as u32).unwrap().clone();
+        assert!((ib.look.rotate - 30.0).abs() < 1e-4 && ib.look.border > 0.0 && ib.intro.kind == screengrabcraft_media::layers::AnimKind::Pop);
+        assert_eq!(ib.keys.len(), 1, "the keyframe past its end left out");
+        assert!((ib.place.x - 0.2).abs() < 1e-4);
+        // A clip's effects don't go on an item, nor an item's on a clip.
+        let clip_fx = s.execute("video.copyEffects", &json!({"track": 0, "clip": 0})).unwrap();
+        assert!(s.execute("video.pasteEffects", &json!({"layer": la, "item": ia, "effects": clip_fx["effects"]})).is_err());
+        assert!(s.execute("video.pasteEffects", &json!({"track": 0, "clip": 0, "effects": fx["effects"]})).is_err());
+        assert!(s.execute("video.pasteEffects", &json!({"track": 0, "clip": 0, "effects": {"clip": "warm"}})).is_err());
+        // The picture replaced by the other: its effects and time kept.
+        let before = s.timeline.item(la.as_u64().unwrap() as u32, ia.as_u64().unwrap() as u32).unwrap().clone();
+        s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": b["id"]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Replace Media"));
+        let after = s.timeline.item(la.as_u64().unwrap() as u32, ia.as_u64().unwrap() as u32).unwrap().clone();
+        assert_eq!(after.what, screengrabcraft_media::layers::What::Media { id: b["id"].as_u64().unwrap() as u32 });
+        assert_eq!((after.at, after.len, after.look.clone(), after.keys.clone()), (before.at, before.len, before.look, before.keys));
+        // A sound doesn't go on a picture layer; nor what isn't in the bin.
+        assert!(s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": song["id"]})).is_err());
+        assert!(s.execute("video.replaceMedia", &json!({"layer": la, "item": ia, "media": 999})).is_err());
+    }
+
+    #[test]
+    fn pieces_are_joined_and_a_sound_is_lined_up_by_ear() {
+        use screengrabcraft_media::align::{Part, RATE};
+        let mut s = session();
+        s.execute("video.split", &json!({"at": 1_000_000})).unwrap();
+        s.execute("video.split", &json!({"at": 3_000_000})).unwrap();
+        s.execute("video.join", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!(s.undo_label(), Some("Join Clips"));
+        assert_eq!(s.timeline.tracks[0].clips.len(), 2);
+        assert_eq!(s.execute("video.joinAll", &json!({})).unwrap()["joined"], 3);
+        assert!(s.timeline.tracks.iter().all(|t| t.clips.len() == 1));
+        assert!(s.execute("video.joinAll", &json!({})).is_err(), "nothing left to join");
+        assert!(s.execute("video.join", &json!({"track": 0, "clip": 0})).is_err());
+        // A voice, made up: bursts of tones at uneven times (20 s at the listening rate).
+        let mut seed = 7u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let mut voice = vec![0.0f32; 20 * RATE as usize];
+        let mut at = 0usize;
+        while at < voice.len() {
+            let (len, hz) = (600 + (next() * 2_400.0) as usize, 150.0 + next() * 300.0);
+            for k in 0..len {
+                if let Some(v) = voice.get_mut(at + k) {
+                    *v = (std::f32::consts::TAU * hz * k as f32 / RATE as f32).sin() * 0.5;
+                }
+            }
+            at += len + 300 + (next() * 3_000.0) as usize;
+        }
+        let voice = std::sync::Arc::new(voice);
+        // No ears: refused.
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "Desk.wav", "path": "C:/Desk.wav", "duration": 10_000_000})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": song["id"], "at": 0})).unwrap();
+        let what = json!({"layer": placed["layer"], "item": placed["item"], "with": {"track": 1}});
+        assert!(s.execute("video.lineUp", &what).is_err());
+        // The microphone heard the voice as it happened; the other recorder started 2 s late, so
+        // its sound placed at 0 is 2 s ahead of the microphone's: it moves 2 s later.
+        let v = voice.clone();
+        s.set_listen(Box::new(move |tl, part, from, n| {
+            (0..n)
+                .map(|k| {
+                    let t = from + k as u64 * 1_000_000 / RATE;
+                    let src = match part {
+                        Part::Track(1) => Some(t),
+                        Part::Item { layer, item } => {
+                            tl.item(layer, item).filter(|i| i.at <= t && t < i.end()).map(|i| t - i.at + i.from + 2_000_000)
+                        }
+                        _ => None,
+                    };
+                    src.and_then(|u| v.get((u * RATE / 1_000_000) as usize)).copied().unwrap_or(0.0)
+                })
+                .collect()
+        }));
+        let moved = s.execute("video.lineUp", &what).unwrap();
+        assert_eq!(s.undo_label(), Some("Line Up by Sound"));
+        assert!((moved["moved"].as_i64().unwrap() - 2_000_000).abs() <= 125, "{moved}");
+        assert!(moved["sure"].as_f64().unwrap() > 0.8);
+        let (l, i) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        assert!(s.timeline.item(l, i).unwrap().at.abs_diff(2_000_000) <= 125);
+        // Asked again, it stays.
+        assert!(s.execute("video.lineUp", &what).unwrap()["moved"].as_i64().unwrap().abs() <= 125);
+        for bad in [
+            json!({"layer": l, "item": i}),
+            json!({"layer": l, "item": i, "with": {"layer": l, "item": i}}),
+            json!({"track": 1, "with": {"layer": l, "item": i}}),
+            json!({"track": 0, "clip": 0, "with": {"track": 1}}),
+            json!({"layer": l, "item": i, "with": {"track": 1}, "within": "far"}),
+            json!({"layer": l, "item": i, "with": "the microphone"}),
+        ] {
+            assert!(s.execute("video.lineUp", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_locked_track_stays_as_it_is_and_grouped_clips_move_together() {
+        let mut s = session();
+        s.execute("video.split", &json!({"at": 2_000_000})).unwrap();
+        s.execute("video.lock", &json!({"track": 1, "locked": true})).unwrap();
+        assert_eq!(s.undo_label(), Some("Lock Track"));
+        for (id, p) in [
+            ("video.deleteClip", json!({"track": 1, "clip": 0})),
+            ("video.trimEnd", json!({"track": 1, "clip": 0, "to": 1_000_000})),
+            ("video.split", json!({"at": 1_000_000, "track": 1})),
+            ("video.volumePoint", json!({"track": 1, "at": 1_000_000})),
+        ] {
+            assert!(s.execute(id, &p).is_err(), "{id}");
+        }
+        s.execute("video.lock", &json!({"track": 1, "locked": false})).unwrap();
+        // The second halves grouped, the microphone's moved: the screen's goes with it.
+        s.execute("video.lift", &json!({"from": 2_000_000, "to": 2_500_000})).unwrap();
+        let v = s.execute("video.group", &json!({"clips": [[0, 1], [1, 1]]})).unwrap();
+        assert_eq!(v["group"].as_u64(), Some(1));
+        assert!(s.execute("video.group", &json!({"clips": [[0, 1], "x"]})).is_err());
+        s.execute("video.moveClip", &json!({"track": 1, "clip": 1, "to": 2_200_000})).unwrap();
+        assert_eq!((s.timeline.tracks[0].clips[1].at, s.timeline.tracks[1].clips[1].at), (2_200_000, 2_200_000));
+        s.execute("video.clipColour", &json!({"track": 0, "clip": 0, "colour": 5})).unwrap();
+        assert!(s.execute("video.clipColour", &json!({"track": 0, "clip": 0, "colour": 300})).is_err());
+        s.execute("video.solo", &json!({"track": 1, "solo": true})).unwrap();
+        assert!(s.execute("video.solo", &json!({"track": 0, "solo": true})).is_err());
+        s.execute("video.ungroup", &json!({"track": 0, "clip": 1})).unwrap();
+        assert!(s.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| c.group.is_none())));
+    }
+
+    #[test]
+    fn subtitles_are_brought_in_as_captions_and_a_watermark_is_set() {
+        let mut s = session();
+        s.execute("video.cut", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        let srt = "1\n00:00:01,500 --> 00:00:02,000\nYou: After the cut\n\n2\n00:00:09,000 --> 00:00:10,000\nPast the end\n";
+        let v = s.execute("video.importCaptions", &json!({"text": srt})).unwrap();
+        assert_eq!((v["lines"].as_u64(), v["left"].as_u64()), (Some(1), Some(1)));
+        assert_eq!(s.undo_label(), Some("Import Subtitles"));
+        let cues = s.timeline.corrected.clone().unwrap();
+        assert_eq!((cues[0].start, cues[0].end, cues[0].text.as_str()), (2_500_000, 3_000_000, "After the cut"), "in the recording's time");
+        // With those it has: both.
+        let vtt = "WEBVTT\n\n00:00.200 --> 00:00.800\nFirst\n";
+        s.execute("video.importCaptions", &json!({"text": vtt, "replace": false})).unwrap();
+        assert_eq!(s.timeline.corrected.as_ref().map(Vec::len), Some(2));
+        for bad in
+            [json!({}), json!({"text": "no subtitles here"}), json!({"text": srt, "replace": "yes"}), json!({"text": "00:30.000 --> 00:31.000\nx"})]
+        {
+            assert!(s.execute("video.importCaptions", &bad).is_err(), "{bad}");
+        }
+        // The watermark: words, then a picture of the bin; one that isn't there is refused.
+        s.execute("video.watermark", &json!({"on": true, "words": "Draft", "corner": "topLeft", "opacity": 3})).unwrap();
+        let w = s.timeline.watermark.clone();
+        assert!(w.on && w.words == "Draft" && w.opacity == 1.0 && w.corner == Corner::TopLeft);
+        assert_eq!(s.undo_label(), Some("Watermark"));
+        let logo = s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png"})).unwrap();
+        s.execute("video.watermark", &json!({"picture": logo["id"]})).unwrap();
+        assert_eq!(s.timeline.watermark.picture, logo["id"].as_u64().map(|v| v as u32));
+        for bad in [json!({"picture": 99}), json!({"corner": "middle"}), json!({"on": 1}), json!("x")] {
+            assert!(s.execute("video.watermark", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.watermark", &json!({"picture": null})).unwrap();
+        assert_eq!(s.timeline.watermark.picture, None);
+    }
+
+    #[test]
+    fn a_clip_is_played_backwards_and_forwards_again_one_undo_step_each() {
+        let mut s = session();
+        let v = s.execute("video.reverse", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!((v["reverse"].as_bool(), v["clips"].as_u64()), (Some(true), Some(1)));
+        assert_eq!(s.undo_label(), Some("Play Backwards"));
+        assert_eq!(s.timeline.source_time(0, 0), Some(4_999_999));
+        // Trimmed at its start, then brought back up to the recording's end.
+        s.execute("video.trimStart", &json!({"track": 0, "clip": 0, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.source_time(0, 1_000_000), Some(3_999_999));
+        s.execute("video.trimStart", &json!({"track": 0, "clip": 0, "to": 0})).unwrap();
+        assert_eq!(s.timeline.source_time(0, 0), Some(4_999_999));
+        // Without `reverse` it turns round again; with it, as said.
+        s.execute("video.reverse", &json!({"track": 0, "clip": 0})).unwrap();
+        assert!(!s.timeline.tracks[0].clips[0].reverse);
+        s.execute("video.reverse", &json!({"track": 1, "clip": 0, "reverse": true})).unwrap();
+        assert!(s.timeline.tracks[1].clips[0].reverse);
+        for bad in [json!({"track": 0, "clip": 5}), json!({"track": 0, "clip": 0, "reverse": "yes"}), json!({"clip": 0})] {
+            assert!(s.execute("video.reverse", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.lock", &json!({"track": 1, "locked": true})).unwrap();
+        assert!(s.execute("video.reverse", &json!({"track": 1, "clip": 0})).is_err(), "locked");
+    }
+
+    #[test]
+    fn a_volume_line_lowering_under_the_voice_and_even_levels_are_edits_like_any() {
+        let mut s = session();
+        s.execute("video.volumePoint", &json!({"track": 1, "at": 1_000_000, "level": 0.25})).unwrap();
+        let v = s.execute("video.volumePoint", &json!({"track": 1, "at": 3_000_000, "level": 1.5})).unwrap();
+        assert_eq!(v["point"].as_u64(), Some(1));
+        assert_eq!(s.undo_label(), Some("Volume Point"));
+        assert!((s.timeline.tracks[1].level_at(2_000_000) - 0.875).abs() < 1e-6);
+        // Dragged, it moves; taken away, it's gone; the screen has none.
+        s.execute("video.volumePoint", &json!({"track": 1, "point": 0, "at": 500_000})).unwrap();
+        assert_eq!(s.timeline.tracks[1].points[0].at, 500_000);
+        assert!(s.execute("video.volumePoint", &json!({"track": 0, "at": 500_000})).is_err());
+        s.execute("video.removeVolumePoint", &json!({"track": 1, "point": 1})).unwrap();
+        assert_eq!(s.timeline.tracks[1].points.len(), 1);
+        // Lowered under the voice.
+        s.execute("video.ducking", &json!({"on": true, "level": 0.2})).unwrap();
+        assert!(s.timeline.ducking.on && (s.timeline.ducking.level - 0.2).abs() < 1e-6);
+        // Levels: not without a way to measure them; with one, the volume that reaches the target.
+        assert!(s.execute("video.levels", &json!({})).is_err());
+        s.set_measure(Box::new(|_, _| Some(-26.0)));
+        let v = s.execute("video.levels", &json!({})).unwrap();
+        assert_eq!(v["tracks"].as_array().map(Vec::len), Some(1));
+        assert!((s.timeline.tracks[1].volume - 2.0).abs() < 0.01, "-26 dB to -20 is twice as loud");
+        assert!(s.execute("video.levels", &json!({"track": 0})).is_err());
+        for _ in 0..7 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.tracks[1].points.is_empty() && !s.timeline.ducking.on && s.timeline.tracks[1].volume == 1.0);
     }
 
     #[test]
@@ -670,6 +2640,194 @@ mod tests {
     }
 
     #[test]
+    fn a_stretch_sped_up_is_one_undo_step_and_says_where_it_ends() {
+        let mut s = session();
+        let r = s.execute("video.speed", &json!({"from": 1_000_000, "to": 3_000_000, "speed": 2})).unwrap();
+        assert_eq!((r["to"].as_u64(), r["length"].as_u64(), r["speed"].as_f64()), (Some(2_000_000), Some(4_000_000), Some(2.0)));
+        assert_eq!(s.undo_label(), Some("Speed"));
+        assert_eq!(s.timeline.source_time(1, 1_500_000), Some(2_000_000), "the sound with the picture");
+        // Slower than the slowest is the slowest; one track alone.
+        let r = s.execute("video.speed", &json!({"from": 0, "to": 1_000_000, "speed": 0.01, "track": 0})).unwrap();
+        assert_eq!(r["speed"].as_f64(), Some(0.1));
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.length(), 5_000_000);
+        for bad in [json!({"from": 0, "to": 1}), json!({"from": 0, "to": 9, "speed": 0}), json!({"from": 0, "to": 9, "speed": "fast"})] {
+            assert!(s.execute("video.speed", &bad).is_err(), "{bad}");
+        }
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn a_frame_is_held_made_longer_and_undone_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.holdFrame", &json!({"at": 2_000_000, "len": 1_500_000})).unwrap();
+        assert_eq!((r["from"].as_u64(), r["to"].as_u64(), r["length"].as_u64()), (Some(2_000_000), Some(3_500_000), Some(6_500_000)));
+        assert_eq!(s.undo_label(), Some("Hold Frame"));
+        assert_eq!(s.timeline.source_time(0, 3_000_000), Some(2_000_000), "the picture held");
+        assert_eq!(s.timeline.source_time(1, 3_000_000), None, "the sound silent");
+        s.execute("video.holdLength", &json!({"track": 0, "clip": 1, "len": 3_000_000})).unwrap();
+        assert_eq!(s.timeline.length(), 8_000_000);
+        for (id, bad) in [
+            ("video.holdFrame", json!({"at": 99_000_000, "len": 1_000_000})),
+            ("video.holdFrame", json!({"at": 0})),
+            ("video.holdLength", json!({"track": 0, "clip": 0, "len": 1_000_000})),
+            ("video.holdLength", json!({"track": 0, "clip": 9, "len": 1_000_000})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn a_sound_clip_fades_and_its_tracks_noise_is_taken_out_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.fade", &json!({"track": 1, "clip": 0, "in": 1_500_000, "out": 99_000_000})).unwrap();
+        assert_eq!((r["in"].as_u64(), r["out"].as_u64()), (Some(1_500_000), Some(3_500_000)), "the fade out given has its way, up to the clip");
+        assert_eq!(s.undo_label(), Some("Fade"));
+        s.execute("video.denoise", &json!({"track": 1, "amount": 0.6})).unwrap();
+        assert_eq!(s.timeline.tracks[1].denoise, 0.6);
+        assert_eq!(s.undo_label(), Some("Background Noise"));
+        for bad in [
+            json!({"track": 0, "clip": 0, "in": 5}),
+            json!({"track": 1, "clip": 0}),
+            json!({"track": 1, "clip": 7, "in": 5}),
+            json!({"track": 0, "amount": 0.5}),
+            json!({"track": 1, "amount": "lots"}),
+        ] {
+            let id = if bad.get("amount").is_some() { "video.denoise" } else { "video.fade" };
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn captions_are_put_right_split_joined_and_moved_then_go_back_to_as_heard() {
+        use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+        let streams = vec![StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut bytes = w.finish(5_000_000).unwrap();
+        let heard = Captions {
+            cues: vec![
+                Cue { start: 500_000, end: 2_000_000, speaker: Speaker::You, text: "Hello their friends".into() },
+                Cue { start: 3_000_000, end: 4_000_000, speaker: Speaker::You, text: "Bye".into() },
+            ],
+            model: String::new(),
+        };
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&heard).unwrap());
+        let mut s = VideoSession::new(&Recording::open(Box::new(bytes)).unwrap());
+        s.execute("video.captionText", &json!({"line": 0, "text": "Hello there friends"})).unwrap();
+        assert_eq!(s.undo_label(), Some("Edit Caption"));
+        s.execute("video.captionSplit", &json!({"line": 0})).unwrap();
+        s.execute("video.captionJoin", &json!({"line": 1})).unwrap();
+        s.execute("video.captionTimes", &json!({"line": 0, "start": 0, "end": 99_000_000})).unwrap();
+        let words: Vec<(String, u64, u64)> = s.timeline.corrected.as_ref().unwrap().iter().map(|c| (c.text.clone(), c.start, c.end)).collect();
+        assert_eq!(words[0], ("Hello there".to_string(), 0, 5_000_000), "moved, up to the recording's end");
+        assert_eq!(words[1].0, "friends Bye");
+        // Revert to Recording keeps them; Captions as Heard takes them back.
+        s.execute("video.revert", &json!({})).unwrap();
+        assert!(s.timeline.corrected.is_some());
+        s.execute("video.captionsHeard", &json!({})).unwrap();
+        assert!(s.timeline.corrected.is_none());
+        for bad in [json!({"line": 9, "text": "x"}), json!({"line": 0}), json!({"line": "first", "text": "x"})] {
+            assert!(s.execute("video.captionText", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.captionTimes", &json!({"line": 0})).is_err());
+        assert!(s.timeline.corrected.is_none(), "a command that fails changes nothing");
+        // Captions that came later are what's put right from then on.
+        s.set_heard(None);
+        assert!(s.execute("video.captionJoin", &json!({"line": 0})).is_err());
+    }
+
+    #[test]
+    fn words_and_filler_words_are_cut_from_the_transcript_one_undo_step_each() {
+        use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut bytes = w.finish(5_000_000).unwrap();
+        let heard = Captions {
+            cues: vec![
+                Cue { start: 0, end: 1_100_000, speaker: Speaker::You, text: "So um this works".into() },
+                Cue { start: 2_000_000, end: 3_000_000, speaker: Speaker::You, text: "Uh, the old page.".into() },
+            ],
+            model: String::new(),
+        };
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&heard).unwrap());
+        let mut s = VideoSession::new(&Recording::open(Box::new(bytes)).unwrap());
+        // "old" (the third of four words, 8/18 to 12/18 of the line) out of the video and the line.
+        let v = s.execute("video.cutWords", &json!({"line": 1, "words": [2]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Cut Words"));
+        assert_eq!((v["words"].as_u64(), v["cut"].as_u64(), v["at"].as_u64()), (Some(1), Some(222_222), Some(2_444_444)));
+        assert_eq!(s.timeline.length(), 5_000_000 - 222_222);
+        let texts = |s: &VideoSession| s.timeline.corrected.as_ref().unwrap().iter().map(|c| c.text.clone()).collect::<Vec<_>>();
+        assert_eq!(texts(&s), ["So um this works", "Uh, the", "page."]);
+        // Every filler: "um" and "Uh,", one undo step.
+        let v = s.execute("video.cutFillers", &json!({})).unwrap();
+        assert_eq!(v["words"].as_u64(), Some(2));
+        assert_eq!(texts(&s), ["So", "this works", "the", "page."]);
+        assert!(s.execute("video.cutFillers", &json!({})).is_err(), "none left");
+        // Words of one's own: "this".
+        s.execute("video.cutFillers", &json!({"words": ["THIS"]})).unwrap();
+        assert_eq!(texts(&s), ["So", "works", "the", "page."]);
+        for (id, bad) in [
+            ("video.cutWords", json!({"line": 0})),
+            ("video.cutWords", json!({"line": 0, "words": [9]})),
+            ("video.cutWords", json!({"line": 9, "words": [0]})),
+            ("video.cutWords", json!({"line": 0, "words": ["first"]})),
+            ("video.cutFillers", json!({"words": "um"})),
+            ("video.cutFillers", json!({"words": [5]})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        for _ in 0..3 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.corrected.is_none() && s.timeline.length() == 5_000_000);
+    }
+
+    #[test]
+    fn markers_are_added_renamed_moved_and_deleted_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.addMarker", &json!({"at": 3_000_000, "name": "Demo"})).unwrap();
+        assert_eq!(r["marker"].as_u64(), Some(0));
+        assert_eq!(s.undo_label(), Some("Add Marker"));
+        s.execute("video.addMarker", &json!({"at": 1_000_000})).unwrap();
+        s.execute("video.renameMarker", &json!({"marker": 0, "name": "Intro"})).unwrap();
+        let r = s.execute("video.moveMarker", &json!({"marker": 0, "at": 4_000_000})).unwrap();
+        assert_eq!(r["marker"].as_u64(), Some(1));
+        assert_eq!(s.timeline.chapters(), vec![(0, "Start".to_string()), (3_000_000, "Demo".to_string()), (4_000_000, "Intro".to_string())]);
+        s.execute("video.removeMarker", &json!({"marker": 0})).unwrap();
+        assert_eq!(s.timeline.markers.len(), 1);
+        for (id, bad) in [
+            ("video.addMarker", json!({"at": 4_000_000})),
+            ("video.addMarker", json!({"name": "x"})),
+            ("video.renameMarker", json!({"marker": 0})),
+            ("video.moveMarker", json!({"marker": 3, "at": 0})),
+            ("video.removeMarker", json!({"marker": "first"})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        for _ in 0..5 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.markers.is_empty());
+    }
+
+    #[test]
     fn trims_stop_where_the_recording_does() {
         let mut s = session();
         s.execute("video.trimEnd", &json!({"track": 1, "clip": 0, "to": 99_000_000})).unwrap();
@@ -687,6 +2845,101 @@ mod tests {
         assert!(s.timeline.tracks[1].muted);
         s.execute("video.revert", &json!({})).unwrap();
         assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_cameras_colour_or_background_is_taken_away_and_undone() {
+        use screengrabcraft_media::keyer::Remove;
+        let mut s = session();
+        s.execute("video.cameraKey", &json!({"remove": "colour", "colour": "#10F020", "tolerance": 7})).unwrap();
+        let c = s.timeline.camera;
+        assert_eq!((c.remove, c.key_colour, c.key_tolerance), (Remove::Colour, [0x10, 0xF0, 0x20], 1.0));
+        assert_eq!(s.undo_label(), Some("Camera Background"));
+        s.execute("video.cameraKey", &json!({"remove": "background"})).unwrap();
+        assert_eq!(s.timeline.camera.remove, Remove::Background);
+        for bad in [json!({"remove": "everything"}), json!({"colour": "green"}), json!({"colour": "#12345"}), json!({"tolerance": "lots"}), json!(1)]
+        {
+            assert!(s.execute("video.cameraKey", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_keys_look_is_set_kept_in_range_and_undone() {
+        use screengrabcraft_media::keys::Place;
+        let mut s = session();
+        assert!(!s.timeline.keys.show, "off until asked for");
+        s.execute("video.keys", &json!({"show": true, "place": "topRight", "size": 9, "light": true})).unwrap();
+        let k = s.timeline.keys;
+        assert_eq!((k.show, k.place, k.size, k.light), (true, Place::TopRight, 2.5, true));
+        assert_eq!(s.undo_label(), Some("Keys Pressed"));
+        for bad in [json!({"place": "middle"}), json!({"show": "yes"}), json!({"size": "big"}), json!(7)] {
+            assert!(s.execute("video.keys", &bad).is_err(), "{bad}");
+        }
+        assert_eq!(s.timeline.keys, k, "a command that fails changes nothing");
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_cameras_border_and_mirror_are_set_and_undone() {
+        let mut s = session();
+        s.execute("video.camera", &json!({"border": 0.04, "borderColor": "#FF8800", "mirror": true})).unwrap();
+        let c = s.timeline.camera;
+        assert_eq!((c.border, c.border_color, c.mirror), (0.04, Color::rgb(0xFF, 0x88, 0), true));
+        assert_eq!(s.undo_label(), Some("Camera"));
+        // Too wide is the widest; a wrong value changes nothing (not even what came with it).
+        s.execute("video.camera", &json!({"border": 5})).unwrap();
+        assert_eq!(s.timeline.camera.border, MAX_CAMERA_BORDER);
+        let before = s.timeline.clone();
+        for junk in [json!({"mirror": "yes"}), json!({"border": "wide"}), json!({"border": null}), json!({"size": 0.3, "borderColor": "orange"})] {
+            assert!(s.execute("video.camera", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera, screengrabcraft_media::timeline::CameraLayout::default());
+    }
+
+    #[test]
+    fn the_camera_is_made_full_screen_for_a_stretch_and_taken_back() {
+        // Without a camera there's nothing to make full screen.
+        let mut s = session();
+        assert!(s.execute("video.cameraFull", &json!({"from": 0, "to": 1_000_000})).is_err());
+        // With one.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 16, height: 16, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(16, 16, Color::WHITE).unwrap()).unwrap();
+        let mut s = VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap());
+        s.execute("video.cameraFull", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        s.execute("video.cameraFull", &json!({"from": 3_000_000, "to": 4_000_000, "full": true})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 2_000_000], [3_000_000, 4_000_000]]);
+        assert_eq!(s.undo_label(), Some("Camera Full Screen"));
+        // Part of one taken back, then the other by its number.
+        s.execute("video.cameraFull", &json!({"from": 1_500_000, "to": 2_500_000, "full": false})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 1_500_000], [3_000_000, 4_000_000]]);
+        s.execute("video.cameraFull", &json!({"stretch": 1, "full": false})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 1_500_000]]);
+        let before = s.timeline.clone();
+        for junk in [
+            json!({"stretch": 7, "full": false}),
+            json!({"stretch": 0}),
+            json!({"stretch": -1, "full": false}),
+            json!({"from": 2, "to": 1}),
+            json!({"from": 0, "to": 9, "full": "yes"}),
+            json!({"from": 90_000_000, "to": 99_000_000}),
+        ] {
+            assert!(s.execute("video.cameraFull", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 2_000_000], [3_000_000, 4_000_000]]);
     }
 
     #[test]
@@ -773,5 +3026,316 @@ mod layer_tests {
             s.execute("edit.undo", &json!({})).unwrap();
         }
         assert!(s.timeline.layers.is_empty() && s.timeline.media.is_empty());
+    }
+
+    #[test]
+    fn an_item_is_turned_and_framed_and_a_clip_coloured_and_cropped() {
+        let mut s = session();
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        let look = json!({"layer": layer, "item": item, "rotate": 400, "crop": [0.1, 0, 0.6, 0], "border": 0.02, "borderColour": "#FF0000", "radius": 0.2, "shadow": true});
+        s.execute("video.setItem", &look).unwrap();
+        let l = s.timeline.item(layer, item).unwrap().look.clone();
+        assert_eq!(
+            (l.rotate, l.crop, l.border, l.border_colour.as_str(), l.radius, l.shadow),
+            (180.0, [0.1, 0.0, 0.45, 0.0], 0.02, "#ff0000", 0.2, true)
+        );
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "crop": [0.1, 0.2]})).is_err());
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "shadow": "yes"})).is_err());
+        // The screen's clip: lighter, cropped; junk refused.
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "brightness": 30.4, "crop": [100, 0, 0, 2000]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Colour and Crop"));
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.brightness, c.crop), (30, [100, 0, 0, 450]));
+        for bad in
+            [json!({"track": 0, "clip": 0, "crop": [1, 2, 3]}), json!({"track": 0, "clip": 0, "contrast": "more"}), json!({"track": 0, "clip": 9})]
+        {
+            assert!(s.execute("video.clipLook", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.timeline.tracks[0].clips[0].look.is_plain());
+    }
+
+    #[test]
+    fn an_item_is_masked_and_blended_and_a_clip_given_a_ready_made_look() {
+        use screengrabcraft_media::layers::{BlendMode, MaskShape};
+        let mut s = session();
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute(
+            "video.setItem",
+            &json!({"layer": layer, "item": item, "mask": "heart", "maskArea": [0.3, 0.5, 9, 0.5], "maskCut": true, "blend": "screen"}),
+        )
+        .unwrap();
+        let l = s.timeline.item(layer, item).unwrap().look.clone();
+        assert_eq!((l.mask.shape, l.mask.x, l.mask.w, l.mask.cut, l.blend), (MaskShape::Heart, 0.3, 2.0, true, BlendMode::Screen));
+        for bad in [
+            json!({"layer": layer, "item": item, "mask": "blob"}),
+            json!({"layer": layer, "item": item, "blend": 3}),
+            json!({"layer": layer, "item": item, "maskArea": [0.5]}),
+            json!({"layer": layer, "item": item, "maskCut": "yes"}),
+        ] {
+            assert!(s.execute("video.setItem", &bad).is_err(), "{bad}");
+        }
+        // A ready-made look sets the colours, keeping the crop; then a slider changes one of them.
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "crop": [100, 0, 0, 0]})).unwrap();
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "sepia"})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.named().map(|n| n.key), c.crop[0], c.saturation), (Some("sepia"), 100, -100));
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "warm", "contrast": 50})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert!(c.named().is_none() && c.contrast == 50 && c.tint_amount > 0);
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "tint": "#00FF00", "tintAmount": 400})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.tint, c.tint_amount), ([0, 255, 0], 100));
+        for bad in [
+            json!({"track": 0, "clip": 0, "look": "neon"}),
+            json!({"track": 0, "clip": 0, "tint": "green"}),
+            json!({"track": 0, "clip": 0, "tintAmount": "x"}),
+        ] {
+            assert!(s.execute("video.clipLook", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "plain"})).unwrap();
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert!(c.colours_plain() && c.crop[0] == 100);
+    }
+
+    /// 20 s of a 160 × 90 screen, the pointer clicking at 3 s (top left) and at 12 s (bottom right).
+    fn clicking() -> VideoSession {
+        use screengrabcraft_media::pointer::{LEFT, SHOWING, Sample, Shape};
+        let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 160, height: 90, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 2, streams }).unwrap();
+        w.pointer_shape(&Shape { id: 1, hot: (0, 0), nominal: 8, pic: Raster::filled(8, 8, Color::rgb(0, 0, 0)).unwrap() }).unwrap();
+        for k in 0..40u64 {
+            let t = k * 500_000;
+            w.video_frame(0, t, &Raster::filled(160, 90, Color::rgb(200, 200, 200)).unwrap()).unwrap();
+            let (x, y) = if t < 8_000_000 { (32.0, 18.0) } else { (128.0, 72.0) };
+            let flags = SHOWING | if t == 3_000_000 || t == 12_000_000 { LEFT } else { 0 };
+            w.pointer(&Sample { t, x, y, flags, shape: 1 }).unwrap();
+        }
+        VideoSession::new(&Recording::open(Box::new(w.finish(20_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn the_pointer_takes_another_look_and_its_path_is_redrawn_through_points() {
+        use screengrabcraft_media::pointer::Kind;
+        let mut s = clicking();
+        s.execute("video.pointer", &json!({"kind": "hand"})).unwrap();
+        assert_eq!(s.timeline.pointer.kind, Kind::Hand);
+        assert!(s.execute("video.pointer", &json!({"kind": "paw"})).is_err());
+        assert_eq!(s.timeline.pointer.kind, Kind::Hand, "unchanged by junk");
+        // From 2 s to 6 s: a point every half second, where it was (the top left).
+        let made = s.execute("video.redrawPointer", &json!({"from": 2_000_000, "to": 6_000_000})).unwrap();
+        assert_eq!(s.undo_label(), Some("Edit the Pointer's Path"));
+        let n = made["path"].as_u64().unwrap() as usize;
+        let path = s.timeline.pointer_paths[n].clone();
+        assert_eq!((path.from, path.to, path.points.len()), (2_000_000, 6_000_000, 9));
+        assert!(path.points.iter().all(|q| q.x == 32.0 && q.y == 18.0));
+        // A point moved; then straightened, ends kept; then as recorded again.
+        s.execute("video.pointerPoint", &json!({"path": n, "point": 4, "x": 90, "y": 60})).unwrap();
+        assert_eq!((s.timeline.pointer_paths[n].points[4].x, s.timeline.pointer_paths[n].points[4].y), (90.0, 60.0));
+        // A cut before it: it stays with what the screen showed.
+        s.execute("video.cut", &json!({"from": 0, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.pointer_paths_on_timeline(), vec![(n, 1_000_000, 5_000_000)]);
+        s.execute("video.straightenPointer", &json!({"path": n})).unwrap();
+        assert_eq!(s.timeline.pointer_paths[n].points.len(), 2);
+        for bad in [
+            json!({"path": n, "point": 99, "x": 1, "y": 1}),
+            json!({"path": 9, "point": 0, "x": 1, "y": 1}),
+            json!({"path": n, "point": 0, "x": "left", "y": 1}),
+            json!({"path": n, "point": 0}),
+        ] {
+            assert!(s.execute("video.pointerPoint", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.redrawPointer", &json!({"from": 5, "to": 5})).is_err());
+        assert!(s.execute("video.redrawPointer", &json!({"from": 90_000_000, "to": 99_000_000})).is_err());
+        s.execute("video.pointerAsRecorded", &json!({"path": n})).unwrap();
+        assert!(s.timeline.pointer_paths.is_empty());
+        assert!(s.execute("video.pointerAsRecorded", &json!({"path": 0})).is_err());
+        // A recording without a pointer has nothing to redraw.
+        assert!(session().execute("video.redrawPointer", &json!({"from": 0, "to": 1_000_000})).is_err());
+    }
+
+    #[test]
+    fn zooms_follow_the_clicks_and_pictures_are_put_in_turn() {
+        use screengrabcraft_media::layers::What;
+        let mut s = clicking();
+        assert!(s.has_clicks());
+        let made = s.execute("video.zoomOnClicks", &json!({"share": 0.4})).unwrap();
+        assert_eq!(made["zooms"], 2);
+        assert_eq!(s.undo_label(), Some("Zoom on the Clicks"));
+        let layer = s.timeline.layers.last().unwrap();
+        assert_eq!(layer.name, "Zooms on the clicks");
+        let z = &layer.items;
+        assert!(z.iter().all(|i| matches!(i.what, What::Zoom)));
+        assert!((z[0].place.x - 0.2).abs() < 0.01 && (z[0].place.y - 0.2).abs() < 0.01, "{:?}", z[0].place);
+        assert!(z[0].at < 3_000_000 && z[0].end() > 3_000_000 && z[1].at < 12_000_000 && z[1].place.x > 0.7);
+        // Ordinary zooms: one is deleted like any; asked again, the clicks already zoomed on make none.
+        let (lid, first) = (layer.id, z[0].id);
+        s.execute("video.deleteItem", &json!({"layer": lid, "item": first})).unwrap();
+        assert_eq!(s.execute("video.zoomOnClicks", &json!({})).unwrap()["zooms"], 1);
+        assert!(s.execute("video.zoomOnClicks", &json!({})).is_err(), "every click is zoomed on");
+        assert!(session().execute("video.zoomOnClicks", &json!({})).is_err(), "no clicks kept");
+        // Pictures in turn: one after another from 1 s, a wide one as wide as the video, a tall one narrower.
+        let wide =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 320, "height": 180})).unwrap();
+        let tall = s.execute("video.addMedia", &json!({"kind": "picture", "name": "B.png", "path": "C:/B.png", "width": 90, "height": 160})).unwrap();
+        let put = s.execute("video.picturesInTurn", &json!({"media": [wide["id"], tall["id"]], "each": 3_000_000, "at": 1_000_000})).unwrap();
+        assert_eq!((put["pictures"].as_u64(), put["end"].as_u64()), (Some(2), Some(7_000_000)));
+        let l = s.timeline.layers.iter().find(|l| l.name == "Pictures").unwrap();
+        assert_eq!(l.items.iter().map(|i| (i.at, i.len)).collect::<Vec<_>>(), vec![(1_000_000, 3_000_000), (4_000_000, 3_000_000)]);
+        assert!((l.items[0].place.w - 1.0).abs() < 1e-4 && l.items[1].place.w < 0.4, "{} {}", l.items[0].place.w, l.items[1].place.w);
+        for bad in [json!({"media": [999]}), json!({"media": "all"}), json!({"each": "long"})] {
+            assert!(s.execute("video.picturesInTurn", &bad).is_err(), "{bad}");
+        }
+        // Every picture of the bin when none is named.
+        assert_eq!(s.execute("video.picturesInTurn", &json!({})).unwrap()["pictures"], 2);
+    }
+
+    #[test]
+    fn motion_blur_is_set_and_the_pointer_hidden_for_a_stretch_through_later_edits() {
+        let mut s = session();
+        s.execute("video.motionBlur", &json!({"on": true, "amount": 7})).unwrap();
+        assert_eq!(s.undo_label(), Some("Motion Blur"));
+        assert!(s.timeline.motion_blur.on && s.timeline.motion_blur.amount == 1.0 && s.timeline.motion_blur.span() == 40_000);
+        for bad in [json!({"on": "yes"}), json!({"amount": "lots"}), json!([1])] {
+            assert!(s.execute("video.motionBlur", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.hidePointer", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        assert_eq!(s.undo_label(), Some("Hide the Pointer"));
+        assert!(s.timeline.pointer_hidden_at(1_500_000) && !s.timeline.pointer_hidden_at(500_000));
+        // A cut before it: still hidden over what the screen showed then.
+        s.execute("video.cut", &json!({"from": 0, "to": 500_000})).unwrap();
+        assert_eq!(s.timeline.pointer_hidden_on_timeline(), vec![(500_000, 1_500_000)]);
+        // Shown again in its middle: two stretches; then everywhere.
+        s.execute("video.showPointer", &json!({"from": 800_000, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.pointer_hidden_on_timeline(), vec![(500_000, 800_000), (1_000_000, 1_500_000)]);
+        s.execute("video.showPointer", &json!({})).unwrap();
+        assert!(s.timeline.pointer_hidden.is_empty());
+        for bad in [json!({"from": 5, "to": 5}), json!({"from": "a", "to": 9}), json!({"from": 90_000_000, "to": 99_000_000})] {
+            assert!(s.execute("video.hidePointer", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.showPointer", &json!({"from": 9})).is_err());
+    }
+
+    #[test]
+    fn the_screen_is_framed_and_an_item_given_a_device() {
+        use screengrabcraft_media::frame::Device;
+        let mut s = session();
+        s.execute("video.screenFrame", &json!({"size": 0.2, "background": "#ABCDEF", "radius": 0.05, "shadow": true, "device": "laptop"})).unwrap();
+        assert_eq!(s.undo_label(), Some("Screen Frame"));
+        let f = s.timeline.frame.clone();
+        assert_eq!((f.size, f.background.as_str(), f.radius, f.shadow, f.device), (0.5, "#abcdef", 0.05, true, Device::Laptop));
+        for bad in [json!({"device": "tablet"}), json!({"background": "blue"}), json!({"shadow": 1}), json!({"size": "half"}), json!([1, 2])] {
+            assert!(s.execute("video.screenFrame", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.timeline.frame.is_plain());
+        // A picture on a layer, in a phone.
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Shot.png", "path": "C:/Shot.png", "width": 90, "height": 160})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute("video.setItem", &json!({"layer": layer, "item": item, "device": "phone"})).unwrap();
+        assert_eq!(s.timeline.item(layer, item).unwrap().look.device, Device::Phone);
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "device": 7})).is_err());
+    }
+
+    #[test]
+    fn clips_turn_into_each_other_where_they_meet_and_items_move_by_keyframes() {
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..50u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(16, 16, Color::rgb(t as u8, 0, 0)).unwrap()).unwrap();
+            w.audio(2, t * 4800, &vec![100; 4800]).unwrap();
+        }
+        let mut s = VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap());
+        s.execute("video.split", &json!({"at": 2_500_000})).unwrap();
+        let v = s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "wipeLeft", "len": 800_000})).unwrap();
+        assert_eq!((v["kind"].as_str(), v["len"].as_u64()), (Some("wipeLeft"), Some(800_000)));
+        assert_eq!(s.undo_label(), Some("Transition"));
+        // The microphone only cross-fades; the first clip has nothing before it; a made-up kind is refused.
+        let v = s.execute("video.transition", &json!({"track": 1, "clip": 1, "kind": "circle"})).unwrap();
+        assert_eq!(v["kind"].as_str(), Some("crossFade"));
+        assert!(s.execute("video.transition", &json!({"track": 0, "clip": 0, "kind": "push"})).is_err());
+        assert!(s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "spin"})).is_err());
+        s.execute("video.transition", &json!({"track": 0, "clip": 1, "kind": "none"})).unwrap();
+        assert_eq!(s.timeline.tracks[0].clips[1].transition, None);
+        // A title moved from the left to the right by two keyframes.
+        let placed = s.execute("video.place", &json!({"template": "title", "at": 0, "len": 4_000_000})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 0, "x": 0.2})).unwrap();
+        let v = s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 4_000_000, "x": 0.8})).unwrap();
+        assert_eq!((v["key"].as_u64(), v["keys"].as_u64()), (Some(1), Some(2)));
+        assert!((s.timeline.item(layer, item).unwrap().place_at(2_000_000).x - 0.5).abs() < 1e-4);
+        assert!(s.execute("video.keyframe", &json!({"layer": layer, "item": item, "at": 9_000_000})).is_err());
+        s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "all": true})).unwrap();
+        assert!(s.timeline.item(layer, item).unwrap().keys.is_empty());
+        assert!(s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "key": 0})).is_err());
+    }
+
+    #[test]
+    fn a_template_made_of_the_layers_goes_on_another_recording_and_a_theme_restyles_them() {
+        use screengrabcraft_media::layers::{TextFont, What};
+        let mut s = session();
+        let placed = s.execute("video.place", &json!({"template": "lower-bar", "at": 1_000_000})).unwrap();
+        s.execute("video.place", &json!({"template": "callout", "at": 2_000_000})).unwrap();
+        let (layer, item) = (placed["layer"].clone(), placed["item"].clone());
+        s.execute("video.setItem", &json!({"layer": layer, "item": item, "font": "mono"})).unwrap();
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "font": "gothic"})).is_err());
+        let undo = s.undo_label().map(str::to_string);
+        let made = s.execute("video.makeTemplate", &json!({"name": "Intro"})).unwrap();
+        assert_eq!(made["items"], 2);
+        assert_eq!(s.undo_label().map(str::to_string), undo, "making one changes nothing");
+        let one = s.execute("video.makeTemplate", &json!({"name": "Name", "items": [[layer, item]]})).unwrap();
+        assert_eq!(one["items"], 1);
+        assert!(s.execute("video.makeTemplate", &json!({"items": [[1, "x"]]})).is_err());
+        // On another recording, from 0.5 s.
+        let mut other = session();
+        let used = other.execute("video.useTemplate", &json!({"template": made["template"], "at": 500_000})).unwrap();
+        assert_eq!(used["items"], 2);
+        let starts: Vec<u64> = other.timeline.layers.iter().flat_map(|l| l.items.iter().map(|i| i.at)).collect();
+        assert_eq!(starts, vec![500_000, 1_500_000]);
+        assert_eq!(other.undo_label(), Some("Add the Template"));
+        let mono = other.timeline.layers.iter().flat_map(|l| l.items.iter()).any(|i| matches!(&i.what, What::Text { font: TextFont::Mono, .. }));
+        assert!(mono, "the look kept with it");
+        assert!(other.execute("video.useTemplate", &json!({"template": {"layers": []}, "at": 0})).is_err());
+        // A theme: every one restyled, and a library item placed in it.
+        let theme = json!({"name": "Mine", "main": "#123456", "mark": "#abcdef", "words": "#ffffff", "font": "slanted"});
+        let v = other.execute("video.applyTheme", &json!({ "theme": theme })).unwrap();
+        assert_eq!(v["items"], 2);
+        let p = other.execute("video.place", &json!({"template": "title-box", "at": 3_000_000, "theme": theme})).unwrap();
+        let placed = other.timeline.item(id(&p, "layer").unwrap(), id(&p, "item").unwrap()).unwrap().clone();
+        assert!(matches!(&placed.what, What::Text { color, font: TextFont::Slanted, .. } if color == "#123456"));
+        assert!(other.execute("video.applyTheme", &json!({"theme": 5})).is_err());
+    }
+
+    #[test]
+    fn narration_goes_on_a_sound_layer_of_its_own_where_it_was_recorded() {
+        use screengrabcraft_media::layers::{LayerKind, MediaKind};
+        let mut s = session();
+        let p = json!({"path": "C:/Captures/Talk narration.wav", "name": "Talk narration.wav", "duration": 2_500_000, "at": 1_000_000});
+        let v = s.execute("video.addNarration", &p).unwrap();
+        assert_eq!(s.undo_label(), Some("Record Narration"));
+        let l = s.timeline.layer(id(&v, "layer").unwrap()).unwrap().clone();
+        assert_eq!((l.name.as_str(), l.kind), ("Narration", LayerKind::Sound));
+        assert_eq!((l.items[0].at, l.items[0].len), (1_000_000, 2_500_000));
+        assert_eq!(s.timeline.media[0].kind, MediaKind::Sound);
+        // A second take over it: a layer of its own too.
+        let p2 = json!({"path": "C:/Captures/Talk narration (2).wav", "duration": 1_000_000, "at": 1_500_000});
+        let v2 = s.execute("video.addNarration", &p2).unwrap();
+        assert_eq!(s.timeline.layer(id(&v2, "layer").unwrap()).unwrap().name, "Narration 2");
+        for bad in
+            [json!({"path": "", "duration": 1_000_000, "at": 0}), json!({"path": "a.wav", "duration": 5, "at": 0}), json!({"path": "a.wav", "at": 0})]
+        {
+            assert!(s.execute("video.addNarration", &bad).is_err(), "{bad}");
+        }
     }
 }

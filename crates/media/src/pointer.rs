@@ -66,19 +66,260 @@ pub struct Look {
     pub smooth: f32,
     /// A ring where a button is pressed.
     pub clicks: bool,
+    /// A soft yellow disc under it, so the eye finds it.
+    pub highlight: bool,
+    /// The picture dimmed but for a circle round it.
+    pub spotlight: bool,
+    /// A round lens on it, showing what's round it twice as large.
+    pub magnify: bool,
+    /// A click heard when a button is pressed (made in code, not a recording).
+    pub click_sound: bool,
+    /// The pointer drawn: the recorded one, or one of another look drawn in code.
+    pub kind: Kind,
 }
 
 impl Default for Look {
     fn default() -> Look {
-        Look { show: true, size: 1.0, smooth: 0.4, clicks: true }
+        Look {
+            show: true,
+            size: 1.0,
+            smooth: 0.4,
+            clicks: true,
+            highlight: false,
+            spotlight: false,
+            magnify: false,
+            click_sound: false,
+            kind: Kind::Recorded,
+        }
     }
+}
+
+/// A pointer of another look, drawn in code in place of the recorded one (see [`drawn`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Kind {
+    /// The pointer the recording kept, as it changed.
+    #[default]
+    Recorded,
+    /// A white arrow with a dark edge.
+    Arrow,
+    /// A black arrow with a white edge.
+    Dark,
+    /// A hand pointing up with one finger.
+    Hand,
+    /// A round dot, its middle where it points.
+    Dot,
+    /// A ring, its middle where it points.
+    Ring,
+}
+
+impl Kind {
+    pub const ALL: [Kind; 6] = [Kind::Recorded, Kind::Arrow, Kind::Dark, Kind::Hand, Kind::Dot, Kind::Ring];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Kind::Recorded => "As recorded",
+            Kind::Arrow => "White arrow",
+            Kind::Dark => "Black arrow",
+            Kind::Hand => "Hand",
+            Kind::Dot => "Dot",
+            Kind::Ring => "Ring",
+        }
+    }
+}
+
+/// The pointer of `kind` drawn in code: 64 × 64, drawn 32 wide on the screen as a pointer is,
+/// with the point it points at. None for the recorded one. All of it is drawn here.
+pub fn drawn(kind: Kind) -> Option<Shape> {
+    use tiny_skia::{FillRule, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
+    let mut pix = Pixmap::new(64, 64)?;
+    let paint = |r: u8, g: u8, b: u8, a: u8| {
+        let mut p = Paint::default();
+        p.set_color_rgba8(r, g, b, a);
+        p.anti_alias = true;
+        p
+    };
+    let edge = |width: f32| Stroke { width, line_join: LineJoin::Round, ..Stroke::default() };
+    let id = Transform::identity();
+    let polygon = |pts: &[(f32, f32)]| {
+        let mut pb = PathBuilder::new();
+        for (i, (x, y)) in pts.iter().enumerate() {
+            if i == 0 {
+                pb.move_to(*x, *y);
+            } else {
+                pb.line_to(*x, *y);
+            }
+        }
+        pb.close();
+        pb.finish()
+    };
+    let rounded =
+        |x: f32, y: f32, w: f32, h: f32, r: f32| screengrabcraft_render::draw::rounded_rect(screengrabcraft_model::Rect::new(x, y, w, h), r);
+    let circle = |x: f32, y: f32, r: f32| {
+        let mut pb = PathBuilder::new();
+        pb.push_circle(x, y, r);
+        pb.finish()
+    };
+    let hot = match kind {
+        Kind::Recorded => return None,
+        Kind::Arrow | Kind::Dark => {
+            // An arrow leaning left, its tail cut square: the tip at the top left.
+            let arrow = polygon(&[(5.0, 4.0), (5.0, 49.0), (16.0, 39.0), (24.5, 57.0), (32.0, 53.5), (23.5, 36.0), (38.5, 36.0)])?;
+            let (fill, line) = if kind == Kind::Arrow {
+                (paint(255, 255, 255, 255), paint(22, 22, 28, 255))
+            } else {
+                (paint(22, 22, 28, 255), paint(255, 255, 255, 255))
+            };
+            pix.stroke_path(&arrow, &line, &edge(4.5), id, None);
+            pix.fill_path(&arrow, &fill, FillRule::Winding, id, None);
+            (5, 4)
+        }
+        Kind::Hand => {
+            // A hand pointing up: the first finger raised, the others folded on the palm, the thumb
+            // along its left. Outlined all round, then filled, so it's one shape.
+            let parts = [
+                rounded(21.0, 3.0, 12.0, 34.0, 6.0),
+                rounded(14.0, 28.0, 40.0, 31.0, 10.0),
+                circle(37.0, 30.0, 5.5),
+                circle(45.0, 32.0, 5.0),
+                circle(51.0, 36.0, 4.5),
+                rounded(8.0, 33.0, 12.0, 20.0, 6.0),
+            ];
+            for p in parts.iter().flatten() {
+                pix.stroke_path(p, &paint(22, 22, 28, 255), &edge(4.5), id, None);
+            }
+            for p in parts.iter().flatten() {
+                pix.fill_path(p, &paint(255, 255, 255, 255), FillRule::Winding, id, None);
+            }
+            // The folded fingers' lines.
+            let mut pb = PathBuilder::new();
+            for x in [33.5, 41.0, 48.0] {
+                pb.move_to(x, 33.0);
+                pb.line_to(x, 42.0);
+            }
+            if let Some(lines) = pb.finish() {
+                pix.stroke_path(&lines, &paint(22, 22, 28, 200), &edge(1.8), id, None);
+            }
+            (27, 3)
+        }
+        Kind::Dot => {
+            // A warm dot with a white rim and a faint dark edge, so it shows on anything.
+            let dot = circle(32.0, 32.0, 13.0)?;
+            pix.stroke_path(&dot, &paint(0, 0, 0, 90), &edge(6.0), id, None);
+            pix.stroke_path(&dot, &paint(255, 255, 255, 255), &edge(3.0), id, None);
+            pix.fill_path(&dot, &paint(255, 176, 0, 235), FillRule::Winding, id, None);
+            (32, 32)
+        }
+        Kind::Ring => {
+            // A red ring, white either side of it.
+            let ring = circle(32.0, 32.0, 15.0)?;
+            pix.stroke_path(&ring, &paint(255, 255, 255, 230), &edge(8.0), id, None);
+            pix.stroke_path(&ring, &paint(232, 48, 40, 255), &edge(4.5), id, None);
+            (32, 32)
+        }
+    };
+    let pic = screengrabcraft_render::canvas::from_pixmap(&pix)?;
+    Some(Shape { id: u16::MAX - 1, hot, nominal: 32, pic })
+}
+
+/// The pointer's way redrawn over a stretch of the screen's recording (its own time, so it stays
+/// with what the screen showed through every edit): through its points, in order, on a smooth
+/// curve, instead of where it went.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Path {
+    pub from: u64,
+    pub to: u64,
+    pub points: Vec<PathPoint>,
+}
+
+/// A point the pointer's redrawn way goes through: when (the screen's recording's time), and
+/// where (its pixels).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PathPoint {
+    pub at: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// The most redrawn stretches kept, and points in each.
+pub const MAX_PATHS: usize = 64;
+pub const MAX_PATH_POINTS: usize = 64;
+
+/// Redrawn ways as they're kept: each with two points or more, in order, inside its stretch, at
+/// sensible places; in order, apart, not too many.
+pub fn checked_paths(paths: Vec<Path>) -> Vec<Path> {
+    let mut out: Vec<Path> = paths
+        .into_iter()
+        .take(MAX_PATHS * 4)
+        .filter_map(|mut p| {
+            p.from = p.from.min(u64::MAX / 8);
+            p.to = p.to.min(u64::MAX / 8);
+            p.points.truncate(MAX_PATH_POINTS);
+            p.points.retain(|q| q.x.is_finite() && q.y.is_finite());
+            for q in &mut p.points {
+                q.at = q.at.clamp(p.from, p.to.max(p.from));
+                q.x = q.x.clamp(-1.0e6, 1.0e6);
+                q.y = q.y.clamp(-1.0e6, 1.0e6);
+            }
+            p.points.sort_by_key(|q| q.at);
+            p.points.dedup_by_key(|q| q.at);
+            (p.from < p.to && p.points.len() >= 2).then_some(p)
+        })
+        .collect();
+    out.sort_by_key(|p| p.from);
+    let mut kept: Vec<Path> = Vec::with_capacity(out.len());
+    for p in out {
+        if kept.len() < MAX_PATHS && kept.last().is_none_or(|l| l.to <= p.from) {
+            kept.push(p);
+        }
+    }
+    kept
+}
+
+/// Where a redrawn way has the pointer at `t` (the screen's recording's time), if `t` is in one
+/// of them: on a smooth curve through its points.
+pub fn path_at(paths: &[Path], t: u64) -> Option<(f32, f32)> {
+    let p = paths.iter().find(|p| p.from <= t && t <= p.to)?;
+    let pts = &p.points;
+    let k = pts.partition_point(|q| q.at <= t);
+    let (a, b) = match (k.checked_sub(1).and_then(|i| pts.get(i)), pts.get(k)) {
+        (Some(a), Some(b)) => (*a, *b),
+        (Some(a), None) => return Some((a.x, a.y)),
+        (None, Some(b)) => return Some((b.x, b.y)),
+        (None, None) => return None,
+    };
+    let f = ((t.saturating_sub(a.at)) as f32 / b.at.saturating_sub(a.at).max(1) as f32).clamp(0.0, 1.0);
+    let before = pts.get(k.saturating_sub(2)).copied().unwrap_or(a);
+    let after = pts.get(k + 1).copied().unwrap_or(b);
+    // Through `a` and `b`, leaving and arriving as the points either side say.
+    let curve = |v0: f32, v1: f32, v2: f32, v3: f32| {
+        let (f2, f3) = (f * f, f * f * f);
+        0.5 * (2.0 * v1 + (v2 - v0) * f + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * f2 + (3.0 * v1 - v0 - 3.0 * v2 + v3) * f3)
+    };
+    Some((curve(before.x, a.x, b.x, after.x), curve(before.y, a.y, b.y, after.y)))
 }
 
 impl Look {
     pub fn checked(self) -> Look {
         let n = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
-        Look { show: self.show, size: n(self.size, 0.5, 4.0, 1.0), smooth: n(self.smooth, 0.0, 1.0, 0.0), clicks: self.clicks }
+        Look { size: n(self.size, 0.5, 4.0, 1.0), smooth: n(self.smooth, 0.0, 1.0, 0.0), ..self }
     }
+}
+
+/// A click's sound: `CLICK_SOUND_LEN` samples at 48 kHz, made here (two short tones dying away
+/// fast, like a mouse button), -1 to 1.
+pub const CLICK_SOUND_LEN: usize = 1440;
+
+/// Sample `k` of a click's sound.
+pub fn click_sound(k: usize) -> f32 {
+    if k >= CLICK_SOUND_LEN {
+        return 0.0;
+    }
+    let t = k as f32 / 48_000.0;
+    let tone = (std::f32::consts::TAU * 2_400.0 * t).sin() * 0.6 + (std::f32::consts::TAU * 1_150.0 * t).sin() * 0.4;
+    // A quick rise (no pop), then gone in a few milliseconds.
+    let rise = (k as f32 / 24.0).min(1.0);
+    tone * rise * (-t / 0.0035).exp() * 0.45
 }
 
 /// A button pressed: when, where, which.
@@ -375,12 +616,24 @@ fn stamp(out: &mut Raster, shape: &Shape, x: f32, y: f32, f: f32) {
 /// Draws the pointer as it was at recording time `t` onto a picture of the screen track made
 /// `scale` times its size: its clicks' rings, then the pointer itself.
 pub fn draw(out: &mut Raster, track: &Track, look: Look, t: u64, scale: f32, fallback: Option<&Shape>) {
-    draw_view(out, track, look, t, (scale, 0.0, 0.0), fallback);
+    draw_view(out, track, look, t, (scale, 0.0, 0.0), fallback, None, &[]);
 }
 
 /// [`draw`] onto a picture of part of the screen (a zoom): a point `(x, y)` of the recording
-/// lands at `((x - left) * scale, (y - top) * scale)`, `view` being `(scale, left, top)`.
-pub fn draw_view(out: &mut Raster, track: &Track, look: Look, t: u64, view: (f32, f32, f32), fallback: Option<&Shape>) {
+/// lands at `((x - left) * scale, (y - top) * scale)`, `view` being `(scale, left, top)`. `instead`:
+/// a pointer of another look drawn in its place; `paths`: its way redrawn over stretches (its
+/// clicks' rings go where the redrawn way has it then).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_view(
+    out: &mut Raster,
+    track: &Track,
+    look: Look,
+    t: u64,
+    view: (f32, f32, f32),
+    fallback: Option<&Shape>,
+    instead: Option<&Shape>,
+    paths: &[Path],
+) {
     let (scale, left, top) = view;
     let look = look.checked();
     if !look.show || track.is_empty() || !scale.is_finite() || scale <= 0.0 || !left.is_finite() || !top.is_finite() {
@@ -388,17 +641,120 @@ pub fn draw_view(out: &mut Raster, track: &Track, look: Look, t: u64, view: (f32
     }
     let at = |x: f32, y: f32| ((x - left) * scale, (y - top) * scale);
     let size = look.size * scale;
+    // Where it is: on its redrawn way, if it's in one then.
+    let pose = track.pose(t, look.smooth).map(|p| match path_at(paths, t) {
+        Some((x, y)) => Pose { x, y, ..p },
+        None => p,
+    });
+    // What's round the pointer first (under it): the spotlight, the lens, the highlight.
+    if let Some(p) = &pose {
+        let (x, y) = at(p.x, p.y);
+        // As large on the screen whatever the video's size, but never most of the picture.
+        let side = out.width().min(out.height()) as f32;
+        if look.spotlight {
+            spotlight(out, x, y, (150.0 * scale).min(side * 0.3));
+        }
+        if look.magnify {
+            magnifier(out, x, y, (110.0 * scale).min(side * 0.25));
+        }
+        if look.highlight {
+            highlight(out, x, y, 26.0 * size);
+        }
+    }
     if look.clicks {
         for (c, p) in track.rings(t) {
-            let (x, y) = at(c.x, c.y);
+            let (cx, cy) = path_at(paths, c.t).unwrap_or((c.x, c.y));
+            let (x, y) = at(cx, cy);
             ring(out, x, y, 34.0 * size, p, c.button);
         }
     }
-    let Some(pose) = track.pose(t, look.smooth) else { return };
-    let Some(shape) = track.shape(pose.shape).or(fallback) else { return };
+    let Some(pose) = pose else { return };
+    let Some(shape) = instead.or_else(|| track.shape(pose.shape)).or(fallback) else { return };
     let f = f32::from(shape.nominal) * size / (shape.pic.width() as f32).max(1.0);
     let (x, y) = at(pose.x, pose.y);
     stamp(out, shape, x, y, f);
+}
+
+/// The pixels within `reach` of `(cx, cy)` on `out`: (x, y, distance) of each, its left to right
+/// and top to bottom bounds kept on the picture.
+fn round(out: &Raster, cx: f32, cy: f32, reach: f32) -> impl Iterator<Item = (u32, u32, f32)> + use<> {
+    let (w, h) = (out.width(), out.height());
+    let fine = cx.is_finite() && cy.is_finite() && reach.is_finite() && reach > 0.0;
+    let span = |c: f32, n: u32| -> (u32, u32) {
+        if !fine {
+            return (0, 0);
+        }
+        ((c - reach).floor().clamp(0.0, n as f32) as u32, (c + reach).ceil().clamp(0.0, n as f32) as u32)
+    };
+    let ((x0, x1), (y0, y1)) = (span(cx, w), span(cy, h));
+    (y0..y1).flat_map(move |y| (x0..x1).map(move |x| (x, y))).filter_map(move |(x, y)| {
+        let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+        (d <= reach).then_some((x, y, d))
+    })
+}
+
+/// The picture dimmed outside a circle of radius `r` round `(cx, cy)`, its edge soft.
+fn spotlight(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) {
+        return;
+    }
+    let w = out.width() as usize;
+    let soft = (r * 0.3).max(1.0);
+    for (i, px) in out.pixels_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = ((i % w.max(1)) as f32 + 0.5, (i / w.max(1)) as f32 + 0.5);
+        let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        let dark = ((d - r) / soft).clamp(0.0, 1.0) * 0.62;
+        if dark > 0.0 {
+            for v in px.iter_mut().take(3) {
+                *v = (f32::from(*v) * (1.0 - dark)).round() as u8;
+            }
+        }
+    }
+}
+
+/// A round lens of radius `r` at `(cx, cy)` showing the picture round it twice as large, with a
+/// white rim.
+fn magnifier(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r < 2.0 {
+        return;
+    }
+    // What the lens shows: the picture as it is, round the middle.
+    let src = out.clone();
+    let (w, h) = (out.width() as i64, out.height() as i64);
+    let rim = (r * 0.04).max(1.5);
+    let spots: Vec<(u32, u32, f32)> = round(out, cx, cy, r + rim).collect();
+    let px = out.pixels_mut();
+    for (x, y, d) in spots {
+        let i = (y as usize * w as usize + x as usize) * 4;
+        let Some(dst) = px.get_mut(i..i + 4) else { continue };
+        if d <= r {
+            let sx = ((cx + (x as f32 + 0.5 - cx) / 2.0).floor() as i64).clamp(0, (w - 1).max(0));
+            let sy = ((cy + (y as f32 + 0.5 - cy) / 2.0).floor() as i64).clamp(0, (h - 1).max(0));
+            let j = ((sy * w + sx) * 4) as usize;
+            if let Some(s) = src.pixels().get(j..j + 4) {
+                dst.copy_from_slice(s);
+            }
+        }
+        // The rim, smooth at its edges.
+        let a = 1.0 - ((d - r).abs() / rim).min(1.0);
+        blend(dst, [255, 255, 255], a);
+    }
+}
+
+/// A soft yellow disc of radius `r` at `(cx, cy)`.
+fn highlight(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r <= 0.0 {
+        return;
+    }
+    let w = out.width() as usize;
+    let spots: Vec<(u32, u32, f32)> = round(out, cx, cy, r).collect();
+    let px = out.pixels_mut();
+    for (x, y, d) in spots {
+        let i = (y as usize * w + x as usize) * 4;
+        if let Some(dst) = px.get_mut(i..i + 3) {
+            blend(dst, [255, 224, 64], 0.42 * ((r - d) / 2.0).clamp(0.0, 1.0));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -519,12 +875,132 @@ mod tests {
     }
 
     #[test]
+    fn pointers_of_other_looks_are_drawn_where_it_points_each_its_own_picture() {
+        let tr = Track::new(vec![s(0, 100.0, 80.0, 0), s(1_000_000, 100.0, 80.0, 0)], Vec::new());
+        let look = Look { clicks: false, smooth: 0.0, ..Look::default() };
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        assert!(drawn(Kind::Recorded).is_none());
+        for kind in Kind::ALL.into_iter().filter(|k| *k != Kind::Recorded) {
+            let shape = drawn(kind).unwrap();
+            assert!(!seen.contains(&shape.pic.pixels().to_vec()), "{kind:?} is a picture of its own");
+            seen.push(shape.pic.pixels().to_vec());
+            let mut pic = Raster::filled(320, 240, Color::rgb(0, 120, 0)).unwrap();
+            draw_view(&mut pic, &tr, Look { kind, ..look }, 500_000, (1.0, 0.0, 0.0), None, Some(&shape), &[]);
+            // Something of it near where it points (the screen's own pixels), nothing far off.
+            let near = pic.pixels().chunks(4).enumerate().filter(|(i, p)| {
+                let (x, y) = ((i % 320) as f32, (i / 320) as f32);
+                p[1] != 120 && (x - 100.0).abs() < 40.0 && (y - 80.0).abs() < 40.0
+            });
+            assert!(near.count() > 30, "{kind:?}");
+            let far = pic.pixels().chunks(4).enumerate().filter(|(i, p)| p[1] != 120 && ((i % 320) as f32 - 100.0).abs() > 40.0).count();
+            assert_eq!(far, 0, "{kind:?}");
+        }
+        // The arrow's tip and the dot's middle are where it points.
+        let dot = drawn(Kind::Dot).unwrap();
+        let mut pic = Raster::filled(320, 240, Color::rgb(0, 120, 0)).unwrap();
+        draw_view(&mut pic, &tr, Look { kind: Kind::Dot, ..look }, 500_000, (1.0, 0.0, 0.0), None, Some(&dot), &[]);
+        assert!(pic.pixel(100, 80).unwrap().r > 200, "the dot's middle on the point");
+        let arrow = drawn(Kind::Dark).unwrap();
+        let mut pic = Raster::filled(320, 240, Color::rgb(0, 120, 0)).unwrap();
+        draw_view(&mut pic, &tr, Look { kind: Kind::Dark, ..look }, 500_000, (1.0, 0.0, 0.0), None, Some(&arrow), &[]);
+        assert_eq!(pic.pixel(97, 78).unwrap().g, 120, "nothing above and left of its tip");
+        assert!(pic.pixel(102, 90).unwrap().g < 60, "black just under it");
+    }
+
+    #[test]
+    fn a_redrawn_way_takes_the_pointer_and_its_clicks_through_its_points() {
+        // Recorded going right along y = 100, a click at 1 s.
+        let tr =
+            Track::new((0..=20u64).map(|k| s(k * 100_000, 100.0 + k as f32 * 10.0, 100.0, if k == 10 { LEFT } else { 0 })).collect(), Vec::new());
+        let look = Look { smooth: 0.0, ..Look::default() };
+        // Redrawn from 0.5 s to 1.5 s through a point well below the line at 1 s.
+        let p = |at: u64, x: f32, y: f32| PathPoint { at, x, y };
+        let paths = checked_paths(vec![Path {
+            from: 500_000,
+            to: 1_500_000,
+            points: vec![p(500_000, 150.0, 100.0), p(1_000_000, 200.0, 160.0), p(1_500_000, 250.0, 100.0)],
+        }]);
+        assert_eq!(path_at(&paths, 1_000_000), Some((200.0, 160.0)));
+        let (x, y) = path_at(&paths, 750_000).unwrap();
+        assert!(y > 120.0 && x > 160.0 && x < 190.0, "on the curve: {x} {y}");
+        assert_eq!(path_at(&paths, 400_000), None, "outside it, as recorded");
+        // Drawn there: the arrow's tip at the redrawn place, the click's ring round it.
+        let arrow = arrow().unwrap();
+        let mut pic = Raster::filled(400, 240, Color::WHITE).unwrap();
+        draw_view(&mut pic, &tr, look, 1_050_000, (1.0, 0.0, 0.0), Some(&arrow), None, &paths);
+        let dark = |pic: &Raster, x0: u32, y0: u32| (x0..x0 + 8).any(|x| (y0..y0 + 8).any(|y| pic.pixel(x, y).is_some_and(|c| c.r < 80)));
+        let (px, py) = path_at(&paths, 1_050_000).unwrap();
+        assert!(dark(&pic, px as u32, py as u32), "the pointer where the way has it");
+        assert!(!dark(&pic, 205, 100), "not where it was recorded");
+        let yellow = |pic: &Raster, cx: f32, cy: f32| {
+            pic.pixels()
+                .chunks(4)
+                .enumerate()
+                .filter(|(i, q)| q[0] > 240 && q[2] < 200 && ((i % 400) as f32 - cx).abs() < 40.0 && ((i / 400) as f32 - cy).abs() < 40.0)
+                .count()
+        };
+        assert!(yellow(&pic, 200.0, 160.0) > 50, "the click's ring where the way had it then");
+        // Junk ways are made safe or left out.
+        let junk = checked_paths(vec![
+            Path { from: 9, to: 3, points: vec![p(9, 1.0, 1.0), p(3, 2.0, 2.0)] },
+            Path { from: 0, to: 10, points: vec![p(0, f32::NAN, 1.0), p(5, 1.0, 1.0)] },
+            Path { from: 0, to: 100, points: vec![p(500, 1e30, -1e30), p(0, 0.0, 0.0)] },
+            Path { from: 50, to: 200, points: vec![p(60, 1.0, 1.0), p(70, 2.0, 2.0)] },
+        ]);
+        assert_eq!(junk.len(), 1, "{junk:?}");
+        assert_eq!(junk[0].points[1], p(100, 1.0e6, -1.0e6));
+    }
+
+    #[test]
     fn junk_looks_are_made_safe() {
-        let l = Look { show: true, size: f32::NAN, smooth: 99.0, clicks: true }.checked();
+        let l = Look { show: true, size: f32::NAN, smooth: 99.0, clicks: true, ..Look::default() }.checked();
         assert_eq!((l.size, l.smooth), (1.0, 1.0));
         let tr = shaky();
         let mut pic = Raster::filled(8, 8, Color::WHITE).unwrap();
-        draw(&mut pic, &tr, Look { size: 1.0e9, ..Look::default() }, 0, f32::INFINITY, None);
-        draw(&mut pic, &tr, Look::default(), u64::MAX, 1.0e9, arrow().as_ref());
+        let all = Look { highlight: true, spotlight: true, magnify: true, ..Look::default() };
+        draw(&mut pic, &tr, Look { size: 1.0e9, ..all }, 0, f32::INFINITY, None);
+        draw(&mut pic, &tr, all, u64::MAX, 1.0e9, arrow().as_ref());
+        draw(&mut pic, &tr, all, 0, 1.0e-9, arrow().as_ref());
+        // Saved before these were: off.
+        let old: Look = serde_json::from_str(r#"{"show":true,"size":2.0}"#).unwrap();
+        assert!(!old.highlight && !old.spotlight && !old.magnify && !old.click_sound && old.clicks);
+    }
+
+    #[test]
+    fn the_pointer_is_highlighted_spotlit_and_magnified_when_asked() {
+        let arrow = arrow().unwrap();
+        // The pointer still at (100, 80) on a picture with a black dot at (110, 80).
+        let tr = Track::new(vec![s(0, 100.0, 80.0, 0)], Vec::new());
+        let pic = || {
+            let mut p = Raster::filled(400, 300, Color::rgb(200, 200, 200)).unwrap();
+            for (x, y) in [(110u32, 80u32), (111, 80), (110, 81), (111, 81)] {
+                let i = ((y * 400 + x) * 4) as usize;
+                p.pixels_mut()[i..i + 3].copy_from_slice(&[0, 0, 0]);
+            }
+            p
+        };
+        let plain = Look { clicks: false, ..Look::default() };
+        let at = |p: &Raster, x: u32, y: u32| p.pixel(x, y).unwrap();
+        // Highlighted: yellow round it, not far off.
+        let mut lit = pic();
+        draw(&mut lit, &tr, Look { highlight: true, ..plain }, 100, 1.0, Some(&arrow));
+        let near = at(&lit, 80, 80);
+        assert!(near.r > near.b + 40 && near.g > near.b + 30, "{near:?}");
+        assert_eq!(at(&lit, 300, 200), Color::rgb(200, 200, 200));
+        // Spotlit: dark far off, as it was near.
+        let mut spot = pic();
+        draw(&mut spot, &tr, Look { spotlight: true, ..plain }, 100, 1.0, Some(&arrow));
+        assert!(at(&spot, 390, 290).r < 100);
+        assert_eq!(at(&spot, 60, 80), Color::rgb(200, 200, 200));
+        // Magnified: the dot 10 px off shows 20 px off, twice the size.
+        let mut lens = pic();
+        draw(&mut lens, &tr, Look { magnify: true, ..plain }, 100, 1.0, Some(&arrow));
+        assert!(at(&lens, 121, 81).r < 50 && at(&lens, 123, 83).r < 50, "{:?}", at(&lens, 121, 81));
+        assert_eq!(at(&lens, 111, 81), Color::rgb(200, 200, 200), "the dot's own place shows what's half way there");
+        assert!(at(&lens, 100, 80 + 75).r > 240, "the lens's white rim (its radius a quarter of the picture's height)");
+        // A click's sound: short, starting and ending quiet.
+        assert_eq!(click_sound(0), 0.0);
+        assert!((0..CLICK_SOUND_LEN).map(click_sound).fold(0.0f32, |m, v| m.max(v.abs())) > 0.2);
+        assert!(click_sound(CLICK_SOUND_LEN - 1).abs() < 0.01 && click_sound(CLICK_SOUND_LEN) == 0.0);
     }
 }

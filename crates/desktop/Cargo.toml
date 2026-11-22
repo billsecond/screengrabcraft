@@ -16,6 +16,10 @@ screengrabcraft-model = { workspace = true }
 screengrabcraft-matte = { workspace = true }
 # Grab Text (text.rs): a small picture is made larger before it is read.
 screengrabcraft-render = { workspace = true }
+# The captures' library (library.rs) is changed by the engine's library commands.
+screengrabcraft-engine = { workspace = true }
+# The fonts on the computer (fonts.rs).
+fontdb = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
@@ -49,3 +53,7 @@ winsafe = { version = "0.0.29", features = ["dwm", "shell"] }
 opener = { version = "0.9", default-features = false, features = ["reveal"] }
 # Grab Text (text.rs): Windows' own text recognition, through its safe WinRT projection.
 windows = { workspace = true, features = ["Foundation", "Foundation_Collections", "Globalization", "Graphics_Imaging", "Media_Ocr", "Security_Cryptography", "Storage_Streams"] }
+
+[dev-dependencies]
+# The live font test reads a font as text draws it.
+ab_glyph = { workspace = true }

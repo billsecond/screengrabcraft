@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use screengrabcraft_model::{Document, ObjectId, Raster};
+use screengrabcraft_model::{Document, ObjectId, Raster, TextLine};
 use screengrabcraft_render::matte::{Matte, Matting};
 use serde_json::Value;
 
@@ -36,6 +36,45 @@ pub struct Session {
     pending: Option<Snapshot>,
     /// What `image.removeBackground` works with. It isn't part of the document or its history.
     pub background: Background,
+    /// Pictures the host lent for commands that take one from outside (a watermark's), by
+    /// place: `effect.watermark` with `{"picture": 0}` uses the first. Not part of the document
+    /// or its history; at most [`crate::fx::MAX_LENT`].
+    pub lent: Vec<Raster>,
+    /// What reads the text in a picture, when the host lent one: the commands that find text
+    /// (`image.hideDetails`) read the picture with it when they aren't given the lines read.
+    pub reader: Reader,
+}
+
+/// Reads the text in a picture, on this computer (the host's: Windows' own text recognition on
+/// the desktop). It can take a moment, so the editor reads on a thread of its own and hands the
+/// lines to the command; the command-line program lends it to the session instead.
+pub trait ReadText: Send + Sync {
+    /// The lines of text in `picture`, in reading order; none if it has no text.
+    fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String>;
+}
+
+/// The text reader a session was lent, if any.
+#[derive(Clone, Default)]
+pub struct Reader(Option<Arc<dyn ReadText>>);
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Reader({})", if self.0.is_some() { "lent" } else { "none" })
+    }
+}
+
+impl Reader {
+    /// Lends a reader, or takes it back.
+    pub fn set(&mut self, reader: Option<Arc<dyn ReadText>>) {
+        self.0 = reader;
+    }
+
+    /// The lines of text in `picture`, read by the reader lent (an error says there is none).
+    pub fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
+        let reader = self.0.as_ref().ok_or_else(|| "there is no text reader here".to_string())?;
+        let lines = reader.read(picture)?;
+        Ok(lines.into_iter().take(screengrabcraft_model::text::MAX_LINES).map(TextLine::sanitized).collect())
+    }
 }
 
 /// What `image.removeBackground` works with: a model the host lent the session, and a matte
@@ -91,6 +130,8 @@ impl Session {
             revision: 1,
             pending: None,
             background: Background::default(),
+            lent: Vec::new(),
+            reader: Reader::default(),
         }
     }
 
@@ -245,8 +286,10 @@ impl Session {
         self.selection.iter().copied().filter(|id| self.doc.get(*id).is_some()).collect()
     }
 
+    /// Selects these annotations, and every other in a group with one of them (a group is
+    /// selected as one).
     pub fn select(&mut self, ids: Vec<ObjectId>) {
-        self.selection = ids;
+        self.selection = if self.doc.objects.iter().any(|o| o.group.is_some()) { self.doc.with_groups(&ids) } else { ids };
     }
 
     /// The undo and redo steps, to keep in a file (the next to undo or redo last in each).

@@ -21,12 +21,25 @@ ScreenGrabCraft takes pictures of your screen, so here is exactly what it does w
 - **What is written about them:** the log (in the settings folder) records a capture's size and
   file name, never its content. The settings remember the last area captured, for Repeat Last
   Capture.
+- **Stamps of your own:** a picture you add to the stamp library (from a file or the clipboard)
+  is kept, no larger than 512 pixels, in the `stamps` folder in the settings folder, until you
+  remove it there (Remove, in the library). Nothing else is kept of it.
 - **Video recordings:** the microphone, the camera and the computer's sound are used only while
   a video recording you started is running, and only the ones you chose (Settings › Recording). The
   camera's light is on for exactly that long. A Record Video recording is made into an MP4 in
   your captures folder and its working file in your temporary folder is deleted; a Video
   Production recording (`.sgvideo`, every track as recorded, with your edits added to its end) is
-  kept in your captures folder until you delete it. Nothing of either is sent anywhere.
+  kept in your captures folder until you delete it. Nothing of either is sent anywhere. In the
+  video editor, Record Narration turns the microphone on only while the take is recorded; the
+  take is saved as a WAV beside the recording.
+- **Templates and themes of your own** (the video editor) are kept in the settings folder: a
+  template keeps its items' words and where its pictures and sounds are, not the files themselves.
+- **Keys pressed:** on Windows a Video Production recording keeps the shortcuts pressed while it
+  runs (to show them on the video): only a key with Ctrl, Alt or the Windows key, and keys that
+  don't type (Enter, Esc, Tab, the arrows, F-keys and the like). Letters, digits, symbols and
+  spaces typed, and anything typed with AltGr, are never kept, so a password typed while recording
+  isn't. The keys are looked at only while the recording runs, kept in the recording file only,
+  never logged; Settings › Recording turns it off.
 - **Captions:** the words of a Video Production recording are written down on your computer, by
   a speech model installed with ScreenGrabCraft (Whisper, run by ScreenGrabCraft itself; it is
   never downloaded). Nothing of the recording or its words is sent anywhere. The captions go into

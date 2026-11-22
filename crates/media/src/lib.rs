@@ -6,26 +6,36 @@
 //! build.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod align;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod av1;
 pub mod captions;
 #[cfg(target_os = "windows")]
 pub mod clip;
 pub mod compose;
+pub mod denoise;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;
+pub mod frame;
 #[cfg(target_os = "windows")]
 mod h264;
+pub mod keyer;
+pub mod keys;
 pub mod layer_draw;
 pub mod layers;
 pub mod media_store;
+pub mod mov;
 pub mod mp4;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod opus;
 pub mod pointer;
 pub mod recording;
 pub mod stock;
+pub mod stretch;
 pub mod timeline;
+pub mod warp;
+pub mod watermark;
+pub mod yours;
 pub mod yuv;
 pub mod zoom;
 

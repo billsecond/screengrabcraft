@@ -129,6 +129,88 @@ fn the_camera_moves_to_another_corner_and_becomes_a_circle() {
 }
 
 #[test]
+fn the_camera_is_mirrored_and_given_a_border_of_its_own_colour() {
+    let mut h = harness();
+    // Below the panel's markers: scrolled to, as it would be by hand.
+    h.get_by_label("Mirror").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Mirror").click();
+    h.run_steps(2);
+    let cam = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera;
+    assert!(cam(&h).mirror);
+    h.get_by_label("The border's colour");
+    // Wider (from the engine, as its slider does) and orange.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.camera", &serde_json::json!({"border": 0.08, "borderColor": "#FF8800"})).unwrap();
+    }
+    h.run_steps(3);
+    assert_eq!((cam(&h).border, cam(&h).border_color), (0.08, Color::rgb(0xFF, 0x88, 0)));
+    // The picture shows it: orange round the camera, in its corner.
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera is on the picture");
+    shot(&mut h, "video-camera-border");
+    let img = h.render().unwrap();
+    let orange = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        p[0] > 220 && (110..170).contains(&p[1]) && p[2] < 60
+    };
+    assert!(orange(r.min.x + 1.5, r.center().y) && orange(r.center().x, r.max.y - 1.5), "{r:?}");
+    assert!(!orange(r.center().x, r.center().y));
+    // Undone a step at a time.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(cam(&h).border, 0.0);
+    assert!(cam(&h).mirror);
+}
+
+/// A chosen stretch made the camera's alone: the camera fills the picture, the screen in its
+/// corner; listed in the camera's panel, gone again with Remove.
+#[test]
+fn the_camera_is_made_full_screen_for_a_stretch_and_the_stretch_removed() {
+    let mut h = harness();
+    let full = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera_full.clone();
+    assert!(full(&h).is_empty());
+    h.get_by_label("Camera Full Screen for the Stretch");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = Some((1_000_000, 3_000_000));
+        v.playhead = 2_000_000;
+    }
+    h.run_steps(2);
+    h.get_by_label("Camera Full Screen for the Stretch").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Camera Full Screen for the Stretch").click();
+    h.run_steps(3);
+    assert_eq!(full(&h), vec![[1_000_000, 3_000_000]]);
+    h.get_by_label("0:01.0 to 0:03.0");
+    // The picture: the camera's teal fills it, the white screen in the camera's corner.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = None;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-camera-full-screen");
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera's place is on the picture");
+    let img = h.render().unwrap();
+    let at = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        [p[0], p[1], p[2]]
+    };
+    let teal = |p: [u8; 3]| p[0] < 80 && p[1] > 120 && p[2] > 100;
+    let white = |p: [u8; 3]| p.iter().all(|v| *v > 220);
+    assert!(teal(at(r.min.x - r.width(), r.center().y)), "{:?}", at(r.min.x - r.width(), r.center().y));
+    assert!(white(at(r.min.x + r.width() * 0.1, r.max.y - r.height() * 0.1)), "{r:?}");
+    // Removed: the screen again, with the camera in its corner.
+    h.get_by_label("Remove").scroll_to_me();
+    h.run_steps(4);
+    shot(&mut h, "video-camera-full-screen-list");
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert!(full(&h).is_empty());
+    let img = h.render().unwrap();
+    let p = img.get_pixel((r.min.x - r.width()) as u32, r.center().y as u32);
+    assert!(!teal([p[0], p[1], p[2]]));
+    h.get_by_label_contains("While recording, the camera button");
+}
+
+#[test]
 fn deleting_a_selected_clip_leaves_a_gap_on_its_track_only() {
     let mut h = harness();
     if let Some(v) = h.state_mut().video.as_mut() {
@@ -183,12 +265,14 @@ struct Job {
     captions: Option<usize>,
     burn: bool,
     subtitles: bool,
+    /// How long the video made is.
+    length: u64,
 }
 
 impl crate::services::Services for CaptionHost {
     fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
         use crate::services::VideoFormat;
-        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif]
+        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Wav]
     }
     fn open_folder(&self, path: Option<&str>) {
         self.shown.lock().unwrap().push(format!("folder:{}", path.unwrap_or("")));
@@ -225,6 +309,7 @@ impl crate::services::Services for CaptionHost {
             captions: job.captions.as_ref().map(Vec::len),
             burn: job.burn,
             subtitles: job.subtitles,
+            length: job.timeline.length(),
         });
         let x = crate::services::VideoExport::default();
         *self.making.lock().unwrap() = Some(x.clone());
@@ -263,10 +348,15 @@ fn captions() -> screengrabcraft_media::captions::Captions {
 }
 
 fn caption_harness(bytes: Vec<u8>, host: CaptionHost) -> Harness<'static, Editor> {
+    caption_harness_stepping(bytes, host, 0.25)
+}
+
+/// [`caption_harness`], each of its steps so long (seconds): a double click needs them short.
+fn caption_harness_stepping(bytes: Vec<u8>, host: CaptionHost, dt: f32) -> Harness<'static, Editor> {
     let mut ed = Editor::new(Box::new(host), EditorSettings::default());
     let path = Some("C:/Captures/Production.sgvideo".to_string());
     ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes });
-    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 860.0)).build_ui_state(
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 860.0)).with_step_dt(dt).build_ui_state(
         |ui, ed: &mut Editor| {
             let ctx = ui.ctx().clone();
             ed.logic(&ctx);
@@ -276,6 +366,29 @@ fn caption_harness(bytes: Vec<u8>, host: CaptionHost) -> Harness<'static, Editor
     );
     h.run_steps(3);
     h
+}
+
+#[test]
+fn captions_light_up_word_by_word_from_the_view_menu() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let mut h = caption_harness(bytes, CaptionHost::default());
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(2_400_000);
+    h.get_by_label("View").click();
+    h.run_steps(2);
+    h.get_by_label("Light Up Each Word as It's Said").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.captions.words);
+    // Early in the others' line its first words are lit, the rest faint; later, more of it.
+    let lit = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0x4D, 0xE1, 0xF0]);
+    let early = h.state_mut().video.as_mut().unwrap().frame_at(2_400_000);
+    assert!(early.pixels() != before.pixels() && lit(&mut h, 2_400_000) > 0);
+    assert!(lit(&mut h, 3_400_000) > 0);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 2_700_000;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-captions-word-by-word");
 }
 
 #[test]
@@ -425,7 +538,15 @@ fn export_video_asks_where_and_how_shows_its_progress_then_play_and_show_in_fold
     let job = host.jobs.lock().unwrap().pop().unwrap();
     assert_eq!(
         job,
-        Job { out: "D:/Videos/Demo.mp4".into(), replace: true, format: VideoFormat::Mp4, captions: Some(2), burn: false, subtitles: true }
+        Job {
+            out: "D:/Videos/Demo.mp4".into(),
+            replace: true,
+            format: VideoFormat::Mp4,
+            captions: Some(2),
+            burn: false,
+            subtitles: true,
+            length: 4_000_000
+        }
     );
     // Being made: a window with its progress and Cancel; the tool bar has no Show in folder.
     let making = host.making.lock().unwrap().clone().unwrap();
@@ -489,6 +610,222 @@ fn a_gif_has_no_subtitles_and_cancelling_says_so() {
     *making.done.lock().unwrap() = Some(Err("cancelled".into()));
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().export.is_none());
+}
+
+#[test]
+fn just_the_chosen_stretch_is_made_with_its_own_captions_and_just_the_sound_as_a_wav() {
+    use crate::services::VideoFormat;
+    use crate::video::{CaptionsIn, ExportStep};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    // A stretch chosen: the window offers it alone, the whole video still as it was.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.choose_stretch(1_000_000, 2_000_000);
+    }
+    h.run_steps(1);
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    for label in ["What", "The whole video (0:04.0)", "Just the chosen stretch: 0:01.0 to 0:02.0 (0:01.0)"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Just the chosen stretch: 0:01.0 to 0:02.0 (0:01.0)").click();
+    h.run_steps(1);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/export-stretch.png"));
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    // A second long; your line (0.2 s to 1.8 s) is in it, the others' (from 2 s) isn't.
+    assert_eq!((job.length, job.captions, job.subtitles), (1_000_000, Some(1), true));
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.mp4".into()));
+    h.run_steps(2);
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    // File, Export Sound…: just the sound, a WAV here (M4A is greyed out on this host).
+    h.get_by_label("File").click();
+    h.run_steps(1);
+    h.get_by_label("Export Sound…").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => {
+            assert_eq!((c.format, c.captions, c.path.as_str()), (VideoFormat::Wav, CaptionsIn::Off, "C:/Captures/Production.wav"));
+        }
+        _ => panic!("the Export window is open"),
+    }
+    // Captions can't go on a picture it hasn't got; beside it, they can.
+    h.get_by_label("On the picture (always shown)").click();
+    h.run_steps(1);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!(c.captions, CaptionsIn::Off),
+        _ => panic!("the Export window is open"),
+    }
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/export-sound.png"));
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.format, job.burn, job.length, job.out.as_str()), (VideoFormat::Wav, false, 4_000_000, "C:/Captures/Production.wav"));
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.wav".into()));
+    h.run_steps(2);
+    for label in ["Play Sound", "Show in Folder"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Play Sound").click();
+    h.run_steps(2);
+    assert_eq!(host.shown.lock().unwrap().last().map(String::as_str), Some("open:C:/Captures/Production.wav"));
+    // A name ending .wav picked for a video makes the sound; .mp4 a video again.
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("D:/Sound/Talk.wav");
+    }
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!((c.format, c.path.as_str()), (VideoFormat::Wav, "D:/Sound/Talk.wav")),
+        _ => panic!("the Export window is open"),
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("D:/Sound/Talk.mp4");
+    }
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!(c.format, VideoFormat::Mp4),
+        _ => panic!("the Export window is open"),
+    }
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    // The chosen stretch's panel has Export the Stretch…: the window set to make just it.
+    h.get_by_label("Export the Stretch…").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert!(c.only_stretch && c.stretch == Some((1_000_000, 2_000_000))),
+        _ => panic!("the Export window is open"),
+    }
+}
+
+/// A host that saves pictures in a made-up captures folder, and has the Image Editor's window
+/// beside this one.
+#[derive(Clone, Default)]
+struct FrameHost {
+    written: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    handed: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+}
+
+impl crate::services::Services for FrameHost {
+    fn new_picture_path(&self, source: &str) -> Result<String, String> {
+        Ok(format!("C:/Captures/{source}.png"))
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.written.lock().unwrap().push((path.to_string(), bytes.to_vec()));
+        Ok(())
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
+        self.handed.lock().unwrap().push((path.to_string(), video));
+        true
+    }
+}
+
+#[test]
+fn a_frame_is_saved_as_a_picture_and_opened_in_the_image_editor() {
+    let host = FrameHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // At 1.5 s the box is at x = 90 to 140.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S);
+    h.run_steps(2);
+    let (path, png) = host.written.lock().unwrap().pop().expect("a picture was written");
+    assert_eq!(path, "C:/Captures/Production 0.01.5.png");
+    let pic = screengrabcraft_render::decode(&png).unwrap();
+    assert_eq!((pic.width(), pic.height()), (320, 180), "at the recording's own size");
+    let p = pic.pixel(110, 60).unwrap();
+    assert_eq!((p.r, p.g, p.b), (0x4E, 0x3C, 0xA8), "the box where it was then");
+    assert_eq!(pic.pixel(20, 60).unwrap(), Color::WHITE);
+    assert_eq!(host.handed.lock().unwrap().as_slice(), [(path.clone(), false)], "handed to the Image Editor");
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("opened in the Image Editor")), "{:?}", h.state().toast_text());
+    // From the ruler's right button, at that moment: three quarters of the way along.
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.75, lane.min.y + 8.0));
+    h.get_by_label("Save This Frame as a Picture").click();
+    h.run_steps(2);
+    let (path, _) = host.written.lock().unwrap().pop().expect("a second picture was written");
+    assert!(path.starts_with("C:/Captures/Production 0.0"), "{path}");
+    assert!(h.state().video.as_ref().unwrap().playhead.abs_diff(3_000_000) < 150_000, "the playhead went there");
+}
+
+#[test]
+fn h_holds_the_frame_its_panel_holds_it_longer_and_takes_it_out() {
+    let mut h = harness();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(1);
+    h.key_press(egui::Key::H);
+    h.run_steps(2);
+    assert_eq!(length(&h), 6_000_000, "two seconds held, everything after moved along");
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let (t, c) = v.selected.expect("the held frame is chosen");
+        let clip = v.session.timeline.tracks[t].clips[c];
+        assert!(clip.hold && clip.at == 1_500_000 && clip.len == 2_000_000);
+        // The screen (and the camera) hold the picture, the microphone waits.
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        assert_eq!(v.session.timeline.source_time(0, 3_000_000), Some(1_500_000));
+        assert_eq!(v.session.timeline.source_time(mic, 3_000_000), None);
+        assert_eq!(v.session.timeline.source_time(mic, 3_600_000), Some(1_600_000));
+    }
+    assert!(h.query_all_by_label("Held frame").next().is_some());
+    shot(&mut h, "video-held-frame");
+    // Held 3 s from the panel; the picture under it is the moment held.
+    h.get_by_label("3 s").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 7_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 4_000_000;
+    }
+    h.run_steps(2);
+    // Undone, then taken out from the panel: as it was.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(length(&h), 6_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let (t, c) = (0, v.session.timeline.tracks[0].clips.iter().position(|c| c.hold).unwrap());
+        v.selected = Some((t, c));
+    }
+    h.run_steps(2);
+    h.get_by_label("Take the Hold Out").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 4_000_000);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| !c.hold)));
+    // The ruler's right button holds the frame there, from its menu.
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.5, lane.min.y + 8.0));
+    h.get_by_label_contains("Hold This Frame").hover();
+    h.run_steps(2);
+    h.get_by_label("For 1 Second").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 5_000_000);
 }
 
 #[test]
@@ -607,6 +944,92 @@ impl crate::services::Services for DiskHost {
     }
 }
 
+/// A host with recordings on its disk (in memory), that makes each video at once and keeps what
+/// it was asked for; asked for recordings, it answers with two of them and a picture.
+#[derive(Clone, Default)]
+struct BatchHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    made: std::sync::Arc<std::sync::Mutex<Vec<(String, crate::services::VideoFormat, bool, bool)>>>,
+}
+
+impl crate::services::Services for BatchHost {
+    fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
+        use crate::services::VideoFormat;
+        vec![VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov, VideoFormat::Wav]
+    }
+    fn request_batch(&self) {
+        let paths = ["C:/Captures/Monday.sgvideo", "C:/Captures/Tuesday.sgvideo", "C:/Captures/Logo.png"];
+        *self.answer.lock().unwrap() = Some(crate::services::DialogResult::Batch(paths.map(str::to_string).to_vec()));
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn open_recording(&self, _path: &str) -> Result<Box<dyn screengrabcraft_media::recording::Source>, String> {
+        let mut bytes = meeting();
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+        Ok(Box::new(bytes))
+    }
+    fn export_video(&self, job: crate::services::VideoJob) -> Result<crate::services::VideoExport, String> {
+        self.made.lock().unwrap().push((job.out.clone(), job.format, job.burn, job.subtitles));
+        let x = crate::services::VideoExport::default();
+        *x.done.lock().unwrap() = Some(Ok(job.out));
+        Ok(x)
+    }
+}
+
+#[test]
+fn several_recordings_are_made_into_videos_with_one_setting() {
+    use crate::services::VideoFormat;
+    let host = BatchHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    h.get_by_label("Make Videos of Several Recordings…").click();
+    h.run_steps(3);
+    // The two recordings listed (the picture isn't one), waiting.
+    let batch = |h: &Harness<'_, Editor>| {
+        let b = h.state().video.as_ref().unwrap().batch.as_ref().unwrap();
+        b.items.iter().map(|i| (i.path.clone(), i.state.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(batch(&h).len(), 2);
+    assert!(h.query_by_label("Monday.sgvideo").is_some() && h.query_by_label("Tuesday.sgvideo").is_some());
+    // One setting for all: see-through, captions in the picture.
+    h.get_by_value(VideoFormat::Mp4Av1.label()).click();
+    h.run_steps(2);
+    h.get_by_label(VideoFormat::Mov.label()).click();
+    h.run_steps(2);
+    h.get_by_label("Captions in the picture").click();
+    h.run_steps(2);
+    shot(&mut h, "video-batch");
+    h.get_by_label("Make Them").click();
+    for _ in 0..60 {
+        h.run_steps(1);
+        if batch(&h).iter().all(|(_, s)| matches!(s, crate::video::batch::BatchState::Done(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let made = host.made.lock().unwrap().clone();
+    assert_eq!(made.len(), 2, "{:?}", batch(&h));
+    assert_eq!(made[0], ("C:/Captures/Monday.mov".to_string(), VideoFormat::Mov, true, false));
+    assert_eq!(made[1].0, "C:/Captures/Tuesday.mov");
+    assert!(h.query_all_by_label("Made").count() >= 2);
+    shot(&mut h, "video-batch-made");
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().batch.is_none());
+}
+
 #[test]
 fn a_recording_from_the_disk_says_its_opening_then_opens() {
     let mut ed = Editor::new(Box::new(DiskHost { recording: meeting() }), EditorSettings::default());
@@ -655,9 +1078,24 @@ struct MediaHost {
     progress: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<f32, String>>>>,
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
     media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
+    /// How fast each sound asked for plays (none is played).
+    rates: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
+    /// The sound a sound file brings in (stereo, 48 kHz), instead of a tone.
+    sound: std::sync::Arc<std::sync::Mutex<Option<Vec<i16>>>>,
 }
 
 impl crate::services::Services for MediaHost {
+    fn play_sound(
+        &self,
+        _recording: std::sync::Arc<screengrabcraft_media::recording::Recording>,
+        _timeline: screengrabcraft_media::timeline::Timeline,
+        _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
+        _from_us: u64,
+        rate: i32,
+    ) -> Option<Box<dyn crate::services::SoundOut>> {
+        self.rates.lock().unwrap().push(rate);
+        None
+    }
     fn request_import(&self) {
         *self.imports.lock().unwrap() += 1;
     }
@@ -695,6 +1133,12 @@ impl crate::services::Services for MediaHost {
         let loaded = if path.ends_with(".png") {
             let pic = Raster::filled(80, 40, Color::rgb(0xE0, 0x20, 0x20)).unwrap();
             Loaded { kind: MediaKind::Picture, duration: 0, width: 80, height: 40, content: Content::Picture(pic) }
+        } else if path.ends_with(".sgvideo") {
+            // Another recording: the made-up one, its picture and its hum.
+            Loaded::recording(screengrabcraft_media::recording::Recording::open(Box::new(recording())).unwrap())
+        } else if let Some(s) = self.sound.lock().unwrap().clone() {
+            let duration = s.len() as u64 / 2 * 1_000_000 / 48_000;
+            Loaded { kind: MediaKind::Sound, duration, width: 0, height: 0, content: Content::Sound(s) }
         } else {
             let tone: Vec<i16> = (0..48_000 * 2)
                 .flat_map(|i| {
@@ -883,6 +1327,372 @@ fn media_brought_in_goes_in_the_bin_then_onto_a_layer_of_its_kind() {
     let id = v.session.timeline.media[0].id;
     v.session.execute("video.removeMedia", &serde_json::json!({"id": id})).unwrap();
     assert!(v.session.timeline.layers[0].items.is_empty());
+}
+
+#[test]
+fn a_videos_sound_is_separated_tracks_go_mono_and_faster_playback_asks_for_sound() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::LayerKind;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Videos/Demo.sgvideo".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Demo.sgvideo").click();
+    h.run_steps(3);
+    let tl = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.clone();
+    let heard = |h: &Harness<'_, Editor>| {
+        let v = h.state().video.as_ref().unwrap();
+        let mut t = v.session.timeline.clone();
+        // The recording's own tracks muted: only the layers are heard.
+        for k in 0..t.tracks.len() {
+            t.set_muted(k, true).unwrap();
+        }
+        screengrabcraft_media::compose::mix_with(&v.rec, &t, v.library.as_ref(), 24_000, 4800)
+    };
+    let before = heard(&h);
+    assert!(before.iter().any(|s| s.abs() > 0.05), "the video's hum is heard");
+    assert_eq!(tl(&h).layers.len(), 1);
+    // Its panel: Separate the Sound.
+    scroll_side_panel_to(&mut h, "Separate the Sound");
+    shot(&mut h, "video-separate-sound");
+    h.get_by_label("Separate the Sound").click();
+    h.run_steps(3);
+    let t = tl(&h);
+    assert_eq!(t.layers.iter().map(|l| l.kind).collect::<Vec<_>>(), [LayerKind::Picture, LayerKind::Sound]);
+    let (video, sound) = (&t.layers[0].items[0], &t.layers[1].items[0]);
+    assert!(video.silent && sound.sound_only && sound.at == video.at && sound.len == video.len);
+    assert_eq!(h.state().video.as_ref().unwrap().item, Some((t.layers[1].id, sound.id)), "the sound chosen");
+    assert_eq!(heard(&h), before, "heard as before, from the sound layer");
+    shot(&mut h, "video-sound-apart");
+    // The sound layer mixed to mono from its panel.
+    h.get_by_label("Mix the layer to mono").click();
+    h.run_steps(2);
+    assert!(tl(&h).layers[1].mono);
+    // A sound track's clip: its panel mixes the track to mono.
+    let mic = t.find(StreamKind::Microphone).unwrap();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.item = None;
+        v.selected = Some((mic, 0));
+    }
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Mix the track to mono");
+    h.get_by_label("Mix the track to mono").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].mono);
+    // L, L, L: the sound asked for as recorded, then twice and four times as fast; J: backwards
+    // as recorded, turned round; J again (twice as fast backwards): none.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.selected = None;
+    }
+    h.run_steps(1);
+    for _ in 0..3 {
+        h.key_press(egui::Key::L);
+        h.run_steps(1);
+    }
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4, -1]);
+    assert_eq!(h.state().video.as_ref().unwrap().rate_label().as_deref(), Some("Backwards"));
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4, -1]);
+    assert_eq!(h.state().video.as_ref().unwrap().rate_label().as_deref(), Some("Backwards 2×"));
+}
+
+#[test]
+fn split_pieces_are_joined_back_from_the_right_button() {
+    let mut h = harness();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 2_000_000;
+    }
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    let clips = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks.iter().map(|t| t.clips.len()).collect::<Vec<_>>();
+    assert_eq!(clips(&h), [2, 2, 2]);
+    // The ruler's right button: every track's pieces joined.
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 60.0, lane.min.y + 8.0));
+    shot(&mut h, "video-join-menu");
+    h.get_by_label("Join the Pieces Back Together").click();
+    h.run_steps(3);
+    assert_eq!(clips(&h), [1, 1, 1]);
+    // Split again; the microphone's first clip joined with the next from its own right button.
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.selected = Some((1, 0));
+    }
+    h.run_steps(1);
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 48.0 + 20.0));
+    h.get_by_label("Join with the Next Clip").click();
+    h.run_steps(3);
+    assert_eq!(clips(&h), [2, 1, 2]);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].clips[0].len, 4_000_000);
+}
+
+#[test]
+fn media_is_replaced_keeping_its_effects_and_effects_are_pasted_on_another() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::What;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string(), "C:/Pictures/Badge.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    h.state_mut()
+        .video
+        .as_mut()
+        .unwrap()
+        .session
+        .execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "rotate": 20, "border": 0.04}))
+        .unwrap();
+    h.run_steps(2);
+    let it = |h: &Harness<'_, Editor>, l: u32, i: u32| h.state().video.as_ref().unwrap().session.timeline.item(l, i).unwrap().clone();
+    let before = it(&h, layer, item);
+    // Its panel: Replace With, the other picture.
+    scroll_side_panel_to(&mut h, "Replace With");
+    shot(&mut h, "video-item-effects");
+    h.get_by_label("Replace With").click();
+    h.run_steps(2);
+    h.get_all_by_label("Badge.png").last().unwrap().click();
+    h.run_steps(3);
+    let after = it(&h, layer, item);
+    let badge = h.state().video.as_ref().unwrap().session.timeline.media[1].id;
+    assert_eq!(after.what, What::Media { id: badge });
+    assert_eq!(
+        (after.at, after.len, after.place, after.look.clone()),
+        (before.at, before.len, before.place, before.look.clone()),
+        "its effects kept"
+    );
+    // Its effects copied, and pasted on a title.
+    h.get_by_label("Copy Effects").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().copied_effects.is_some());
+    let (tl_, ti) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let p = v.session.execute("video.place", &serde_json::json!({"template": "news-name", "at": 0})).unwrap();
+        let chosen = (p["layer"].as_u64().unwrap() as u32, p["item"].as_u64().unwrap() as u32);
+        v.item = Some(chosen);
+        chosen
+    };
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Paste Effects");
+    h.get_by_label("Paste Effects").click();
+    h.run_steps(2);
+    let title = it(&h, tl_, ti);
+    assert!((title.look.rotate - 20.0).abs() < 1e-4, "{}", title.look.rotate);
+    // A clip's effects, from its right button: the screen's first half's look on its second half.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.session.execute("video.split", &serde_json::json!({"at": 2_000_000})).unwrap();
+        v.session.execute("video.clipLook", &serde_json::json!({"track": 0, "clip": 0, "look": "sepia"})).unwrap();
+        v.selected = Some((0, 0));
+    }
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    let rows = h.state().video.as_ref().unwrap().session.timeline.layers.len() as f32;
+    let (pps, scroll) = (h.state().video.as_ref().unwrap().pps, h.state().video.as_ref().unwrap().scrolled());
+    let screen_y = top + rows * 48.0 + 20.0;
+    right_click(&mut h, egui::pos2(lane.min.x + pps - scroll, screen_y));
+    h.get_by_label("Copy Effects").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 1));
+    h.run_steps(1);
+    right_click(&mut h, egui::pos2(lane.min.x + 3.0 * pps - scroll, screen_y));
+    h.get_by_label("Paste Effects").click();
+    h.run_steps(2);
+    let clips = &h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips;
+    assert_eq!(clips[1].look, clips[0].look);
+}
+
+#[test]
+fn a_region_of_the_screen_is_frozen_from_the_edit_menu_and_a_title_writes_itself_on() {
+    use screengrabcraft_media::layers::{AnimKind, What};
+    let mut h = harness();
+    // The purple block moves right across the white screen; frozen from 0.5 s to 2 s.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 2_000_000));
+    h.run_steps(2);
+    h.get_by_label("Edit").click();
+    h.run_steps(2);
+    h.get_by_label("Freeze a Region").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.expect("the frozen region is chosen");
+    let it = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    assert!(matches!(it(&h).what, What::Freeze { .. }) && it(&h).at == 500_000 && it(&h).end() == 2_000_000);
+    assert!(h.query_by_label("Frozen Region").is_some() && h.query_by_label("Height").is_some());
+    // Its corner dragged out: larger, wider than it's high as it was dragged.
+    let r = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    crate::tests::drag(&mut h, r.right_bottom(), r.right_bottom() + egui::vec2(60.0, 10.0));
+    let after = it(&h);
+    let tall = match after.what {
+        What::Freeze { h } => h,
+        _ => 0.0,
+    };
+    assert!(after.place.w > 0.45 && tall > 0.3 && tall < after.place.w, "{} {tall}", after.place.w);
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Resize"));
+    shot(&mut h, "video-freeze-region");
+    // Over the left half of the screen: at 1.5 s the block (at 90 to 140 by then) is still where it
+    // was at 0.5 s (30 to 80), and the screen beyond the region plays on.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "x": 0.25, "y": 0.5, "w": 0.5, "h": 1.0})).unwrap();
+    }
+    let f = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let (sx, sy) = (f.width() as f32 / 320.0, f.height() as f32 / 180.0);
+    let purple = |x: f32, y: f32| f.pixel((x * sx) as u32, (y * sy) as u32).is_some_and(|p| p.b > 140 && p.r < 120);
+    assert!(purple(55.0, 65.0) && !purple(115.0, 65.0), "held as at 0.5 s");
+    let g = h.state_mut().video.as_mut().unwrap().frame_at(2_500_000);
+    assert!(g.pixel((175.0 * sx) as u32, (65.0 * sy) as u32).is_some_and(|p| p.b > 140 && p.r < 120), "after it, the block plays on");
+    // A title written on: its Entrance, Write on.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.range = None;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title-box"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (tl, ti) = h.state().video.as_ref().unwrap().item.unwrap();
+    h.state_mut().video.as_mut().unwrap().session.execute("video.setItem", &serde_json::json!({"layer": tl, "item": ti, "intro": "fade"})).unwrap();
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Entrance");
+    scroll_side_panel(&mut h, 3);
+    h.get_by_value("Fade").click();
+    h.run_steps(2);
+    h.get_by_label("Write on").click();
+    h.run_steps(3);
+    let title = h.state().video.as_ref().unwrap().session.timeline.item(tl, ti).unwrap().clone();
+    assert_eq!(title.intro.kind, AnimKind::Write);
+    assert!(title.intro.len >= 1_200_000, "writing takes a while");
+    // Part way in, it isn't all written yet.
+    let frame = |h: &mut Harness<'_, Editor>, t: u64| h.state_mut().video.as_mut().unwrap().frame_at(t);
+    let (part, all) = (frame(&mut h, title.intro.len / 3), frame(&mut h, title.intro.len + 100_000));
+    assert!(part.pixels() != all.pixels());
+    h.state_mut().video.as_mut().unwrap().playhead = title.intro.len / 2;
+    h.run_steps(3);
+    shot(&mut h, "video-write-on");
+}
+
+#[test]
+fn a_picture_moves_along_a_curved_path_and_is_pinned_by_its_corners() {
+    use crate::services::DialogResult;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        for (at, x, y) in [(500_000u64, 0.2, 0.7), (1_500_000, 0.5, 0.25), (2_500_000, 0.8, 0.7)] {
+            v.session.execute("video.keyframe", &serde_json::json!({"layer": layer, "item": item, "at": at, "x": x, "y": y})).unwrap();
+        }
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "intro": "none"})).unwrap();
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(2);
+    let it = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    // Its Corner Pin (above its Motion in the panel): its top right corner dragged up and right.
+    scroll_side_panel_to(&mut h, "Pin its corners");
+    h.get_by_label("Pin its corners").click();
+    h.run_steps(2);
+    assert!(it(&h).look.pinned);
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let r = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    crate::tests::drag(&mut h, r.right_top(), r.right_top() + egui::vec2(40.0, -30.0));
+    let pin = it(&h).look.pin;
+    assert!(pin[1][0] > 0.02 && pin[1][1] < -0.02 && pin[0] == [0.0, 0.0], "{pin:?}");
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Pin Corner"));
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    assert_ne!(before.pixels(), after.pixels(), "drawn in perspective");
+    shot(&mut h, "video-corner-pin");
+    // Its Motion: along a curved path, drawn on the picture.
+    scroll_side_panel_to(&mut h, "Along a curved path");
+    h.get_by_label("Along a curved path").click();
+    h.run_steps(2);
+    assert!(it(&h).path);
+    shot(&mut h, "video-motion-path");
+}
+
+/// A made-up voice at 48 kHz: bursts of tones at uneven times, quiet between.
+fn voice(secs: usize) -> Vec<i16> {
+    let mut seed = 99u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let mut out = vec![0i16; secs * 48_000];
+    let mut at = 0usize;
+    while at < out.len() {
+        let (len, hz) = (4_000 + (next() * 14_000.0) as usize, 150.0 + next() * 300.0);
+        for k in 0..len {
+            if let Some(v) = out.get_mut(at + k) {
+                *v = ((std::f32::consts::TAU * hz * k as f32 / 48_000.0).sin() * 9_000.0) as i16;
+            }
+        }
+        at += len + 2_000 + (next() * 18_000.0) as usize;
+    }
+    out
+}
+
+#[test]
+fn a_sound_brought_in_is_lined_up_with_the_microphone_by_ear() {
+    use crate::services::DialogResult;
+    // A recording whose microphone heard the voice; another recorder that started 1.5 s later.
+    let said = voice(8);
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 160, height: 90, channels: 0 },
+        StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    for t in 0..60u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(160, 90, Color::WHITE).unwrap()).unwrap();
+        w.audio(2, t * 4800, &said[t as usize * 4800..(t as usize + 1) * 4800]).unwrap();
+    }
+    let bytes = w.finish(6_000_000).unwrap();
+    let host = MediaHost::default();
+    *host.sound.lock().unwrap() = Some(said[72_000..72_000 + 4 * 48_000].iter().flat_map(|v| [*v / 2, *v / 2]).collect());
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Talk.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Talk.sgvideo".into(), path, bytes });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Recorder/Desk.wav".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Desk.wav").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.expect("the sound chosen");
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at, 0);
+    // Its panel: Line Up by Sound With, the microphone.
+    h.get_by_label("Line Up by Sound With").click();
+    h.run_steps(2);
+    shot(&mut h, "video-line-up-menu");
+    h.get_all_by_label("Microphone").last().unwrap().click();
+    h.run_steps(3);
+    let at = h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at;
+    assert!(at.abs_diff(1_500_000) <= 250, "moved to where the voice is heard: {at}");
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("1.50 s later")), "{:?}", h.state().toast_text());
+    shot(&mut h, "video-lined-up");
 }
 
 #[test]
@@ -1075,6 +1885,79 @@ fn recording_with_pointer() -> Vec<u8> {
 }
 
 #[test]
+fn the_pointer_takes_another_look_and_its_path_is_dragged_on_the_picture() {
+    use screengrabcraft_media::pointer::Kind;
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xE0, 0x20, 0x20]);
+    assert!(red(&mut h, 1_000_000) > 0);
+    // The Pointer panel: a hand in its place.
+    scroll_side_panel_to(&mut h, "Show the mouse pointer");
+    h.get_by_value("As recorded").click();
+    h.run_steps(2);
+    h.get_by_label("Hand").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.pointer.kind, Kind::Hand);
+    assert_eq!(red(&mut h, 1_000_000), 0, "the recorded square isn't drawn");
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.run_steps(3);
+    shot(&mut h, "video-pointer-look");
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.pointer", &serde_json::json!({"kind": "recorded", "smooth": 0})).unwrap();
+        v.range = Some((500_000, 1_500_000));
+        v.playhead = 0;
+    }
+    h.run_steps(2);
+    // Its path in the chosen stretch: a point every half second, the playhead put in it.
+    scroll_side_panel_to(&mut h, "Edit Its Path in the Chosen Stretch");
+    h.get_by_label("Edit Its Path in the Chosen Stretch").click();
+    h.run_steps(3);
+    let paths = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.pointer_paths.clone();
+    assert_eq!(paths(&h).len(), 1);
+    assert_eq!(paths(&h)[0].points.len(), 3);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 1_000_000);
+    assert!(h.query_by_label("Redrawn from 0:00.5 to 0:01.5").is_some());
+    // Its middle point (where it was at 1 s: 80, 60 of the screen) dragged down on the picture.
+    let pic = h.state().video.as_ref().unwrap().picture_rect.unwrap();
+    let vw = h.state_mut().video.as_mut().unwrap().frame_at(0).width() as f32;
+    let f = pic.width() / vw;
+    let at = pic.min + egui::vec2(80.0 * f, 60.0 * f);
+    crate::tests::drag(&mut h, at, at + egui::vec2(0.0, 50.0));
+    let q = paths(&h)[0].points[1];
+    assert!((q.y - (60.0 + 50.0 / f)).abs() < 3.0 && (q.x - 80.0).abs() < 3.0, "{q:?}");
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Move the Pointer"));
+    // The pointer is drawn there at 1 s; outside the stretch, as recorded.
+    let top_of_red = |h: &mut Harness<'_, Editor>, t: u64| {
+        let pic = h.state_mut().video.as_mut().unwrap().frame_at(t);
+        let w = pic.width() as usize;
+        let y = pic.pixels().chunks(4).position(|p| p[0].abs_diff(0xE0) < 30 && p[1] < 60 && p[2] < 60).map(|i| i / w);
+        y.map(|y| y as f32 * 180.0 / pic.height() as f32)
+    };
+    let y = top_of_red(&mut h, 1_000_000).unwrap();
+    assert!((y - q.y).abs() < 4.0, "{y} {}", q.y);
+    assert!((top_of_red(&mut h, 2_000_000).unwrap() - 60.0).abs() < 4.0);
+    shot(&mut h, "video-pointer-path");
+    // Straightened, then put back as recorded, from the panel.
+    scroll_side_panel_to(&mut h, "Straighten");
+    h.get_by_label("Straighten").click();
+    h.run_steps(2);
+    assert_eq!(paths(&h)[0].points.len(), 2);
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(paths(&h).is_empty());
+}
+
+#[test]
 fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_panel() {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
     ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
@@ -1112,6 +1995,226 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
     // A recording without a pointer has no such panel.
     let h = harness();
     assert!(h.query_by_label("Show the mouse pointer").is_none());
+}
+
+/// A white screen and a camera of a green screen with a red box (the person) in it, for 2 s.
+fn recording_green_screen() -> Vec<u8> {
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 },
+        StreamInfo { id: 3, kind: StreamKind::Camera, name: "Camera".into(), width: 80, height: 60, channels: 0 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    let mut cam = image::RgbImage::from_pixel(80, 60, image::Rgb([0x00, 0xB1, 0x40]));
+    for y in 10..60 {
+        for x in 30..50 {
+            cam.put_pixel(x, y, image::Rgb([0xE0, 0x20, 0x20]));
+        }
+    }
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95).encode_image(&cam).unwrap();
+    for t in 0..20u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::WHITE).unwrap()).unwrap();
+        w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+    }
+    w.finish(2_000_000).unwrap()
+}
+
+/// A made-up background model: the red is the person.
+struct RedIsThePerson;
+
+impl screengrabcraft_render::matte::Matting for RedIsThePerson {
+    fn name(&self) -> &str {
+        "test"
+    }
+    fn matte(
+        &self,
+        picture: &Raster,
+        progress: &mut dyn FnMut(f32) -> bool,
+    ) -> Result<screengrabcraft_render::matte::Matte, screengrabcraft_render::matte::MatteError> {
+        progress(0.5);
+        let alpha = picture.pixels().chunks(4).map(|p| if p[0] > 150 && p[1] < 100 { 255 } else { 0 }).collect();
+        Ok(screengrabcraft_render::matte::Matte::new(picture.width(), picture.height(), alpha).unwrap())
+    }
+}
+
+/// A host with the made-up model, keeping what's added to the recording file.
+#[derive(Clone, Default)]
+struct ModelHost(std::sync::Arc<std::sync::Mutex<Vec<(String, usize)>>>);
+
+impl crate::services::Services for ModelHost {
+    fn background_model(&self) -> Result<std::sync::Arc<dyn screengrabcraft_render::matte::Matting>, String> {
+        Ok(std::sync::Arc::new(RedIsThePerson))
+    }
+    fn append_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().push((path.to_string(), bytes.len()));
+        Ok(())
+    }
+}
+
+#[test]
+fn the_cameras_green_screen_or_its_background_is_taken_away_from_its_panel() {
+    let host = ModelHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Green.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Green.sgvideo".into(), path, bytes: recording_green_screen() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 900.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let green = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(500_000), [0x00, 0xB1, 0x40]);
+    let red = |h: &mut Harness<'_, Editor>| count(&h.state_mut().video.as_mut().unwrap().frame_at(500_000), [0xE0, 0x20, 0x20]);
+    let (green_before, red_before) = (green(&mut h), red(&mut h));
+    assert!(green_before > 400 && red_before > 100, "{green_before} {red_before}");
+    shot(&mut h, "video-camera-panel");
+    // Remove a colour: the green screen goes, the person stays.
+    h.get_by_value("Keep it").click();
+    h.run_steps(3);
+    h.get_by_label("Remove a colour (green screen)").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.camera.remove, screengrabcraft_media::keyer::Remove::Colour);
+    assert!(green(&mut h) < 20, "{}", green(&mut h));
+    assert!(red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Tolerance").is_some());
+    shot(&mut h, "video-camera-green-screen");
+    // Behind you: your room blurred instead of the screen.
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    // Below the camera's border and mirror: scrolled to, as it would be by hand.
+    h.get_by_value("The screen").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_value("The screen").click();
+    h.run_steps(2);
+    h.get_by_label("Your room, blurred").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.camera.behind, screengrabcraft_media::timeline::Behind::Blur);
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    assert!(before.pixels() != after.pixels() && red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Pictures brought into the Media bin can go behind you too.").is_some());
+    shot(&mut h, "video-camera-blurred-room");
+    h.state_mut().video.as_mut().unwrap().session.execute("video.cameraKey", &serde_json::json!({"behind": "screen"})).unwrap();
+    h.run_steps(2);
+    // Remove the background instead: it's learnt on a thread, then kept in the file.
+    h.get_by_value("Remove a colour (green screen)").click();
+    h.run_steps(3);
+    h.get_by_label("Remove it (no green screen)").click();
+    for _ in 0..40 {
+        h.run_steps(1);
+        if h.state().video.as_ref().unwrap().rec.plate().is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().rec.plate().is_some(), "the background was learnt");
+    assert_eq!(host.0.lock().unwrap().last().map(|(p, _)| p.as_str()), Some("C:/Captures/Green.sgvideo"));
+    assert!(green(&mut h) < 60, "{}", green(&mut h));
+    assert!(red(&mut h) > red_before / 2);
+    assert!(h.query_by_label("Learn It Again").is_some());
+    shot(&mut h, "video-camera-background");
+    // Undone: kept as it was.
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    assert!(green(&mut h) > 400);
+}
+
+/// A grey screen for 4 s, with Ctrl+S pressed at 1 s and Enter at 3 s.
+fn recording_with_keys() -> Vec<u8> {
+    let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 }];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    for t in 0..40u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::rgb(0x80, 0x80, 0x80)).unwrap()).unwrap();
+    }
+    for (t, keys) in [(1_000_000, "Ctrl+S"), (3_000_000, "Enter")] {
+        w.key_press(&screengrabcraft_media::keys::Press { t, keys: keys.to_string() }).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+#[test]
+fn the_shortcuts_pressed_while_recording_are_shown_as_keys_from_their_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Keys.sgvideo".into(), path: None, bytes: recording_with_keys() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let grey = |h: &mut Harness<'_, Editor>, at: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(at), [0x80, 0x80, 0x80]);
+    let whole = 320 * 180;
+    assert_eq!(grey(&mut h, 1_200_000), whole, "not shown until asked for");
+    h.get_by_label("Show the keys pressed").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.keys.show);
+    // Just after Ctrl+S the keys are on the picture; a second and a half later they've gone.
+    assert!(grey(&mut h, 1_200_000) < whole - 300);
+    assert_eq!(grey(&mut h, 2_700_000), whole);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_200_000;
+    }
+    h.run_steps(2);
+    shot(&mut h, "video-keys");
+    // Moved to the top: the bottom half is grey again.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.keys", &serde_json::json!({"place": "top"})).unwrap();
+    }
+    let pic = h.state_mut().video.as_mut().unwrap().frame_at(1_200_000);
+    let bottom = pic.pixels().chunks(4).skip(320 * 90).filter(|p| p[0] != 0x80).count();
+    assert_eq!(bottom, 0);
+    // A recording that kept none says so.
+    let h = harness();
+    assert!(h.query_by_label("Show the keys pressed").is_none());
+    assert!(h.query_by_label_contains("No shortcuts were kept").is_some());
+}
+
+#[test]
+fn the_pointer_is_spotlit_magnified_highlighted_and_its_clicks_heard_from_its_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // At 1 s the pointer is at (80, 60) on the white screen.
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    let frame = |h: &mut Harness<'_, Editor>| h.state_mut().video.as_mut().unwrap().frame_at(1_000_000);
+    let white = frame(&mut h);
+    assert_eq!(white.pixel(300, 170).unwrap(), Color::WHITE);
+    for label in ["Spotlight", "Magnifier", "Highlight", "Click sounds"] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+    }
+    let look = h.state().video.as_ref().unwrap().session.timeline.pointer;
+    assert!(look.spotlight && look.magnify && look.highlight && look.click_sound);
+    let lit = frame(&mut h);
+    assert!(lit.pixel(300, 170).unwrap().r < 150, "dimmed far from the pointer");
+    let near = lit.pixel(70, 60).unwrap();
+    assert!(near.b < near.r, "yellow under it: {near:?}");
+    shot(&mut h, "video-pointer-effects");
+    // The click at 2 s is heard.
+    let v = h.state().video.as_ref().unwrap();
+    let click = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 96_000, 1440);
+    assert!(click.iter().any(|s| s.abs() > 0.1));
+    // Four undo steps: as it was.
+    for _ in 0..4 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(1);
+    }
+    assert_eq!(frame(&mut h).pixel(300, 170).unwrap(), Color::WHITE);
 }
 
 // ---- the broadcast graphics ----
@@ -1505,6 +2608,261 @@ fn a_chosen_clip_is_named_in_the_panel_with_what_is_done_to_it() {
     h.get_by_label("Let Go").click();
     h.run_steps(3);
     assert!(h.state().video.as_ref().unwrap().range.is_none());
+}
+
+#[test]
+fn a_chosen_stretch_is_sped_up_from_the_panel_and_a_clip_slowed_down_from_the_menu() {
+    let mut h = harness();
+    // 1 s to 3 s chosen, made twice as fast: the video is a second shorter, the stretch stays
+    // chosen as long as it now is, every track in step.
+    h.state_mut().video.as_mut().unwrap().range = Some((1_000_000, 3_000_000));
+    h.run_steps(3);
+    h.get_by_label("2×").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(length(&h), 3_000_000);
+    assert_eq!(v.range, Some((1_000_000, 2_000_000)));
+    for track in 0..3 {
+        assert_eq!(v.session.timeline.source_time(track, 1_500_000), Some(2_000_000), "track {track}");
+    }
+    assert_eq!(v.session.undo_label(), Some("Speed"));
+    // The picture follows: at 1.5 s the box is where it was at 2 s of the recording (x = 120).
+    let mut c = screengrabcraft_media::compose::Composer::new(v.rec.clone(), &v.session.timeline, 320, 180);
+    let pic = c.frame(&v.session.timeline, 1_500_000);
+    assert!(pic.pixel(165, 60).is_some_and(|p| p.b > 150 && p.r < 120), "{:?}", pic.pixel(165, 60));
+    // And the sound: it's heard, faster, not silent.
+    let sound = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 60_000, 9600);
+    assert!(sound.iter().any(|s| s.abs() > 0.1));
+    let fast = v.session.timeline.tracks[0].clips.iter().position(|c| c.speed == 200).unwrap();
+    shot(&mut h, "video-speed-stretch");
+    // Its clip on the screen track, chosen with the right button (at 1.5 s, the timeline still
+    // fitted to 4 s): the panel says how fast it plays.
+    h.state_mut().video.as_mut().unwrap().range = None;
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.375, top + 20.0));
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, fast)));
+    assert!(h.query_by_label_contains("playing at 2×").is_some());
+    // Speed of the Clip > 0.5×: that second takes four now.
+    h.get_by_label_contains("Speed of the Clip").hover();
+    h.run_steps(2);
+    h.get_by_label("Play at 0.5×").click();
+    h.run_steps(3);
+    assert_eq!(length(&h), 6_000_000);
+    shot(&mut h, "video-speed-clip");
+    // Undone twice: as recorded.
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    assert_eq!(length(&h), 4_000_000);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks.iter().flat_map(|t| &t.clips).all(|c| c.speed == 100));
+}
+
+#[test]
+fn a_sound_clip_fades_and_its_tracks_steady_hum_is_taken_out() {
+    let mut h = harness();
+    // The screen's clip has no sound to fade; the microphone's has, and its track's noise.
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(3);
+    assert!(h.query_by_label("Fade in").is_none());
+    h.state_mut().video.as_mut().unwrap().selected = Some((1, 0));
+    h.run_steps(3);
+    for label in ["Fade in", "Fade out", "Background noise taken out"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    // A second's fade in and half a second's fade out (as the sliders set them): silent at the
+    // start, drawn on the clip.
+    let v = h.state_mut().video.as_mut().unwrap();
+    v.session.execute("video.fade", &serde_json::json!({"track": 1, "clip": 0, "in": 1_000_000, "out": 500_000})).unwrap();
+    let start = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 0, 480);
+    assert!(start.iter().all(|s| s.abs() < 0.01));
+    h.run_steps(3);
+    shot(&mut h, "video-sound-fades");
+    // The microphone's row, right button: Take Out Background Noise. Its hum never changes, so
+    // it's learnt as the noise and goes.
+    let loud = |h: &Harness<'_, Editor>| {
+        let v = h.state().video.as_ref().unwrap();
+        let s = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 96_000, 9600);
+        (s.iter().map(|x| x * x).sum::<f32>() / s.len() as f32).sqrt()
+    };
+    let before = loud(&h);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 48.0 + 20.0));
+    h.get_by_label("Take Out Background Noise").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].denoise, 0.6);
+    let after = loud(&h);
+    assert!(before > 0.05 && after < before / 2.0, "{before} then {after}");
+}
+
+#[test]
+fn a_caption_is_put_right_split_joined_and_moved_from_the_transcript() {
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let mut h = caption_harness_stepping(bytes, CaptionHost::default(), 0.02);
+    h.state_mut().video.as_mut().unwrap().transcript_open = true;
+    h.run_steps(3);
+    let corrected = |h: &Harness<'_, Editor>| {
+        h.state()
+            .video
+            .as_ref()
+            .unwrap()
+            .session
+            .timeline
+            .corrected
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|c| (c.text, c.end))
+            .collect::<Vec<_>>()
+    };
+    // Your line, double-clicked: its words in a box, chosen, typed over, kept with Enter.
+    let at = h.get_by_label_contains("Here's the new login page.").rect().center();
+    h.hover_at(at);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().caption_edit.is_some(), "the double click puts its words in the box");
+    h.event(egui::Event::Text("Here's the new sign-in page, with its button on the right.".into()));
+    h.run_steps(1);
+    shot(&mut h, "video-caption-editing");
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.caption_edit.is_none());
+        assert_eq!(v.session.undo_label(), Some("Edit Caption"));
+        assert!(v.cues.iter().any(|c| c.text.starts_with("Here's the new sign-in page")), "on the picture and in the video too");
+    }
+    // Its right button: Split in Two, then joined back.
+    let at = h.get_by_label_contains("sign-in page").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Split in Two").click();
+    h.run_steps(3);
+    assert_eq!(
+        corrected(&h).iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>()[..2],
+        ["Here's the new sign-in page,", "with its button on the right."]
+    );
+    let at = h.get_by_label_contains("sign-in page,").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Join with the Next Line").click();
+    h.run_steps(3);
+    assert_eq!(corrected(&h)[0].0, "Here's the new sign-in page, with its button on the right.");
+    // The others' line ends at the playhead (3 s).
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.run_steps(2);
+    let at = h.get_by_label_contains("It looks good to me.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("End at the Playhead").click();
+    h.run_steps(3);
+    assert!(corrected(&h).contains(&("It looks good to me.".to_string(), 3_000_000)));
+    shot(&mut h, "video-caption-moved");
+    // All as heard again, from the same menu.
+    let at = h.get_by_label_contains("It looks good to me.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("All Captions as Heard").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.corrected.is_none());
+    assert!(h.query_by_label_contains("Here's the new login page.").is_some());
+}
+
+#[test]
+fn words_are_cut_from_the_transcript_and_filler_words_taken_out() {
+    use screengrabcraft_media::captions::{Captions, Cue, Speaker};
+    let mut bytes = meeting();
+    let said = Captions {
+        cues: vec![
+            Cue { start: 200_000, end: 1_800_000, speaker: Speaker::You, text: "So, um, here's the old login page.".into() },
+            Cue { start: 2_000_000, end: 3_600_000, speaker: Speaker::Others, text: "Uh, it looks good to me.".into() },
+        ],
+        model: "test".into(),
+    };
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&said).unwrap());
+    let mut h = caption_harness_stepping(bytes, CaptionHost::default(), 0.02);
+    h.state_mut().video.as_mut().unwrap().transcript_open = true;
+    h.run_steps(3);
+    let texts = |h: &Harness<'_, Editor>| {
+        h.state().video.as_ref().unwrap().session.timeline.corrected.clone().unwrap_or_default().into_iter().map(|c| c.text).collect::<Vec<_>>()
+    };
+    // Your line's right button: its words to choose; "old" chosen, cut with Delete.
+    let at = h.get_by_label_contains("here's the old login page.").rect().center();
+    right_click(&mut h, at);
+    h.get_by_label("Cut Words from the Video…").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().word_cut.is_some());
+    h.get_by_label("old").click();
+    h.run_steps(2);
+    shot(&mut h, "video-cut-words");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.word_cut.is_none());
+        assert_eq!(v.session.undo_label(), Some("Cut Words"));
+        assert!(v.session.timeline.length() < 4_000_000, "the time it was said is out of every track");
+        assert_eq!(v.session.timeline.tracks[0].clips.len(), 2, "the screen too");
+    }
+    assert_eq!(texts(&h), ["So, um, here's the", "login page.", "Uh, it looks good to me."]);
+    let before = length(&h);
+    // Take Out Filler Words: your "um," and their "Uh,".
+    h.get_by_label("Take Out Filler Words").click();
+    h.run_steps(3);
+    assert_eq!(texts(&h), ["So,", "here's the", "login page.", "it looks good to me."]);
+    assert!(length(&h) < before);
+    assert_eq!(h.state().toast_text(), Some("2 filler words cut out of the video (0.4 s)"));
+    shot(&mut h, "video-fillers-cut");
+    // None left: said so; undone, both come back.
+    h.get_by_label("Take Out Filler Words").click();
+    h.run_steps(3);
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("no filler words")));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.corrected.is_none());
+    assert_eq!(length(&h), 4_000_000);
+}
+
+#[test]
+fn markers_are_added_with_m_named_in_the_panel_and_deleted() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.run_steps(2);
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.run_steps(2);
+    h.get_by_label_contains("Add a Marker at the Playhead").click();
+    h.run_steps(3);
+    let markers = |h: &Harness<'_, Editor>| {
+        h.state().video.as_ref().unwrap().session.timeline.markers.iter().map(|m| (m.at, m.name.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(markers(&h), vec![(1_000_000, "Chapter 1".to_string()), (3_000_000, "Chapter 2".to_string())]);
+    // The same moment again: said, not added.
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    assert_eq!(markers(&h).len(), 2);
+    // Named in the panel: typed, kept when the box is left.
+    let name = h.query_all_by_value("Chapter 1").next().unwrap().rect().center();
+    h.drag_at(name);
+    h.drop_at(name);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("The login page".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(markers(&h)[0].1, "The login page");
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.chapters()[1], (1_000_000, "The login page".to_string()));
+    shot(&mut h, "video-markers");
+    // Its time goes there; its button deletes it.
+    h.get_by_label("0:03.0").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 3_000_000);
+    h.get_by_label("Delete the Marker Chapter 2").click();
+    h.run_steps(3);
+    assert_eq!(markers(&h).len(), 1);
 }
 
 #[test]
@@ -2090,4 +3448,1052 @@ fn a_zoom_from_the_library_is_placed_on_the_whole_screen_and_zooms_once_let_go()
     }
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().zooms_shown());
+}
+
+#[test]
+fn a_transition_from_the_library_goes_where_two_clips_meet_and_its_panel_changes_it() {
+    use screengrabcraft_media::timeline::Blend;
+    let mut h = harness();
+    // 1.5 s to 2.5 s taken out: every track's two clips meet at 1.5 s.
+    h.state_mut().video.as_mut().unwrap().session.execute("video.cut", &serde_json::json!({"from": 1_500_000, "to": 2_500_000})).unwrap();
+    h.run_steps(2);
+    h.get_by_label("Between Clips").click();
+    h.run_steps(3);
+    for kind in Blend::ALL {
+        assert!(h.query_all_by_label(kind.label()).next().is_some(), "{kind:?}");
+    }
+    // + puts it at the cut nearest the playhead.
+    h.get_by_label("Add Cross-fade").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert_eq!(v.selected, Some((0, 1)), "the clip it leads into is chosen");
+        assert_eq!(v.session.timeline.tracks[0].clips[1].transition.map(|x| (x.kind, x.len)), Some((Blend::CrossFade, 1_000_000)));
+    }
+    // Its panel makes it longer.
+    scroll_side_panel_to(&mut h, "2 s");
+    h.get_by_label("2 s").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[1].transition.map(|x| x.len), Some(2_000_000));
+    // At the cut the picture is the two together: the box recorded at 1.5 s half there.
+    let pic = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let p = pic.pixel(100, 60).unwrap();
+    assert!(p.r > 0x4E + 30 && p.r < 0xFF - 30, "half the box, half the white: {p:?}");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-clip-transition");
+    // (The library's cards closed, so the menu's names are the only ones.)
+    h.get_by_label("Between Clips").click();
+    h.run_steps(2);
+    // The right button on the clip: another kind.
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    right_click(&mut h, egui::pos2(lane.min.x + 2.2 * pps - scroll, rows_top + 20.0));
+    h.get_by_label_contains("Transition from the Clip Before").hover();
+    h.run_steps(2);
+    h.get_by_label("Push").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[1].transition.map(|x| x.kind), Some(Blend::Push));
+    // Dropped on the microphone's row, it's a cross-fade of its sound.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        v.drop_blend(ed, &ctx, Blend::WipeUp, Some(mic), 1_400_000);
+        assert_eq!(v.session.timeline.tracks[mic].clips[1].transition.map(|x| x.kind), Some(Blend::CrossFade));
+        ed.video = Some(v);
+    }
+}
+
+#[test]
+fn every_transition_card_is_a_picture_of_its_own() {
+    use screengrabcraft_media::timeline::Blend;
+    let cards: Vec<Raster> = Blend::ALL.iter().map(|k| crate::video::VideoView::blend_card_picture(*k).unwrap()).collect();
+    for (i, a) in cards.iter().enumerate() {
+        for b in cards.iter().skip(i + 1) {
+            assert_ne!(a.pixels(), b.pixels());
+        }
+    }
+}
+
+#[test]
+fn keyframes_added_from_the_panel_move_a_title_across_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 0;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    let keys = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().keys.clone();
+    scroll_side_panel(&mut h, 12);
+    h.get_by_label("Add Keyframe at the Playhead").click();
+    h.run_steps(2);
+    assert_eq!(keys(&h).len(), 1);
+    // Later, dragged on the picture: a second keyframe there, the first kept.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 3_000_000;
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    crate::tests::drag(&mut h, on.center(), on.center() + egui::vec2(pic.width() * 0.3, 0.0));
+    let k = keys(&h);
+    assert_eq!(k.len(), 2, "{k:?}");
+    assert_eq!(k[1].at, 3_000_000);
+    assert!(k[1].place.x > k[0].place.x + 0.2, "{k:?}");
+    // Halfway, it's halfway across.
+    let it = h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    let mid = it.place_at(1_500_000).x;
+    assert!((mid - (k[0].place.x + k[1].place.x) / 2.0).abs() < 0.01);
+    assert_eq!(h.query_all_by_label("Go To").count(), 2);
+    shot(&mut h, "video-keyframes");
+    // One taken away from the panel.
+    scroll_side_panel(&mut h, 12);
+    h.get_all_by_label("Remove").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(keys(&h).len(), 1);
+}
+
+/// Scrolls the panel at the right down by `lines` turns of the wheel.
+fn scroll_side_panel(h: &mut Harness<'_, Editor>, lines: usize) {
+    let r = h.ctx.content_rect();
+    h.hover_at(egui::pos2(r.max.x - 120.0, r.min.y + 300.0));
+    h.run_steps(1);
+    for _ in 0..lines {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(1);
+    }
+    h.run_steps(10);
+}
+
+#[test]
+fn a_volume_line_is_drawn_on_the_microphones_wave_and_levels_are_evened_out() {
+    let mut h = harness_stepping(0.05);
+    let mic = h.state().video.as_ref().unwrap().session.timeline.find(StreamKind::Microphone).unwrap();
+    // The microphone's clip chosen, its wave double-clicked low down at 1 s: a quiet point there.
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.selected = Some((mic, 0));
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    h.run_steps(2);
+    let row_top = rows_top + mic as f32 * 48.0;
+    let at = egui::pos2(lane.min.x + 1.0 * pps - scroll, row_top + 34.0);
+    h.hover_at(at);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    let points = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks[mic].points.clone();
+    let p = points(&h);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].level < 0.6 && p[0].at.abs_diff(1_000_000) < 50_000, "{p:?}");
+    // Dragged up: louder.
+    crate::tests::drag(&mut h, at, at - egui::vec2(0.0, 18.0));
+    let p = points(&h);
+    assert!(p.len() == 1 && p[0].level > 1.0, "{p:?}");
+    // A second point, from the track's right button.
+    right_click(&mut h, egui::pos2(lane.min.x + 3.0 * pps - scroll, row_top + 20.0));
+    h.get_by_label("Add a Volume Point Here").click();
+    h.run_steps(2);
+    assert_eq!(points(&h).len(), 2);
+    shot(&mut h, "video-volume-line");
+    // Every level evened out from the panel: the humming microphone is turned down to the level.
+    scroll_side_panel_to(&mut h, "Even Out the Levels");
+    shot(&mut h, "video-sound-mix");
+    h.get_by_label("Even Out the Levels").click();
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap().session.timeline.tracks[mic].volume;
+    assert!(v < 0.8 && v > 0.3, "{v}");
+    // Nothing else to lower under the voice here.
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Lower the rest under the voice")).is_disabled());
+}
+
+/// Scrolls the panel at the right down, a turn of the wheel at a time, until `label` is in view.
+fn scroll_side_panel_to(h: &mut Harness<'_, Editor>, label: &str) {
+    for _ in 0..30 {
+        let y = h.get_by_label(label).rect().center().y;
+        if (130.0..480.0).contains(&y) {
+            return;
+        }
+        scroll_side_panel(h, 1);
+    }
+}
+
+#[test]
+fn clips_are_grouped_coloured_and_tracks_locked_or_played_alone() {
+    let mut h = harness();
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.split", &serde_json::json!({"at": 2_000_000})).unwrap();
+        v.session.execute("video.lift", &serde_json::json!({"from": 2_000_000, "to": 2_500_000})).unwrap();
+    }
+    h.run_steps(2);
+    let mic = h.state().video.as_ref().unwrap().session.timeline.find(StreamKind::Microphone).unwrap();
+    let tl = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.clone();
+    // The microphone locked from its header: its clip can't be dragged.
+    h.get_all_by_label("Lock it: its clips stay as they are").nth(mic).unwrap().click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].locked);
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    let x = |s: f32| lane.min.x + s * pps - scroll;
+    let row_y = |t: usize| rows_top + t as f32 * 48.0 + 20.0;
+    crate::tests::drag(&mut h, egui::pos2(x(3.0), row_y(mic)), egui::pos2(x(2.6), row_y(mic)));
+    assert_eq!(tl(&h).tracks[mic].clips[1].at, 2_500_000, "a locked track's clip stays");
+    h.get_by_label("Locked: its clips stay as they are. Click to unlock it.").click();
+    h.run_steps(2);
+    // The screen's second clip grouped with those under it, then dragged: they all go.
+    right_click(&mut h, egui::pos2(x(3.0), row_y(0)));
+    h.get_by_label("Group with the Clips Above and Below").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks.iter().all(|t| t.clips[1].group == Some(1)));
+    crate::tests::drag(&mut h, egui::pos2(x(3.0), row_y(0)), egui::pos2(x(2.7), row_y(0)));
+    let moved: Vec<u64> = tl(&h).tracks.iter().map(|t| t.clips[1].at).collect();
+    assert!(moved.iter().all(|a| *a == moved[0] && *a < 2_400_000 && *a >= 2_000_000), "{moved:?}");
+    // A colour from the right button.
+    right_click(&mut h, egui::pos2(x(1.0), row_y(0)));
+    h.get_by_label_contains("Clip Colour").hover();
+    h.run_steps(2);
+    h.get_by_label("Teal").click();
+    h.run_steps(2);
+    assert_eq!(tl(&h).tracks[0].clips[0].colour, Some(4));
+    // The microphone played alone.
+    h.get_by_label("Play it alone: the other sound isn't heard").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].solo);
+    shot(&mut h, "video-groups-and-locks");
+}
+
+#[test]
+fn j_k_and_l_play_backwards_pause_and_faster_and_a_clip_plays_backwards() {
+    let mut h = harness();
+    let rate = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().rate_label();
+    // L plays on as recorded; again, twice as fast.
+    h.key_press(egui::Key::L);
+    h.run_steps(1);
+    assert!(h.state().video.as_ref().unwrap().is_playing() && rate(&h).is_none());
+    h.key_press(egui::Key::L);
+    h.run_steps(1);
+    assert_eq!(rate(&h).as_deref(), Some("2×"));
+    // K stops; J plays backwards, then faster backwards.
+    h.key_press(egui::Key::K);
+    h.run_steps(1);
+    assert!(!h.state().video.as_ref().unwrap().is_playing());
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(rate(&h).as_deref(), Some("Backwards 2×"));
+    shot(&mut h, "video-playing-backwards");
+    h.run_steps(1);
+    let at = h.state().video.as_ref().unwrap().playhead;
+    assert!(at < 3_000_000 && at > 1_000_000, "{at}");
+    // It stops at the start.
+    h.run_steps(8);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(!v.is_playing() && v.playhead == 0);
+    // The screen's clip played backwards from its right button, and forwards again.
+    let (lane, rows_top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 60.0, rows_top + 20.0));
+    h.get_by_label("Play Backwards").click();
+    h.run_steps(2);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.session.timeline.tracks[0].clips[0].reverse);
+        assert_eq!(v.session.undo_label(), Some("Play Backwards"));
+        assert_eq!(v.session.timeline.source_time(0, 0), Some(3_999_999), "it starts with the recording's last moment");
+    }
+    h.state_mut().video.as_mut().unwrap().selected = Some((0, 0));
+    h.run_steps(2);
+    shot(&mut h, "video-clip-backwards");
+    scroll_side_panel_to(&mut h, "Play backwards");
+    h.get_by_label("Play backwards").click();
+    h.run_steps(2);
+    assert!(!h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].reverse);
+}
+
+#[test]
+fn subtitles_are_brought_in_as_captions_and_a_watermark_goes_on_every_frame() {
+    use crate::services::{DialogResult, OpenedFile};
+    let host = CaptionHost::default();
+    let mut h = caption_harness(meeting(), host.clone());
+    // File › Import Subtitles… asks the host; the file it gives is read as the captions.
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    h.get_by_label("Import Subtitles…").click();
+    h.run_steps(2);
+    let vtt = "WEBVTT\n\n00:00.500 --> 00:01.800\n<v You>Here's the <b>new</b> page.\n\n00:02.000 --> 00:03.000\nOthers: Looks good.\n\n00:09.000 --> 00:10.000\nAfter the end\n";
+    *host.answer.lock().unwrap() =
+        Some(DialogResult::Subtitles(vec![OpenedFile { name: "Talk.vtt".into(), path: None, bytes: vtt.as_bytes().to_vec() }]));
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.transcript_open, "the transcript shows what came in");
+        assert_eq!(v.cues.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Here's the new page.", "Looks good."]);
+        assert_eq!(v.session.undo_label(), Some("Import Subtitles"));
+    }
+    assert_eq!(h.state().toast_text(), Some("2 caption lines brought in from Talk.vtt; 1 fell where nothing is heard and were left out"));
+    shot(&mut h, "video-subtitles-imported");
+    // Junk is said, never panicked over; UTF-16 is read.
+    *host.answer.lock().unwrap() = Some(DialogResult::Subtitles(vec![OpenedFile { name: "Junk.srt".into(), path: None, bytes: vec![0xFF; 300] }]));
+    h.run_steps(3);
+    assert!(h.state().toast_text().is_some_and(|t| t.starts_with("Junk.srt: ")));
+    let utf16: Vec<u8> =
+        [0xFF, 0xFE].into_iter().chain("1\n00:00:01,000 --> 00:00:02,000\nÉté\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    assert_eq!(crate::video::transcript::subtitle_text(&utf16), "1\n00:00:01,000 --> 00:00:02,000\nÉté\n");
+    // Export Video's window: a watermark, its words typed, in the top left.
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    h.get_by_label("Words or a picture on every frame").click();
+    // (The window grows and settles where it is.)
+    h.run_steps(6);
+    h.get_by_label("Top left").hover();
+    h.run_steps(1);
+    h.get_by_label("Top left").click();
+    h.run_steps(2);
+    h.get_by_role_and_label(egui::accesskit::Role::TextInput, "The words").click();
+    h.run_steps(1);
+    h.event(egui::Event::Text("Draft".into()));
+    h.run_steps(2);
+    shot(&mut h, "video-export-watermark");
+    h.key_press(egui::Key::Tab);
+    h.run_steps(2);
+    let w = h.state().video.as_ref().unwrap().session.timeline.watermark.clone();
+    assert!(w.on && w.words == "Draft" && w.corner == screengrabcraft_media::timeline::Corner::TopLeft, "{w:?}");
+    // On the picture: the top left changed, the rest as it was.
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    let differ = |x0: u32, y0: u32| {
+        (x0..x0 + 80).flat_map(|x| (y0..y0 + 30).map(move |y| (x, y))).filter(|(x, y)| before.pixel(*x, *y) != after.pixel(*x, *y)).count()
+    };
+    assert!(differ(0, 0) > 40 && differ(200, 140) == 0, "{} {}", differ(0, 0), differ(200, 140));
+}
+
+#[test]
+fn a_picture_item_is_framed_and_a_clip_coloured_from_their_panels() {
+    let mut h = harness();
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let pic = v
+            .session
+            .execute("video.addMedia", &serde_json::json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20}))
+            .unwrap();
+        let placed = v.session.execute("video.place", &serde_json::json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        v.item = Some((layer, item));
+        (layer, item)
+    };
+    h.run_steps(3);
+    // Its panel: turned, and framed: the shadow ticked.
+    for label in ["Turn", "Frame", "Crop the left", "Rounded corners"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    scroll_side_panel_to(&mut h, "Shadow");
+    h.get_by_label("Shadow").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.shadow);
+    shot(&mut h, "video-item-frame");
+    // The screen's clip: its colours and crop in its panel; As Recorded puts them back.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.selected = Some((0, 0));
+        v.session.execute("video.clipLook", &serde_json::json!({"track": 0, "clip": 0, "saturation": -100, "crop": [100, 100, 100, 100]})).unwrap();
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Brightness");
+    shot(&mut h, "video-clip-colour");
+    scroll_side_panel_to(&mut h, "As Recorded");
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
+}
+
+#[test]
+fn a_picture_item_is_masked_and_blended_and_a_clip_given_a_look_from_their_panels() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::{BlendMode, MaskShape};
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let l = &v.session.timeline.layers[0];
+        let key = (l.id, l.items[0].id);
+        v.item = Some(key);
+        v.playhead = 1_000_000;
+        key
+    };
+    h.run_steps(3);
+    let look = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.clone();
+    // Its panel: shown in an oval, then the oval cut out of it; blended by multiplying.
+    scroll_side_panel_to(&mut h, "Mask and Blend");
+    h.get_by_value("None").click();
+    h.run_steps(2);
+    h.get_by_label("Oval").click();
+    h.run_steps(3);
+    assert_eq!(look(&h).mask.shape, MaskShape::Ellipse);
+    for label in ["Cut the shape out", "Shape across", "Shape width"] {
+        assert!(h.query_by_label(label).is_some(), "{label}");
+    }
+    h.get_by_value("Normal").click();
+    h.run_steps(2);
+    h.get_by_label("Multiply").click();
+    h.run_steps(3);
+    assert_eq!(look(&h).blend, BlendMode::Multiply);
+    shot(&mut h, "video-item-mask");
+    scroll_side_panel_to(&mut h, "Cut the shape out");
+    h.get_by_label("Cut the shape out").click();
+    h.run_steps(3);
+    let l = look(&h);
+    assert!(l.mask.cut && l.mask.w < 0.6, "cut out at half its size: {:?}", l.mask);
+    // On the video: the middle of the picture is gone, its corners there (multiplied: darker
+    // over the screen's dark square, as it is over its white).
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let multiplied = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "blend": "normal"})).unwrap();
+        let red = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        assert!(multiplied < red, "{multiplied} {red}");
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "mask": "none"})).unwrap();
+        let whole = count(&v.frame_at(1_000_000), [0xE0, 0x20, 0x20]);
+        assert!(red > 0 && red < whole * 9 / 10, "{red} of {whole}");
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "mask": "ellipse"})).unwrap();
+    }
+    // The screen's clip: a ready-made look from its panel.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.item = None;
+        v.selected = Some((0, 0));
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Look");
+    h.get_by_value("As recorded").click();
+    h.run_steps(2);
+    h.get_by_label("Sepia").click();
+    h.run_steps(3);
+    let c = h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look;
+    assert_eq!(c.named().map(|n| n.key), Some("sepia"));
+    scroll_side_panel_to(&mut h, "Tint");
+    shot(&mut h, "video-clip-look");
+    scroll_side_panel_to(&mut h, "As Recorded");
+    h.get_by_label("As Recorded").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[0].look.is_plain());
+}
+
+#[test]
+fn the_screen_is_framed_in_a_device_and_a_picture_put_in_a_phone_from_their_panels() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::frame::Device;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.run_steps(2);
+    // The side panel's Screen Frame: a laptop round the screen, with a shadow.
+    scroll_side_panel_to(&mut h, "Screen Frame");
+    h.get_by_value("No device").click();
+    h.run_steps(2);
+    h.get_by_label("Laptop").click();
+    h.run_steps(3);
+    let frame = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.frame.clone();
+    assert_eq!(frame(&h).device, Device::Laptop);
+    scroll_side_panel_to(&mut h, "Shadow");
+    h.get_by_label("Shadow").click();
+    h.run_steps(3);
+    assert!(frame(&h).shadow);
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.screenFrame", &serde_json::json!({"background": "#204060", "radius": 0.03})).unwrap();
+        // The video's corner is the background now; its middle still the screen.
+        let pic = v.frame_at(1_000_000);
+        let c = pic.pixel(2, 2).unwrap();
+        assert_eq!((c.r, c.g, c.b), (0x20, 0x40, 0x60));
+    }
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Screen Frame");
+    shot(&mut h, "video-screen-frame");
+    scroll_side_panel_to(&mut h, "Fill the Video Again");
+    h.get_by_label("Fill the Video Again").click();
+    h.run_steps(2);
+    assert!(frame(&h).is_plain());
+    // A picture on a layer, put in a phone from its panel.
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        let l = &v.session.timeline.layers[0];
+        let key = (l.id, l.items[0].id);
+        v.item = Some(key);
+        v.playhead = 1_000_000;
+        key
+    };
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Device round it");
+    h.get_by_value("No device").click();
+    h.run_steps(2);
+    h.get_by_label("Phone").click();
+    h.run_steps(3);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.device, Device::Phone);
+    shot(&mut h, "video-item-device");
+}
+
+#[test]
+fn the_pointer_is_hidden_for_a_stretch_and_what_moves_is_blurred_from_the_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xE0, 0x20, 0x20]);
+    assert!(red(&mut h, 1_000_000) > 0);
+    // The Pointer panel hides it in the chosen stretch.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 1_500_000));
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Hide It in the Chosen Stretch");
+    h.get_by_label("Hide It in the Chosen Stretch").click();
+    h.run_steps(3);
+    assert_eq!(red(&mut h, 1_000_000), 0, "hidden there");
+    assert!(red(&mut h, 2_500_000) > 0, "not after");
+    assert!(h.query_by_label("Hidden from 0:00.5 to 0:01.5").is_some());
+    shot(&mut h, "video-pointer-hidden");
+    // The right button on the screen's row, inside it: shown there again.
+    h.state_mut().video.as_mut().unwrap().range = None;
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    let (pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.pps, v.scrolled())
+    };
+    right_click(&mut h, egui::pos2(lane.min.x + pps - scroll, top + 20.0));
+    h.get_by_label_contains("Screen at");
+    h.get_by_label("Show the Pointer Here Again").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.pointer_hidden.is_empty());
+    assert!(red(&mut h, 1_000_000) > 0);
+    // Motion blur from the side panel.
+    scroll_side_panel_to(&mut h, "Blur what moves");
+    h.get_by_label("Blur what moves").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.motion_blur.on);
+    assert!(h.query_by_label("How much").is_some());
+    shot(&mut h, "video-motion-blur");
+}
+
+#[test]
+fn zooms_follow_the_clicks_from_the_library_and_the_pictures_are_put_in_turn() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::What;
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // The Library's Zoom and Pan section: a zoom made where it clicked (at 2 s).
+    h.get_by_label("Zoom and Pan").click();
+    h.run_steps(3);
+    h.get_by_label("Zoom on the Clicks").click();
+    h.run_steps(3);
+    {
+        let tl = &h.state().video.as_ref().unwrap().session.timeline;
+        let l = tl.layers.last().unwrap();
+        assert_eq!(l.name, "Zooms on the clicks");
+        assert!(matches!(l.items[0].what, What::Zoom) && l.items[0].at < 2_000_000 && l.items[0].end() > 2_000_000);
+    }
+    h.state_mut().video.as_mut().unwrap().playhead = 2_000_000;
+    h.run_steps(3);
+    shot(&mut h, "video-zoom-on-clicks");
+    // Again: every click is zoomed on already, which it says.
+    h.get_by_label("Zoom on the Clicks").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.layers.len(), 1);
+    // A recording without clicks: greyed out.
+    let mut h = media_harness(MediaHost::default());
+    h.get_by_label("Zoom and Pan").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Zoom on the Clicks")).is_disabled());
+    // Pictures brought in, put in turn from the Media bin.
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/One.png".to_string(), "C:/Pictures/Two.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Put the Pictures in Turn").click();
+    h.run_steps(3);
+    let v = h.state_mut().video.as_mut().unwrap();
+    let l = v.session.timeline.layers.iter().find(|l| l.name == "Pictures").unwrap();
+    assert_eq!(l.items.iter().map(|i| (i.at, i.len)).collect::<Vec<_>>(), vec![(0, 4_000_000), (4_000_000, 4_000_000)]);
+    assert!(count(&v.frame_at(2_000_000), [0xE0, 0x20, 0x20]) > 1000, "the picture on the video");
+    shot(&mut h, "video-pictures-in-turn");
+}
+
+/// A host that keeps the owner's templates and themes (in memory, by kind and name).
+#[derive(Clone, Default)]
+struct KeepHost(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<(String, String), Vec<u8>>>>);
+
+impl crate::services::Services for KeepHost {
+    fn can_keep(&self) -> bool {
+        true
+    }
+    fn kept(&self, kind: crate::services::Kept) -> Vec<(String, Vec<u8>)> {
+        let all = self.0.lock().unwrap();
+        all.iter().filter(|((k, _), _)| k == kind.folder()).map(|((_, n), b)| (n.clone(), b.clone())).collect()
+    }
+    fn keep(&self, kind: crate::services::Kept, name: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert((kind.folder().to_string(), name.to_string()), bytes.to_vec());
+        Ok(())
+    }
+    fn forget(&self, kind: crate::services::Kept, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().remove(&(kind.folder().to_string(), name.to_string()));
+        Ok(())
+    }
+}
+
+fn host_harness(host: Box<dyn crate::services::Services>, settings: EditorSettings) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(host, settings);
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h
+}
+
+/// The text items on the video's layers: their style, colour and face.
+fn texts_on(h: &Harness<'_, Editor>) -> Vec<(screengrabcraft_media::layers::TextStyle, String, screengrabcraft_media::layers::TextFont)> {
+    let v = h.state().video.as_ref().unwrap();
+    v.session
+        .timeline
+        .layers
+        .iter()
+        .flat_map(|l| l.items.iter())
+        .filter_map(|i| match &i.what {
+            screengrabcraft_media::layers::What::Text { style, color, font, .. } => Some((*style, color.clone(), *font)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_layers_kept_as_a_template_of_your_own_go_on_again_and_a_theme_colours_the_titles() {
+    use screengrabcraft_media::layers::{TextFont, TextStyle};
+    let host = KeepHost::default();
+    let mut h = host_harness(Box::new(host.clone()), EditorSettings::default());
+    on_video(&mut h, |v, ed, ctx| {
+        v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("lower-bar"), None, 0);
+        v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("title"), None, 1_000_000);
+    });
+    h.run_steps(2);
+    // Yours: a name, and the layers kept under it.
+    h.get_by_label("Yours").click();
+    h.run_steps(2);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Save the Layers")).is_disabled(), "not without a name");
+    h.state_mut().video.as_mut().unwrap().yours.template_name = "My intro".into();
+    h.run_steps(1);
+    h.get_by_label("Save the Layers").click();
+    h.run_steps(3);
+    assert_eq!(crate::services::Services::kept(&host, crate::services::Kept::VideoTemplates).len(), 1, "kept by the host");
+    assert!(h.query_by_label("My intro").is_some(), "its card");
+    shot(&mut h, "video-library-yours");
+    // The video's items taken off, then the template put back from the playhead.
+    on_video(&mut h, |v, ed, ctx| {
+        let ids: Vec<(u32, u32)> = v.session.timeline.layers.iter().flat_map(|l| l.items.iter().map(move |i| (l.id, i.id))).collect();
+        for (layer, item) in ids {
+            v.session.execute("video.deleteItem", &serde_json::json!({"layer": layer, "item": item})).unwrap();
+        }
+        v.playhead = 2_000_000;
+        let _ = (ed, ctx);
+    });
+    h.run_steps(1);
+    h.get_by_label("Add My intro").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let starts: Vec<u64> = v.session.timeline.layers.iter().flat_map(|l| l.items.iter().map(|i| i.at)).collect();
+        assert_eq!(starts, vec![2_000_000, 3_000_000], "where they were from its start, from the playhead");
+        assert_eq!(v.session.undo_label(), Some("Add the Template"));
+    }
+    // Opened again later, it's still there (read from the host).
+    let mut again = host_harness(Box::new(host.clone()), EditorSettings::default());
+    again.get_by_label("Yours").click();
+    again.run_steps(2);
+    assert!(again.query_by_label("My intro").is_some());
+    // Themes: Sunset chosen, applied to the video, and what comes from the Library in it.
+    h.get_by_label("Yours").click();
+    h.run_steps(1);
+    h.get_by_label("Themes").click();
+    h.run_steps(2);
+    h.get_by_value("As each was made").click();
+    h.run_steps(2);
+    h.get_by_label("Sunset").click();
+    h.run_steps(2);
+    assert_eq!(h.state().settings.video_theme, "Sunset", "the settings keep its name");
+    shot(&mut h, "video-library-theme-chosen");
+    scroll_library_to(&mut h, "Apply to This Video");
+    h.get_by_label("Apply to This Video").click();
+    h.run_steps(2);
+    let texts = texts_on(&h);
+    assert!(texts.contains(&(TextStyle::LowerBar, "#e4572e".into(), TextFont::Slanted)), "{texts:?}");
+    assert!(texts.contains(&(TextStyle::Title, "#fff3e6".into(), TextFont::Slanted)), "{texts:?}");
+    scroll_library_to(&mut h, "Add Angled");
+    h.get_by_label("Add Angled").click();
+    h.run_steps(3);
+    assert_eq!(texts_on(&h).iter().filter(|t| t.0 == TextStyle::LowerBar && t.1 == "#e4572e").count(), 2, "a new one in the theme");
+    shot(&mut h, "video-library-themes");
+    // Kept as a theme of the owner's, under another name.
+    h.state_mut().video.as_mut().unwrap().yours.theme_name = "Brand".into();
+    h.run_steps(1);
+    scroll_library_to(&mut h, "Save as Yours");
+    h.get_by_label("Save as Yours").click();
+    h.run_steps(2);
+    let themes = crate::services::Services::kept(&host, crate::services::Kept::VideoThemes);
+    assert_eq!(themes.len(), 1);
+    assert!(String::from_utf8_lossy(&themes[0].1).contains("#e4572e"));
+    assert_eq!(h.state().settings.video_theme, "Brand");
+    // A new window with those settings starts in it.
+    let mut fresh = host_harness(Box::new(host.clone()), EditorSettings { video_theme: "Brand".into(), ..EditorSettings::default() });
+    fresh.get_by_label("Themes").click();
+    fresh.run_steps(2);
+    assert!(fresh.query_by_label("Delete This Theme").is_some(), "Brand, the owner's, in use");
+    // A text item's face from its panel.
+    let (layer, item) = {
+        let v = h.state().video.as_ref().unwrap();
+        let l = v.session.timeline.layers.iter().find(|l| !l.items.is_empty()).unwrap();
+        (l.id, l.items[0].id)
+    };
+    h.state_mut().video.as_mut().unwrap().item = Some((layer, item));
+    h.run_steps(2);
+    // The item panel's, at the right (the theme's is in the library).
+    h.get_all_by_value("Sans, slanted").max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x)).unwrap().click();
+    h.run_steps(2);
+    h.get_by_label("Fixed width").click();
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(matches!(&v.session.timeline.item(layer, item).unwrap().what, screengrabcraft_media::layers::What::Text { font: TextFont::Mono, .. }));
+    if let Ok(dir) = std::env::var("SGC_SHOTS") {
+        let f = h.state_mut().video.as_mut().unwrap().frame_at(4_500_000);
+        image::RgbaImage::from_raw(f.width(), f.height(), f.pixels().to_vec()).unwrap().save(format!("{dir}/video-theme-frame.png")).unwrap();
+    }
+}
+
+#[test]
+fn in_the_browser_templates_and_themes_are_greyed_out_and_say_why() {
+    let mut h = harness();
+    on_video(&mut h, |v, ed, ctx| v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("lower-bar"), None, 0));
+    h.get_by_label("Yours").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().yours.template_name = "My intro".into();
+    h.run_steps(1);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Save the Layers")).is_disabled());
+}
+
+/// Does something to the video view with the editor beside it (as the editor's own frame does).
+fn on_video(h: &mut Harness<'_, Editor>, f: impl FnOnce(&mut crate::video::VideoView, &mut Editor, &egui::Context)) {
+    let ctx = egui::Context::default();
+    let ed = h.state_mut();
+    let mut v = ed.video.take().unwrap();
+    f(&mut v, ed, &ctx);
+    ed.video = Some(v);
+}
+
+/// Scrolls the library panel at the left until `label` is in its upper part.
+fn scroll_library_to(h: &mut Harness<'_, Editor>, label: &str) {
+    for _ in 0..30 {
+        let y = h.get_by_label(label).rect().center().y;
+        if (130.0..360.0).contains(&y) {
+            return;
+        }
+        h.hover_at(egui::pos2(150.0, 300.0));
+        h.run_steps(1);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, if y < 130.0 { 3.0 } else { -3.0 }),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(3);
+    }
+}
+
+/// A host with made-up microphones: a take "records" nothing real (no microphone is ever turned
+/// on in a test), and finishing it gives a made-up file of the length asked for.
+#[derive(Clone, Default)]
+struct NarrationHost {
+    /// How many times the microphones were listed.
+    listed: std::sync::Arc<std::sync::Mutex<usize>>,
+    /// Each take started, with the microphone asked for.
+    takes: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+struct MadeUpTake;
+
+impl crate::services::NarrationTake for MadeUpTake {
+    fn level(&self) -> f32 {
+        0.4
+    }
+    fn finish(self: Box<Self>) -> Result<(String, u64), String> {
+        Ok(("C:/Captures/Production narration.wav".to_string(), 1_500_000))
+    }
+}
+
+impl crate::services::Services for NarrationHost {
+    fn can_narrate(&self) -> bool {
+        true
+    }
+    fn microphones(&self) -> Vec<String> {
+        *self.listed.lock().unwrap() += 1;
+        vec!["Desk microphone".to_string(), "Headset".to_string()]
+    }
+    fn record_narration(&self, mic: Option<&str>, beside: &str) -> Result<Box<dyn crate::services::NarrationTake>, String> {
+        assert_eq!(beside, "C:/Captures/Production.sgvideo");
+        self.takes.lock().unwrap().push(mic.map(str::to_string));
+        Ok(Box::new(MadeUpTake))
+    }
+    fn load_media(&self, _path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let voice: Vec<i16> = (0..72_000).flat_map(|i| [((i as f32 * 0.05).sin() * 9_000.0) as i16; 2]).collect();
+        let loaded = Loaded { kind: MediaKind::Sound, duration: 1_500_000, width: 0, height: 0, content: Content::Sound(voice) };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+}
+
+#[test]
+fn narration_is_recorded_over_the_video_and_lands_on_a_sound_layer_at_the_playhead() {
+    let host = NarrationHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.1).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Record Narration");
+    assert_eq!(*host.listed.lock().unwrap(), 0, "the microphones aren't even listed until asked for");
+    // Another microphone than Video Production's.
+    h.get_by_value("As Video Production records").click();
+    h.run_steps(2);
+    assert_eq!(*host.listed.lock().unwrap(), 1);
+    h.get_by_label("Headset").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.get_by_label("Record Narration").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.narrating() && v.is_playing());
+        assert!(v.playhead > 1_000_000, "the video plays while you speak");
+    }
+    assert_eq!(host.takes.lock().unwrap().as_slice(), [Some("Headset".to_string())]);
+    shot(&mut h, "video-narrating");
+    // Space ends it: the take on a sound layer of its own from where the playhead was.
+    h.key_press(egui::Key::Space);
+    h.run_steps(4);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(!v.narrating() && !v.is_playing());
+        let l = v.session.timeline.layers.iter().find(|l| l.name == "Narration").expect("a Narration layer");
+        assert_eq!((l.items[0].at, l.items[0].len), (1_000_000, 1_500_000));
+        assert_eq!(v.session.timeline.media[0].path, "C:/Captures/Production narration.wav");
+        assert_eq!(v.session.undo_label(), Some("Record Narration"));
+    }
+    shot(&mut h, "video-narration-added");
+    // Started near the end, it ends with the video by itself.
+    h.state_mut().video.as_mut().unwrap().playhead = 3_800_000;
+    scroll_side_panel_to(&mut h, "Record Narration");
+    h.get_by_label("Record Narration").click();
+    h.run_steps(8);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(!v.narrating());
+    assert_eq!(v.session.timeline.layers.iter().filter(|l| l.name.starts_with("Narration")).count(), 2);
+    assert_eq!(host.takes.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn without_microphones_narration_is_greyed_out_and_says_why() {
+    let mut h = harness();
+    scroll_side_panel_to(&mut h, "Record Narration");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Record Narration")).is_disabled());
+}
+
+/// A host that makes videos of pictures: files are kept in memory, pictures are made up (a colour
+/// each), and narration has a made-up microphone (none is ever turned on in a test).
+#[derive(Clone, Default)]
+struct PicturesHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    asked: std::sync::Arc<std::sync::Mutex<usize>>,
+    files: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+}
+
+impl crate::services::Services for PicturesHost {
+    fn request_pictures_video(&self) {
+        *self.asked.lock().unwrap() += 1;
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn new_recording_path(&self, source: &str) -> Result<String, String> {
+        Ok(format!("C:/Captures/{source} 1.sgvideo"))
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.files.lock().unwrap().insert(path.to_string(), bytes.to_vec());
+        Ok(())
+    }
+    fn append_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.files.lock().unwrap().entry(path.to_string()).or_default().extend_from_slice(bytes);
+        Ok(())
+    }
+    fn load_media(&self, path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let loaded = if path.ends_with(".png") {
+            // Each its own colour: red, green, blue.
+            let c = if path.contains("One") {
+                Color::rgb(0xE0, 0x20, 0x20)
+            } else if path.contains("Two") {
+                Color::rgb(0x20, 0xC0, 0x40)
+            } else {
+                Color::rgb(0x20, 0x40, 0xE0)
+            };
+            let pic = Raster::filled(160, 90, c).unwrap();
+            Loaded { kind: MediaKind::Picture, duration: 0, width: 160, height: 90, content: Content::Picture(pic) }
+        } else {
+            let voice: Vec<i16> = (0..72_000).flat_map(|i| [((i as f32 * 0.05).sin() * 9_000.0) as i16; 2]).collect();
+            Loaded { kind: MediaKind::Sound, duration: 1_500_000, width: 0, height: 0, content: Content::Sound(voice) }
+        };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+    fn can_narrate(&self) -> bool {
+        true
+    }
+    fn record_narration(&self, _mic: Option<&str>, beside: &str) -> Result<Box<dyn crate::services::NarrationTake>, String> {
+        assert_eq!(beside, "C:/Captures/Pictures 1.sgvideo", "beside the new video");
+        Ok(Box::new(MadeUpTake))
+    }
+}
+
+#[test]
+fn a_new_video_is_made_of_pictures_alone_and_narrated() {
+    let host = PicturesHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.kind = crate::EditorKind::Video;
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.1).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // From the start page: no recording needed.
+    h.get_by_label("A Video of Pictures…").click();
+    h.run_steps(2);
+    assert_eq!(*host.asked.lock().unwrap(), 1);
+    let picked = ["C:/Pictures/One.png", "C:/Pictures/Two.png", "C:/Pictures/notes.txt", "C:/Pictures/Three.png"];
+    *host.answer.lock().unwrap() = Some(crate::services::DialogResult::PicturesVideo(picked.map(str::to_string).to_vec()));
+    h.run_steps(6);
+    {
+        let v = h.state_mut().video.as_mut().expect("the new video is open");
+        assert_eq!(v.path.as_deref(), Some("C:/Captures/Pictures 1.sgvideo"));
+        let tl = &v.session.timeline;
+        assert_eq!(tl.tracks.len(), 1, "just a blank screen");
+        assert_eq!(tl.length(), 12_000_000, "four seconds for each picture");
+        let l = tl.layers.iter().find(|l| l.name == "Pictures").expect("the pictures' layer");
+        assert_eq!(l.items.iter().map(|i| i.at).collect::<Vec<_>>(), vec![0, 4_000_000, 8_000_000]);
+        assert!(count(&v.frame_at(2_000_000), [0xE0, 0x20, 0x20]) > 1000, "the first picture");
+        assert!(count(&v.frame_at(10_000_000), [0x20, 0x40, 0xE0]) > 1000, "the third");
+    }
+    // Written as an ordinary recording in the captures folder.
+    let written = host.files.lock().unwrap().get("C:/Captures/Pictures 1.sgvideo").cloned().unwrap();
+    assert!(screengrabcraft_media::recording::sniff(&written));
+    shot(&mut h, "video-from-pictures");
+    // Narrated over: the take on its own layer from the start.
+    scroll_side_panel_to(&mut h, "Record Narration");
+    h.get_by_label("Record Narration").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Space);
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    let n = v.session.timeline.layers.iter().find(|l| l.name == "Narration").expect("the narration");
+    assert_eq!(n.items[0].at, 0);
+    // From a video already open, the File menu makes another (that one is saved first).
+    h.get_by_label("File").click();
+    h.run_steps(1);
+    h.get_by_label("New Video from Pictures…").click();
+    h.run_steps(1);
+    assert_eq!(*host.asked.lock().unwrap(), 2);
+}
+
+#[test]
+fn without_paths_there_is_no_video_of_pictures() {
+    let (mut h, _) = two_windows(crate::EditorKind::Video);
+    assert!(h.query_by_label("A Video of Pictures…").is_some(), "a desktop host");
+    let mut h2 = harness();
+    h2.get_by_label("File").click();
+    h2.run_steps(1);
+    assert!(h2.query_by_label("New Video from Pictures…").is_none(), "nowhere to keep it");
+    h.run_steps(1);
 }

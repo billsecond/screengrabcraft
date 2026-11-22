@@ -176,12 +176,17 @@ pub enum CaptureMode {
     Production,
     /// An area whose text is read and put on the clipboard (Grab Text).
     Text,
+    /// An area drawn round freehand: what's outside the outline is see-through.
+    Freehand,
+    /// A still picture from the camera (Video Production's camera).
+    Camera,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 11] = [
+    pub const ALL: [CaptureMode; 13] = [
         CaptureMode::Region,
         CaptureMode::Adjust,
+        CaptureMode::Freehand,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
@@ -191,6 +196,7 @@ impl CaptureMode {
         CaptureMode::Video,
         CaptureMode::Production,
         CaptureMode::Text,
+        CaptureMode::Camera,
     ];
 
     pub fn label(self) -> &'static str {
@@ -206,6 +212,8 @@ impl CaptureMode {
             CaptureMode::Video => "Record Video",
             CaptureMode::Production => "Video Production",
             CaptureMode::Text => "Grab Text",
+            CaptureMode::Freehand => "Capture Freehand Area",
+            CaptureMode::Camera => "Picture from the Camera",
         }
     }
 
@@ -223,6 +231,8 @@ impl CaptureMode {
             CaptureMode::Video => "video",
             CaptureMode::Production => "production",
             CaptureMode::Text => "text",
+            CaptureMode::Freehand => "freehand",
+            CaptureMode::Camera => "camera",
         }
     }
 
@@ -231,7 +241,13 @@ impl CaptureMode {
     pub fn is_still(self) -> bool {
         matches!(
             self,
-            CaptureMode::Region | CaptureMode::Adjust | CaptureMode::Window | CaptureMode::Screen | CaptureMode::AllScreens | CaptureMode::Repeat
+            CaptureMode::Region
+                | CaptureMode::Adjust
+                | CaptureMode::Freehand
+                | CaptureMode::Window
+                | CaptureMode::Screen
+                | CaptureMode::AllScreens
+                | CaptureMode::Repeat
         )
     }
 
@@ -257,11 +273,20 @@ pub struct Hotkeys {
     pub production: Option<Hotkey>,
     /// Grab Text: none by default (Print Screen and its variants are taken; macOS has no reader yet).
     pub text: Option<Hotkey>,
+    /// An area drawn round freehand: none by default.
+    pub freehand: Option<Hotkey>,
+    /// A still from the camera: none by default.
+    pub camera: Option<Hotkey>,
     pub editor: Option<Hotkey>,
     /// While a recording runs (only then are they taken from other programs): pause it or go on,
     /// and stop it. F9 and F10, as screen recorders have them.
     pub pause: Option<Hotkey>,
     pub stop: Option<Hotkey>,
+    /// While a recording runs: draw on the screen, or stop drawing. F8 by default.
+    pub draw: Option<Hotkey>,
+    /// While a recording runs: the camera full screen with the screen in its corner, or back.
+    /// F7 by default.
+    pub camera_full: Option<Hotkey>,
 }
 
 impl Hotkeys {
@@ -283,10 +308,14 @@ impl Hotkeys {
                 video: k("V"),
                 production: k("P"),
                 text: None,
+                freehand: None,
+                camera: None,
                 editor: k("E"),
                 // A Mac's top row is its media keys, so with Control and Shift there.
                 pause: k("F9"),
                 stop: k("F10"),
+                draw: k("F8"),
+                camera_full: k("F7"),
             }
         } else {
             Hotkeys {
@@ -302,9 +331,13 @@ impl Hotkeys {
                 video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
                 production: None,
                 text: None,
+                freehand: None,
+                camera: None,
                 editor: None,
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
+                draw: Some(Hotkey::new(false, false, false, false, "F8")),
+                camera_full: Some(Hotkey::new(false, false, false, false, "F7")),
             }
         }
     }
@@ -322,6 +355,8 @@ impl Hotkeys {
             CaptureMode::Video => self.video.as_ref(),
             CaptureMode::Production => self.production.as_ref(),
             CaptureMode::Text => self.text.as_ref(),
+            CaptureMode::Freehand => self.freehand.as_ref(),
+            CaptureMode::Camera => self.camera.as_ref(),
         }
     }
 
@@ -353,6 +388,8 @@ impl Hotkeys {
             CaptureMode::Video => &mut self.video,
             CaptureMode::Production => &mut self.production,
             CaptureMode::Text => &mut self.text,
+            CaptureMode::Freehand => &mut self.freehand,
+            CaptureMode::Camera => &mut self.camera,
         };
         *slot = key;
     }
@@ -369,6 +406,12 @@ impl Hotkeys {
         if let Some(k) = &self.stop {
             named.push(("Stop Recording", k));
         }
+        if let Some(k) = &self.draw {
+            named.push(("Draw on the Screen While Recording", k));
+        }
+        if let Some(k) = &self.camera_full {
+            named.push((CAMERA_FULL_LABEL, k));
+        }
         let mut out = Vec::new();
         for (i, (a, ka)) in named.iter().enumerate() {
             for (b, kb) in named.iter().skip(i + 1) {
@@ -380,6 +423,9 @@ impl Hotkeys {
         out
     }
 }
+
+/// The camera full screen shortcut's name, in Settings and where shortcuts clash.
+pub const CAMERA_FULL_LABEL: &str = "Camera Full Screen While Recording";
 
 impl Default for Hotkeys {
     fn default() -> Hotkeys {
@@ -398,10 +444,12 @@ pub enum ImageFormat {
     Bmp,
     Gif,
     Pdf,
+    Tiff,
 }
 
 impl ImageFormat {
-    pub const ALL: [ImageFormat; 6] = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Bmp, ImageFormat::Gif, ImageFormat::Pdf];
+    pub const ALL: [ImageFormat; 7] =
+        [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Bmp, ImageFormat::Tiff, ImageFormat::Gif, ImageFormat::Pdf];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -411,6 +459,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "bmp",
             ImageFormat::Gif => "gif",
             ImageFormat::Pdf => "pdf",
+            ImageFormat::Tiff => "tif",
         }
     }
 
@@ -422,6 +471,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "BMP",
             ImageFormat::Gif => "GIF",
             ImageFormat::Pdf => "PDF",
+            ImageFormat::Tiff => "TIFF",
         }
     }
 
@@ -433,6 +483,7 @@ impl ImageFormat {
             ImageFormat::Bmp => "image/bmp",
             ImageFormat::Gif => "image/gif",
             ImageFormat::Pdf => "application/pdf",
+            ImageFormat::Tiff => "image/tiff",
         }
     }
 
@@ -445,6 +496,7 @@ impl ImageFormat {
             "bmp" => Some(ImageFormat::Bmp),
             "gif" => Some(ImageFormat::Gif),
             "pdf" => Some(ImageFormat::Pdf),
+            "tif" | "tiff" => Some(ImageFormat::Tiff),
             _ => None,
         }
     }
@@ -493,9 +545,23 @@ pub struct VideoOptions {
     pub camera: bool,
     /// The camera by number; `None` is the first one.
     pub camera_index: Option<u32>,
+    /// The camera flipped left to right in the video, as in a mirror (the recording starts with
+    /// it so; the video editor can change it).
+    pub camera_mirror: bool,
+    /// A line round the camera in the video: its width in hundredths of the picture's shorter
+    /// side, 0 (none) to 10.
+    pub camera_border: u8,
+    /// The line's colour.
+    pub camera_border_color: crate::Color,
     /// Video Production: captions of what's said, made on this computer after the recording.
     pub captions: bool,
+    /// Video Production: the shortcuts pressed while recording kept, to show them on the video
+    /// (never what's typed; Windows only for now).
+    pub keys: bool,
 }
+
+/// The widest border round the camera, in hundredths of its picture's shorter side.
+pub const CAMERA_BORDER_MAX: u8 = 10;
 
 impl Default for VideoOptions {
     /// A quick video: the screen and what the computer plays.
@@ -507,7 +573,11 @@ impl Default for VideoOptions {
             microphone_name: None,
             camera: false,
             camera_index: None,
+            camera_mirror: false,
+            camera_border: 0,
+            camera_border_color: crate::Color::WHITE,
             captions: true,
+            keys: true,
         }
     }
 }
@@ -522,7 +592,11 @@ impl VideoOptions {
             microphone_name: None,
             camera: true,
             camera_index: None,
+            camera_mirror: false,
+            camera_border: 0,
+            camera_border_color: crate::Color::WHITE,
             captions: true,
+            keys: true,
         }
     }
 }
@@ -668,6 +742,269 @@ impl RecorderOptions {
 /// default for Capture All Screens).
 pub const HOTKEYS_VERSION: u32 = 1;
 
+/// The longest a scrolling capture's picture gets unless the owner says otherwise, and the least
+/// they can make it.
+pub const SCROLLING_LONGEST: u32 = 30_000;
+pub const SCROLLING_SHORTEST: u32 = 1_000;
+/// The longest countdown before a recording, in seconds.
+pub const RECORD_COUNTDOWN_MAX: u32 = 10;
+
+/// The shapes an area can be held to (`w` wide for every `h` tall), as presets offer them.
+pub const SHAPES: [(u32, u32); 7] = [(1, 1), (4, 3), (3, 2), (16, 10), (16, 9), (21, 9), (9, 16)];
+/// The largest number either side of a shape.
+pub const SHAPE_MAX: u32 = 100;
+
+/// What a capture preset takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PresetArea {
+    /// Drag out an area (or click a window).
+    #[default]
+    Region,
+    /// Drag out an area held to a shape: `w` wide for every `h` tall.
+    Shape { w: u32, h: u32 },
+    /// An area of a set size in pixels, placed with a click.
+    Fixed { w: u32, h: u32 },
+    /// Click a window.
+    Window,
+    /// The monitor under the pointer.
+    Screen,
+    /// Every monitor in one picture.
+    AllScreens,
+    /// A long page joined into one picture.
+    Scrolling,
+    /// An area drawn round freehand.
+    Freehand,
+}
+
+impl PresetArea {
+    /// One of each kind, as the preset's list offers them.
+    pub const KINDS: [PresetArea; 8] = [
+        PresetArea::Region,
+        PresetArea::Shape { w: 16, h: 9 },
+        PresetArea::Fixed { w: 1280, h: 720 },
+        PresetArea::Freehand,
+        PresetArea::Window,
+        PresetArea::Screen,
+        PresetArea::AllScreens,
+        PresetArea::Scrolling,
+    ];
+
+    /// The capture it starts.
+    pub fn mode(self) -> CaptureMode {
+        match self {
+            PresetArea::Region | PresetArea::Shape { .. } | PresetArea::Fixed { .. } => CaptureMode::Region,
+            PresetArea::Window => CaptureMode::Window,
+            PresetArea::Screen => CaptureMode::Screen,
+            PresetArea::AllScreens => CaptureMode::AllScreens,
+            PresetArea::Scrolling => CaptureMode::Scrolling,
+            PresetArea::Freehand => CaptureMode::Freehand,
+        }
+    }
+
+    /// Its kind, as the list says it.
+    pub fn label(self) -> &'static str {
+        match self {
+            PresetArea::Region => "Region",
+            PresetArea::Shape { .. } => "Region of a set shape",
+            PresetArea::Fixed { .. } => "Region of a set size",
+            PresetArea::Window => "Window",
+            PresetArea::Screen => "Full screen",
+            PresetArea::AllScreens => "All screens",
+            PresetArea::Scrolling => "Scrolling",
+            PresetArea::Freehand => "Freehand area",
+        }
+    }
+
+    /// Whether it's the same kind as `other`, whatever its numbers.
+    pub fn same_kind(self, other: PresetArea) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// What it takes, in a few words (`Region, 16:9`, `800 × 600`).
+    pub fn describe(self) -> String {
+        match self {
+            PresetArea::Shape { w, h } => format!("Region, {w}:{h}"),
+            PresetArea::Fixed { w, h } => format!("{w} × {h}"),
+            other => other.label().to_string(),
+        }
+    }
+
+    /// Its numbers in their ranges.
+    pub fn clamped(self) -> PresetArea {
+        match self {
+            PresetArea::Shape { w, h } => PresetArea::Shape { w: w.clamp(1, SHAPE_MAX), h: h.clamp(1, SHAPE_MAX) },
+            PresetArea::Fixed { w, h } => PresetArea::Fixed { w: w.clamp(FIXED_MIN, FIXED_MAX), h: h.clamp(FIXED_MIN, FIXED_MAX) },
+            other => other,
+        }
+    }
+}
+
+/// The most presets kept, and the longest name one has.
+pub const PRESETS_MAX: usize = 30;
+pub const PRESET_NAME_MAX: usize = 60;
+
+/// A capture of the owner's own making: what it takes, after how long, what happens to it, and a
+/// shortcut of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CapturePreset {
+    pub name: String,
+    #[serde(deserialize_with = "or_default")]
+    pub area: PresetArea,
+    /// Seconds to wait first (a countdown shows them); 0 is at once.
+    pub delay_secs: u32,
+    /// What happens to the picture (instead of the default in After a capture).
+    #[serde(deserialize_with = "or_default")]
+    pub after: AfterCapture,
+    /// Its own shortcut, if it has one.
+    #[serde(deserialize_with = "or_none")]
+    pub hotkey: Option<Hotkey>,
+    /// Effects added to the picture as it's taken.
+    #[serde(deserialize_with = "or_default")]
+    pub effects: PresetEffects,
+    /// Where its captures are saved, instead of the captures folder (none: the captures folder).
+    #[serde(deserialize_with = "or_none")]
+    pub folder: Option<String>,
+    /// The file format its captures are saved in, instead of the settings' (none: the settings').
+    #[serde(deserialize_with = "or_none")]
+    pub format: Option<ImageFormat>,
+}
+
+impl Default for CapturePreset {
+    fn default() -> CapturePreset {
+        CapturePreset {
+            name: "New preset".to_string(),
+            area: PresetArea::Region,
+            delay_secs: 0,
+            after: AfterCapture::default(),
+            hotkey: None,
+            effects: PresetEffects::default(),
+            folder: None,
+            format: None,
+        }
+    }
+}
+
+/// The widest border and the largest corner a preset's effects have, in pixels.
+pub const PRESET_BORDER_MAX: u32 = 100;
+pub const PRESET_RADIUS_MAX: u32 = 200;
+
+/// Effects a capture preset adds to its picture as it's taken, made by the editor's own commands
+/// (as Batch Changes makes them), in this order: grey, the border, the round corners, the torn
+/// edge, the shadow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PresetEffects {
+    /// In shades of grey.
+    pub grayscale: bool,
+    /// A border this many pixels wide; 0 is none.
+    pub border: u32,
+    pub border_color: crate::Color,
+    /// Corners rounded to this radius in pixels; 0 is square.
+    pub round_corners: u32,
+    /// The bottom edge torn off.
+    pub torn_edge: bool,
+    /// A soft shadow under it.
+    pub shadow: bool,
+}
+
+impl Default for PresetEffects {
+    fn default() -> PresetEffects {
+        PresetEffects { grayscale: false, border: 0, border_color: crate::Color::BLACK, round_corners: 0, torn_edge: false, shadow: false }
+    }
+}
+
+impl PresetEffects {
+    /// Whether there are any.
+    pub fn any(&self) -> bool {
+        !self.steps().is_empty()
+    }
+
+    /// The commands that make them (the id and its parameters), in order.
+    pub fn steps(&self) -> Vec<(String, serde_json::Value)> {
+        use serde_json::json;
+        let mut steps = Vec::new();
+        if self.grayscale {
+            steps.push(("effect.grayscale".to_string(), json!({})));
+        }
+        if self.border > 0 {
+            steps.push(("effect.border".to_string(), json!({"width": self.border.min(PRESET_BORDER_MAX), "color": self.border_color.to_hex()})));
+        }
+        if self.round_corners > 0 {
+            steps.push(("effect.roundCorners".to_string(), json!({"radius": self.round_corners.min(PRESET_RADIUS_MAX)})));
+        }
+        if self.torn_edge {
+            steps.push(("effect.tornEdge".to_string(), json!({"bottom": true})));
+        }
+        if self.shadow {
+            steps.push(("effect.shadow".to_string(), json!({})));
+        }
+        steps
+    }
+
+    /// What they are, in a few words ("Border, Shadow"), or none.
+    pub fn describe(&self) -> Option<String> {
+        let names: Vec<&str> = [
+            (self.grayscale, "Grey"),
+            (self.border > 0, "Border"),
+            (self.round_corners > 0, "Round corners"),
+            (self.torn_edge, "Torn edge"),
+            (self.shadow, "Shadow"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        (!names.is_empty()).then(|| names.join(", "))
+    }
+}
+
+impl CapturePreset {
+    /// Every number in its range, and a name of one line no longer than [`PRESET_NAME_MAX`] (left
+    /// as typed otherwise: it's kept as it's being typed).
+    pub fn clamped(mut self) -> CapturePreset {
+        self.name = self.name.chars().filter(|c| !c.is_control()).take(PRESET_NAME_MAX).collect();
+        self.area = self.area.clamped();
+        self.delay_secs = self.delay_secs.min(60);
+        self.effects.border = self.effects.border.min(PRESET_BORDER_MAX);
+        self.effects.round_corners = self.effects.round_corners.min(PRESET_RADIUS_MAX);
+        self.folder = self.folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty() && !f.chars().any(char::is_control));
+        self
+    }
+
+    /// The settings its capture is kept with: its own folder and file format, where it has them.
+    pub fn keep_with(&self, s: &Settings) -> Settings {
+        let mut s = s.clone();
+        if let Some(f) = self.folder.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            s.folder = Some(f.to_string());
+        }
+        if let Some(format) = self.format {
+            s.format = format;
+        }
+        s
+    }
+
+    /// Its name as menus show it, the `n`th of the list: `Preset n` when it has none.
+    pub fn title(&self, n: usize) -> String {
+        let name = self.name.trim();
+        if name.is_empty() { format!("Preset {n}") } else { name.to_string() }
+    }
+}
+
+/// The preset a script names (`--preset "Docs shot"`): by its name as menus show it, in any case,
+/// or by its number in the list (from 1).
+pub fn preset_named(presets: &[CapturePreset], name: &str) -> Option<usize> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    presets
+        .iter()
+        .enumerate()
+        .position(|(i, p)| p.title(i + 1).to_lowercase() == name)
+        .or_else(|| name.parse::<usize>().ok().filter(|n| (1..=presets.len()).contains(n)).map(|n| n - 1))
+}
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -731,7 +1068,31 @@ pub struct Settings {
     /// controls and the tray). On by default.
     #[serde(default = "on")]
     pub recording_border: bool,
+    /// Seconds counted down on the screen before a recording (a GIF, a video, Video Production)
+    /// starts; 0: none. 3 by default.
+    pub record_countdown: u32,
+    /// A scrolling capture turns the mouse wheel over the area by itself and stops at the end of
+    /// the page (where the system lets it: elsewhere, or off, the owner scrolls). On by default.
+    #[serde(default = "on")]
+    pub scroll_by_itself: bool,
+    /// The longest a scrolling capture's picture gets, in pixels.
+    pub scrolling_longest: u32,
+    /// Captures of the owner's own making, in the order they're listed. One that can't be read is
+    /// let go, not the others.
+    #[serde(deserialize_with = "readable")]
+    pub presets: Vec<CapturePreset>,
+    /// Captures on a timer and at a set time (the Capture page).
+    pub timed: crate::timed::TimedCaptures,
+    /// Folders captures were kept in besides the captures folder (a capture preset's own), the
+    /// latest first: the Recent strip and All captures list theirs too, after the preset
+    /// changes folder. See [`Settings::note_folder`].
+    pub other_folders: Vec<String>,
 }
+
+/// The most other folders remembered (see [`Settings::other_folders`]).
+pub const OTHER_FOLDERS_MAX: usize = 20;
+/// The longest folder remembered, in characters.
+const FOLDER_CHARS_MAX: usize = 1000;
 
 fn on() -> bool {
     true
@@ -768,6 +1129,12 @@ impl Default for Settings {
             check_updates: true,
             keep_editor_ready: true,
             recording_border: true,
+            record_countdown: 3,
+            scroll_by_itself: true,
+            scrolling_longest: SCROLLING_LONGEST,
+            presets: Vec::new(),
+            timed: crate::timed::TimedCaptures::default(),
+            other_folders: Vec::new(),
         }
     }
 }
@@ -810,15 +1177,76 @@ impl Settings {
     pub fn clamped(mut self) -> Settings {
         self.jpeg_quality = self.jpeg_quality.clamp(10, 100);
         self.delay_secs = self.delay_secs.min(60);
+        self.record_countdown = self.record_countdown.min(RECORD_COUNTDOWN_MAX);
         self.gif_frame_rate = self.gif_frame_rate.clamp(1, 30);
         self.gif_max_secs = self.gif_max_secs.clamp(1, 600);
         self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
         self.video_max_mins = self.video_max_mins.clamp(1, 240);
         self.recorder = self.recorder.clamped();
+        self.scrolling_longest = self.scrolling_longest.clamp(SCROLLING_SHORTEST, crate::MAX_SIDE);
+        self.presets.truncate(PRESETS_MAX);
+        self.presets = std::mem::take(&mut self.presets).into_iter().map(CapturePreset::clamped).collect();
+        self.timed = std::mem::take(&mut self.timed).clamped();
+        let folders = std::mem::take(&mut self.other_folders);
+        for f in folders.iter().take(OTHER_FOLDERS_MAX * 4).rev() {
+            self.note_folder(f);
+        }
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }
         self
+    }
+
+    /// Notes a folder a capture was just kept in (a capture preset's own), first among
+    /// [`Settings::other_folders`]. False when nothing changed: it's the captures folder, it's
+    /// first already, or it's no folder.
+    pub fn note_folder(&mut self, folder: &str) -> bool {
+        let f = folder.trim();
+        let same = |a: &str, b: &str| a.trim_end_matches(['/', '\\']).eq_ignore_ascii_case(b.trim_end_matches(['/', '\\']));
+        if f.is_empty() || f.chars().count() > FOLDER_CHARS_MAX || f.chars().any(char::is_control) {
+            return false;
+        }
+        if self.folder.as_deref().is_some_and(|c| same(c.trim(), f)) || self.other_folders.first().is_some_and(|o| same(o, f)) {
+            return false;
+        }
+        self.other_folders.retain(|o| !same(o, f));
+        self.other_folders.insert(0, f.to_string());
+        self.other_folders.truncate(OTHER_FOLDERS_MAX);
+        true
+    }
+
+    /// Pairs of actions that share a shortcut (only one of each pair can have it), the presets'
+    /// among them.
+    pub fn clashes(&self) -> Vec<(String, String)> {
+        let mut out = self.hotkeys.clashes();
+        let keys = &self.hotkeys;
+        let presets: Vec<(String, &Hotkey)> =
+            self.presets.iter().enumerate().filter_map(|(i, p)| p.hotkey.as_ref().map(|k| (p.title(i + 1), k))).collect();
+        let others = [
+            ("Open the Image Editor", &keys.editor),
+            ("Pause or Resume Recording", &keys.pause),
+            ("Stop Recording", &keys.stop),
+            ("Draw on the Screen While Recording", &keys.draw),
+            (CAMERA_FULL_LABEL, &keys.camera_full),
+        ];
+        for (i, (a, ka)) in presets.iter().enumerate() {
+            for m in CaptureMode::ALL {
+                if keys.get(m) == Some(*ka) {
+                    out.push((m.label().to_string(), a.clone()));
+                }
+            }
+            for (name, k) in others {
+                if k.as_ref() == Some(*ka) {
+                    out.push((name.to_string(), a.clone()));
+                }
+            }
+            for (b, kb) in presets.iter().skip(i + 1) {
+                if ka == kb {
+                    out.push(((*a).to_string(), (*b).to_string()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -845,6 +1273,9 @@ pub struct EditorSettings {
     /// What the Fill tool fills with.
     #[serde(deserialize_with = "or_default")]
     pub fill: FillTool,
+    /// Whether the Measure tool keeps each measurement on the picture, and its colour.
+    #[serde(deserialize_with = "or_default")]
+    pub measure: MeasureTool,
     /// What the Cut Out tool takes out (columns or rows) and how the parts meet.
     #[serde(deserialize_with = "or_default")]
     pub cut_out: CutOutTool,
@@ -854,6 +1285,14 @@ pub struct EditorSettings {
     pub options: std::collections::BTreeMap<Kind, ShapeOptions>,
     /// The quick styles' theme, by name (the first theme when it isn't one).
     pub quick_theme: String,
+    /// Themes of the owner's own, shown after the built-in ones. One that can't be read is let
+    /// go, not the others.
+    #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
+    pub own_themes: Vec<crate::quick::OwnTheme>,
+    /// Effect presets of the owner's own, shown after the ready-made ones. One that can't be read
+    /// is let go, not the others.
+    #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
+    pub effect_presets: Vec<crate::presets::EffectPreset>,
     /// The looks starred as favourites, in the order they were starred. One that can't be read
     /// is let go, not the others.
     #[serde(deserialize_with = "readable")]
@@ -868,21 +1307,58 @@ pub struct EditorSettings {
     pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
+    /// The video editor's theme, by name, for the titles, lower thirds and callouts added from
+    /// its Library (empty: each as it was made).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub video_theme: String,
+    /// The tool bar's tools after Favorites, in order, by name (View › Customize Tool Bar); none
+    /// for the usual ones. A tool left off is still picked by its key.
+    #[serde(deserialize_with = "or_default", skip_serializing_if = "Vec::is_empty")]
+    pub tool_bar: Vec<String>,
+    /// Rulers along the top and the left of the picture, and the guides dragged out of them.
+    #[serde(deserialize_with = "or_default")]
+    pub show_rulers: bool,
+    /// What is moved doesn't snap to the guides and to the picture's edges and middle.
+    #[serde(deserialize_with = "or_default")]
+    pub no_snap: bool,
+    /// Where a part of the picture moved with the Selection tool was is filled from round it
+    /// (rather than left see-through).
+    #[serde(deserialize_with = "or_default")]
+    pub fill_lifted: bool,
 }
 
 /// The Fill tool's settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FillTool {
     /// The colour it fills with; a transparent one clears the area.
     pub color: crate::color::Color,
     /// How close (0 to 255 a channel) a colour must be to the one clicked to be filled too.
     pub tolerance: u8,
+    /// The colour going on to a second one across what is filled (none for one colour).
+    #[serde(skip_serializing_if = "crate::object::Gradient::is_none")]
+    pub gradient: crate::object::Gradient,
 }
 
 impl Default for FillTool {
     fn default() -> FillTool {
-        FillTool { color: crate::color::Color::RED, tolerance: 32 }
+        FillTool { color: crate::color::Color::RED, tolerance: 32, gradient: crate::object::Gradient::default() }
+    }
+}
+
+/// The Measure tool's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeasureTool {
+    /// Each measurement kept on the picture as a dimension line and its length (otherwise it
+    /// is shown until the next one).
+    pub keep: bool,
+    pub color: crate::color::Color,
+}
+
+impl Default for MeasureTool {
+    fn default() -> MeasureTool {
+        MeasureTool { keep: false, color: crate::color::Color::RED }
     }
 }
 
@@ -986,7 +1462,89 @@ impl EditorSettings {
         if self.quick_theme.len() > 64 {
             self.quick_theme.clear();
         }
+        // Own themes with a name to keep, none named as a built-in one or as one before it.
+        let mut kept: Vec<crate::quick::OwnTheme> = Vec::new();
+        for t in std::mem::take(&mut self.own_themes) {
+            let Some(name) = crate::quick::theme_name(&t.name) else { continue };
+            if crate::quick::is_built_in(&name) || kept.iter().any(|k| k.name.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            if kept.len() < crate::quick::MAX_OWN_THEMES {
+                kept.push(crate::quick::OwnTheme { name, colors: t.colors });
+            }
+        }
+        self.own_themes = kept;
+        // Presets fit to keep, none named as a ready-made one or as one before it.
+        let mut presets: Vec<crate::presets::EffectPreset> = Vec::new();
+        for p in std::mem::take(&mut self.effect_presets).into_iter().filter_map(crate::presets::EffectPreset::clamped) {
+            if crate::presets::is_ready_made(&p.name) || presets.iter().any(|k| k.name.eq_ignore_ascii_case(&p.name)) {
+                continue;
+            }
+            if presets.len() < crate::presets::MAX_PRESETS {
+                presets.push(p);
+            }
+        }
+        self.effect_presets = presets;
+        self.tool_bar.retain(|t| !t.is_empty() && t.len() <= 32);
+        self.tool_bar.truncate(64);
         self
+    }
+
+    /// Keeps an effect preset of the owner's own (one of the same name is replaced); its name as
+    /// kept, or why it can't be.
+    pub fn keep_preset(&mut self, name: &str, steps: Vec<crate::presets::EffectStep>) -> Result<String, String> {
+        let name = crate::presets::preset_name(name).ok_or_else(|| "Give the preset a name.".to_string())?;
+        if crate::presets::is_ready_made(&name) {
+            return Err(format!("{name} is a ready-made preset's name."));
+        }
+        let preset = crate::presets::EffectPreset { name: name.clone(), steps }
+            .clamped()
+            .ok_or_else(|| "A preset holds the picture's effects only.".to_string())?;
+        if let Some(p) = self.effect_presets.iter_mut().find(|p| p.name.eq_ignore_ascii_case(&name)) {
+            *p = preset;
+        } else if self.effect_presets.len() >= crate::presets::MAX_PRESETS {
+            return Err(format!("{} presets of your own are kept at most; delete one first.", crate::presets::MAX_PRESETS));
+        } else {
+            self.effect_presets.push(preset);
+        }
+        Ok(name)
+    }
+
+    /// Lets an effect preset of the owner's own go.
+    pub fn forget_preset(&mut self, name: &str) {
+        self.effect_presets.retain(|p| !p.name.eq_ignore_ascii_case(name));
+    }
+
+    /// The quick styles' theme in use.
+    pub fn quick_theme(&self) -> crate::quick::QuickTheme {
+        crate::quick::theme(&self.quick_theme, &self.own_themes)
+    }
+
+    /// Keeps a theme of the owner's own (one of the same name is replaced) and puts it in use;
+    /// its name as kept, or why it can't be.
+    pub fn keep_theme(&mut self, name: &str, colors: [crate::color::Color; 4]) -> Result<String, String> {
+        let name = crate::quick::theme_name(name).ok_or_else(|| "Give the theme a name.".to_string())?;
+        if crate::quick::is_built_in(&name) {
+            return Err(format!("{name} is a built-in theme's name."));
+        }
+        let theme = crate::quick::OwnTheme { name: name.clone(), colors };
+        if let Some(t) = self.own_themes.iter_mut().find(|t| t.name.eq_ignore_ascii_case(&name)) {
+            *t = theme;
+        } else if self.own_themes.len() >= crate::quick::MAX_OWN_THEMES {
+            return Err(format!("{} themes of your own are kept at most; delete one first.", crate::quick::MAX_OWN_THEMES));
+        } else {
+            self.own_themes.push(theme);
+        }
+        self.quick_theme = name.clone();
+        Ok(name)
+    }
+
+    /// Lets a theme of the owner's own go; the first built-in one is used if it was in use.
+    pub fn forget_theme(&mut self, name: &str) {
+        self.own_themes.retain(|t| !t.name.eq_ignore_ascii_case(name));
+        if self.quick_theme.eq_ignore_ascii_case(name) {
+            self.quick_theme.clear();
+        }
     }
 
     /// What a tool sets about the shapes it draws: what it was last given, over its defaults.
@@ -1001,6 +1559,12 @@ impl EditorSettings {
             },
             Kind::Stamp => ShapeOptions { stamp: Some(self.stamp.unwrap_or_default()), ..ShapeOptions::default() },
             Kind::Spotlight => ShapeOptions { round: Some(false), ..ShapeOptions::default() },
+            Kind::Polygon => ShapeOptions { sides: Some(crate::object::MIN_SIDES), star: Some(false), ..ShapeOptions::default() },
+            Kind::Step => ShapeOptions {
+                labels: Some(crate::object::StepLabels::Numbers),
+                badge: Some(crate::object::BadgeShape::Circle),
+                ..ShapeOptions::default()
+            },
             _ => ShapeOptions::default(),
         };
         // A rectangle's and an ellipse's are kept as one, the Shape tool's; which of the two it
@@ -1008,6 +1572,11 @@ impl EditorSettings {
         let mut kept = self.options.get(&kind.family()).copied().unwrap_or_default();
         if kind.family() == Kind::Rect {
             kept.round = None;
+            // A polygon's corners say nothing of a rectangle or an ellipse.
+            if kind != Kind::Polygon {
+                kept.sides = None;
+                kept.star = None;
+            }
         }
         defaults.merged(kept)
     }
@@ -1035,7 +1604,9 @@ impl EditorSettings {
 
     /// The style a tool draws with: the last one used, or the kind's default.
     pub fn style(&self, kind: Kind) -> Style {
-        self.styles.get(&kind).copied().unwrap_or_else(|| kind.default_style())
+        // Polygons look as the Shape tool's rectangles did until they have a look of their own.
+        let shared = || if kind == Kind::Polygon { self.styles.get(&Kind::Rect).copied() } else { None };
+        self.styles.get(&kind).copied().or_else(shared).unwrap_or_else(|| kind.default_style())
     }
 
     /// Puts `path` first in the recent files.
@@ -1090,12 +1661,186 @@ mod tests {
     use super::*;
 
     #[test]
+    fn presets_are_kept_and_read_back_and_a_bad_one_is_let_go() {
+        let mut s = Settings::default();
+        assert!(s.presets.is_empty(), "none to start with");
+        s.presets = vec![
+            CapturePreset {
+                name: "Docs shot".into(),
+                area: PresetArea::Fixed { w: 800, h: 600 },
+                delay_secs: 3,
+                after: AfterCapture { show_bar: false, open_editor: false, copy: true, save: false },
+                hotkey: Some(Hotkey::new(true, true, false, false, "D")),
+                effects: PresetEffects { border: 3, shadow: true, ..PresetEffects::default() },
+                folder: Some("D:/Docs/Shots".into()),
+                format: Some(ImageFormat::Jpeg),
+            },
+            CapturePreset { name: "Wide".into(), area: PresetArea::Shape { w: 16, h: 9 }, ..CapturePreset::default() },
+            CapturePreset { name: "Page".into(), area: PresetArea::Scrolling, ..CapturePreset::default() },
+        ];
+        let text = serde_json::to_string(&s).unwrap();
+        assert_eq!(Settings::from_json(&text).presets, s.presets);
+        // One that can't be read is let go; one with a bad part keeps the rest.
+        let text = text.replacen(r#""name":"Wide""#, r#""name":12"#, 1).replacen(r#""area":"scrolling""#, r#""area":"teleport""#, 1);
+        let back = Settings::from_json(&text).presets;
+        assert_eq!(back.len(), 2, "{back:?}");
+        assert_eq!(back[0].name, "Docs shot");
+        assert_eq!((back[1].name.as_str(), back[1].area), ("Page", PresetArea::Region), "an area that can't be read is a region");
+    }
+
+    #[test]
+    fn presets_are_brought_into_range() {
+        let wild =
+            CapturePreset { name: "  \u{7}".into(), area: PresetArea::Fixed { w: 0, h: u32::MAX }, delay_secs: 9999, ..CapturePreset::default() };
+        let mut s = Settings { presets: vec![wild; PRESETS_MAX + 5], ..Settings::default() };
+        s.presets[1].area = PresetArea::Shape { w: 0, h: 500 };
+        s.presets[2].name = "x".repeat(500);
+        let s = s.clamped();
+        assert_eq!(s.presets.len(), PRESETS_MAX);
+        assert_eq!(s.presets[0].name, "  ", "kept as typed, but on one line");
+        assert_eq!(s.presets[0].title(1), "Preset 1", "a name to show");
+        assert_eq!(CapturePreset { name: " Wide ".into(), ..CapturePreset::default() }.title(4), "Wide");
+        assert_eq!(s.presets[0].area, PresetArea::Fixed { w: FIXED_MIN, h: FIXED_MAX });
+        assert_eq!(s.presets[0].delay_secs, 60);
+        assert_eq!(s.presets[1].area, PresetArea::Shape { w: 1, h: SHAPE_MAX });
+        assert_eq!(s.presets[2].name.chars().count(), PRESET_NAME_MAX);
+    }
+
+    #[test]
+    fn folders_captures_were_kept_in_are_remembered_latest_first() {
+        let mut s = Settings { folder: Some("C:/Captures".into()), ..Settings::default() };
+        assert!(s.note_folder("D:/Docs/Shots"));
+        assert!(s.note_folder(" E:/Bugs "));
+        assert!(!s.note_folder("E:/Bugs/"), "first already");
+        assert!(!s.note_folder("c:/captures"), "the captures folder is listed anyway");
+        assert!(!s.note_folder("  ") && !s.note_folder("D:/\u{7}"));
+        assert!(s.note_folder("d:/docs/shots"));
+        assert_eq!(s.other_folders, ["d:/docs/shots", "E:/Bugs"]);
+        for i in 0..50 {
+            s.note_folder(&format!("F:/{i}"));
+        }
+        assert_eq!(s.other_folders.len(), OTHER_FOLDERS_MAX);
+        assert_eq!(s.other_folders.first().map(String::as_str), Some("F:/49"));
+        // Kept through a settings file, cleaned as it's read; one from before has none.
+        let back = Settings::from_json(&serde_json::to_string(&s).unwrap());
+        assert_eq!(back.other_folders, s.other_folders);
+        let odd = Settings::from_json(r#"{"otherFolders": ["G:/A", "", "G:/A", "\u0007", "H:/B"]}"#);
+        assert_eq!(odd.other_folders, ["G:/A", "H:/B"]);
+        assert!(Settings::from_json(r#"{"otherFolders": 5}"#).other_folders.is_empty());
+        assert!(Settings::from_json("{}").other_folders.is_empty());
+    }
+
+    #[test]
+    fn a_presets_effects_are_its_commands_in_order_and_its_folder_and_format_its_own() {
+        let none = PresetEffects::default();
+        assert!(!none.any() && none.describe().is_none());
+        let all = PresetEffects { grayscale: true, border: 500, border_color: crate::Color::WHITE, round_corners: 12, torn_edge: true, shadow: true };
+        let ids: Vec<String> = all.steps().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["effect.grayscale", "effect.border", "effect.roundCorners", "effect.tornEdge", "effect.shadow"]);
+        assert_eq!(all.steps()[1].1, serde_json::json!({"width": PRESET_BORDER_MAX, "color": "#FFFFFF"}), "at most the widest");
+        assert_eq!(all.describe().as_deref(), Some("Grey, Border, Round corners, Torn edge, Shadow"));
+        // Its folder and format, else the settings'.
+        let s = Settings { folder: Some("C:/Captures".into()), format: ImageFormat::Png, ..Settings::default() };
+        let own = CapturePreset { folder: Some(" D:/Docs ".into()), format: Some(ImageFormat::Jpeg), ..CapturePreset::default() };
+        let kept = own.keep_with(&s);
+        assert_eq!((kept.folder.as_deref(), kept.format), (Some("D:/Docs"), ImageFormat::Jpeg));
+        let kept = CapturePreset::default().keep_with(&s);
+        assert_eq!((kept.folder.as_deref(), kept.format), (Some("C:/Captures"), ImageFormat::Png));
+        // A blank or broken folder is none; one from an older version has none of these.
+        let p =
+            CapturePreset { folder: Some("  ".into()), effects: PresetEffects { round_corners: 9999, ..none }, ..CapturePreset::default() }.clamped();
+        assert_eq!((p.folder, p.effects.round_corners), (None, PRESET_RADIUS_MAX));
+        let old: CapturePreset = serde_json::from_str(r#"{"name": "Old", "area": "window"}"#).unwrap();
+        assert_eq!((old.effects, old.folder, old.format), (none, None, None));
+        let odd: CapturePreset = serde_json::from_str(r#"{"name": "Odd", "effects": 5, "folder": [1], "format": "heif"}"#).unwrap();
+        assert_eq!((odd.name.as_str(), odd.effects, odd.folder, odd.format), ("Odd", none, None, None));
+        // TIFF is one of the formats a preset can keep its captures in.
+        let tiff: CapturePreset = serde_json::from_str(r#"{"name": "Scans", "format": "tiff"}"#).unwrap();
+        assert_eq!(tiff.format, Some(ImageFormat::Tiff));
+    }
+
+    #[test]
+    fn a_preset_is_found_by_its_name_or_its_number() {
+        let presets = vec![
+            CapturePreset { name: "Docs shot".into(), ..CapturePreset::default() },
+            CapturePreset { name: " ".into(), ..CapturePreset::default() },
+            CapturePreset { name: "3".into(), ..CapturePreset::default() },
+        ];
+        assert_eq!(preset_named(&presets, "docs SHOT "), Some(0));
+        assert_eq!(preset_named(&presets, "Preset 2"), Some(1), "as menus name it");
+        assert_eq!(preset_named(&presets, "2"), Some(1));
+        assert_eq!(preset_named(&presets, "3"), Some(2), "its name first");
+        assert_eq!(preset_named(&presets, "4"), None);
+        assert_eq!(preset_named(&presets, "0"), None);
+        assert_eq!(preset_named(&presets, ""), None);
+        assert_eq!(preset_named(&presets, "Nothing"), None);
+    }
+
+    #[test]
+    fn a_preset_starts_the_capture_of_its_kind() {
+        let modes: Vec<CaptureMode> = PresetArea::KINDS.iter().map(|a| a.mode()).collect();
+        assert_eq!(
+            modes,
+            [
+                CaptureMode::Region,
+                CaptureMode::Region,
+                CaptureMode::Region,
+                CaptureMode::Freehand,
+                CaptureMode::Window,
+                CaptureMode::Screen,
+                CaptureMode::AllScreens,
+                CaptureMode::Scrolling
+            ]
+        );
+        assert!(PresetArea::Shape { w: 1, h: 1 }.same_kind(PresetArea::Shape { w: 16, h: 9 }));
+        assert!(!PresetArea::Shape { w: 1, h: 1 }.same_kind(PresetArea::Fixed { w: 1, h: 1 }));
+        assert_eq!(PresetArea::Fixed { w: 800, h: 600 }.describe(), "800 × 600");
+        assert_eq!(PresetArea::Shape { w: 16, h: 9 }.describe(), "Region, 16:9");
+    }
+
+    #[test]
+    fn a_presets_shortcut_that_another_has_is_said() {
+        let mut s = Settings::default();
+        let region = s.hotkeys.region.clone();
+        let own = Some(Hotkey::new(true, true, false, false, "D"));
+        s.presets = vec![
+            CapturePreset { name: "A".into(), hotkey: region, ..CapturePreset::default() },
+            CapturePreset { name: "B".into(), hotkey: own.clone(), ..CapturePreset::default() },
+            CapturePreset { name: "C".into(), hotkey: own, ..CapturePreset::default() },
+            CapturePreset { name: "D".into(), hotkey: None, ..CapturePreset::default() },
+        ];
+        s.hotkeys.editor = Some(Hotkey::new(true, true, false, false, "D"));
+        let clashes = s.clashes();
+        assert!(clashes.contains(&("Capture Region".to_string(), "A".to_string())), "{clashes:?}");
+        assert!(clashes.contains(&("Open the Image Editor".to_string(), "B".to_string())), "{clashes:?}");
+        assert!(clashes.contains(&("B".to_string(), "C".to_string())), "{clashes:?}");
+        assert!(!clashes.iter().any(|(a, b)| a == "D" || b == "D"));
+    }
+
+    #[test]
     fn only_still_pictures_are_taken_while_recording() {
         let still: Vec<CaptureMode> = CaptureMode::ALL.into_iter().filter(|m| m.is_still()).collect();
         assert_eq!(
             still,
-            vec![CaptureMode::Region, CaptureMode::Adjust, CaptureMode::Window, CaptureMode::Screen, CaptureMode::AllScreens, CaptureMode::Repeat]
+            vec![
+                CaptureMode::Region,
+                CaptureMode::Adjust,
+                CaptureMode::Freehand,
+                CaptureMode::Window,
+                CaptureMode::Screen,
+                CaptureMode::AllScreens,
+                CaptureMode::Repeat
+            ]
         );
+    }
+
+    #[test]
+    fn a_recording_counts_down_three_seconds_unless_told_otherwise() {
+        assert_eq!(Settings::from_json("{}").record_countdown, 3, "a file from before it existed");
+        assert_eq!(Settings::from_json(r#"{"recordCountdown": 0}"#).record_countdown, 0, "turned off");
+        assert_eq!(Settings::from_json(r#"{"recordCountdown": 99}"#).clamped().record_countdown, RECORD_COUNTDOWN_MAX);
+        assert_eq!(CaptureMode::from_arg("camera"), Some(CaptureMode::Camera));
+        assert!(!CaptureMode::Camera.is_still(), "the camera isn't taken from while a recording has it");
     }
 
     #[test]
@@ -1285,6 +2030,8 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            keys: false,
+            ..VideoOptions::default()
         };
         let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
         assert!(!off.records_anything(&none, true, true));
@@ -1313,6 +2060,7 @@ mod tests {
             assert_eq!(ImageFormat::from_extension(f.extension()), Some(f));
         }
         assert_eq!(ImageFormat::from_extension(".JPEG"), Some(ImageFormat::Jpeg));
+        assert_eq!(ImageFormat::from_extension("TIFF"), Some(ImageFormat::Tiff));
         for m in CaptureMode::ALL {
             assert_eq!(CaptureMode::from_arg(m.arg()), Some(m));
         }
@@ -1352,7 +2100,7 @@ mod tests {
         assert_eq!((odd.side_width, odd.properties_share), (None, Some(0.4)));
         assert_eq!(fresh.options(Kind::Arrow).heads, Some(ArrowHeads::End));
         assert_eq!(fresh.options(Kind::Callout).tail, Some(TailSpot::DownLeft));
-        let look = crate::quick::presets(Kind::Callout, crate::quick::theme("Bold")).into_iter().nth(8).map(|p| p.look).unwrap();
+        let look = crate::quick::presets(Kind::Callout, &crate::quick::theme("Bold", &[])).into_iter().nth(8).map(|p| p.look).unwrap();
         let mut e = EditorSettings { quick_theme: "Soft".into(), side_width: Some(320.0), ..EditorSettings::default() };
         assert!(e.toggle_favorite(&look));
         assert!(e.is_favorite(&look));
@@ -1380,7 +2128,10 @@ mod tests {
     #[test]
     fn the_fill_tool_keeps_its_colour_and_a_bad_one_spoils_nothing() {
         assert_eq!(EditorSettings::from_json("{}").fill, FillTool::default(), "a file from before has the default");
-        let e = EditorSettings { fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90 }, ..EditorSettings::default() };
+        let e = EditorSettings {
+            fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90, ..FillTool::default() },
+            ..EditorSettings::default()
+        };
         assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
         for bad in [
             r#"{"fill":{"color":"teapot","tolerance":9},"showTray":true}"#,
@@ -1391,5 +2142,60 @@ mod tests {
             assert_eq!(e.fill, FillTool::default(), "{bad}");
             assert!(e.show_tray, "the rest is still read: {bad}");
         }
+        // Its gradient is kept too.
+        let g = crate::object::Gradient { kind: crate::object::GradientKind::Radial, to: crate::color::Color::BLACK, angle: 90.0 };
+        let e = EditorSettings { fill: FillTool { gradient: g, ..FillTool::default() }, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()).fill.gradient, g);
+    }
+
+    /// Themes of your own are kept by name and put in use; a built-in name, an empty one or one
+    /// too many isn't; one of the same name is replaced; one that can't be read is let go alone.
+    #[test]
+    fn own_themes_are_kept_by_name() {
+        use crate::color::Color;
+        let mut e = EditorSettings::default();
+        let colours = [Color::RED, Color::BLACK, Color::WHITE, Color::YELLOW];
+        assert_eq!(e.keep_theme("  Brand ", colours), Ok("Brand".to_string()));
+        assert_eq!((e.quick_theme.as_str(), e.quick_theme().name.as_ref()), ("Brand", "Brand"));
+        assert!(e.keep_theme("mono", colours).is_err(), "a built-in name");
+        assert!(e.keep_theme(" ", colours).is_err());
+        let other = [Color::BLACK; 4];
+        assert!(e.keep_theme("BRAND", other).is_ok());
+        assert_eq!((e.own_themes.len(), e.own_themes.first().map(|t| t.colors)), (1, Some(other)), "replaced");
+        for i in 1..crate::quick::MAX_OWN_THEMES {
+            assert!(e.keep_theme(&format!("Theme {i}"), colours).is_ok());
+        }
+        assert!(e.keep_theme("One more", colours).is_err(), "too many");
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back.own_themes, e.own_themes);
+        e.forget_theme(&e.quick_theme.clone());
+        assert_eq!((e.own_themes.len(), e.quick_theme().name.as_ref()), (crate::quick::MAX_OWN_THEMES - 1, "Bold"));
+        let text = r##"{"ownThemes":[{"name":"Ok","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},{"name":"Bad","colors":["#FF0000"]},{"name":"Vivid","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},{"name":"ok","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},4],"showTray":true}"##;
+        let e = EditorSettings::from_json(text);
+        assert_eq!(e.own_themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Ok"], "short, built-in and twice-named ones let go");
+        assert!(e.show_tray);
+        assert!(!serde_json::to_string(&EditorSettings::default()).unwrap().contains("ownThemes"));
+    }
+
+    /// Effect presets of your own are kept by name; a ready-made name or one without an effect
+    /// isn't; one that can't be read is let go alone.
+    #[test]
+    fn effect_presets_are_kept_by_name() {
+        use crate::presets::EffectStep;
+        let border = || vec![EffectStep { effect: "effect.border".into(), params: serde_json::json!({"width": 3}) }];
+        let mut e = EditorSettings::default();
+        assert_eq!(e.keep_preset(" Mine ", border()), Ok("Mine".to_string()));
+        assert!(e.keep_preset("Soft shadow", border()).is_err(), "a ready-made name");
+        assert!(e.keep_preset("Bad", vec![EffectStep { effect: "image.crop".into(), params: serde_json::json!({}) }]).is_err());
+        assert!(e.keep_preset("MINE", border()).is_ok());
+        assert_eq!(e.effect_presets.len(), 1, "replaced");
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back.effect_presets, e.effect_presets);
+        e.forget_preset("mine");
+        assert!(e.effect_presets.is_empty());
+        let text = r#"{"effectPresets":[{"name":"Ok","steps":[{"effect":"effect.invert"}]},{"name":"No steps","steps":[]},{"name":"Old Photo","steps":[{"effect":"effect.invert"}]},5],"showTray":true}"#;
+        let e = EditorSettings::from_json(text);
+        assert_eq!(e.effect_presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Ok"]);
+        assert!(e.show_tray);
     }
 }

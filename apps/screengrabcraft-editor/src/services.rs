@@ -16,13 +16,17 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{
-    DialogResult, Filter, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
+    DialogResult, Filter, Kept, NarrationTake, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport,
+    VideoFormat, VideoJob,
 };
 
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
 const THUMB: u32 = 200;
+/// The pictures the video editor brings in (Import Media).
 const PICTURES: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+/// The pictures the picture editor opens and lists in its strip: those, and TIFF.
+const STILLS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
 /// Videos in the strip too: recordings to edit, and MP4s that play in the system's player.
 const VIDEOS: &[&str] = &[REC, "mp4"];
 /// The extension of a video recording.
@@ -115,6 +119,38 @@ impl DesktopServices {
 
 /// Writes a save. Whatever happens in drawing or encoding, an answer comes back: the editor
 /// waits for it before it closes.
+/// The pictures and videos in these folders (not their folders), newest first, as many as the
+/// strip shows. A folder that isn't there, or a file that can't be looked at, is left out.
+fn captures_in(dirs: &[PathBuf]) -> Vec<RecentItem> {
+    let mut items: Vec<RecentItem> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                let x = x.to_ascii_lowercase();
+                STILLS.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
+            })
+        })
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            let since = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            let modified = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
+            let path: PathBuf = e.path();
+            Some(RecentItem {
+                name: e.file_name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                modified,
+                ..RecentItem::default()
+            })
+        })
+        .collect();
+    items.sort_by_key(|i| std::cmp::Reverse(i.modified));
+    items.truncate(screengrabcraft_ui::strip::MAX_SHOWN);
+    items
+}
+
 fn write_save(job: &SaveJob) -> Saved {
     let write = |path: &str, bytes: &[u8]| store::write_atomic(Path::new(path), bytes).map_err(|e| e.to_string());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&write))) {
@@ -199,12 +235,12 @@ impl Services for DesktopServices {
                     .set_title("Open a Recording")
                     .set_directory(&start)
                     .add_filter("Video recording", &[REC])
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
             } else {
                 rfd::AsyncFileDialog::new()
                     .set_title("Open")
                     .set_directory(&start)
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
                     .add_filter("ScreenGrabCraft project", &[PROJECT_EXT])
                     .add_filter("Video recording", &[REC])
             };
@@ -290,6 +326,14 @@ impl Services for DesktopServices {
         Ok(free_path(&dir, &name, format.extension()).to_string_lossy().to_string())
     }
 
+    fn new_recording_path(&self, source: &str) -> Result<String, String> {
+        let s = store::load_settings();
+        let dir = paths::captures_dir(&s);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
+        Ok(free_path(&dir, &name, REC).to_string_lossy().to_string())
+    }
+
     fn trash(&self, path: &str) -> Result<(), String> {
         let p = PathBuf::from(path);
         if std::fs::symlink_metadata(&p).is_err() {
@@ -301,35 +345,60 @@ impl Services for DesktopServices {
     }
 
     fn recent(&self) -> Vec<RecentItem> {
-        let dir = paths::captures_dir(&store::load_settings());
-        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-        let mut items: Vec<RecentItem> = entries
-            .filter_map(Result::ok)
-            .filter(|e| {
-                e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
-                    let x = x.to_ascii_lowercase();
-                    PICTURES.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
-                })
-            })
-            .filter_map(|e| {
-                let since = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-                let modified = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
-                let path: PathBuf = e.path();
-                Some(RecentItem {
-                    name: e.file_name().to_string_lossy().to_string(),
-                    path: path.to_string_lossy().to_string(),
-                    modified,
-                    ..RecentItem::default()
-                })
-            })
-            .collect();
-        items.sort_by_key(|i| std::cmp::Reverse(i.modified));
-        items.truncate(screengrabcraft_ui::strip::MAX_SHOWN);
+        let mut items = captures_in(&paths::capture_folders(&store::load_settings()));
         // The local day and time of those kept (All captures groups them by day).
         for i in &mut items {
             (i.day, i.time) = screengrabcraft_desktop::time::local_day_time(i.modified);
         }
         items
+    }
+
+    fn request_pictures(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("pictures-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new().set_title("Pictures to Change").set_directory(&start).add_filter("Pictures", STILLS).pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Pictures(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn file_exists(&self, path: &str) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn print(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        screengrabcraft_desktop::print::print(picture, name)
+    }
+
+    fn can_print(&self) -> Result<(), String> {
+        screengrabcraft_desktop::print::available()
+    }
+
+    fn can_open_with(&self) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::available()
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_picture_with(picture, name)
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_with(std::path::Path::new(path))
+    }
+
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        screengrabcraft_desktop::library::for_paths(paths)
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_desktop::library::run(id, params)
     }
 
     fn today(&self) -> String {
@@ -375,6 +444,22 @@ impl Services for DesktopServices {
         self.settings_file.save(settings);
     }
 
+    fn can_keep(&self) -> bool {
+        !paths::no_prefs()
+    }
+
+    fn kept(&self, kind: Kept) -> Vec<(String, Vec<u8>)> {
+        store::kept(kind.folder())
+    }
+
+    fn keep(&self, kind: Kept, name: &str, bytes: &[u8]) -> Result<(), String> {
+        store::keep(kind.folder(), name, bytes)
+    }
+
+    fn forget(&self, kind: Kept, name: &str) -> Result<(), String> {
+        store::forget(kind.folder(), name)
+    }
+
     fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
         let args = [path.to_string()];
         let opened = if video { launch::open_video_editor(&args) } else { launch::open_editor(&args) };
@@ -411,6 +496,24 @@ impl Services for DesktopServices {
 
     fn export_video(&self, job: VideoJob) -> Result<VideoExport, String> {
         crate::video::export(job, self.ctx.clone())
+    }
+
+    fn request_pictures_video(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("pictures-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new().set_title("New Video from Pictures").set_directory(&start).add_filter("Pictures", PICTURES).pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => {
+                    DialogResult::PicturesVideo(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect())
+                }
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
     }
 
     fn request_import(&self) {
@@ -456,14 +559,35 @@ impl Services for DesktopServices {
         Ok(job)
     }
 
-    fn play_sound(&self, recording: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Option<Box<dyn SoundOut>> {
-        match crate::video::Sound::start(recording, timeline, media, from_us) {
+    fn play_sound(
+        &self,
+        recording: Arc<Recording>,
+        timeline: Timeline,
+        media: Arc<dyn MediaStore>,
+        from_us: u64,
+        rate: i32,
+    ) -> Option<Box<dyn SoundOut>> {
+        match crate::video::Sound::start(recording, timeline, media, from_us, rate) {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
                 log::warn!("playing the sound: {e}");
                 None
             }
         }
+    }
+
+    fn can_narrate(&self) -> bool {
+        cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux"))
+    }
+
+    fn microphones(&self) -> Vec<String> {
+        screengrabcraft_capture::audio::microphones()
+    }
+
+    fn record_narration(&self, mic: Option<&str>, beside: &str) -> Result<Box<dyn NarrationTake>, String> {
+        // None: the one Video Production records with, as the Recorder has it.
+        let mic = mic.map(str::to_string).or_else(|| store::load_settings().production.microphone_name);
+        Ok(Box::new(crate::narration::start(mic, Path::new(beside))?))
     }
 
     fn open_with_system(&self, path: &str) {
@@ -545,6 +669,63 @@ impl Services for DesktopServices {
         });
     }
 
+    fn request_batch(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("batch-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Make Videos of Several Recordings")
+                    .set_directory(&start)
+                    .add_filter("Video recordings", &[REC])
+                    .pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Batch(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn request_subtitles(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("subtitles-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Import Subtitles")
+                    .set_directory(&start)
+                    .add_filter("Subtitles", &["srt", "vtt"])
+                    .add_filter("All files", &["*"])
+                    .pick_file(),
+            );
+            let answer = match picked {
+                Some(f) => {
+                    let path = f.path().to_path_buf();
+                    let too_large = std::fs::metadata(&path).map(|m| m.len() > screengrabcraft_ui::services::MAX_SUBTITLES).unwrap_or(true);
+                    match std::fs::read(&path) {
+                        Ok(bytes) if !too_large => {
+                            DialogResult::Subtitles(vec![OpenedFile { name: f.file_name(), path: Some(path.to_string_lossy().to_string()), bytes }])
+                        }
+                        Ok(_) => {
+                            log::warn!("subtitles not brought in: {} is too large", f.file_name());
+                            DialogResult::Cancelled
+                        }
+                        Err(e) => {
+                            log::warn!("subtitles not read: {e}");
+                            DialogResult::Cancelled
+                        }
+                    }
+                }
+                None => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
     fn background_model(&self) -> Result<Arc<dyn Matting>, String> {
         self.model.get_or_init(screengrabcraft_desktop::models::background_model).clone()
     }
@@ -553,6 +734,79 @@ impl Services for DesktopServices {
         self.text_ready.get_or_init(screengrabcraft_desktop::text::ready).clone()?;
         Ok(Arc::new(SystemText))
     }
+
+    fn keeps_own_stamps(&self) -> bool {
+        stamps_dir().is_some()
+    }
+
+    fn own_stamps(&self) -> Vec<String> {
+        let Some(dir) = stamps_dir() else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let png = p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("png"));
+                if png { p.file_stem().and_then(|s| s.to_str()).map(str::to_string) } else { None }
+            })
+            .filter(|n| stamp_name_ok(n))
+            .collect();
+        names.sort();
+        names.truncate(screengrabcraft_ui::stamps::MAX_OWN);
+        names
+    }
+
+    fn own_stamp(&self, name: &str) -> Option<Raster> {
+        let bytes = read_limited(&stamp_file(name)?).ok()?;
+        screengrabcraft_render::codec::decode(&bytes).ok()
+    }
+
+    fn add_own_stamp(&self, png: &[u8]) -> Result<String, String> {
+        let dir = stamps_dir().ok_or("this run keeps no settings, so no stamps of your own")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let base = format!("stamp-{ms}");
+        let mut name = base.clone();
+        for i in 1..1000 {
+            if !dir.join(format!("{name}.png")).exists() {
+                break;
+            }
+            name = format!("{base}-{i}");
+        }
+        store::write_atomic(&dir.join(format!("{name}.png")), png).map_err(|e| e.to_string())?;
+        log::info!("kept a picture as a stamp: {name}.png, {} bytes", png.len());
+        Ok(name)
+    }
+
+    fn remove_own_stamp(&self, name: &str) -> Result<(), String> {
+        let file = stamp_file(name).ok_or("there is no such stamp")?;
+        std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        log::info!("took {name}.png out of the stamps");
+        Ok(())
+    }
+}
+
+/// The folder pictures of your own are kept in as stamps: `stamps` in the settings folder (none
+/// in a run that keeps no settings).
+fn stamps_dir() -> Option<PathBuf> {
+    if paths::no_prefs() {
+        return None;
+    }
+    Some(paths::settings_dir()?.join("stamps"))
+}
+
+/// Whether `name` is one the editor gives a stamp (letters, figures, - and _): nothing that
+/// reaches out of the folder.
+fn stamp_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A stamp's file, for a name the editor gave it.
+fn stamp_file(name: &str) -> Option<PathBuf> {
+    if !stamp_name_ok(name) {
+        return None;
+    }
+    Some(stamps_dir()?.join(format!("{name}.png")))
 }
 
 /// Grab Text with the system's own text reader ([`screengrabcraft_desktop::text`]).
@@ -560,7 +814,32 @@ struct SystemText;
 
 impl ReadText for SystemText {
     fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
-        let lines = screengrabcraft_desktop::text::read(picture)?;
-        Ok(lines.into_iter().map(|l| TextLine { text: l.text, rect: screengrabcraft_model::Rect::new(l.x, l.y, l.w, l.h) }).collect())
+        screengrabcraft_desktop::text::read(picture)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Captures kept in a capture preset's own folder are in the strip with the rest, newest first.
+    #[test]
+    fn the_strip_lists_the_captures_of_every_folder_they_were_kept_in() {
+        let base = std::env::temp_dir().join(format!("sgc-strip-{}", std::process::id()));
+        let (main, own, gone) = (base.join("Captures"), base.join("Bugs"), base.join("Not there"));
+        for d in [&main, &own] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let png = screengrabcraft_render::encode(&Raster::filled(4, 4, screengrabcraft_model::Color::WHITE).unwrap(), ImageFormat::Png, 90).unwrap();
+        std::fs::write(main.join("Capture 1.png"), &png).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(own.join("Bug 1.png"), &png).unwrap();
+        std::fs::write(own.join("notes.txt"), b"not a capture").unwrap();
+        std::fs::create_dir_all(own.join("folder.png")).unwrap();
+        let items = captures_in(&[main.clone(), own.clone(), gone]);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Bug 1.png", "Capture 1.png"], "newest first, pictures only, from both");
+        assert!(items.first().is_some_and(|i| Path::new(&i.path).starts_with(&own)));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
