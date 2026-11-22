@@ -31,7 +31,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Fixed size or fixed place area | Part | the Recorder has fixed sizes for videos; still pictures don't |
 | Aspect ratio held while dragging (square, 16:9, 4:3) | Missing | |
 | The program's own windows kept out of the picture | Has | the editor steps aside |
-| The mouse pointer in the picture | Part | drawn into the picture when Settings say so; not a separate object to move or delete later |
+| The mouse pointer in the picture | Has | drawn into the picture when Settings say so, and kept in the capture's side file as an annotation of its own, so the editor can move or delete it |
 | **Grab Text: the text in an area straight to the clipboard** | Has (0.1.54) | Windows' own text reader, on this computer; Windows only for now |
 | Scrolling capture, scrolled by hand | Has | |
 | Scrolling capture that scrolls by itself | Missing | |
@@ -112,7 +112,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Remove background | Has | a model on this computer |
 | Make a colour see-through | Has | |
 | **Grab Text from the picture or an area** | Has (0.1.54) | Image menu, right-click, Ctrl+Shift+T |
-| The captured pointer moved or deleted | Missing | |
+| **The captured pointer moved or deleted** | Has | the capture service keeps the pointer as a picture annotation in the capture's side file (the picture without it under it, and as the original); the editor opens the capture with it, to move, delete or restyle |
 | Quick styles in themes, favourites | Has | |
 | **Themes of your own** | Has | the theme menu's "New theme from the current colours…": four colours (the ones in use first, each changeable) and a name, kept in the editor's settings and listed after the built-in four; deleted from the same menu |
 | **Effect presets** | Has | at the top of the Effects pane: eight ready-made (Soft Shadow, Photo Frame, Rounded Card, Torn Paper, Old Photo, Faded Edges, Thin Line, Black and White), each one or a few effects applied with one click as one undo step; Keep as Preset… under any effect keeps its settings under a name, kept in the editor's settings (a right-click deletes one) |
@@ -130,7 +130,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Copy, paste (a pasted picture stays an object) | Has | |
 | Project file that keeps the annotations | Has | `.sgcraft` |
 | Saves itself; Revert to Original | Has | |
-| Tool bar with names; tools of your choosing | Part | names on or off; the tools can't be chosen |
+| **Tool bar with names; tools of your choosing** | Has | names on or off (View › Tool Names); View › Customize Tool Bar…: tick the tools to show and move them up or down, kept in the settings; Usual Tools puts it back; a tool left off keeps its key |
 
 ## Effects on a picture
 
@@ -292,6 +292,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 16. Gradient fills; themes of your own for the quick styles.
 17. Effect presets; the picture rotated by any angle.
 18. Rulers, guides and snapping; measuring a distance.
+19. A tool bar of your choosing; the captured pointer as an annotation to move or delete.
 
 **Still to build, in this order**
 

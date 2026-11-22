@@ -294,3 +294,37 @@ fn the_measure_tool_measures_a_distance() {
     assert_eq!(h.state().session.doc.objects.len(), 4);
     shot(&mut h, "measure-kept");
 }
+
+/// View › Customize Tool Bar: a tool left off and another moved up are kept in the settings and
+/// shown so; the one left off is still picked by its key; Usual Tools puts the bar back.
+#[test]
+fn the_tool_bar_is_customized() {
+    let mut h = crate::tests::harness_sized(editor(), egui::vec2(1700.0, 1000.0));
+    h.run_steps(4);
+    click(&mut h, "View");
+    click(&mut h, "Customize Tool Bar…");
+    h.run_steps(6);
+    h.get_by_label(crate::toolbar::TITLE);
+    click(&mut h, "Magnify");
+    click(&mut h, "Move Hand up");
+    shot(&mut h, "customize-tool-bar");
+    click(&mut h, "Save");
+    let kept = h.state().settings.tool_bar.clone();
+    assert_eq!(kept.first().map(String::as_str), Some("hand"), "{kept:?}");
+    assert!(!kept.iter().any(|t| t == "magnify"));
+    assert!(h.state().customizing_bar.is_none());
+    h.run_steps(2);
+    assert!(h.query_by_label("Magnify (M)").is_none(), "left off the bar");
+    let (hand, mv) = (h.get_by_label("Hand (D)").rect(), h.get_by_label("Move (V)").rect());
+    assert!(hand.max.x <= mv.min.x, "Hand before Move");
+    shot(&mut h, "tool-bar-customized");
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Magnify), "still picked by its key");
+    click(&mut h, "View");
+    click(&mut h, "Customize Tool Bar…");
+    click(&mut h, "Usual Tools");
+    click(&mut h, "Save");
+    assert!(h.state().settings.tool_bar.is_empty());
+    h.get_by_label("Magnify (M)");
+}

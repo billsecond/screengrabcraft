@@ -124,6 +124,9 @@ pub struct Service {
     /// screen) has gone: copying it to the clipboard takes a moment, and the screen shouldn't
     /// stay frozen meanwhile.
     chosen: Option<(Raster, String, Action)>,
+    /// The capture as a document with the pointer as an annotation of its own (it is drawn into the
+    /// picture too), kept as the capture's side file so the editor can move or delete it.
+    pointer_doc: Option<screengrabcraft_model::Document>,
     /// When the capture now under way was asked for, for the log's timings.
     asked: Option<Instant>,
     /// Whether an editor is to be kept ready out of sight (the setting, on Windows), as last seen.
@@ -212,6 +215,7 @@ impl Service {
             keeping_held: false,
             held: Vec::new(),
             chosen: None,
+            pointer_doc: None,
             asked: None,
             ready_wanted: false,
             ready_at: None,
@@ -679,7 +683,8 @@ impl Service {
 
     /// The mouse pointer drawn into a capture of (part of) a monitor, when the settings ask for
     /// it. `pic` is cut from the monitor's picture (`full` its size) at `origin`.
-    fn with_pointer(&self, pic: &Raster, m: &Monitor, full: (u32, u32), origin: (u32, u32), pointer: Option<(i32, i32)>) -> Raster {
+    fn with_pointer(&mut self, pic: &Raster, m: &Monitor, full: (u32, u32), origin: (u32, u32), pointer: Option<(i32, i32)>) -> Raster {
+        self.pointer_doc = None;
         let (Some((x, y)), true) = (pointer, self.settings.include_cursor) else { return pic.clone() };
         if !m.rect.contains(i64::from(x), i64::from(y)) {
             return pic.clone();
@@ -690,6 +695,7 @@ impl Service {
         let py = (y - m.rect.y) as f32 * ry - origin.1 as f32;
         // Pointers grow with the display's scale (on a Retina display the picture's own pixels say so).
         let size = if rx > 1.01 { rx } else { m.scale.max(1.0) };
+        self.pointer_doc = screengrabcraft_render::pointer::as_document(pic, px, py, size);
         screengrabcraft_render::pointer::draw(pic, px, py, size).unwrap_or_else(|| pic.clone())
     }
 
@@ -766,6 +772,8 @@ impl Service {
     /// Keeps a capture: saved, copied and/or opened in the editor, as the action and the
     /// settings say. The file work is done on a worker thread.
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
+        // The pointer as an annotation, for this very picture only.
+        let pointer_doc = self.pointer_doc.take().filter(|d| d.width() == pic.width() && d.height() == pic.height());
         let (save, copy, edit) = what_to_keep(action, &self.settings.after_capture);
         // While recording, nothing comes up over the screen being recorded: the capture is saved
         // (and copied, if it's to be), and opened in the editor once the recording is over.
@@ -781,7 +789,7 @@ impl Service {
         let copy_later = copy && cfg!(target_os = "windows");
         let copied = copy && !copy_later && copy_to_clipboard(&pic);
         let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
-            let r = keep(&pic, &source, &settings, save, edit, copied, copy_later);
+            let r = keep(&pic, &source, &settings, (save, edit), copied, copy_later, pointer_doc.as_ref());
             let _ = tx.send(Msg::Saved(r));
             ctx.request_repaint();
         });
@@ -1343,8 +1351,20 @@ fn copy_to_clipboard(pic: &Raster) -> bool {
 /// The file work of keeping a capture (on a worker thread): written, handed to the editor, then
 /// copied to the clipboard if that's left to do (`copy_later`), whether the file could be
 /// written or not.
-fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool, copy_later: bool) -> Result<Done, String> {
+fn keep(
+    pic: &Raster,
+    source: &str,
+    s: &Settings,
+    (save, edit): (bool, bool),
+    copied: bool,
+    copy_later: bool,
+    side: Option<&screengrabcraft_model::Document>,
+) -> Result<Done, String> {
     let file = write_capture(pic, source, s, save, edit);
+    // The pointer as an annotation of its own, in the side file the editor opens the capture with.
+    if let (Ok((_, Some(p))), Some(doc)) = (&file, side) {
+        write_pointer_side(p, doc);
+    }
     let mut edited = false;
     if edit && let Ok((_, Some(p))) = &file {
         let t = Instant::now();
@@ -1363,6 +1383,20 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
         screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
     };
     Ok(Done { saved, copied, edited, thumb })
+}
+
+/// The side file of the capture at `picture`: the capture as a document with the pointer as an
+/// annotation, and the picture without it as the original. A failure only loses that.
+fn write_pointer_side(picture: &std::path::Path, doc: &screengrabcraft_model::Document) {
+    let side = picture.with_extension(screengrabcraft_model::PROJECT_EXT);
+    match screengrabcraft_render::project::save_with_original(doc, Some(&doc.base)) {
+        Ok(bytes) => {
+            if let Err(e) = store::write_atomic(&side, &bytes) {
+                log::warn!("the pointer's side file {}: {e}", side.display());
+            }
+        }
+        Err(e) => log::warn!("the pointer's side file: {e}"),
+    }
 }
 
 /// The capture written: where it was saved (if it was), and the file for the editor (if it goes
@@ -1400,6 +1434,24 @@ fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A capture with the pointer in it gets a side file beside it with the pointer as an
+    /// annotation of its own, over the picture without it (a made-up picture, in a folder of the
+    /// test's own).
+    #[test]
+    fn the_pointer_is_kept_as_an_annotation_beside_the_capture() {
+        let dir = std::env::temp_dir().join(format!("sgc-pointer-side-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = Raster::filled(80, 60, screengrabcraft_model::Color::rgb(30, 90, 200)).unwrap();
+        let doc = screengrabcraft_render::pointer::as_document(&plain, 40.0, 30.0, 1.0).unwrap();
+        let picture = dir.join("capture.png");
+        write_pointer_side(&picture, &doc);
+        let bytes = std::fs::read(dir.join("capture.sgcraft")).unwrap();
+        let p = screengrabcraft_render::project::read(&bytes).unwrap();
+        assert_eq!(p.doc.objects.len(), 1, "the pointer");
+        assert!(p.doc.base == plain && p.original == Some(plain), "under it, and as the original, the screen alone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn grab_texts_notice_shows_how_the_text_begins() {

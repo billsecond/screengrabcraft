@@ -54,6 +54,8 @@ every capture, a delayed capture (3, 5 or 10 s), the editor and the captures fol
 an area the screen is frozen as it was when the key was pressed (open menus and tooltips included),
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
+With "Include the mouse pointer in captures" on, the pointer is drawn into the capture, and in the
+editor it is an annotation of its own, to move or delete.
 
 As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
@@ -164,7 +166,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
   **Fill** and **Move** in the middle, then every other tool, each with its own full-size button
   and its name under it (a narrow window gives the tools a row of their own; View › Tool Names
-  turns the names off). Every tool keeps its key.
+  turns the names off). View › Customize Tool Bar… shows the tools you choose, in your order.
+  Every tool keeps its key, on the bar or not.
 - **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every

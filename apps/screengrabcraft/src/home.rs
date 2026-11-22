@@ -394,7 +394,8 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     ui.label(RichText::new("While choosing").strong());
     ui.checkbox(&mut s.magnifier, "Show the magnifier next to the pointer");
     ui.checkbox(&mut s.crosshair, "Show crosshair lines");
-    ui.checkbox(&mut s.include_cursor, "Include the mouse pointer in captures");
+    ui.checkbox(&mut s.include_cursor, "Include the mouse pointer in captures")
+        .on_hover_text("In the editor the pointer is an annotation of its own, to move or delete");
     if s != svc.settings {
         svc.settings = s;
         svc.apply_settings();
