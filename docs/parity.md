@@ -293,7 +293,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 17. Open With: a capture in a program of the owner's choosing (Windows; #94).
 18. The camera full screen, swapped with the screen while recording (#98).
 19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
-20. The how-to guide saved as a word-processor document and as slides.
+20. The how-to guide saved as a word-processor document and as slides (#101).
 
 **Still to build, in this order**
 
