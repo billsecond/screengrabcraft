@@ -732,6 +732,9 @@ impl VideoView {
                         self.slider(ui, size_label, place.w, lo, hi, "w", &set);
                         self.slider(ui, "Opacity", place.opacity, 0.1, 1.0, "opacity", &set);
                         self.frame_section(ui, &item, &media, &mut first, &set);
+                        if !matches!(item.what, What::Text { style: layers::TextStyle::Blur, .. }) {
+                            self.mask_section(ui, &item, &mut first, &set);
+                        }
                         super::section(ui, "Position", &mut first);
                         self.slider(ui, "Across", place.x, -0.5, 1.5, "x", &set);
                         self.slider(ui, "Down", place.y, -0.5, 1.5, "y", &set);
@@ -885,8 +888,6 @@ impl VideoView {
         }
     }
 
-    /// A number of the item's placement, as a percentage slider (a drag is one undo step).
-    #[allow(clippy::too_many_arguments)]
     /// How an item is framed: turned (anything on the picture), and a picture or a video cut down
     /// at its sides, with a border, rounded corners and a shadow.
     fn frame_section(
@@ -939,6 +940,61 @@ impl VideoView {
         }
     }
 
+    /// An item's mask (the shape it's shown in, or that's cut out of it: where in it and how
+    /// large) and how it's blended with what's under it.
+    fn mask_section(&mut self, ui: &mut Ui, item: &Item, first: &mut bool, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        let t = Tokens::get(ui.ctx());
+        let look = item.look.clone().checked();
+        let mask = look.mask;
+        super::section(ui, "Mask and Blend", first);
+        egui::Grid::new("item-mask").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label(RichText::new("Shown in").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("mask-shape").width(150.0).selected_text(mask.shape.label()).show_ui(ui, |ui| {
+                for k in layers::MaskShape::ALL {
+                    if ui.selectable_label(mask.shape == k, k.label()).clicked() {
+                        set(self, json!({ "mask": k }), false);
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label(RichText::new("Blend").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("blend-mode").width(150.0).selected_text(look.blend.label()).show_ui(ui, |ui| {
+                for k in layers::BlendMode::ALL {
+                    if ui.selectable_label(look.blend == k, k.label()).clicked() {
+                        set(self, json!({ "blend": k }), false);
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        if mask.is_none() {
+            return;
+        }
+        ui.add_space(4.0);
+        let mut cut = mask.cut;
+        if ui.checkbox(&mut cut, "Cut the shape out").on_hover_text("Everything but the shape shown, instead of only the shape").changed() {
+            // Cut out at its whole size it would hide everything: start at half its size.
+            let whole = mask.w >= 0.99 && mask.h >= 0.99;
+            let p = if cut && whole { json!({"maskCut": true, "maskArea": [mask.x, mask.y, 0.5, 0.5]}) } else { json!({ "maskCut": cut }) };
+            set(self, p, false);
+        }
+        let area = [mask.x, mask.y, mask.w, mask.h];
+        for (k, (name, lo, hi)) in
+            [("Shape across", -50.0, 150.0), ("Shape down", -50.0, 150.0), ("Shape width", 5.0, 200.0), ("Shape height", 5.0, 200.0)]
+                .into_iter()
+                .enumerate()
+        {
+            let was = area.get(k).copied().unwrap_or(0.0) * 100.0;
+            let mut v = was;
+            let r = super::named_slider(ui, name, &mut v, lo..=hi, "%");
+            let mut new = area;
+            if let Some(a) = new.get_mut(k) {
+                *a = v / 100.0;
+            }
+            self.look_change(&r, (v - was).abs() > 0.4, json!({ "maskArea": new }), set);
+        }
+    }
+
     /// A change of an item's look from a slider: a drag is one undo step. (A slider rounds what
     /// it's given: only a move is a change.)
     fn look_change(&mut self, r: &egui::Response, moved: bool, p: serde_json::Value, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
@@ -953,6 +1009,8 @@ impl VideoView {
         }
     }
 
+    /// A number of the item's placement, as a percentage slider (a drag is one undo step).
+    #[allow(clippy::too_many_arguments)]
     fn slider(&mut self, ui: &mut Ui, label: &str, value: f32, lo: f32, hi: f32, key: &str, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
         let mut v = value * 100.0;
         let r = super::named_slider(ui, label, &mut v, lo * 100.0..=hi * 100.0, "%");

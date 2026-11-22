@@ -199,6 +199,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   sides, puts a border of any colour round it, rounds its corners and gives it a soft shadow
   (Frame). A screen or camera clip's panel makes it lighter or darker, changes its contrast and
   colour (down to grey), and crops its edges (what's left fills the picture, its shape kept).
+- **Looks, masks and blends**: a screen or camera clip's panel gives it a ready-made look (warm,
+  cool, vivid, faded, dramatic, black and white, sepia, night) or a tint of any colour. An item's
+  panel (Mask and Blend) shows it only inside a shape (a rectangle, rounded rectangle, oval,
+  diamond, star or heart), or cuts the shape out of it, and lays it on what's under it as
+  multiply, screen, overlay, darken or lighten.
 - **Keyframes**: an item's panel adds a keyframe at the playhead (Motion); move the playhead on and
   move, resize or fade the item (on the picture or in the panel) and it goes there smoothly. A
   zoom's keyframes pan it along. The timeline shows each as a diamond on the item.

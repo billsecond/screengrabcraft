@@ -83,6 +83,27 @@ impl VideoView {
     pub(super) fn clip_look_section(&mut self, ed: &mut Editor, ui: &mut Ui, ti: usize, ci: usize) {
         let ctx = ui.ctx().clone();
         let Some(look) = self.session.timeline.tracks.get(ti).and_then(|t| t.clips.get(ci)).map(|c| c.look) else { return };
+        // A ready-made look: every colour at once (the sliders then change it further).
+        let t = Tokens::get(ui.ctx());
+        let chosen = match look.named() {
+            Some(n) => n.label,
+            None if look.colours_plain() => "As recorded",
+            None => "Your own",
+        };
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Look").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt(("clip-look", ti, ci)).width(150.0).selected_text(chosen).show_ui(ui, |ui| {
+                if ui.selectable_label(look.colours_plain(), "As recorded").clicked() {
+                    self.run(ed, &ctx, "video.clipLook", json!({"track": ti, "clip": ci, "look": "plain"}));
+                }
+                for n in screengrabcraft_media::timeline::LOOKS {
+                    if ui.selectable_label(look.named().is_some_and(|m| m.key == n.key), n.label).clicked() {
+                        self.run(ed, &ctx, "video.clipLook", json!({"track": ti, "clip": ci, "look": n.key}));
+                    }
+                }
+            });
+        });
+        ui.add_space(4.0);
         for (name, key, value) in
             [("Brightness", "brightness", look.brightness), ("Contrast", "contrast", look.contrast), ("Colour", "saturation", look.saturation)]
         {
@@ -90,6 +111,26 @@ impl VideoView {
             let r = super::named_slider(ui, name, &mut v, -100.0..=100.0, "");
             self.clip_look_change(ed, &ctx, &r, (v - f32::from(value)).abs() > 0.4, json!({"track": ti, "clip": ci, key: v.round()}));
         }
+        // The tint: a colour, and how far towards it (a colour picked with none yet gives some).
+        let mut amount = f32::from(look.tint_amount);
+        let r = super::named_slider(ui, "Tint", &mut amount, 0.0..=100.0, "%");
+        let tint = if look.tint_amount == 0 { [0xFF, 0x96, 0x3C] } else { look.tint };
+        let hex = |c: [u8; 3]| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]);
+        self.clip_look_change(
+            ed,
+            &ctx,
+            &r,
+            (amount - f32::from(look.tint_amount)).abs() > 0.4,
+            json!({"track": ti, "clip": ci, "tint": hex(tint), "tintAmount": amount.round()}),
+        );
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Tint colour").size(12.0).color(t.muted));
+            let mut c = Color32::from_rgb(tint[0], tint[1], tint[2]);
+            if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                let amount = if look.tint_amount == 0 { 30 } else { look.tint_amount };
+                self.run(ed, &ctx, "video.clipLook", json!({"track": ti, "clip": ci, "tint": hex([c.r(), c.g(), c.b()]), "tintAmount": amount}));
+            }
+        });
         for (k, name) in ["Crop the left", "Crop the top", "Crop the right", "Crop the bottom"].into_iter().enumerate() {
             let was = f32::from(look.crop.get(k).copied().unwrap_or(0)) / 10.0;
             let mut v = was;
@@ -103,12 +144,7 @@ impl VideoView {
         if !look.is_plain() {
             ui.add_space(4.0);
             if ui.button("As Recorded").on_hover_text("Its colours and its whole picture again").clicked() {
-                self.run(
-                    ed,
-                    &ctx,
-                    "video.clipLook",
-                    json!({"track": ti, "clip": ci, "brightness": 0, "contrast": 0, "saturation": 0, "crop": [0, 0, 0, 0]}),
-                );
+                self.run(ed, &ctx, "video.clipLook", json!({"track": ti, "clip": ci, "look": "plain", "crop": [0, 0, 0, 0]}));
             }
         }
     }

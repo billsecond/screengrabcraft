@@ -579,7 +579,8 @@ impl PictureCache {
 }
 
 /// Draws every picture layer's items at timeline time `t` over `out` (the recording's picture),
-/// the later layers on top.
+/// the later layers on top. An item with a mask or a blend mode is drawn on a see-through picture
+/// of its own first, masked, then laid on the rest as its blend mode says.
 pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore, t: u64, texts: &mut TextCache, pictures: &mut PictureCache) {
     let showing: Vec<std::borrow::Cow<Item>> = timeline
         .layers
@@ -595,80 +596,204 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
         return;
     }
     let Some(mut pix) = canvas::to_pixmap(out) else { return };
-    let (w, h) = (pix.width() as f32, pix.height() as f32);
     for item in &showing {
         let item: &Item = item;
-        let m = motion(item, t, w, h);
-        match &item.what {
-            What::Media { id } => {
-                let Some(m_item) = timeline.media.iter().find(|x| x.id == *id) else { continue };
-                let at = if m_item.kind == MediaKind::Picture { 0 } else { item.from + (t - item.at) };
-                let Some(pic) = store.picture(*id, at) else { continue };
-                let Some(ready) = pictures.get(*id, &pic) else { continue };
-                let rect = media_rect(item, pic.width(), pic.height(), w, h);
-                if item.look.is_plain() {
-                    picture_at(&mut pix, &ready, rect, m);
-                } else {
-                    framed_at(&mut pix, &ready, rect, m, &item.look);
-                }
-            }
-            What::Text { style: TextStyle::Blur, title, subtitle, color } => {
-                // What's under its box blurred (it draws nothing of its own), coming on and going
-                // as the graphics do, and as the item's own animations and opacity say.
-                let Some(g) = graphic(Some(&mut *texts), TextStyle::Blur, title, subtitle, color, item.len, item.place.w) else { continue };
-                let amount = crate::stock::blur_amount(item.len, t.saturating_sub(item.at) as f32 / 1e6) * m.alpha;
-                let r = moved(g.bounds, stock_place(TextStyle::Blur, &g, item.place, w, h));
-                // Moved and grown about the middle of the picture, as a graphic's picture is.
-                let (k, cx, cy) = (m.scale.max(0.01), w / 2.0, h / 2.0);
-                let r = Rect::new((r.x - cx) * k + cx + m.dx, (r.y - cy) * k + cy + m.dy, r.w * k, r.h * k);
-                blur_box(&mut pix, r, amount);
-            }
-            What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
-                // A broadcast graphic: played, a frame for each moment of its item.
-                let Some(g) = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len, item.place.w) else { continue };
-                let secs = (t - item.at) as f32 / 1e6;
-                let at = stock_place(*style, &g, item.place, w, h);
-                let turn = item.look.clone().checked().rotate;
-                let plain = m.alpha >= 0.999
-                    && item.place.opacity >= 0.999
-                    && m.dx == 0.0
-                    && m.dy == 0.0
-                    && (m.scale - 1.0).abs() < 1.0e-4
-                    && turn.abs() < 1.0e-3;
-                if plain {
-                    g.animation.render(&mut pix, secs, at);
-                } else if let Some(mut own) = Pixmap::new(w as u32, h as u32) {
-                    g.animation.render(&mut own, secs, at);
-                    let r = moved(g.bounds, at);
-                    let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
-                    turned_at(&mut pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
-                }
-            }
-            What::Text { style, title, subtitle, color } => {
-                let key = format!("{style:?}|{title}|{subtitle}|{color}|{:?}|{}x{}", item.place, w, h);
-                let (st, ti, su, co, place) = (*style, title.as_str(), subtitle.as_str(), color.as_str(), item.place);
-                let drawn = texts.get(key, || {
-                    let mut p = Pixmap::new(w as u32, h as u32)?;
-                    text_item(Some(&mut p), st, ti, su, co, place, w, h);
-                    Some(p)
-                });
-                if let Some(p) = drawn {
-                    let r = text_item(None, st, ti, su, co, place, w, h);
-                    let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
-                    let turn = item.look.clone().checked().rotate;
-                    turned_at(&mut pix, &p, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
-                }
-            }
-            What::Transition { kind } => {
-                let p = (t - item.at) as f32 / item.len.max(1) as f32;
-                transition(&mut pix, *kind, p);
-            }
-            // It zooms the screen under everything (see `crate::zoom`); it draws nothing itself.
-            What::Zoom => {}
+        // A blur and a transition change what's under them: they're never drawn apart.
+        let apart = item.look.is_layered() && !matches!(item.what, What::Transition { .. } | What::Text { style: TextStyle::Blur, .. });
+        if !apart {
+            let _ = draw_item(&mut pix, item, timeline, store, t, texts, pictures);
+            continue;
         }
+        let Some(mut own) = Pixmap::new(pix.width(), pix.height()) else { continue };
+        let Some((bx, to)) = draw_item(&mut own, item, timeline, store, t, texts, pictures) else { continue };
+        let look = item.look.clone().checked();
+        if let Some(mask) = mask_for(&look.mask, bx, to, own.width(), own.height()) {
+            own.apply_mask(&mask);
+        }
+        let paint = PixmapPaint { blend_mode: blend_mode(look.blend), ..PixmapPaint::default() };
+        pix.draw_pixmap(0, 0, own.as_ref(), &paint, Transform::identity(), None);
     }
     if let Some(r) = canvas::from_pixmap(&pix) {
         *out = r;
+    }
+}
+
+/// tiny-skia's blend mode for an item's.
+fn blend_mode(b: layers::BlendMode) -> tiny_skia::BlendMode {
+    match b {
+        layers::BlendMode::Normal => tiny_skia::BlendMode::SourceOver,
+        layers::BlendMode::Multiply => tiny_skia::BlendMode::Multiply,
+        layers::BlendMode::Screen => tiny_skia::BlendMode::Screen,
+        layers::BlendMode::Overlay => tiny_skia::BlendMode::Overlay,
+        layers::BlendMode::Darken => tiny_skia::BlendMode::Darken,
+        layers::BlendMode::Lighten => tiny_skia::BlendMode::Lighten,
+    }
+}
+
+/// The outline of a mask's shape filling `r`.
+fn mask_path(shape: layers::MaskShape, r: Rect) -> Option<tiny_skia::Path> {
+    use layers::MaskShape as S;
+    if !(r.w > 0.0 && r.h > 0.0 && r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite()) {
+        return None;
+    }
+    let at = |u: f32, v: f32| (r.x + u * r.w, r.y + v * r.h);
+    let polygon = |points: &[(f32, f32)]| {
+        let mut pb = PathBuilder::new();
+        for (k, (u, v)) in points.iter().enumerate() {
+            let (x, y) = at(*u, *v);
+            if k == 0 {
+                pb.move_to(x, y);
+            } else {
+                pb.line_to(x, y);
+            }
+        }
+        pb.close();
+        pb.finish()
+    };
+    match shape {
+        S::None => None,
+        S::Rectangle => Some(PathBuilder::from_rect(tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h)?)),
+        S::Rounded => draw::rounded_rect(r, r.w.min(r.h) * 0.2),
+        S::Ellipse => PathBuilder::from_oval(tiny_skia::Rect::from_xywh(r.x, r.y, r.w, r.h)?),
+        S::Diamond => polygon(&[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)]),
+        S::Star => {
+            // Five points, the top one up; the points half its size from its middle, the dips a fifth.
+            let points: Vec<(f32, f32)> = (0..10)
+                .map(|k| {
+                    let a = -std::f32::consts::FRAC_PI_2 + k as f32 * std::f32::consts::PI / 5.0;
+                    let reach = if k % 2 == 0 { 0.5 } else { 0.2 };
+                    (0.5 + reach * a.cos(), 0.53 + reach * a.sin())
+                })
+                .collect();
+            polygon(&points)
+        }
+        S::Heart => {
+            // Two round lobes at the top meeting in a point at the bottom.
+            let mut pb = PathBuilder::new();
+            let (x, y) = at(0.5, 0.3);
+            pb.move_to(x, y);
+            for [a, b, c] in [
+                [(0.5, 0.0), (0.0, 0.0), (0.0, 0.3)],
+                [(0.0, 0.6), (0.5, 0.8), (0.5, 1.0)],
+                [(0.5, 0.8), (1.0, 0.6), (1.0, 0.3)],
+                [(1.0, 0.0), (0.5, 0.0), (0.5, 0.3)],
+            ] {
+                let ((ax, ay), (bx, by), (cx, cy)) = (at(a.0, a.1), at(b.0, b.1), at(c.0, c.1));
+                pb.cubic_to(ax, ay, bx, by, cx, cy);
+            }
+            pb.close();
+            pb.finish()
+        }
+    }
+}
+
+/// A `w × h` mask of an item's mask shape: `bx` is the item's box in its own space and `to` puts
+/// that space on the picture. None when it has no mask.
+fn mask_for(mask: &layers::Mask, bx: Rect, to: Transform, w: u32, h: u32) -> Option<tiny_skia::Mask> {
+    let m = mask.checked();
+    let (mw, mh) = (bx.w * m.w, bx.h * m.h);
+    let path = mask_path(m.shape, Rect::new(bx.x + bx.w * m.x - mw / 2.0, bx.y + bx.h * m.y - mh / 2.0, mw, mh))?;
+    let mut out = tiny_skia::Mask::new(w, h)?;
+    out.fill_path(&path, FillRule::Winding, true, to);
+    if m.cut {
+        out.invert();
+    }
+    Some(out)
+}
+
+/// The transform that moves, grows and turns a frame-sized picture of an item as its motion and
+/// its turn say (`pivot`: its middle before its motion).
+fn frame_transform(m: Motion, w: f32, h: f32, degrees: f32, pivot: Pt) -> Transform {
+    let (cx, cy, k) = (w / 2.0, h / 2.0, m.scale.max(0.01));
+    let t = Transform::from_translate(-cx, -cy).post_scale(k, k).post_translate(cx + m.dx, cy + m.dy);
+    if degrees.abs() > 1.0e-3 && degrees.is_finite() { t.post_rotate_at(degrees, pivot.x + m.dx, pivot.y + m.dy) } else { t }
+}
+
+/// Draws one item at timeline time `t` onto `pix` (the picture so far, or a see-through one of its
+/// own): where its box is then, in its own space, and the transform putting that on the picture
+/// (for its mask). None when nothing could be drawn.
+fn draw_item(
+    pix: &mut Pixmap,
+    item: &Item,
+    timeline: &Timeline,
+    store: &dyn MediaStore,
+    t: u64,
+    texts: &mut TextCache,
+    pictures: &mut PictureCache,
+) -> Option<(Rect, Transform)> {
+    let (w, h) = (pix.width() as f32, pix.height() as f32);
+    let m = motion(item, t, w, h);
+    match &item.what {
+        What::Media { id } => {
+            let m_item = timeline.media.iter().find(|x| x.id == *id)?;
+            let at = if m_item.kind == MediaKind::Picture { 0 } else { item.from + (t - item.at) };
+            let pic = store.picture(*id, at)?;
+            let ready = pictures.get(*id, &pic)?;
+            let rect = media_rect(item, pic.width(), pic.height(), w, h);
+            if item.look.is_plain() {
+                picture_at(pix, &ready, rect, m);
+            } else {
+                framed_at(pix, &ready, rect, m, &item.look);
+            }
+            let (k, turn) = (m.scale.max(0.01), item.look.clone().checked().rotate);
+            let to = Transform::from_scale(k, k).post_rotate(turn).post_translate(rect.x + rect.w / 2.0 + m.dx, rect.y + rect.h / 2.0 + m.dy);
+            Some((Rect::new(-rect.w / 2.0, -rect.h / 2.0, rect.w, rect.h), to))
+        }
+        What::Text { style: TextStyle::Blur, title, subtitle, color } => {
+            // What's under its box blurred (it draws nothing of its own), coming on and going
+            // as the graphics do, and as the item's own animations and opacity say.
+            let g = graphic(Some(&mut *texts), TextStyle::Blur, title, subtitle, color, item.len, item.place.w)?;
+            let amount = crate::stock::blur_amount(item.len, t.saturating_sub(item.at) as f32 / 1e6) * m.alpha;
+            let r = moved(g.bounds, stock_place(TextStyle::Blur, &g, item.place, w, h));
+            // Moved and grown about the middle of the picture, as a graphic's picture is.
+            let (k, cx, cy) = (m.scale.max(0.01), w / 2.0, h / 2.0);
+            let r = Rect::new((r.x - cx) * k + cx + m.dx, (r.y - cy) * k + cy + m.dy, r.w * k, r.h * k);
+            blur_box(pix, r, amount);
+            Some((r, Transform::identity()))
+        }
+        What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
+            // A broadcast graphic: played, a frame for each moment of its item.
+            let g = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len, item.place.w)?;
+            let secs = (t - item.at) as f32 / 1e6;
+            let at = stock_place(*style, &g, item.place, w, h);
+            let turn = item.look.clone().checked().rotate;
+            let r = moved(g.bounds, at);
+            let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let plain = m.alpha >= 0.999
+                && item.place.opacity >= 0.999
+                && m.dx == 0.0
+                && m.dy == 0.0
+                && (m.scale - 1.0).abs() < 1.0e-4
+                && turn.abs() < 1.0e-3;
+            if plain {
+                g.animation.render(pix, secs, at);
+            } else if let Some(mut own) = Pixmap::new(w as u32, h as u32) {
+                g.animation.render(&mut own, secs, at);
+                turned_at(pix, &own, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
+            }
+            Some((r, frame_transform(m, w, h, turn, pivot)))
+        }
+        What::Text { style, title, subtitle, color } => {
+            let key = format!("{style:?}|{title}|{subtitle}|{color}|{:?}|{}x{}", item.place, w, h);
+            let (st, ti, su, co, place) = (*style, title.as_str(), subtitle.as_str(), color.as_str(), item.place);
+            let drawn = texts.get(key, || {
+                let mut p = Pixmap::new(w as u32, h as u32)?;
+                text_item(Some(&mut p), st, ti, su, co, place, w, h);
+                Some(p)
+            })?;
+            let r = text_item(None, st, ti, su, co, place, w, h);
+            let pivot = Pt::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
+            let turn = item.look.clone().checked().rotate;
+            turned_at(pix, &drawn, Rect::new(0.0, 0.0, w, h), Motion { dx: m.dx, dy: m.dy, scale: m.scale, alpha: m.alpha }, turn, pivot);
+            Some((r, frame_transform(m, w, h, turn, pivot)))
+        }
+        What::Transition { kind } => {
+            let p = (t - item.at) as f32 / item.len.max(1) as f32;
+            transition(pix, *kind, p);
+            None
+        }
+        // It zooms the screen under everything (see `crate::zoom`); it draws nothing itself.
+        What::Zoom => None,
     }
 }
 
@@ -911,14 +1036,96 @@ mod tests {
             border_colour: "red".into(),
             radius: -2.0,
             shadow: true,
+            mask: layers::Mask { shape: layers::MaskShape::Star, x: f32::NAN, y: 9.0, w: -1.0, h: f32::INFINITY, cut: true },
+            ..layers::ItemLook::default()
         }
         .checked();
         assert_eq!(
             (wild.rotate, wild.crop, wild.border, wild.border_colour.as_str(), wild.radius),
             (0.0, [0.45, 0.0, 0.0, 0.3], 0.1, "#ffffff", 0.0)
         );
+        assert_eq!((wild.mask.x, wild.mask.y, wild.mask.w, wild.mask.h), (0.5, 1.5, 0.05, 1.0));
         tl.set_item(layer, id, |i| i.look = wild.clone()).unwrap();
         let _ = draw(&tl);
+    }
+
+    #[test]
+    fn a_picture_is_masked_by_a_shape_and_blended_with_what_is_under_it() {
+        let mut tl = timeline();
+        let pic = tl
+            .add_media(layers::MediaItem { name: "Square.png".into(), path: "C:/Square.png".into(), width: 40, height: 40, ..Default::default() })
+            .unwrap();
+        let red = Raster::filled(40, 40, Color::rgb(200, 0, 0)).unwrap();
+        let item = Item {
+            what: What::Media { id: pic },
+            place: Placement { x: 0.5, y: 0.5, w: 0.4, opacity: 1.0 },
+            intro: layers::Anim { kind: AnimKind::None, len: 0 },
+            ..Item::default()
+        };
+        let (layer, id) = tl.place(item, None, 0).unwrap();
+        let draw = |tl: &Timeline| {
+            let mut out = grey(100, 100);
+            draw_layers(&mut out, tl, &OnePicture(Arc::new(red.clone())), 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+            out
+        };
+        let set = |tl: &mut Timeline, look: layers::ItemLook| tl.set_item(layer, id, |i| i.look = look).unwrap();
+        let grey_ = Color::rgb(120, 120, 120);
+        // It covers 30 to 70 each way. An oval mask: its middle shown, its corners not.
+        let oval = layers::Mask { shape: layers::MaskShape::Ellipse, ..layers::Mask::default() };
+        set(&mut tl, layers::ItemLook { mask: oval, ..layers::ItemLook::default() });
+        let out = draw(&tl);
+        assert_eq!(out.pixel(50, 50).unwrap(), Color::rgb(200, 0, 0));
+        assert_eq!(out.pixel(32, 32).unwrap(), grey_, "the corner is outside the oval");
+        // The oval cut out of it: the opposite.
+        set(&mut tl, layers::ItemLook { mask: layers::Mask { cut: true, ..oval }, ..layers::ItemLook::default() });
+        let out = draw(&tl);
+        assert_eq!(out.pixel(50, 50).unwrap(), grey_);
+        assert_eq!(out.pixel(32, 32).unwrap(), Color::rgb(200, 0, 0));
+        assert_eq!(out.pixel(10, 10).unwrap(), grey_, "nothing beyond the item");
+        // A small rectangle in its top left quarter: only that.
+        let corner = layers::Mask { shape: layers::MaskShape::Rectangle, x: 0.25, y: 0.25, w: 0.5, h: 0.5, cut: false };
+        set(&mut tl, layers::ItemLook { mask: corner, ..layers::ItemLook::default() });
+        let out = draw(&tl);
+        assert_eq!(out.pixel(35, 35).unwrap(), Color::rgb(200, 0, 0));
+        assert_eq!(out.pixel(60, 60).unwrap(), grey_);
+        // Every shape draws something in its middle, and nothing far outside the item.
+        for shape in layers::MaskShape::ALL {
+            set(&mut tl, layers::ItemLook { mask: layers::Mask { shape, ..layers::Mask::default() }, ..layers::ItemLook::default() });
+            let out = draw(&tl);
+            assert_eq!(out.pixel(50, 55).unwrap(), Color::rgb(200, 0, 0), "{shape:?}");
+            assert_eq!(out.pixel(20, 50).unwrap(), grey_, "{shape:?}");
+        }
+        // Blends: multiply darkens, screen lightens, darken and lighten pick.
+        let at = |tl: &mut Timeline, blend| {
+            set(tl, layers::ItemLook { blend, ..layers::ItemLook::default() });
+            draw(tl).pixel(50, 50).unwrap()
+        };
+        assert_eq!(at(&mut tl, layers::BlendMode::Normal), Color::rgb(200, 0, 0));
+        let p = at(&mut tl, layers::BlendMode::Multiply);
+        assert!((92..=96).contains(&p.r) && p.g == 0 && p.b == 0, "multiply: {p:?}");
+        let p = at(&mut tl, layers::BlendMode::Screen);
+        assert!(p.r > 200 && (118..=122).contains(&p.g), "screen: {p:?}");
+        let p = at(&mut tl, layers::BlendMode::Darken);
+        assert!((118..=122).contains(&p.r) && p.g == 0, "darken: {p:?}");
+        let p = at(&mut tl, layers::BlendMode::Lighten);
+        assert!(p.r >= 199 && (118..=122).contains(&p.g), "lighten: {p:?}");
+        let p = at(&mut tl, layers::BlendMode::Overlay);
+        assert!(p.r > 120 && p.g < 120, "overlay: {p:?}");
+        // A mask and a blend on words as well, turned.
+        let (tl2, _) = {
+            let mut tl2 = timeline();
+            let words = Item {
+                what: What::Text { style: TextStyle::TitleBox, title: "Masked".into(), subtitle: String::new(), color: String::new() },
+                intro: layers::Anim { kind: AnimKind::None, len: 0 },
+                look: layers::ItemLook { rotate: 30.0, blend: layers::BlendMode::Multiply, mask: oval, ..layers::ItemLook::default() },
+                ..Item::default()
+            };
+            let placed = tl2.place(words, None, 0).unwrap();
+            (tl2, placed)
+        };
+        let mut out = grey(160, 90);
+        draw_layers(&mut out, &tl2, &NoMedia, 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+        assert!(out.pixels().iter().step_by(4).any(|r| *r < 110), "the box multiplied over the grey");
     }
 
     #[test]
