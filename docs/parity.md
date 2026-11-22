@@ -180,7 +180,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Lock a track; play one track alone** | Has | the padlock and S in its header (or its right button): a locked track's clips stay as they are (cuts, speeds and holds of the whole video still keep it in time); while any sound track plays alone only those are heard |
 | Zoom the timeline, scroll it | Has | |
 | Play, step a frame, full screen | Has | |
-| **Faster and slower playback keys (J, K, L)** | Has | J plays backwards, K pauses, L plays on; pressed again, 2, 4 and 8 times as fast (the Play menu too). Playing on faster has its sound, voices at their own pitch; backwards has none |
+| **Faster and slower playback keys (J, K, L)** | Has | J plays backwards, K pauses, L plays on; pressed again, 2, 4 and 8 times as fast (the Play menu too). Playing on faster has its sound, voices at their own pitch; backwards as recorded has its sound turned round, faster backwards is silent |
 | Split one track or every track | Has | |
 | Cut leaving a gap, or closing it | Has | |
 | Trim, slide a clip | Has | |
@@ -307,6 +307,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 30. The camera's background blurred or replaced by a picture; captions lit up word by word (word times estimated) (#122).
 31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once (#123).
 32. Templates and themes of your own in the video editor (#124).
+33. The sound turned round while playing backwards (J), as recorded.
 
 **Still to build, in this order**
 

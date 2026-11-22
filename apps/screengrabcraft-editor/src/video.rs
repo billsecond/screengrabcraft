@@ -229,6 +229,8 @@ pub struct Sound {
     rate: u64,
     /// How many times as fast as recorded it plays.
     speed: u64,
+    /// It plays backwards (its sound turned round).
+    backwards: bool,
     /// Frames the device has played so far.
     played: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -239,7 +241,8 @@ pub struct Sound {
 impl SoundOut for Sound {
     fn position_us(&self) -> Option<u64> {
         let played = self.played.load(Ordering::Relaxed);
-        (played > 0).then(|| self.from_us + played.saturating_mul(1_000_000).saturating_mul(self.speed) / self.rate.max(1))
+        let gone = played.saturating_mul(1_000_000).saturating_mul(self.speed) / self.rate.max(1);
+        (played > 0).then(|| if self.backwards { self.from_us.saturating_sub(gone) } else { self.from_us.saturating_add(gone) })
     }
 }
 
@@ -259,9 +262,14 @@ const AHEAD_SECS: f64 = 0.25;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Sound {
-    /// Plays from `from_us`, `speed` times as fast as recorded (faster at its own pitch).
-    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64, speed: u32) -> Result<Sound, String> {
-        let speed = u64::from(speed.clamp(1, 8));
+    /// Plays from `from_us`, `speed` times as fast as recorded (faster at its own pitch), or at -1
+    /// backwards, its sound turned round.
+    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64, speed: i32) -> Result<Sound, String> {
+        let backwards = speed < 0;
+        if speed < -1 {
+            return Err("faster backwards plays without sound".to_string());
+        }
+        let speed = u64::from(speed.unsigned_abs().clamp(1, 8));
         let device = cpal::default_host().default_output_device().ok_or("there are no speakers")?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let rate = u64::from(config.sample_rate().max(1));
@@ -330,9 +338,16 @@ impl Sound {
                 let step = 48_000.0 / rate as f64;
                 while !s.load(Ordering::SeqCst) {
                     let waiting = queue.lock().unwrap_or_else(PoisonError::into_inner).len();
-                    if (waiting as f64) < rate as f64 * AHEAD_SECS && at48 < end {
-                        // As recorded: the mix as it is; faster: the mix at its own pitch, a piece at a time.
-                        let mixed = if speed == 1 {
+                    let more = if backwards { at48 > 0 } else { at48 < end };
+                    if (waiting as f64) < rate as f64 * AHEAD_SECS && more {
+                        // As recorded: the mix as it is; faster: the mix at its own pitch, a piece at a
+                        // time; backwards: the mix before where it's got to, turned round.
+                        let mixed = if backwards {
+                            let n = 4800usize;
+                            let piece = compose::mix_backwards(&rec, &timeline, media.as_ref(), at48, n);
+                            made += (piece.len() / 2) as u64;
+                            piece
+                        } else if speed == 1 {
                             let n = 4800usize;
                             made += n as u64;
                             compose::mix_with(&rec, &timeline, media.as_ref(), at48, n)
@@ -342,7 +357,7 @@ impl Sound {
                             made += n as u64;
                             piece
                         };
-                        at48 = start.saturating_add(made.saturating_mul(speed));
+                        at48 = if backwards { start.saturating_sub(made) } else { start.saturating_add(made.saturating_mul(speed)) };
                         let frames: Vec<[f32; 2]> = mixed.as_chunks::<2>().0.to_vec();
                         let mut out = Vec::with_capacity((frames.len() as f64 / step) as usize + 2);
                         while pos < frames.len() as f64 {
@@ -364,7 +379,7 @@ impl Sound {
             })
             .map_err(|e| e.to_string())?;
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Sound { from_us, rate, speed, played, stop, thread: Some(thread) }),
+            Ok(Ok(())) => Ok(Sound { from_us, rate, speed, backwards, played, stop, thread: Some(thread) }),
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 stop.store(true, Ordering::SeqCst);
@@ -380,7 +395,7 @@ pub struct Sound;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 impl Sound {
-    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64, _speed: u32) -> Result<Sound, String> {
+    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64, _speed: i32) -> Result<Sound, String> {
         Err("sound can't be played on this system yet".to_string())
     }
 }
