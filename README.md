@@ -174,7 +174,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
-  what's round it twice as large.
+  what's round it twice as large. With a stretch chosen, Hide It in the Chosen Stretch (or the
+  screen track's right button) hides it there, clicks and all; a dashed line on the screen's row
+  shows where, and it stays hidden over what the screen showed there through later edits.
 - **The camera's background taken away**, so the screen shows round you (the camera's panel,
   Background): **Remove a colour** for a green screen (choose the colour and how far from it
   still goes; its green glow on you is taken out), or **Remove it** with no green screen: the
@@ -191,6 +193,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
   starts where another ends pans straight from one to the other. Only the screen and the pointer
   are zoomed; the camera, titles and captions stay where they are.
+- **Motion blur**: the side panel's Motion Blur (or a zoom's panel) blurs what moves along its way:
+  items sliding, growing or moving by their keyframes, and zooms going in, out or panning. Each
+  such moment is drawn five times over the shutter and blended, so it takes longer to make.
 - **Transitions between clips**: where two clips of a track meet, one can turn into the other (a
   cross-fade, through black, a wipe four ways, a push or a circle), from the clip's panel, its
   right button, or the Library's Between Clips section dropped on the cut. It plays across the

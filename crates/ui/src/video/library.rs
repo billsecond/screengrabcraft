@@ -168,6 +168,8 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         ducking: Default::default(),
         watermark: Default::default(),
         frame: Default::default(),
+        motion_blur: Default::default(),
+        pointer_hidden: Vec::new(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
@@ -802,6 +804,15 @@ impl VideoView {
         });
         ui.add_space(4.0);
         ui.label(RichText::new("A zoom that starts where another ends pans straight from one to the other.").size(12.0).color(t.muted));
+        ui.add_space(4.0);
+        let mut blur = self.session.timeline.motion_blur.on;
+        if ui
+            .checkbox(&mut blur, "Motion blur")
+            .on_hover_text("Going in, out or along, the screen blurred along its way (for every zoom and moving item: the side panel's Motion Blur)")
+            .changed()
+        {
+            let _ = self.session.execute("video.motionBlur", &json!({"on": blur}));
+        }
     }
 
     /// An item's keyframes: one added at the playhead, each gone to or taken away.

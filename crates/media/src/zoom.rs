@@ -140,6 +140,8 @@ mod tests {
             ducking: Default::default(),
             watermark: Default::default(),
             frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
         };
         tl.layers.push(Layer { id: 1, name: "Zoom".to_string(), items, ..Layer::default() });
         tl

@@ -579,30 +579,58 @@ impl PictureCache {
 /// the later layers on top. An item with a mask or a blend mode is drawn on a see-through picture
 /// of its own first, masked, then laid on the rest as its blend mode says.
 pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore, t: u64, texts: &mut TextCache, pictures: &mut PictureCache) {
-    let showing: Vec<std::borrow::Cow<Item>> = timeline
+    draw_layers_at(out, timeline, store, t, 0, texts, pictures);
+}
+
+/// [`draw_layers`], an item moving then (sliding, growing, moving by its keyframes) blurred along
+/// its way over `blur` µs round `t`: drawn at each of the shutter's moments, the pictures averaged.
+pub fn draw_layers_at(
+    out: &mut Raster,
+    timeline: &Timeline,
+    store: &dyn MediaStore,
+    t: u64,
+    blur: u64,
+    texts: &mut TextCache,
+    pictures: &mut PictureCache,
+) {
+    let showing: Vec<&Item> = timeline
         .layers
         .iter()
         .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
         .filter_map(|l| l.items.iter().find(|i| i.at <= t && t < i.end()))
         // A zoom draws nothing of its own.
         .filter(|i| !matches!(i.what, What::Zoom))
-        // Where its keyframes have it then.
-        .map(|i| i.placed_at(t))
         .collect();
     if showing.is_empty() {
         return;
     }
     let Some(mut pix) = canvas::to_pixmap(out) else { return };
-    for item in &showing {
-        let item: &Item = item;
+    let (w, h) = (pix.width() as f32, pix.height() as f32);
+    let shutter = crate::timeline::MotionBlur { on: blur > 0, amount: blur as f32 / 40_000.0 };
+    for whole in showing {
+        // Where its keyframes have it then.
+        let placed = whole.placed_at(t);
+        let item: &Item = &placed;
         // A blur and a transition change what's under them: they're never drawn apart.
-        let apart = item.look.is_layered() && !matches!(item.what, What::Transition { .. } | What::Text { style: TextStyle::Blur, .. });
+        let changes_under = matches!(item.what, What::Transition { .. } | What::Text { style: TextStyle::Blur, .. });
+        let moments: Vec<u64> = if blur > 0 && !changes_under {
+            let m: Vec<u64> = shutter.moments(t).into_iter().map(|s| s.clamp(whole.at, whole.end().saturating_sub(1))).collect();
+            if moves(whole, &m, w, h) { m } else { Vec::new() }
+        } else {
+            Vec::new()
+        };
+        let apart = (item.look.is_layered() || !moments.is_empty()) && !changes_under;
         if !apart {
             let _ = draw_item(&mut pix, item, timeline, store, t, texts, pictures);
             continue;
         }
-        let Some(mut own) = Pixmap::new(pix.width(), pix.height()) else { continue };
-        let Some((bx, to)) = draw_item(&mut own, item, timeline, store, t, texts, pictures) else { continue };
+        let drawn = if moments.is_empty() {
+            Pixmap::new(pix.width(), pix.height())
+                .and_then(|mut own| draw_item(&mut own, item, timeline, store, t, texts, pictures).map(|b| (own, b)))
+        } else {
+            blurred(whole, &moments, t, timeline, store, texts, pictures, pix.width(), pix.height())
+        };
+        let Some((mut own, (bx, to))) = drawn else { continue };
         let look = item.look.clone().checked();
         if let Some(mask) = mask_for(&look.mask, bx, to, own.width(), own.height()) {
             own.apply_mask(&mask);
@@ -613,6 +641,56 @@ pub fn draw_layers(out: &mut Raster, timeline: &Timeline, store: &dyn MediaStore
     if let Some(r) = canvas::from_pixmap(&pix) {
         *out = r;
     }
+}
+
+/// Whether an item moves (its place, its size, how its animations move or grow it) by about a
+/// pixel or more over `moments` on a `w × h` video.
+fn moves(item: &Item, moments: &[u64], w: f32, h: f32) -> bool {
+    let at = |s: u64| {
+        let p = item.placed_at(s);
+        let m = motion(&p, s, w, h);
+        (p.place.x * w + m.dx, p.place.y * h + m.dy, p.place.w * w * m.scale)
+    };
+    let (Some(a), Some(b)) = (moments.first(), moments.last()) else { return false };
+    let ((ax, ay, aw), (bx, by, bw)) = (at(*a), at(*b));
+    (ax - bx).abs() > 0.5 || (ay - by).abs() > 0.5 || (aw - bw).abs() > 0.5
+}
+
+/// An item drawn at each of `moments` on see-through pictures of its own, averaged: the picture
+/// and (for its mask) where its box is at `t`.
+#[allow(clippy::too_many_arguments)]
+fn blurred(
+    item: &Item,
+    moments: &[u64],
+    t: u64,
+    timeline: &Timeline,
+    store: &dyn MediaStore,
+    texts: &mut TextCache,
+    pictures: &mut PictureCache,
+    w: u32,
+    h: u32,
+) -> Option<(Pixmap, (Rect, Transform))> {
+    let mut sum = vec![0u32; (w as usize).checked_mul(h as usize)?.checked_mul(4)?];
+    let mut middle = None;
+    let mut n = 0u32;
+    let centre = moments.get(moments.len() / 2).copied().unwrap_or(t);
+    for &s in moments {
+        let mut own = Pixmap::new(w, h)?;
+        let b = draw_item(&mut own, &item.placed_at(s), timeline, store, s, texts, pictures);
+        if s == centre || middle.is_none() {
+            middle = b.or(middle);
+        }
+        for (a, v) in sum.iter_mut().zip(own.data()) {
+            *a = a.saturating_add(u32::from(*v));
+        }
+        n += 1;
+    }
+    let mut out = Pixmap::new(w, h)?;
+    let n = n.max(1);
+    for (o, s) in out.data_mut().iter_mut().zip(sum) {
+        *o = ((s + n / 2) / n).min(255) as u8;
+    }
+    Some((out, middle?))
 }
 
 /// tiny-skia's blend mode for an item's.
@@ -864,6 +942,8 @@ mod tests {
             ducking: Default::default(),
             watermark: Default::default(),
             frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
         }
     }
 
@@ -1045,6 +1125,38 @@ mod tests {
         assert_eq!((wild.mask.x, wild.mask.y, wild.mask.w, wild.mask.h), (0.5, 1.5, 0.05, 1.0));
         tl.set_item(layer, id, |i| i.look = wild.clone()).unwrap();
         let _ = draw(&tl);
+    }
+
+    #[test]
+    fn a_sliding_picture_is_blurred_along_its_way_and_a_still_one_is_not() {
+        let mut tl = timeline();
+        let pic = tl
+            .add_media(layers::MediaItem { name: "Square.png".into(), path: "C:/Square.png".into(), width: 20, height: 20, ..Default::default() })
+            .unwrap();
+        let red = Raster::filled(20, 20, Color::rgb(200, 0, 0)).unwrap();
+        // Sliding in from the left over its first second.
+        let item = Item {
+            what: What::Media { id: pic },
+            place: Placement { x: 0.5, y: 0.5, w: 0.2, opacity: 1.0 },
+            intro: layers::Anim { kind: AnimKind::SlideLeft, len: 1_000_000 },
+            outro: layers::Anim { kind: AnimKind::None, len: 0 },
+            len: 3_000_000,
+            ..Item::default()
+        };
+        tl.place(item, None, 0).unwrap();
+        let draw = |t: u64, blur: u64| {
+            let mut out = grey(200, 100);
+            draw_layers_at(&mut out, &tl, &OnePicture(Arc::new(red.clone())), t, blur, &mut TextCache::default(), &mut PictureCache::default());
+            out
+        };
+        // Pixels part red, part grey: the blur's smear at its edges.
+        let smeared = |p: &Raster| p.pixels().chunks(4).filter(|c| c[0] > 125 && c[0] < 195 && c[1] < 115).count();
+        let (sharp, soft) = (draw(500_000, 0), draw(500_000, 40_000));
+        assert!(smeared(&soft) > smeared(&sharp) + 20, "{} {}", smeared(&soft), smeared(&sharp));
+        // Still (after its slide), it's drawn as it is.
+        assert_eq!(draw(2_000_000, 40_000), draw(2_000_000, 0));
+        // At its very start the moments before it are kept to it.
+        let _ = draw(0, 40_000);
     }
 
     #[test]

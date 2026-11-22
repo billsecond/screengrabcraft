@@ -3307,3 +3307,51 @@ fn the_screen_is_framed_in_a_device_and_a_picture_put_in_a_phone_from_their_pane
     assert_eq!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().look.device, Device::Phone);
     shot(&mut h, "video-item-device");
 }
+
+#[test]
+fn the_pointer_is_hidden_for_a_stretch_and_what_moves_is_blurred_from_the_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let red = |h: &mut Harness<'_, Editor>, t: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(t), [0xE0, 0x20, 0x20]);
+    assert!(red(&mut h, 1_000_000) > 0);
+    // The Pointer panel hides it in the chosen stretch.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 1_500_000));
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Hide It in the Chosen Stretch");
+    h.get_by_label("Hide It in the Chosen Stretch").click();
+    h.run_steps(3);
+    assert_eq!(red(&mut h, 1_000_000), 0, "hidden there");
+    assert!(red(&mut h, 2_500_000) > 0, "not after");
+    assert!(h.query_by_label("Hidden from 0:00.5 to 0:01.5").is_some());
+    shot(&mut h, "video-pointer-hidden");
+    // The right button on the screen's row, inside it: shown there again.
+    h.state_mut().video.as_mut().unwrap().range = None;
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    let (pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.pps, v.scrolled())
+    };
+    right_click(&mut h, egui::pos2(lane.min.x + pps - scroll, top + 20.0));
+    h.get_by_label_contains("Screen at");
+    h.get_by_label("Show the Pointer Here Again").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.pointer_hidden.is_empty());
+    assert!(red(&mut h, 1_000_000) > 0);
+    // Motion blur from the side panel.
+    scroll_side_panel_to(&mut h, "Blur what moves");
+    h.get_by_label("Blur what moves").click();
+    h.run_steps(3);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.motion_blur.on);
+    assert!(h.query_by_label("How much").is_some());
+    shot(&mut h, "video-motion-blur");
+}

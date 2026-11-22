@@ -2000,6 +2000,8 @@ impl VideoView {
                         section(ui, "Screen Frame", &mut first);
                         self.screen_frame_section(ed, ui);
                     }
+                    section(ui, "Motion Blur", &mut first);
+                    self.motion_blur_section(ed, ui);
                     if self.session.timeline.tracks.iter().any(|x| !x.kind.is_video()) {
                         section(ui, "Sound Mix", &mut first);
                         self.mix_section(ed, ui);
@@ -2136,7 +2138,78 @@ impl VideoView {
                     self.run(ed, &ctx, "video.pointer", json!({ key: v }));
                 }
             }
+            self.pointer_hidden_section(ed, ui);
         });
+    }
+
+    /// The stretches the pointer is hidden in: hidden in the chosen stretch, each shown again.
+    fn pointer_hidden_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let t = Tokens::get(ui.ctx());
+        ui.add_space(8.0);
+        ui.label(RichText::new("Hidden for a stretch").size(12.0).color(t.muted));
+        let hide = ui
+            .add_enabled(self.range.is_some(), egui::Button::new("Hide It in the Chosen Stretch"))
+            .on_hover_text("No pointer, no clicks seen or heard there; it stays hidden over what the screen showed there through later edits")
+            .on_disabled_hover_text("Choose a stretch first: drag a handle beside the playhead on the ruler")
+            .clicked();
+        if hide && let Some((a, b)) = self.range {
+            self.run(ed, &ctx, "video.hidePointer", json!({"from": a, "to": b}));
+        }
+        let hidden = self.session.timeline.pointer_hidden_on_timeline();
+        let mut show = None;
+        for (a, b) in hidden.iter().take(8) {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("Hidden from {} to {}", clock(*a), clock(*b))).size(12.0).color(t.text));
+                if ui.small_button("Show").on_hover_text("The pointer shown here again").clicked() {
+                    show = Some((*a, *b));
+                }
+            });
+        }
+        if hidden.len() > 8 {
+            ui.label(RichText::new(format!("and {} more", hidden.len() - 8)).size(12.0).color(t.muted));
+        }
+        if let Some((a, b)) = show {
+            self.run(ed, &ctx, "video.showPointer", json!({"from": a, "to": b}));
+        }
+        if !hidden.is_empty() && ui.button("Show It Everywhere Again").clicked() {
+            self.run(ed, &ctx, "video.showPointer", json!({}));
+        }
+    }
+
+    /// Motion blur: what moves on the picture blurred along its way, and how much.
+    fn motion_blur_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let ctx = ui.ctx().clone();
+        let t = Tokens::get(ui.ctx());
+        let b = self.session.timeline.motion_blur.checked();
+        let mut on = b.on;
+        if ui
+            .checkbox(&mut on, "Blur what moves")
+            .on_hover_text("Items sliding, growing or moving by their keyframes, and zooms going in, out or along, blurred along their way")
+            .changed()
+        {
+            self.run(ed, &ctx, "video.motionBlur", json!({"on": on}));
+        }
+        ui.add_enabled_ui(b.on, |ui| {
+            let mut amount = b.amount * 100.0;
+            let r =
+                named_slider(ui, "How much", &mut amount, 10.0..=100.0, "%").on_hover_text("How long the shutter is open: up to a 25th of a second");
+            if r.drag_started() {
+                self.session.begin("Motion Blur");
+            }
+            if r.changed() && (amount - b.amount * 100.0).abs() > 0.4 {
+                let p = json!({"amount": amount / 100.0});
+                if r.dragged() {
+                    let _ = self.session.drag("video.motionBlur", &p);
+                } else {
+                    self.run(ed, &ctx, "video.motionBlur", p);
+                }
+            }
+            if r.drag_stopped() {
+                self.session.commit();
+            }
+        });
+        ui.label(RichText::new("Each moment of motion is drawn a few times and blended: it takes longer to make.").size(12.0).color(t.muted));
     }
 
     /// The shortcuts pressed while recording: shown on the video or not, where, how large, light
@@ -2891,6 +2964,26 @@ impl VideoView {
                     ui.close();
                 }
                 self.speed_menu(ed, ui, ctx);
+                if track.kind == StreamKind::Screen && !self.rec.pointer.is_empty() {
+                    ui.separator();
+                    if ui
+                        .add_enabled(chosen, egui::Button::new("Hide the Pointer in the Selection"))
+                        .on_hover_text("No pointer there, its clicks neither seen nor heard")
+                        .on_disabled_hover_text(first_choose)
+                        .clicked()
+                        && let Some((a, b)) = self.range
+                    {
+                        self.run(ed, ctx, "video.hidePointer", json!({"from": a, "to": b}));
+                        ui.close();
+                    }
+                    let hidden_here = self.session.timeline.pointer_hidden_on_timeline().into_iter().find(|(a, b)| (*a..*b).contains(&at));
+                    if let Some((a, b)) = hidden_here
+                        && ui.button("Show the Pointer Here Again").on_hover_text(format!("Hidden from {} to {}", clock(a), clock(b))).clicked()
+                    {
+                        self.run(ed, ctx, "video.showPointer", json!({"from": a, "to": b}));
+                        ui.close();
+                    }
+                }
                 ui.separator();
                 self.choosing_items(ui, at);
                 ui.separator();
@@ -3356,6 +3449,21 @@ impl VideoView {
                     }
                     if track.locked {
                         clips::draw_locked(&painter, lane_row);
+                    }
+                    // Where the pointer is hidden: a dashed line along the screen's clips' foot.
+                    if track.kind == StreamKind::Screen {
+                        for (a, b) in self.session.timeline.pointer_hidden_on_timeline() {
+                            let (x0, x1) = (x_of(a).max(lane.min.x), x_of(b).min(lane.max.x));
+                            if x1 <= x0 {
+                                continue;
+                            }
+                            let y = row.max.y - 7.0;
+                            let mut x = x0;
+                            while x < x1 {
+                                painter.line_segment([pos2(x, y), pos2((x + 5.0).min(x1), y)], Stroke::new(2.0, Color32::from_rgb(0xF5, 0xC5, 0x42)));
+                                x += 9.0;
+                            }
+                        }
                     }
                     // Its transitions across the cuts, and (a transition from the library over
                     // it) the cut it would go to.
