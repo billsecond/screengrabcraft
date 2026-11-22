@@ -1156,6 +1156,8 @@ impl Editor {
                     self.video = Some(v);
                 }
             }
+            // A new video of them, opened here.
+            DialogResult::PicturesVideo(paths) => crate::video::new_video_from_pictures(self, ctx, &paths),
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {

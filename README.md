@@ -237,6 +237,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   after another from the playhead, a few seconds each (as many as asked), each as large as fits
   the video, fading from one to the next. Hide the screen's track for a video of just them, and
   talk over them with Narration.
+- **A video of pictures alone**: File › New Video from Pictures (or A Video of Pictures on the
+  start page) asks for pictures and makes a new video of just them: a blank screen as long as they
+  take (1920 × 1080, saved in your captures folder like any recording), each picture four seconds,
+  one after another. Talk over it with Record Narration, then make the video as any other.
 - **Narration**: the side panel's Record Narration turns the microphone on (the one Video
   Production records with, or another from its list) and plays the video from the playhead
   without its sound while you speak. Pause (Space), Stop Narration or the video's end ends it: the

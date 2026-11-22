@@ -49,6 +49,8 @@ pub enum DialogResult {
     Subtitles(Vec<OpenedFile>),
     /// Video recordings to make videos of, together (paths).
     Batch(Vec<String>),
+    /// Pictures to make a new video of, one after another (paths).
+    PicturesVideo(Vec<String>),
     Cancelled,
 }
 
@@ -278,6 +280,12 @@ pub trait Services {
         None
     }
 
+    /// A new file in the captures folder for a video recording made here (a video of pictures),
+    /// named the way captures are (`source` is what it's of, for the name).
+    fn new_recording_path(&self, _source: &str) -> Result<String, String> {
+        Err("new videos are made by ScreenGrabCraft Editor on the desktop".to_string())
+    }
+
     /// A new file in the captures folder for a picture that has none yet, named the way
     /// captures are (`source` is what the picture is of, for the name).
     fn new_picture_path(&self, _source: &str) -> Result<String, String> {
@@ -459,6 +467,10 @@ pub trait Services {
     fn auto_captions(&self) -> bool {
         false
     }
+
+    /// Asks for pictures to make a new video of; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::PicturesVideo`].
+    fn request_pictures_video(&self) {}
 
     /// Asks for video recordings to make videos of, together; the answer comes through
     /// [`Services::poll_dialog`] as [`DialogResult::Batch`].

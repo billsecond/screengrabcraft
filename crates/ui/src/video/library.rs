@@ -319,6 +319,8 @@ impl VideoView {
         if arrived {
             self.shown = None;
         }
+        // A new video's pictures, once they're all read in: put in turn.
+        self.poll_pictures(ed, ctx);
         if !self.importing.is_empty() || !self.rereading.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }

@@ -40,12 +40,14 @@ mod clips;
 mod export_window;
 mod library;
 mod narration;
+mod pictures;
 mod screen_frame;
 mod sound;
 pub(crate) mod transcript;
 mod transitions;
 mod yours;
 pub use library::{LibDrop, LibTab};
+pub use pictures::new_video_from_pictures;
 
 pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
 
@@ -348,6 +350,8 @@ pub struct VideoView {
     pub(crate) narrating: Option<narration::Narrating>,
     /// The microphones the host has for narration, and the one chosen.
     pub(crate) mics: narration::Mics,
+    /// The pictures of a new video of pictures, waiting to be read in before they're put in turn.
+    pub(crate) pictures_pending: Option<pictures::PicturesPending>,
 }
 
 /// A small button with a triangle pointing up (or down) for what `key` names (a track or a layer:
@@ -639,6 +643,7 @@ impl VideoView {
             yours: Default::default(),
             narrating: None,
             mics: Default::default(),
+            pictures_pending: None,
             type_words: false,
         }
     }
@@ -1499,6 +1504,15 @@ impl VideoView {
                     }
                     if ui.button("Import Media…").on_hover_text("Pictures, sound files and recordings for the Media Bin").clicked() {
                         ed.services.request_import();
+                        ui.close();
+                    }
+                    if ed.services.has_paths()
+                        && ui
+                            .button("New Video from Pictures…")
+                            .on_hover_text("A new video of pictures one after another, to talk over: no screen recording needed")
+                            .clicked()
+                    {
+                        ed.services.request_pictures_video();
                         ui.close();
                     }
                     if self.has_sound
@@ -4372,6 +4386,15 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
                     record(ed, &ctx);
                     ui.close();
                 }
+                if ed.services.has_paths()
+                    && ui
+                        .button("New Video from Pictures…")
+                        .on_hover_text("Pictures one after another, to talk over: no screen recording needed")
+                        .clicked()
+                {
+                    ed.services.request_pictures_video();
+                    ui.close();
+                }
                 if ed.services.can_capture()
                     && ui.button("New Capture").on_hover_text("A picture: it opens in the Image Editor, beside this window").clicked()
                 {
@@ -4444,6 +4467,7 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
         let room = ui.max_rect();
         let mut chosen: Option<String> = None;
         let mut start: Option<bool> = None;
+        let mut pictures = false;
         ui.scope_builder(egui::UiBuilder::new().max_rect(Rect::from_center_size(room.center(), vec2(380.0, room.height().min(560.0)))), |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                 ui.add_space(((room.height() - 360.0 - 52.0 * recordings.len() as f32) / 2.0).max(12.0));
@@ -4470,6 +4494,9 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
                         if crate::editor::welcome_row(ui, Icon::Open, "Open a Recording…", "Ctrl+O").clicked() {
                             start = Some(false);
                         }
+                        if ed.services.has_paths() && crate::editor::welcome_row(ui, Icon::Capture, "A Video of Pictures…", "").clicked() {
+                            pictures = true;
+                        }
                         if !recordings.is_empty() {
                             ui.add_space(10.0);
                             ui.label(RichText::new("Recent recordings").size(12.5).strong().color(t.text));
@@ -4489,6 +4516,9 @@ pub fn start_page(ed: &mut Editor, ui: &mut Ui) {
             Some(true) => record(ed, &ctx),
             Some(false) => ed.services.request_open(),
             None => {}
+        }
+        if pictures {
+            ed.services.request_pictures_video();
         }
         if let Some(p) = chosen {
             ed.open_path(&ctx, &p);
