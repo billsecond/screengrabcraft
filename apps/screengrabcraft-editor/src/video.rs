@@ -226,6 +226,8 @@ fn play_sign() -> Option<Raster> {
 pub struct Sound {
     from_us: u64,
     rate: u64,
+    /// How many times as fast as recorded it plays.
+    speed: u64,
     /// Frames the device has played so far.
     played: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -236,7 +238,7 @@ pub struct Sound {
 impl SoundOut for Sound {
     fn position_us(&self) -> Option<u64> {
         let played = self.played.load(Ordering::Relaxed);
-        (played > 0).then(|| self.from_us + played.saturating_mul(1_000_000) / self.rate.max(1))
+        (played > 0).then(|| self.from_us + played.saturating_mul(1_000_000).saturating_mul(self.speed) / self.rate.max(1))
     }
 }
 
@@ -256,7 +258,9 @@ const AHEAD_SECS: f64 = 0.25;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Sound {
-    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Result<Sound, String> {
+    /// Plays from `from_us`, `speed` times as fast as recorded (faster at its own pitch).
+    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64, speed: u32) -> Result<Sound, String> {
+        let speed = u64::from(speed.clamp(1, 8));
         let device = cpal::default_host().default_output_device().ok_or("there are no speakers")?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let rate = u64::from(config.sample_rate().max(1));
@@ -315,7 +319,10 @@ impl Sound {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let end = compose::to_samples(timeline.length());
-                let mut at48 = compose::to_samples(from_us);
+                let start = compose::to_samples(from_us);
+                // How much has been made (48 kHz samples as played), and where on the timeline it's got to.
+                let mut made = 0u64;
+                let mut at48 = start;
                 // Where between two 48 kHz samples the device's next one falls.
                 let mut pos = 0.0f64;
                 let mut last = [0.0f32; 2];
@@ -323,11 +330,20 @@ impl Sound {
                 while !s.load(Ordering::SeqCst) {
                     let waiting = queue.lock().unwrap_or_else(PoisonError::into_inner).len();
                     if (waiting as f64) < rate as f64 * AHEAD_SECS && at48 < end {
-                        let n = 4800usize;
-                        let mixed = compose::mix_with(&rec, &timeline, media.as_ref(), at48, n);
-                        at48 += n as u64;
+                        // As recorded: the mix as it is; faster: the mix at its own pitch, a piece at a time.
+                        let mixed = if speed == 1 {
+                            let n = 4800usize;
+                            made += n as u64;
+                            compose::mix_with(&rec, &timeline, media.as_ref(), at48, n)
+                        } else {
+                            let n = screengrabcraft_media::stretch::FRESH;
+                            let piece = compose::mix_faster(&rec, &timeline, media.as_ref(), start, speed as f64, made, n);
+                            made += n as u64;
+                            piece
+                        };
+                        at48 = start.saturating_add(made.saturating_mul(speed));
                         let frames: Vec<[f32; 2]> = mixed.as_chunks::<2>().0.to_vec();
-                        let mut out = Vec::with_capacity((n as f64 / step) as usize + 2);
+                        let mut out = Vec::with_capacity((frames.len() as f64 / step) as usize + 2);
                         while pos < frames.len() as f64 {
                             let i = pos.floor() as usize;
                             let t = (pos - pos.floor()) as f32;
@@ -347,7 +363,7 @@ impl Sound {
             })
             .map_err(|e| e.to_string())?;
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Sound { from_us, rate, played, stop, thread: Some(thread) }),
+            Ok(Ok(())) => Ok(Sound { from_us, rate, speed, played, stop, thread: Some(thread) }),
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 stop.store(true, Ordering::SeqCst);
@@ -363,7 +379,7 @@ pub struct Sound;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 impl Sound {
-    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64) -> Result<Sound, String> {
+    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64, _speed: u32) -> Result<Sound, String> {
         Err("sound can't be played on this system yet".to_string())
     }
 }
@@ -411,7 +427,7 @@ mod tests {
         let tl = Timeline::new(&rec);
         let n = compose::to_samples(tl.length()) as usize;
         let loudest = compose::mix(&rec, &tl, 0, n).iter().fold(0f32, |m, s| m.max(s.abs()));
-        let sound = Sound::start(rec, tl, Arc::new(screengrabcraft_media::layer_draw::NoMedia), 0).expect("the speakers start");
+        let sound = Sound::start(rec, tl, Arc::new(screengrabcraft_media::layer_draw::NoMedia), 0, 1).expect("the speakers start");
         std::thread::sleep(Duration::from_millis(2500));
         let at = sound.position_us().unwrap_or(0);
         println!("played to {:.2} s in 2.5 s; the loudest sound in it {loudest:.3}", at as f64 / 1e6);

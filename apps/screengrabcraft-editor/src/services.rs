@@ -456,8 +456,15 @@ impl Services for DesktopServices {
         Ok(job)
     }
 
-    fn play_sound(&self, recording: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Option<Box<dyn SoundOut>> {
-        match crate::video::Sound::start(recording, timeline, media, from_us) {
+    fn play_sound(
+        &self,
+        recording: Arc<Recording>,
+        timeline: Timeline,
+        media: Arc<dyn MediaStore>,
+        from_us: u64,
+        rate: u32,
+    ) -> Option<Box<dyn SoundOut>> {
+        match crate::video::Sound::start(recording, timeline, media, from_us, rate) {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
                 log::warn!("playing the sound: {e}");

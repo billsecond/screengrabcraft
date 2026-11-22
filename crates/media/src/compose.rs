@@ -704,7 +704,8 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         let into = if voice.is_none_or(|v| v == ti) { &mut out } else { &mut rest };
         let shaped = !t.points.is_empty();
         let stereo = rec.stream(t.stream).is_some_and(|s| s.channels >= 2);
-        // `n` stereo samples of the track as recorded from sample `from` (-1 to 1).
+        // `n` stereo samples of the track as recorded from sample `from` (-1 to 1); mixed to mono,
+        // both sides the same.
         let read = |from: u64, n: usize| -> Vec<[f32; 2]> {
             let src = rec.sound(t.stream, from, n);
             (0..n)
@@ -715,7 +716,8 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                         let v = src.get(k).copied().unwrap_or(0);
                         (v, v)
                     };
-                    [f32::from(l) / 32768.0, f32::from(r) / 32768.0]
+                    let (l, r) = (f32::from(l) / 32768.0, f32::from(r) / 32768.0);
+                    if t.mono && stereo { [(l + r) / 2.0; 2] } else { [l, r] }
                 })
                 .collect()
         };
@@ -806,6 +808,37 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         *s = s.clamp(-1.0, 1.0);
     }
     out
+}
+
+/// The edited sound played `rate` times as fast from timeline sample `start` (the playhead), at
+/// its own pitch: `count` stereo samples from sample `first` of what's played, interleaved (-1 to
+/// 1). Asked for [`crate::stretch::FRESH`] samples at a time from a multiple of it, nothing is
+/// mixed twice.
+pub fn mix_faster(
+    rec: &Recording,
+    timeline: &Timeline,
+    media: &dyn crate::layer_draw::MediaStore,
+    start: u64,
+    rate: f64,
+    first: u64,
+    count: usize,
+) -> Vec<f32> {
+    let end = to_samples(timeline.length());
+    // What's played from: the edited sound as it is (before the video's start, and after its end,
+    // silence).
+    let read = |s: i64, n: usize| -> Vec<[f32; 2]> {
+        let at = i64::try_from(start.min(u64::MAX / 4)).unwrap_or(0).saturating_add(s);
+        let skip = usize::try_from(at.saturating_neg().max(0)).unwrap_or(n).min(n);
+        let from = u64::try_from(at.max(0)).unwrap_or(0);
+        let heard = usize::try_from(end.saturating_sub(from)).unwrap_or(usize::MAX).min(n - skip);
+        let mut out = vec![[0.0; 2]; skip];
+        if heard > 0 {
+            out.extend(mix_with(rec, timeline, media, from, heard).as_chunks::<2>().0.iter().copied());
+        }
+        out.resize(n, [0.0; 2]);
+        out
+    };
+    crate::stretch::stretched(&read, rate, first, count).into_iter().flatten().collect()
 }
 
 /// The track whose voice lowers the rest, when the rest is lowered under the voice: the
@@ -1438,6 +1471,50 @@ mod tests {
         tl.split(1_000_000, Some(1)).unwrap();
         tl.delete_clip(1, 1).unwrap();
         assert!(mix(&r, &tl, to_samples(1_500_000), 10).iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn a_track_mixed_to_mono_sounds_the_same_from_both_sides() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        tl.set_muted(1, true).unwrap();
+        let s = mix(&r, &tl, 100, 1);
+        assert!(s[0] > 0.05 && s[1] < -0.05, "its two sides apart: {s:?}");
+        tl.set_mono(2, true).unwrap();
+        let s = mix(&r, &tl, 100, 1);
+        assert!(s[0].abs() < 1e-6 && s[1].abs() < 1e-6, "+ and - mixed into one: {s:?}");
+        // The microphone (one side recorded) is the same either way; a picture track has no sound.
+        tl.set_muted(1, false).unwrap();
+        tl.set_mono(1, true).unwrap();
+        let s = mix(&r, &tl, 100, 1);
+        assert!((s[0] - 1000.0 / 32768.0).abs() < 1e-6 && s[0] == s[1]);
+        assert!(tl.set_mono(0, true).is_err());
+        assert!(tl.clone().checked(&r).tracks[2].mono, "kept");
+    }
+
+    #[test]
+    fn played_faster_the_sound_is_heard_sooner_and_ends_with_the_video() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        // Only the microphone, and only from 1 s on.
+        tl.set_muted(2, true).unwrap();
+        tl.lift(0, 1_000_000, Some(1)).unwrap();
+        let fast = mix_faster(&r, &tl, &crate::layer_draw::NoMedia, 0, 2.0, 0, 48_000);
+        assert_eq!(fast.len(), 96_000);
+        let loud = |s: &[f32]| s.iter().fold(0f32, |m, v| m.max(v.abs()));
+        // Twice as fast from the start: the second recorded at 1 s is heard at half a second.
+        assert!(loud(&fast[..2 * 20_000]) < 1e-4, "silent at first");
+        assert!(loud(&fast[2 * 28_000..2 * 44_000]) > 0.02, "then the microphone");
+        // From the playhead at 1.5 s: half a second of the video is a quarter, then silence.
+        let from = mix_faster(&r, &tl, &crate::layer_draw::NoMedia, to_samples(1_500_000), 2.0, 0, 24_000);
+        assert!(loud(&from[..2 * 9_000]) > 0.02 && loud(&from[2 * 14_000..]) < 1e-4);
+        // In pieces as asked for while playing: the same as in one go.
+        let step = crate::stretch::FRESH;
+        let mut parts = mix_faster(&r, &tl, &crate::layer_draw::NoMedia, 0, 4.0, 0, step);
+        parts.extend(mix_faster(&r, &tl, &crate::layer_draw::NoMedia, 0, 4.0, step as u64, step));
+        assert_eq!(parts, mix_faster(&r, &tl, &crate::layer_draw::NoMedia, 0, 4.0, 0, step * 2));
+        // Junk never panics.
+        let _ = mix_faster(&r, &tl, &crate::layer_draw::NoMedia, u64::MAX, f64::NAN, u64::MAX / 2, 5);
     }
 
     #[test]

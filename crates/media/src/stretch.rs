@@ -16,6 +16,9 @@ const SEEK: i64 = 384;
 const CHAIN: u64 = 32;
 /// The most samples made in one go (longer asks are made a piece at a time).
 const PIECE: usize = 48_000;
+/// How often (samples played) the windows are lined up afresh: asked for this many at a time,
+/// from a multiple of it, nothing is read twice.
+pub const FRESH: usize = CHAIN as usize * HOP;
 
 /// `count` stereo samples of a clip's sound played at `rate` (1 as recorded, 2 twice as fast),
 /// from sample `first` of it as played. `read(start, n)` gives `n` stereo samples of the clip's

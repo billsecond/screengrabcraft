@@ -455,6 +455,10 @@ pub struct Track {
     /// Played alone: while any sound track is, only those are heard. Sound only.
     #[serde(default, skip_serializing_if = "is_false")]
     pub solo: bool,
+    /// Its two sides mixed into one, heard the same from both speakers (a microphone recorded on
+    /// one side only, a stereo sound made mono). Sound only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub mono: bool,
 }
 
 /// A point of a sound track's volume line: how loud it is at a moment of its recording (µs).
@@ -763,6 +767,7 @@ impl Timeline {
                     points: Vec::new(),
                     locked: false,
                     solo: false,
+                    mono: false,
                 }
             })
             .collect();
@@ -809,6 +814,7 @@ impl Timeline {
             t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 2.0) } else { 1.0 };
             t.denoise = if t.denoise.is_finite() && !t.kind.is_video() { t.denoise.clamp(0.0, 1.0) } else { 0.0 };
             t.solo = t.solo && !t.kind.is_video();
+            t.mono = t.mono && !t.kind.is_video();
             // The volume line: of sound, levels in range, in order, one to a moment, not too many.
             t.points.truncate(MAX_VOLUME_POINTS);
             if t.kind.is_video() {
@@ -1426,6 +1432,16 @@ impl Timeline {
         Ok(())
     }
 
+    /// A sound track's two sides mixed into one (or kept apart again).
+    pub fn set_mono(&mut self, track: usize, mono: bool) -> Result<(), EditError> {
+        let t = self.track_mut(track)?;
+        if t.kind.is_video() {
+            return Err(EditError::Invalid("only a sound track is mixed to mono".to_string()));
+        }
+        t.mono = mono;
+        Ok(())
+    }
+
     /// Whether a sound track is heard: not muted, and played alone if any is.
     pub fn heard(&self, track: usize) -> bool {
         let any_solo = self.tracks.iter().any(|t| t.solo && !t.kind.is_video());
@@ -1799,6 +1815,7 @@ mod tests {
             points: Vec::new(),
             locked: false,
             solo: false,
+            mono: false,
         };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],

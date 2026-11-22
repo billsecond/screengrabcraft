@@ -810,6 +810,7 @@ impl VideoView {
                             }
                         });
                     }
+                    self.item_sound_section(ed, ui, &ctx, layer, &item, &mut first);
                     ui.add_space(16.0);
                     if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                         self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
@@ -818,6 +819,68 @@ impl VideoView {
                 });
             });
         true
+    }
+
+    /// Whether an item is a video whose sound can be taken apart from its picture.
+    pub(super) fn separable(&self, item: &Item) -> bool {
+        let media = &self.session.timeline.media;
+        !item.sound_only
+            && !item.silent
+            && matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video))
+    }
+
+    /// A video's sound put apart from its picture, on a sound layer; the sound then chosen.
+    pub(super) fn separate_sound(&mut self, ed: &mut Editor, ctx: &egui::Context, layer: u32, item: u32) {
+        match self.session.execute("video.separateSound", &json!({"layer": layer, "item": item})) {
+            Ok(v) => {
+                let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok());
+                if let (Some(l), Some(i)) = (n("layer"), n("item")) {
+                    self.item = Some((l, i));
+                }
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
+    }
+
+    /// An item's sound: a video's taken apart from its picture or kept silent; a sound layer mixed
+    /// to mono.
+    fn item_sound_section(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, layer: u32, item: &Item, first: &mut bool) {
+        let t = Tokens::get(ctx);
+        let media = self.session.timeline.media.clone();
+        let video = matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+        let sound = item.layer_kind(&media) == layers::LayerKind::Sound;
+        if !video && !sound {
+            return;
+        }
+        super::section(ui, "Sound", first);
+        if video && !item.sound_only {
+            if ui
+                .add_enabled(self.separable(item), egui::Button::new("Separate the Sound").min_size(vec2(ui.available_width(), 28.0)))
+                .on_hover_text(super::SEPARATE_TIP)
+                .on_disabled_hover_text("Its sound is apart already, or silent")
+                .clicked()
+            {
+                self.separate_sound(ed, ctx, layer, item.id);
+            }
+            let mut heard = !item.silent;
+            if ui.checkbox(&mut heard, "Its sound heard with it").changed() {
+                self.run(ed, ctx, "video.setItem", json!({"layer": layer, "item": item.id, "silent": !heard}));
+            }
+        }
+        if item.sound_only {
+            ui.label(RichText::new("The video's sound, apart from its picture: it moves, trims and goes on its own.").size(12.0).color(t.muted));
+            ui.add_space(4.0);
+        }
+        if sound {
+            let mut mono = self.session.timeline.layer(layer).is_some_and(|l| l.mono);
+            if ui
+                .checkbox(&mut mono, "Mix the layer to mono")
+                .on_hover_text("Its two sides mixed into one, heard the same from both speakers")
+                .changed()
+            {
+                self.run(ed, ctx, "video.mono", json!({"layer": layer, "mono": mono}));
+            }
+        }
     }
 
     /// A zoom's settings: how close, where, and how it goes in and out.
@@ -1328,6 +1391,7 @@ impl VideoView {
 /// An item's colour on the timeline.
 pub fn item_colour(item: &Item, media: &[layers::MediaItem]) -> Color32 {
     match &item.what {
+        What::Media { .. } if item.sound_only => Color32::from_rgb(0x2F, 0x80, 0xED),
         What::Media { id } => match media.iter().find(|m| m.id == *id).map(|m| m.kind) {
             Some(MediaKind::Sound) => Color32::from_rgb(0x2F, 0x80, 0xED),
             Some(MediaKind::Video) => Color32::from_rgb(0x6E, 0x5A, 0xD6),
