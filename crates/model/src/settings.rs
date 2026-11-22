@@ -873,6 +873,10 @@ pub struct EditorSettings {
     pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
+    /// The video editor's theme, by name, for the titles, lower thirds and callouts added from
+    /// its Library (empty: each as it was made).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub video_theme: String,
 }
 
 /// The Fill tool's settings.

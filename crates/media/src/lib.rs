@@ -35,6 +35,7 @@ pub mod stretch;
 pub mod timeline;
 pub mod warp;
 pub mod watermark;
+pub mod yours;
 pub mod yuv;
 pub mod zoom;
 

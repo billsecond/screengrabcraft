@@ -263,7 +263,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **See-through video** | Has | Export Video's See-through video: a QuickTime MOV of PNG pictures (written by ScreenGrabCraft's own code; no other codec), clear wherever there's nothing: the screen's track hidden, the camera's background taken away, round titles and callouts. No sound in it (Export Sound makes it apart); not WebM |
 | **A watermark** | Has | Export Video's window: words, or a picture from the Media Bin, in a corner, as see-through and as large as asked; on the preview too |
 | **Several at once (batch)** | Has | File › Make Videos of Several Recordings: recordings chosen together, each made as it was edited (its layers' media read where they are), beside it under its own name, one format for all, the captions in the picture or beside it; one after another, the window saying how each is getting on |
-| Templates and themes of your own | Missing | |
+| **Templates and themes of your own** | Has | the Library's Yours: the layers' items (or the one chosen) kept under a name with their look, in the settings folder, dropped on another recording from where it's let go (its pictures and sounds found where they were). Themes: colours for bars and cards, marks and a title's words, and a face (the bundled sans, slanted, or fixed width: not any font on the computer), six that come with it and your own; Apply to This Video, and what comes from the Library takes it |
 | Uploads to video sites, an online editor, an online asset store | Not planned | needs a network service |
 
 ## The gaps, ranked
@@ -305,7 +305,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
 29. A pointer of another look drawn in its place; the pointer's path redrawn through points dragged on the picture (#121).
 30. The camera's background blurred or replaced by a picture; captions lit up word by word (word times estimated) (#122).
-31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once.
+31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once (#123).
+32. Templates and themes of your own in the video editor.
 
 **Still to build, in this order**
 

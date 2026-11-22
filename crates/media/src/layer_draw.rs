@@ -64,14 +64,15 @@ fn graphic(
     title: &str,
     subtitle: &str,
     color: &str,
+    font: layers::TextFont,
     len: u64,
     size: f32,
 ) -> Option<Arc<crate::stock::Graphic>> {
-    let key = format!("{style:?}|{title}|{subtitle}|{color}|{len}|{size}");
+    let key = format!("{style:?}|{title}|{subtitle}|{color}|{font:?}|{len}|{size}");
     if let Some(g) = cache.as_ref().and_then(|c| c.built.get(&key)) {
         return Some(g.clone());
     }
-    let g = Arc::new(crate::stock::build(style, title, subtitle, layers::color(color, [0x0b, 0x5f, 0xff]), len, size)?);
+    let g = Arc::new(crate::stock::build_in(font, style, title, subtitle, layers::color(color, [0x0b, 0x5f, 0xff]), len, size)?);
     if let Some(c) = cache {
         if c.built.len() > 48 {
             c.built.clear();
@@ -272,11 +273,11 @@ pub fn item_rect(item: &Item, timeline: &Timeline, store: &dyn MediaStore, w: f3
             };
             Some(media_rect(item, pw, ph, w, h))
         }
-        What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
-            let g = graphic(None, *style, title, subtitle, color, item.len, item.place.w)?;
+        What::Text { style, title, subtitle, color, font } if crate::stock::is_stock(*style) => {
+            let g = graphic(None, *style, title, subtitle, color, *font, item.len, item.place.w)?;
             Some(moved(g.bounds, stock_place(*style, &g, item.place, w, h)))
         }
-        What::Text { style, title, subtitle, color } => Some(text_item(None, *style, title, subtitle, color, item.place, w, h)),
+        What::Text { style, title, subtitle, color, .. } => Some(text_item(None, *style, title, subtitle, color, item.place, w, h)),
         What::Transition { .. } => None,
         // The frame it zooms into: the video's shape, kept on the picture.
         What::Zoom => {
@@ -514,7 +515,7 @@ pub fn text_item(
             r
         }
         // The broadcast graphics are played, not drawn here (see `draw_layers`): where one is.
-        _ => graphic(None, style, title, subtitle, color, 4_000_000, place.w)
+        _ => graphic(None, style, title, subtitle, color, layers::TextFont::Sans, 4_000_000, place.w)
             .map_or(Rect::new(0.0, 0.0, w, h), |g| moved(g.bounds, stock_place(style, &g, place, w, h))),
     }
 }
@@ -898,10 +899,10 @@ fn draw_item(
             let to = Transform::from_scale(k, k).post_rotate(turn).post_translate(rect.x + rect.w / 2.0 + m.dx, rect.y + rect.h / 2.0 + m.dy);
             Some((Rect::new(-rect.w / 2.0, -rect.h / 2.0, rect.w, rect.h), to))
         }
-        What::Text { style: TextStyle::Blur, title, subtitle, color } => {
+        What::Text { style: TextStyle::Blur, title, subtitle, color, .. } => {
             // What's under its box blurred (it draws nothing of its own), coming on and going
             // as the graphics do, and as the item's own animations and opacity say.
-            let g = graphic(Some(&mut *texts), TextStyle::Blur, title, subtitle, color, item.len, item.place.w)?;
+            let g = graphic(Some(&mut *texts), TextStyle::Blur, title, subtitle, color, layers::TextFont::Sans, item.len, item.place.w)?;
             let amount = crate::stock::blur_amount(item.len, t.saturating_sub(item.at) as f32 / 1e6) * m.alpha;
             let r = moved(g.bounds, stock_place(TextStyle::Blur, &g, item.place, w, h));
             // Moved and grown about the middle of the picture, as a graphic's picture is.
@@ -910,9 +911,9 @@ fn draw_item(
             blur_box(pix, r, amount);
             Some((r, Transform::identity()))
         }
-        What::Text { style, title, subtitle, color } if crate::stock::is_stock(*style) => {
+        What::Text { style, title, subtitle, color, font } if crate::stock::is_stock(*style) => {
             // A broadcast graphic: played, a frame for each moment of its item.
-            let g = graphic(Some(&mut *texts), *style, title, subtitle, color, item.len, item.place.w)?;
+            let g = graphic(Some(&mut *texts), *style, title, subtitle, color, *font, item.len, item.place.w)?;
             let secs = (t - item.at) as f32 / 1e6;
             let at = stock_place(*style, &g, item.place, w, h);
             let turn = item.look.clone().checked().rotate;
@@ -934,7 +935,7 @@ fn draw_item(
             }
             Some((r, frame_transform(m, w, h, turn, pivot)))
         }
-        What::Text { style, title, subtitle, color } => {
+        What::Text { style, title, subtitle, color, .. } => {
             let key = format!("{style:?}|{title}|{subtitle}|{color}|{:?}|{}x{}", item.place, w, h);
             let (st, ti, su, co, place) = (*style, title.as_str(), subtitle.as_str(), color.as_str(), item.place);
             let drawn = texts.get(key, || {
@@ -1484,7 +1485,13 @@ mod tests {
         let (tl2, _) = {
             let mut tl2 = timeline();
             let words = Item {
-                what: What::Text { style: TextStyle::TitleBox, title: "Masked".into(), subtitle: String::new(), color: String::new() },
+                what: What::Text {
+                    style: TextStyle::TitleBox,
+                    title: "Masked".into(),
+                    subtitle: String::new(),
+                    color: String::new(),
+                    font: Default::default(),
+                },
                 intro: layers::Anim { kind: AnimKind::None, len: 0 },
                 look: layers::ItemLook { rotate: 30.0, blend: layers::BlendMode::Multiply, mask: oval, ..layers::ItemLook::default() },
                 ..Item::default()

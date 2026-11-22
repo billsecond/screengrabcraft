@@ -37,6 +37,8 @@ pub enum LibDrop {
     Media(u32),
     /// A transition between two clips, dropped where they meet.
     Blend(screengrabcraft_media::timeline::Blend),
+    /// A template of the owner's, by its name.
+    Yours(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -326,9 +328,11 @@ impl VideoView {
     /// the nearest place it fits; it's then chosen.
     pub fn drop_on_timeline(&mut self, ed: &mut Editor, ctx: &egui::Context, what: &LibDrop, layer: Option<u32>, at: u64) {
         let mut p = match what {
-            LibDrop::Template(key) => json!({"template": key}),
+            LibDrop::Template(key) => json!({"template": key, "theme": self.theme_param()}),
             LibDrop::Media(id) => json!({"media": id}),
             LibDrop::Blend(kind) => return self.drop_blend(ed, ctx, *kind, None, at),
+            // Its own layers, whatever it was dropped on.
+            LibDrop::Yours(name) => return self.use_template(ed, ctx, name, at),
         };
         if let Some(o) = p.as_object_mut() {
             o.insert("at".into(), json!(at));
@@ -393,15 +397,18 @@ impl VideoView {
         // Looked for by name: everything that matches, whatever its section.
         ui.add(egui::TextEdit::singleline(&mut self.lib_search).hint_text("Search the library").desired_width(f32::INFINITY));
         ui.add_space(6.0);
+        self.load_yours(ed);
         let wanted = self.lib_search.trim().to_lowercase();
         if !wanted.is_empty() {
             let found: Vec<&layers::Template> =
                 lib.iter().filter(|x| x.name.to_lowercase().contains(&wanted) || x.group.label().to_lowercase().contains(&wanted)).collect();
             let blends = super::transitions::matching(&wanted);
-            if found.is_empty() && blends.is_empty() {
+            let own = self.yours.templates.iter().any(|x| x.name.to_lowercase().contains(&wanted));
+            if found.is_empty() && blends.is_empty() && !own {
                 ui.add_space(8.0);
                 ui.label(RichText::new(format!("Nothing in the library is called \u{201c}{}\u{201d}.", self.lib_search.trim())).color(t.muted));
             }
+            self.yours_section(ed, ui, ctx, &wanted);
             let mut budget = THUMBS_PER_FRAME;
             let mut hovered = false;
             for row in found.chunks(2) {
@@ -416,6 +423,22 @@ impl VideoView {
                 self.lib_hover = None;
             }
             return;
+        }
+        // The owner's own templates, and the themes, first.
+        for (name, themes) in [(super::yours::YOURS, false), (super::yours::THEMES, true)] {
+            egui::CollapsingHeader::new(RichText::new(name).size(14.0).strong().color(t.text))
+                .id_salt(("library-section", name))
+                .default_open(false)
+                .show_unindented(ui, |ui| {
+                    ui.add_space(4.0);
+                    if themes {
+                        self.themes_section(ed, ui, ctx);
+                    } else {
+                        self.yours_section(ed, ui, ctx, "");
+                    }
+                    ui.add_space(6.0);
+                });
+            ui.add_space(2.0);
         }
         // A section for each kind, opened and closed by its heading (the first is open).
         let mut budget = THUMBS_PER_FRAME;
@@ -498,6 +521,9 @@ impl VideoView {
         budget: &mut usize,
         hovered: &mut bool,
     ) {
+        // As it will be placed: in the theme in use.
+        let themed = self.themed(tpl);
+        let tpl = &themed;
         let key = format!("template-{}", tpl.key);
         if !self.thumbs.contains_key(&key) {
             if *budget > 0 {
@@ -803,6 +829,21 @@ impl VideoView {
                             if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
                                 set(self, json!({"color": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())}), false);
                             }
+                        });
+                        ui.add_space(4.0);
+                    }
+                    if let What::Text { style, font, .. } = &item.what
+                        && style.has_words()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Face").size(12.0).color(t.muted));
+                            egui::ComboBox::from_id_salt("item-font").width(150.0).selected_text(font.label()).show_ui(ui, |ui| {
+                                for f in layers::TextFont::ALL {
+                                    if ui.selectable_label(*font == f, f.label()).clicked() {
+                                        set(self, json!({ "font": f }), false);
+                                    }
+                                }
+                            });
                         });
                         ui.add_space(4.0);
                     }

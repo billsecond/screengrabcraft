@@ -182,6 +182,28 @@ pub struct VideoJob {
     pub media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
 }
 
+/// What the owner keeps to use again, each kind in a folder of its own in the settings folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kept {
+    /// The video editor's templates of the owner's: the layers' items kept under a name.
+    VideoTemplates,
+    /// The video editor's themes of the owner's: colours and a face for the titles.
+    VideoThemes,
+}
+
+impl Kept {
+    /// Its folder, in the settings folder.
+    pub fn folder(self) -> &'static str {
+        match self {
+            Kept::VideoTemplates => "video-templates",
+            Kept::VideoThemes => "video-themes",
+        }
+    }
+}
+
+/// Why nothing is kept here.
+pub const NOT_KEPT: &str = "Templates and themes of your own are kept by ScreenGrabCraft Editor on the desktop";
+
 /// Sound the host is playing; dropping it stops it.
 pub trait SoundOut {
     /// Where on the timeline the sound heard now is (µs), when the device says.
@@ -291,6 +313,26 @@ pub trait Services {
     }
 
     fn save_settings(&self, _settings: &EditorSettings) {}
+
+    /// Whether the owner's templates and themes are kept here (in the settings folder).
+    fn can_keep(&self) -> bool {
+        false
+    }
+
+    /// The files of a kind kept (a name each, and what's in it), in the order of their names.
+    fn kept(&self, _kind: Kept) -> Vec<(String, Vec<u8>)> {
+        Vec::new()
+    }
+
+    /// Keeps a file of a kind under a name; one kept under that name before is replaced.
+    fn keep(&self, _kind: Kept, _name: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err(NOT_KEPT.to_string())
+    }
+
+    /// Lets go of the file of a kind kept under a name.
+    fn forget(&self, _kind: Kept, _name: &str) -> Result<(), String> {
+        Err(NOT_KEPT.to_string())
+    }
 
     /// Now, in local time, for naming files.
     fn now(&self) -> Stamp {

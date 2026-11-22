@@ -699,6 +699,10 @@ fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
         (None, Some(_)) => Item { what: What::Media { id: id(p, "media")? }, ..Item::default() },
         (None, None) => return Err(EngineError::Params("say what to place: `template` or `media`".to_string())),
     };
+    // A library item in the theme chosen: its colours and face.
+    if let Some(th) = theme_param(p)? {
+        th.restyle(&mut item);
+    }
     if let What::Text { title, subtitle, .. } = &mut item.what {
         if let Some(t) = text(p, "title")? {
             *title = t;
@@ -712,6 +716,60 @@ fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
     }
     let (layer, item) = s.timeline.place(item, layer_or_new(p, "layer")?, int(p, "at")?).map_err(edit_err)?;
     Ok(json!({"layer": layer, "item": item}))
+}
+
+/// A theme given as `"theme"`: `{"name", "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}`,
+/// if it's given (null: none).
+fn theme_param(p: &Value) -> Result<Option<screengrabcraft_media::yours::VideoTheme>> {
+    match p.get("theme") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v @ Value::Object(_)) => serde_json::from_value::<screengrabcraft_media::yours::VideoTheme>(v.clone())
+            .map(|t| Some(t.checked()))
+            .map_err(|_| EngineError::Params("`theme` is {name, main, mark, words: #rrggbb, font: sans, slanted or mono}".to_string())),
+        Some(_) => Err(EngineError::Params("`theme` is an object".to_string())),
+    }
+}
+
+/// Every title, lower third, callout and graphic on the layers in a theme's colours and face.
+fn apply_theme(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let theme = theme_param(p)?.ok_or_else(|| EngineError::Params("say which `theme`".to_string()))?;
+    Ok(json!({"items": s.timeline.apply_theme(&theme)}))
+}
+
+/// The layers' items (or those chosen) as a template to keep: nothing on the timeline changes.
+fn make_template(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?.unwrap_or_default();
+    let chosen: Option<Vec<(u32, u32)>> = match p.get("items") {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(
+            a.iter()
+                .take(screengrabcraft_media::layers::MAX_ITEMS)
+                .map(|pair| match pair.as_array().map(Vec::as_slice) {
+                    Some([l, i]) => match (l.as_u64().and_then(|v| u32::try_from(v).ok()), i.as_u64().and_then(|v| u32::try_from(v).ok())) {
+                        (Some(l), Some(i)) => Ok((l, i)),
+                        _ => Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+                    },
+                    _ => Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+                })
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        Some(_) => return Err(EngineError::Params("`items` is [[layer, item], …]".to_string())),
+    };
+    let t = s.timeline.make_template(&name, chosen.as_deref()).map_err(edit_err)?;
+    let items = t.item_count();
+    let template = serde_json::to_value(&t).map_err(|e| EngineError::Failed(e.to_string()))?;
+    Ok(json!({"template": template, "items": items}))
+}
+
+/// A template kept before put on layers of its own from `at`.
+fn use_template(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let t = match p.get("template") {
+        Some(v @ Value::Object(_)) => serde_json::from_value::<screengrabcraft_media::yours::OwnTemplate>(v.clone())
+            .map_err(|_| EngineError::Params("`template` is one made by video.makeTemplate".to_string()))?,
+        _ => return Err(EngineError::Params("`template` is one made by video.makeTemplate".to_string())),
+    };
+    let used = s.timeline.use_template(&t, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"layers": used.layers, "items": used.items}))
 }
 
 fn move_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -732,6 +790,13 @@ fn delete_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
 fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
     use screengrabcraft_media::layers::{AnimKind, BlendMode, MaskShape, What};
     let (title, subtitle, color) = (text(p, "title")?, text(p, "subtitle")?, text(p, "color")?);
+    let font = match p.get("font") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<screengrabcraft_media::layers::TextFont>(v.clone())
+                .map_err(|_| EngineError::Params("`font` is sans, slanted or mono".to_string()))?,
+        ),
+    };
     let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
     // A frozen region's height.
     let freeze_h = number(p, "h")?;
@@ -849,7 +914,10 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             if let (Some(v), What::Freeze { h }) = (freeze_h, &mut i.what) {
                 *h = v;
             }
-            if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
+            if let What::Text { title: t, subtitle: st, color: c, font: f, .. } = &mut i.what {
+                if let Some(v) = font {
+                    *f = v;
+                }
                 if let Some(v) = title {
                     *t = v;
                 }
@@ -1944,8 +2012,26 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.place",
         label: "Add to the Timeline",
-        params: r#"{"template": key | "media": id, "at": µs, "layer"?: id|"new", "title"?: text, "subtitle"?: text, "len"?: µs}: where it fits, never over another"#,
+        params: r##"{"template": key | "media": id, "at": µs, "layer"?: id|"new", "title"?: text, "subtitle"?: text, "len"?: µs, "theme"?: {"main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}}: where it fits, never over another (a library item in the theme's colours and face)"##,
         run: place,
+    },
+    VideoCommand {
+        id: "video.applyTheme",
+        label: "Apply the Theme",
+        params: r##"{"theme": {"name"?, "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}}: every title, lower third, callout and graphic on the layers in its colours (main: bars, boxes and cards; mark: highlights, circles, arrows, clicks; words: a plain title) and its face; how many changed"##,
+        run: apply_theme,
+    },
+    VideoCommand {
+        id: "video.makeTemplate",
+        label: "Make a Template",
+        params: r#"{"name": text, "items"?: [[layer, item], …]}: the layers' items (all, or these) as a template to keep, timed from the first, with the media they show; nothing changes"#,
+        run: make_template,
+    },
+    VideoCommand {
+        id: "video.useTemplate",
+        label: "Add the Template",
+        params: r#"{"template": what video.makeTemplate made, "at": µs}: its items on layers of their own from there, its media into the bin"#,
+        run: use_template,
     },
     VideoCommand {
         id: "video.moveItem",
@@ -1958,7 +2044,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop"|"write" (write: words written on letter by letter, anything else wiped on from its left), "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left), "h"?: 0.02..1 (a frozen region's height, a share of the screen)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "font"?: "sans"|"slanted"|"mono", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop"|"write" (write: words written on letter by letter, anything else wiped on from its left), "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left), "h"?: 0.02..1 (a frozen region's height, a share of the screen)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -3068,5 +3154,41 @@ mod layer_tests {
         s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "all": true})).unwrap();
         assert!(s.timeline.item(layer, item).unwrap().keys.is_empty());
         assert!(s.execute("video.removeKeyframe", &json!({"layer": layer, "item": item, "key": 0})).is_err());
+    }
+
+    #[test]
+    fn a_template_made_of_the_layers_goes_on_another_recording_and_a_theme_restyles_them() {
+        use screengrabcraft_media::layers::{TextFont, What};
+        let mut s = session();
+        let placed = s.execute("video.place", &json!({"template": "lower-bar", "at": 1_000_000})).unwrap();
+        s.execute("video.place", &json!({"template": "callout", "at": 2_000_000})).unwrap();
+        let (layer, item) = (placed["layer"].clone(), placed["item"].clone());
+        s.execute("video.setItem", &json!({"layer": layer, "item": item, "font": "mono"})).unwrap();
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "font": "gothic"})).is_err());
+        let undo = s.undo_label().map(str::to_string);
+        let made = s.execute("video.makeTemplate", &json!({"name": "Intro"})).unwrap();
+        assert_eq!(made["items"], 2);
+        assert_eq!(s.undo_label().map(str::to_string), undo, "making one changes nothing");
+        let one = s.execute("video.makeTemplate", &json!({"name": "Name", "items": [[layer, item]]})).unwrap();
+        assert_eq!(one["items"], 1);
+        assert!(s.execute("video.makeTemplate", &json!({"items": [[1, "x"]]})).is_err());
+        // On another recording, from 0.5 s.
+        let mut other = session();
+        let used = other.execute("video.useTemplate", &json!({"template": made["template"], "at": 500_000})).unwrap();
+        assert_eq!(used["items"], 2);
+        let starts: Vec<u64> = other.timeline.layers.iter().flat_map(|l| l.items.iter().map(|i| i.at)).collect();
+        assert_eq!(starts, vec![500_000, 1_500_000]);
+        assert_eq!(other.undo_label(), Some("Add the Template"));
+        let mono = other.timeline.layers.iter().flat_map(|l| l.items.iter()).any(|i| matches!(&i.what, What::Text { font: TextFont::Mono, .. }));
+        assert!(mono, "the look kept with it");
+        assert!(other.execute("video.useTemplate", &json!({"template": {"layers": []}, "at": 0})).is_err());
+        // A theme: every one restyled, and a library item placed in it.
+        let theme = json!({"name": "Mine", "main": "#123456", "mark": "#abcdef", "words": "#ffffff", "font": "slanted"});
+        let v = other.execute("video.applyTheme", &json!({ "theme": theme })).unwrap();
+        assert_eq!(v["items"], 2);
+        let p = other.execute("video.place", &json!({"template": "title-box", "at": 3_000_000, "theme": theme})).unwrap();
+        let placed = other.timeline.item(id(&p, "layer").unwrap(), id(&p, "item").unwrap()).unwrap().clone();
+        assert!(matches!(&placed.what, What::Text { color, font: TextFont::Slanted, .. } if color == "#123456"));
+        assert!(other.execute("video.applyTheme", &json!({"theme": 5})).is_err());
     }
 }
