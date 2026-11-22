@@ -1763,6 +1763,17 @@ impl VideoView {
             {
                 self.run(ed, &ctx, "video.pointer", json!({"clicks": clicks}));
             }
+            for (label, key, on, tip) in [
+                ("Click sounds", "clickSound", look.click_sound, "A click heard each time a button is pressed"),
+                ("Highlight", "highlight", look.highlight, "A soft yellow circle under the pointer, so the eye finds it"),
+                ("Spotlight", "spotlight", look.spotlight, "The picture dimmed but for a circle round the pointer"),
+                ("Magnifier", "magnify", look.magnify, "A round lens on the pointer, showing what's round it twice as large"),
+            ] {
+                let mut v = on;
+                if ui.checkbox(&mut v, label).on_hover_text(tip).changed() {
+                    self.run(ed, &ctx, "video.pointer", json!({ key: v }));
+                }
+            }
         });
     }
 

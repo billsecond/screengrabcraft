@@ -382,8 +382,8 @@ fn id(p: &Value, key: &str) -> Result<u32> {
     u32::try_from(v).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
 }
 
-/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path, and
-/// whether its clicks are ringed.
+/// How the mouse pointer is drawn on the video: shown or not, how large, how smooth its path,
+/// whether its clicks are ringed (and heard), and whether it's highlighted, spotlit or magnified.
 fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if !p.is_object() {
         return Err(EngineError::Params("the pointer's look is given as an object".to_string()));
@@ -395,9 +395,14 @@ fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
         }
     };
     let (show, clicks, size, smooth) = (flag("show")?, flag("clicks")?, number(p, "size")?, number(p, "smooth")?);
+    let (highlight, spotlight, magnify, click_sound) = (flag("highlight")?, flag("spotlight")?, flag("magnify")?, flag("clickSound")?);
     let mut look = s.timeline.pointer;
     look.show = show.unwrap_or(look.show);
     look.clicks = clicks.unwrap_or(look.clicks);
+    look.highlight = highlight.unwrap_or(look.highlight);
+    look.spotlight = spotlight.unwrap_or(look.spotlight);
+    look.magnify = magnify.unwrap_or(look.magnify);
+    look.click_sound = click_sound.unwrap_or(look.click_sound);
     look.size = size.unwrap_or(look.size);
     look.smooth = smooth.unwrap_or(look.smooth);
     s.timeline.pointer = look.checked();
@@ -629,7 +634,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.pointer",
         label: "Pointer",
-        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool}: the mouse pointer on the video"#,
+        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool, "highlight"?: bool, "spotlight"?: bool, "magnify"?: bool, "clickSound"?: bool}: the mouse pointer on the video: rings at its clicks, a yellow disc under it, the picture dimmed but round it, a lens showing what's round it twice as large, a click heard at each click"#,
         run: pointer,
     },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },

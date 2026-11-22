@@ -66,19 +66,43 @@ pub struct Look {
     pub smooth: f32,
     /// A ring where a button is pressed.
     pub clicks: bool,
+    /// A soft yellow disc under it, so the eye finds it.
+    pub highlight: bool,
+    /// The picture dimmed but for a circle round it.
+    pub spotlight: bool,
+    /// A round lens on it, showing what's round it twice as large.
+    pub magnify: bool,
+    /// A click heard when a button is pressed (made in code, not a recording).
+    pub click_sound: bool,
 }
 
 impl Default for Look {
     fn default() -> Look {
-        Look { show: true, size: 1.0, smooth: 0.4, clicks: true }
+        Look { show: true, size: 1.0, smooth: 0.4, clicks: true, highlight: false, spotlight: false, magnify: false, click_sound: false }
     }
 }
 
 impl Look {
     pub fn checked(self) -> Look {
         let n = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
-        Look { show: self.show, size: n(self.size, 0.5, 4.0, 1.0), smooth: n(self.smooth, 0.0, 1.0, 0.0), clicks: self.clicks }
+        Look { size: n(self.size, 0.5, 4.0, 1.0), smooth: n(self.smooth, 0.0, 1.0, 0.0), ..self }
     }
+}
+
+/// A click's sound: `CLICK_SOUND_LEN` samples at 48 kHz, made here (two short tones dying away
+/// fast, like a mouse button), -1 to 1.
+pub const CLICK_SOUND_LEN: usize = 1440;
+
+/// Sample `k` of a click's sound.
+pub fn click_sound(k: usize) -> f32 {
+    if k >= CLICK_SOUND_LEN {
+        return 0.0;
+    }
+    let t = k as f32 / 48_000.0;
+    let tone = (std::f32::consts::TAU * 2_400.0 * t).sin() * 0.6 + (std::f32::consts::TAU * 1_150.0 * t).sin() * 0.4;
+    // A quick rise (no pop), then gone in a few milliseconds.
+    let rise = (k as f32 / 24.0).min(1.0);
+    tone * rise * (-t / 0.0035).exp() * 0.45
 }
 
 /// A button pressed: when, where, which.
@@ -388,17 +412,115 @@ pub fn draw_view(out: &mut Raster, track: &Track, look: Look, t: u64, view: (f32
     }
     let at = |x: f32, y: f32| ((x - left) * scale, (y - top) * scale);
     let size = look.size * scale;
+    let pose = track.pose(t, look.smooth);
+    // What's round the pointer first (under it): the spotlight, the lens, the highlight.
+    if let Some(p) = &pose {
+        let (x, y) = at(p.x, p.y);
+        // As large on the screen whatever the video's size, but never most of the picture.
+        let side = out.width().min(out.height()) as f32;
+        if look.spotlight {
+            spotlight(out, x, y, (150.0 * scale).min(side * 0.3));
+        }
+        if look.magnify {
+            magnifier(out, x, y, (110.0 * scale).min(side * 0.25));
+        }
+        if look.highlight {
+            highlight(out, x, y, 26.0 * size);
+        }
+    }
     if look.clicks {
         for (c, p) in track.rings(t) {
             let (x, y) = at(c.x, c.y);
             ring(out, x, y, 34.0 * size, p, c.button);
         }
     }
-    let Some(pose) = track.pose(t, look.smooth) else { return };
+    let Some(pose) = pose else { return };
     let Some(shape) = track.shape(pose.shape).or(fallback) else { return };
     let f = f32::from(shape.nominal) * size / (shape.pic.width() as f32).max(1.0);
     let (x, y) = at(pose.x, pose.y);
     stamp(out, shape, x, y, f);
+}
+
+/// The pixels within `reach` of `(cx, cy)` on `out`: (x, y, distance) of each, its left to right
+/// and top to bottom bounds kept on the picture.
+fn round(out: &Raster, cx: f32, cy: f32, reach: f32) -> impl Iterator<Item = (u32, u32, f32)> + use<> {
+    let (w, h) = (out.width(), out.height());
+    let fine = cx.is_finite() && cy.is_finite() && reach.is_finite() && reach > 0.0;
+    let span = |c: f32, n: u32| -> (u32, u32) {
+        if !fine {
+            return (0, 0);
+        }
+        ((c - reach).floor().clamp(0.0, n as f32) as u32, (c + reach).ceil().clamp(0.0, n as f32) as u32)
+    };
+    let ((x0, x1), (y0, y1)) = (span(cx, w), span(cy, h));
+    (y0..y1).flat_map(move |y| (x0..x1).map(move |x| (x, y))).filter_map(move |(x, y)| {
+        let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+        (d <= reach).then_some((x, y, d))
+    })
+}
+
+/// The picture dimmed outside a circle of radius `r` round `(cx, cy)`, its edge soft.
+fn spotlight(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) {
+        return;
+    }
+    let w = out.width() as usize;
+    let soft = (r * 0.3).max(1.0);
+    for (i, px) in out.pixels_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = ((i % w.max(1)) as f32 + 0.5, (i / w.max(1)) as f32 + 0.5);
+        let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+        let dark = ((d - r) / soft).clamp(0.0, 1.0) * 0.62;
+        if dark > 0.0 {
+            for v in px.iter_mut().take(3) {
+                *v = (f32::from(*v) * (1.0 - dark)).round() as u8;
+            }
+        }
+    }
+}
+
+/// A round lens of radius `r` at `(cx, cy)` showing the picture round it twice as large, with a
+/// white rim.
+fn magnifier(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r < 2.0 {
+        return;
+    }
+    // What the lens shows: the picture as it is, round the middle.
+    let src = out.clone();
+    let (w, h) = (out.width() as i64, out.height() as i64);
+    let rim = (r * 0.04).max(1.5);
+    let spots: Vec<(u32, u32, f32)> = round(out, cx, cy, r + rim).collect();
+    let px = out.pixels_mut();
+    for (x, y, d) in spots {
+        let i = (y as usize * w as usize + x as usize) * 4;
+        let Some(dst) = px.get_mut(i..i + 4) else { continue };
+        if d <= r {
+            let sx = ((cx + (x as f32 + 0.5 - cx) / 2.0).floor() as i64).clamp(0, (w - 1).max(0));
+            let sy = ((cy + (y as f32 + 0.5 - cy) / 2.0).floor() as i64).clamp(0, (h - 1).max(0));
+            let j = ((sy * w + sx) * 4) as usize;
+            if let Some(s) = src.pixels().get(j..j + 4) {
+                dst.copy_from_slice(s);
+            }
+        }
+        // The rim, smooth at its edges.
+        let a = 1.0 - ((d - r).abs() / rim).min(1.0);
+        blend(dst, [255, 255, 255], a);
+    }
+}
+
+/// A soft yellow disc of radius `r` at `(cx, cy)`.
+fn highlight(out: &mut Raster, cx: f32, cy: f32, r: f32) {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r <= 0.0 {
+        return;
+    }
+    let w = out.width() as usize;
+    let spots: Vec<(u32, u32, f32)> = round(out, cx, cy, r).collect();
+    let px = out.pixels_mut();
+    for (x, y, d) in spots {
+        let i = (y as usize * w + x as usize) * 4;
+        if let Some(dst) = px.get_mut(i..i + 3) {
+            blend(dst, [255, 224, 64], 0.42 * ((r - d) / 2.0).clamp(0.0, 1.0));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -520,11 +642,54 @@ mod tests {
 
     #[test]
     fn junk_looks_are_made_safe() {
-        let l = Look { show: true, size: f32::NAN, smooth: 99.0, clicks: true }.checked();
+        let l = Look { show: true, size: f32::NAN, smooth: 99.0, clicks: true, ..Look::default() }.checked();
         assert_eq!((l.size, l.smooth), (1.0, 1.0));
         let tr = shaky();
         let mut pic = Raster::filled(8, 8, Color::WHITE).unwrap();
-        draw(&mut pic, &tr, Look { size: 1.0e9, ..Look::default() }, 0, f32::INFINITY, None);
-        draw(&mut pic, &tr, Look::default(), u64::MAX, 1.0e9, arrow().as_ref());
+        let all = Look { highlight: true, spotlight: true, magnify: true, ..Look::default() };
+        draw(&mut pic, &tr, Look { size: 1.0e9, ..all }, 0, f32::INFINITY, None);
+        draw(&mut pic, &tr, all, u64::MAX, 1.0e9, arrow().as_ref());
+        draw(&mut pic, &tr, all, 0, 1.0e-9, arrow().as_ref());
+        // Saved before these were: off.
+        let old: Look = serde_json::from_str(r#"{"show":true,"size":2.0}"#).unwrap();
+        assert!(!old.highlight && !old.spotlight && !old.magnify && !old.click_sound && old.clicks);
+    }
+
+    #[test]
+    fn the_pointer_is_highlighted_spotlit_and_magnified_when_asked() {
+        let arrow = arrow().unwrap();
+        // The pointer still at (100, 80) on a picture with a black dot at (110, 80).
+        let tr = Track::new(vec![s(0, 100.0, 80.0, 0)], Vec::new());
+        let pic = || {
+            let mut p = Raster::filled(400, 300, Color::rgb(200, 200, 200)).unwrap();
+            for (x, y) in [(110u32, 80u32), (111, 80), (110, 81), (111, 81)] {
+                let i = ((y * 400 + x) * 4) as usize;
+                p.pixels_mut()[i..i + 3].copy_from_slice(&[0, 0, 0]);
+            }
+            p
+        };
+        let plain = Look { clicks: false, ..Look::default() };
+        let at = |p: &Raster, x: u32, y: u32| p.pixel(x, y).unwrap();
+        // Highlighted: yellow round it, not far off.
+        let mut lit = pic();
+        draw(&mut lit, &tr, Look { highlight: true, ..plain }, 100, 1.0, Some(&arrow));
+        let near = at(&lit, 80, 80);
+        assert!(near.r > near.b + 40 && near.g > near.b + 30, "{near:?}");
+        assert_eq!(at(&lit, 300, 200), Color::rgb(200, 200, 200));
+        // Spotlit: dark far off, as it was near.
+        let mut spot = pic();
+        draw(&mut spot, &tr, Look { spotlight: true, ..plain }, 100, 1.0, Some(&arrow));
+        assert!(at(&spot, 390, 290).r < 100);
+        assert_eq!(at(&spot, 60, 80), Color::rgb(200, 200, 200));
+        // Magnified: the dot 10 px off shows 20 px off, twice the size.
+        let mut lens = pic();
+        draw(&mut lens, &tr, Look { magnify: true, ..plain }, 100, 1.0, Some(&arrow));
+        assert!(at(&lens, 121, 81).r < 50 && at(&lens, 123, 83).r < 50, "{:?}", at(&lens, 121, 81));
+        assert_eq!(at(&lens, 111, 81), Color::rgb(200, 200, 200), "the dot's own place shows what's half way there");
+        assert!(at(&lens, 100, 80 + 75).r > 240, "the lens's white rim (its radius a quarter of the picture's height)");
+        // A click's sound: short, starting and ending quiet.
+        assert_eq!(click_sound(0), 0.0);
+        assert!((0..CLICK_SOUND_LEN).map(click_sound).fold(0.0f32, |m, v| m.max(v.abs())) > 0.2);
+        assert!(click_sound(CLICK_SOUND_LEN - 1).abs() < 0.01 && click_sound(CLICK_SOUND_LEN) == 0.0);
     }
 }

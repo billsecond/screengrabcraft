@@ -128,6 +128,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
   track itself, on this computer; voices stay). The track's right button turns the noise off and
   on too.
+- **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
+  it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
+  yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
+  what's round it twice as large.
 - **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
