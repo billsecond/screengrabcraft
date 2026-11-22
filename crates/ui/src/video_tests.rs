@@ -2859,3 +2859,59 @@ fn scroll_side_panel(h: &mut Harness<'_, Editor>, lines: usize) {
     }
     h.run_steps(10);
 }
+
+#[test]
+fn a_volume_line_is_drawn_on_the_microphones_wave_and_levels_are_evened_out() {
+    let mut h = harness_stepping(0.05);
+    let mic = h.state().video.as_ref().unwrap().session.timeline.find(StreamKind::Microphone).unwrap();
+    // The microphone's clip chosen, its wave double-clicked low down at 1 s: a quiet point there.
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.selected = Some((mic, 0));
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    h.run_steps(2);
+    let row_top = rows_top + mic as f32 * 48.0;
+    let at = egui::pos2(lane.min.x + 1.0 * pps - scroll, row_top + 34.0);
+    h.hover_at(at);
+    h.run_steps(1);
+    for pressed in [true, false, true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+    }
+    h.run_steps(3);
+    let points = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks[mic].points.clone();
+    let p = points(&h);
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].level < 0.6 && p[0].at.abs_diff(1_000_000) < 50_000, "{p:?}");
+    // Dragged up: louder.
+    crate::tests::drag(&mut h, at, at - egui::vec2(0.0, 18.0));
+    let p = points(&h);
+    assert!(p.len() == 1 && p[0].level > 1.0, "{p:?}");
+    // A second point, from the track's right button.
+    right_click(&mut h, egui::pos2(lane.min.x + 3.0 * pps - scroll, row_top + 20.0));
+    h.get_by_label("Add a Volume Point Here").click();
+    h.run_steps(2);
+    assert_eq!(points(&h).len(), 2);
+    shot(&mut h, "video-volume-line");
+    // Every level evened out from the panel: the humming microphone is turned down to the level.
+    scroll_side_panel_to(&mut h, "Even Out the Levels");
+    shot(&mut h, "video-sound-mix");
+    h.get_by_label("Even Out the Levels").click();
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap().session.timeline.tracks[mic].volume;
+    assert!(v < 0.8 && v > 0.3, "{v}");
+    // Nothing else to lower under the voice here.
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Lower the rest under the voice")).is_disabled());
+}
+
+/// Scrolls the panel at the right down, a turn of the wheel at a time, until `label` is in view.
+fn scroll_side_panel_to(h: &mut Harness<'_, Editor>, label: &str) {
+    for _ in 0..30 {
+        let y = h.get_by_label(label).rect().center().y;
+        if (130.0..480.0).contains(&y) {
+            return;
+        }
+        scroll_side_panel(h, 1);
+    }
+}

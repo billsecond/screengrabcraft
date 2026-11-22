@@ -236,10 +236,10 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Waves drawn; volume for each track | Has | |
-| Volume changed along a clip | Missing | |
+| **Volume changed along a clip** | Has | a sound track's volume line: double-click a clip's wave for a point (or the track's right button), drag points up and down and along; it stays with the sound through every edit |
 | **Fade in and out** | Has | a sound clip at its start and end |
 | **Background noise taken out** | Has | the steady noise learnt from the track itself and turned down, on this computer (no trained model) |
-| Levels evened out; music lowered under the voice | Missing | |
+| **Levels evened out; music lowered under the voice** | Has | Even Out the Levels gives each sound track the volume that makes it as loud as the others (measured on this computer); Lower the rest under the voice turns the computer's sound, music and media down while the microphone is heard |
 | Sound of a video apart from its picture; mono | Missing | |
 | Narration recorded over the video | Missing | |
 | Captions made on this computer (You and Others) | Has | |
@@ -285,7 +285,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 10. Hold a frame: the picture held while every track waits (#73).
 11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed (#76).
 12. The camera's background removed, with or without a green screen (#79).
-13. Transitions between clips; keyframe animation of an item's place, size and opacity.
+13. Transitions between clips; keyframe animation of an item's place, size and opacity (#85).
+14. Volume along a clip; the rest lowered under the voice; levels evened out.
 
 **Still to build, in this order**
 
@@ -300,13 +301,12 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Rotate, group and align annotations; select all of one kind.
 9. Magic wand, eraser, ellipse and freehand selections.
 10. Drawing on the screen while recording.
-11. Volume along a clip; music lowered under the voice; levels evened out.
-12. Tags, favourites, and captures sorted by program.
-13. Templates; several pictures combined into one.
-14. A picture per click made into a how-to guide.
-15. Groups, pushing later clips along, locked and solo tracks, clip colours.
-16. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-17. Print; batch changes; captures on a timer or at a set time.
-18. Cutting words from the transcript; filler words taken out.
-19. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+11. Tags, favourites, and captures sorted by program.
+12. Templates; several pictures combined into one.
+13. A picture per click made into a how-to guide.
+14. Groups, pushing later clips along, locked and solo tracks, clip colours.
+15. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+16. Print; batch changes; captures on a timer or at a set time.
+17. Cutting words from the transcript; filler words taken out.
+18. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

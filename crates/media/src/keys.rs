@@ -227,7 +227,16 @@ mod tests {
 
     fn screen(clips: Vec<Clip>) -> Timeline {
         Timeline {
-            tracks: vec![Track { stream: 0, kind: StreamKind::Screen, muted: false, volume: 1.0, clips, name: None, denoise: 0.0 }],
+            tracks: vec![Track {
+                stream: 0,
+                kind: StreamKind::Screen,
+                muted: false,
+                volume: 1.0,
+                clips,
+                name: None,
+                denoise: 0.0,
+                points: Vec::new(),
+            }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
             layers: Vec::new(),
@@ -236,6 +245,7 @@ mod tests {
             corrected: None,
             markers: Vec::new(),
             keys: Look::default(),
+            ducking: Default::default(),
         }
     }
 

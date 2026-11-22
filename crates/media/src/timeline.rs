@@ -277,6 +277,53 @@ pub struct Track {
     /// Sound only.
     #[serde(default, skip_serializing_if = "is_quiet")]
     pub denoise: f32,
+    /// Its volume line: how loud it is (0 to 2, on top of its volume) at moments of its
+    /// recording, in order, straight from one to the next; before the first, the first's; after
+    /// the last, the last's. None: as loud all along. Kept in the recording's time, so they stay
+    /// with the sound through every edit. Sound only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<VolumePoint>,
+}
+
+/// A point of a sound track's volume line: how loud it is at a moment of its recording (µs).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct VolumePoint {
+    pub at: u64,
+    pub level: f32,
+}
+
+/// The most points a track's volume line keeps.
+pub const MAX_VOLUME_POINTS: usize = 2_000;
+
+impl Track {
+    /// How loud its volume line has it at `src` µs of its recording: 1 with no points.
+    pub fn level_at(&self, src: u64) -> f32 {
+        let k = self.points.partition_point(|p| p.at <= src);
+        match (k.checked_sub(1).and_then(|i| self.points.get(i)), self.points.get(k)) {
+            (None, None) => 1.0,
+            (Some(a), None) => a.level,
+            (None, Some(b)) => b.level,
+            (Some(a), Some(b)) => {
+                let f = (src - a.at) as f32 / b.at.saturating_sub(a.at).max(1) as f32;
+                a.level + (b.level - a.level) * f.clamp(0.0, 1.0)
+            }
+        }
+    }
+}
+
+/// The other sound lowered while the voice (the microphone) is heard.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ducking {
+    pub on: bool,
+    /// How loud the rest is under the voice, 0 to 1 (0.3: about a third as loud).
+    pub level: f32,
+}
+
+impl Default for Ducking {
+    fn default() -> Ducking {
+        Ducking { on: false, level: 0.3 }
+    }
 }
 
 fn is_quiet(v: &f32) -> bool {
@@ -418,6 +465,9 @@ pub struct Timeline {
     /// them).
     #[serde(default)]
     pub keys: crate::keys::Look,
+    /// The other sound lowered while the voice is heard.
+    #[serde(default)]
+    pub ducking: Ducking,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -450,7 +500,7 @@ impl Timeline {
             .map(|s| {
                 let len = rec.stream_duration(s.id);
                 let clips = if len >= MIN_CLIP_US { vec![Clip::new(0, 0, len)] } else { Vec::new() };
-                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None, denoise: 0.0 }
+                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None, denoise: 0.0, points: Vec::new() }
             })
             .collect();
         Timeline {
@@ -463,6 +513,7 @@ impl Timeline {
             corrected: None,
             markers: Vec::new(),
             keys: Default::default(),
+            ducking: Default::default(),
         }
     }
 
@@ -490,6 +541,17 @@ impl Timeline {
             t.name = t.name.as_deref().and_then(clean_name);
             t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 2.0) } else { 1.0 };
             t.denoise = if t.denoise.is_finite() && !t.kind.is_video() { t.denoise.clamp(0.0, 1.0) } else { 0.0 };
+            // The volume line: of sound, levels in range, in order, one to a moment, not too many.
+            t.points.truncate(MAX_VOLUME_POINTS);
+            if t.kind.is_video() {
+                t.points.clear();
+            }
+            for p in &mut t.points {
+                p.at = p.at.min(u64::MAX / 4);
+                p.level = if p.level.is_finite() { p.level.clamp(0.0, 2.0) } else { 1.0 };
+            }
+            t.points.sort_by_key(|p| p.at);
+            t.points.dedup_by_key(|p| p.at);
             let sound = !t.kind.is_video();
             let source = rec.stream_duration(t.stream);
             let mut clips: Vec<Clip> = t
@@ -545,6 +607,7 @@ impl Timeline {
             corrected: self.corrected.map(|c| crate::captions::Captions { cues: c, model: String::new() }.checked(rec.duration_us).cues),
             markers: Vec::new(),
             keys: self.keys.checked(),
+            ducking: Ducking { on: self.ducking.on, level: if self.ducking.level.is_finite() { self.ducking.level.clamp(0.0, 1.0) } else { 0.3 } },
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -981,6 +1044,79 @@ impl Timeline {
         Ok(())
     }
 
+    /// A point of a sound track's volume line at timeline time `at` (on one of its clips): its
+    /// level (else what the line has there now). `point` given: that point moved there (its level
+    /// kept unless one is given); else one within a moment of it is changed, or one is added. Its
+    /// place among the points.
+    pub fn set_volume_point(&mut self, track: usize, point: Option<usize>, at: u64, level: Option<f32>) -> Result<usize, EditError> {
+        if level.is_some_and(|l| !l.is_finite()) {
+            return Err(EditError::Invalid("the level is not a number".to_string()));
+        }
+        let src = self.source_time(track, at).ok_or_else(|| EditError::Invalid("a volume point goes on a clip of the track".to_string()))?;
+        let t = self.track_mut(track)?;
+        if t.kind.is_video() {
+            return Err(EditError::Invalid("only a sound track has a volume line".to_string()));
+        }
+        let level = level.map(|l| l.clamp(0.0, 2.0));
+        let at_src = match point {
+            Some(i) => {
+                let old = *t.points.get(i).ok_or_else(|| EditError::Invalid(format!("there's no volume point {i}")))?;
+                t.points.remove(i);
+                // Not onto another point.
+                if t.points.iter().any(|p| p.at == src) {
+                    t.points.insert(i, old);
+                    return Ok(i);
+                }
+                t.points.push(VolumePoint { at: src, level: level.unwrap_or(old.level) });
+                src
+            }
+            None => match t.points.iter_mut().find(|p| p.at.abs_diff(src) < MIN_CLIP_US) {
+                Some(p) => {
+                    p.level = level.unwrap_or(p.level);
+                    p.at
+                }
+                None => {
+                    if t.points.len() >= MAX_VOLUME_POINTS {
+                        return Err(EditError::Invalid(format!("a track has at most {MAX_VOLUME_POINTS} volume points")));
+                    }
+                    let l = level.unwrap_or_else(|| t.level_at(src));
+                    t.points.push(VolumePoint { at: src, level: l });
+                    src
+                }
+            },
+        };
+        t.points.sort_by_key(|p| p.at);
+        Ok(t.points.iter().position(|p| p.at == at_src).unwrap_or(0))
+    }
+
+    /// Takes a point of a track's volume line away (`None`: all of them: as loud all along).
+    pub fn remove_volume_point(&mut self, track: usize, point: Option<usize>) -> Result<(), EditError> {
+        let t = self.track_mut(track)?;
+        match point {
+            Some(i) if i < t.points.len() => {
+                t.points.remove(i);
+            }
+            Some(i) => return Err(EditError::Invalid(format!("there's no volume point {i}"))),
+            None => t.points.clear(),
+        }
+        Ok(())
+    }
+
+    /// Where on the timeline a track's volume points are heard (each point's place, and when):
+    /// once for each clip that plays its moment.
+    pub fn volume_points_on_timeline(&self, track: usize) -> Vec<(usize, u64)> {
+        let Some(t) = self.tracks.get(track) else { return Vec::new() };
+        let mut out = Vec::new();
+        for c in &t.clips {
+            let (a, b) = (c.from, c.from.saturating_add(c.source_len()));
+            let first = t.points.partition_point(|p| p.at < a);
+            for (k, p) in t.points.iter().enumerate().skip(first).take_while(|(_, p)| p.at < b) {
+                out.push((k, c.at.saturating_add(c.played(p.at - a))));
+            }
+        }
+        out
+    }
+
     /// The transition from the clip before into clip `clip` of a track (none: a plain cut), as
     /// long as `len` says (else what it was, or a second). The two must meet; on a sound track
     /// every transition is a cross-fade.
@@ -1130,8 +1266,16 @@ mod tests {
     use super::*;
 
     fn two_tracks() -> Timeline {
-        let full =
-            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 10_000_000)], name: None, denoise: 0.0 };
+        let full = |stream, kind| Track {
+            stream,
+            kind,
+            muted: false,
+            volume: 1.0,
+            clips: vec![Clip::new(0, 0, 10_000_000)],
+            name: None,
+            denoise: 0.0,
+            points: Vec::new(),
+        };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -1142,6 +1286,7 @@ mod tests {
             corrected: None,
             markers: Vec::new(),
             keys: Default::default(),
+            ducking: Default::default(),
         }
     }
 
