@@ -2,10 +2,13 @@
 //! pictures at once. The pictures are listed, the changes chosen (resize, the effects with their
 //! settings as in their own windows, grayscale, invert, trim), the format and a file name pattern
 //! given; each picture is then changed by the engine's commands (one a frame, so the window keeps
-//! drawing) and saved beside the original under the new name. No picture is written over.
+//! drawing) and saved beside the original under the new name. No picture is written over. Or the
+//! changed pictures are made into one PDF, a page each in the order listed, saved where the owner
+//! says (All captures' PDF of These starts it with the pictures shown, or chosen).
 
 use egui::Ui;
 use screengrabcraft_model::{ImageFormat, Stamp};
+use screengrabcraft_render::pdf::MAX_PAGES;
 use serde_json::{Value, json};
 
 use crate::dialogs::{self, Dialog};
@@ -19,6 +22,8 @@ pub const MAX_FILES: usize = 5000;
 pub const DEFAULT_PATTERN: &str = "{name} changed";
 /// The formats changed pictures can be saved as (a GIF's or a PDF's one picture isn't the point).
 const FORMATS: [ImageFormat; 4] = [ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Bmp];
+/// The format choice that makes the pictures one PDF.
+const ONE_PDF: &str = "One PDF, a page each";
 
 /// One change made to every picture.
 #[derive(Clone, Debug)]
@@ -103,6 +108,8 @@ pub struct Progress {
     /// The pictures that couldn't be changed, and why.
     pub failed: Vec<(String, String)>,
     pub done: bool,
+    /// The pages of the one PDF being made, when the batch makes one.
+    pub pdf: Option<screengrabcraft_render::pdf::Builder>,
 }
 
 /// The Batch Changes window.
@@ -118,6 +125,10 @@ pub struct Batch {
     pub progress: Option<Progress>,
     /// When it started (for `{date}` and `{time}` in the name).
     stamp: Stamp,
+    /// Where the one PDF is written, once asked.
+    pub pdf_to: Option<String>,
+    /// The save dialog for the PDF is open.
+    pub(crate) asking: bool,
 }
 
 impl Batch {
@@ -129,6 +140,8 @@ impl Batch {
             pattern: DEFAULT_PATTERN.to_string(),
             progress: None,
             stamp: Stamp::default(),
+            pdf_to: None,
+            asking: false,
         };
         b.add(files);
         b
@@ -155,6 +168,17 @@ impl Batch {
     /// The commands of the changes, in order.
     pub fn steps(&self) -> Vec<(String, Value)> {
         self.changes.iter().filter_map(|(_, c)| c.as_ref()).filter(|(id, _)| !id.is_empty()).map(|(id, p)| (id.to_string(), p.clone())).collect()
+    }
+
+    /// Whether the changed pictures are made into one PDF rather than saved each as a file.
+    pub fn makes_pdf(&self) -> bool {
+        self.format == Some(ImageFormat::Pdf)
+    }
+
+    /// Whether it can start: pictures, something to do with them, and no more pages than a PDF has.
+    pub fn ready(&self) -> bool {
+        let n = self.files.len();
+        n > 0 && !self.running() && if self.makes_pdf() { n <= MAX_PAGES } else { !self.changes.is_empty() }
     }
 
     fn running(&self) -> bool {
@@ -202,12 +226,57 @@ impl Editor {
         }
     }
 
+    /// Opens Batch Changes to make one PDF of these pictures, a page each in this order.
+    pub fn open_batch_pdf(&mut self, files: Vec<String>) {
+        self.open_batch(files);
+        if let Some(b) = self.batch.as_mut()
+            && !b.running()
+        {
+            b.format = Some(ImageFormat::Pdf);
+        }
+    }
+
+    /// The PDF's save dialog answered: the batch starts, writing the PDF there.
+    pub(crate) fn batch_pdf_to(&mut self, ctx: &egui::Context, path: Option<String>) {
+        let now = self.services.now();
+        let Some(b) = self.batch.as_mut() else { return };
+        b.asking = false;
+        let Some(mut path) = path else { return };
+        if !path.to_ascii_lowercase().ends_with(".pdf") {
+            path.push_str(".pdf");
+        }
+        if b.ready() {
+            b.pdf_to = Some(path);
+            b.stamp = now;
+            b.progress = Some(Progress { pdf: Some(screengrabcraft_render::pdf::Builder::new()), ..Progress::default() });
+            ctx.request_repaint();
+        }
+    }
+
     /// Changes the next picture of a running batch.
     fn batch_step(&mut self, ctx: &egui::Context, b: &mut Batch) {
         let steps = b.steps();
         let Some(p) = b.progress.as_mut() else { return };
         let Some(path) = b.files.get(p.next).cloned() else {
             p.done = true;
+            // The one PDF, of every page made.
+            if let Some(pdf) = p.pdf.take() {
+                let to = b.pdf_to.clone().unwrap_or_default();
+                let pages = pdf.len();
+                let written = pdf.finish().map_err(|e| e.to_string()).and_then(|bytes| self.services.write_file(&to, &bytes));
+                match written {
+                    Ok(()) => {
+                        p.written.push(to.clone());
+                        self.toast(ctx, format!("Made a PDF of {pages} page{}: {}", if pages == 1 { "" } else { "s" }, file_name(&to)));
+                    }
+                    Err(e) => {
+                        log::warn!("batch: the PDF not written: {e}");
+                        let why = if pages == 0 { "none of the pictures could be read".to_string() } else { e };
+                        self.error(ctx, format!("The PDF could not be made: {why}"));
+                    }
+                }
+                return;
+            }
             let (n, failed) = (p.written.len(), p.failed.len());
             let words = match failed {
                 0 => format!("Changed {n} picture{}", if n == 1 { "" } else { "s" }),
@@ -224,6 +293,11 @@ impl Editor {
             let bytes = self.services.read_file(&path)?;
             let picture = screengrabcraft_render::decode(&bytes).map_err(|e| e.to_string())?;
             let changed = screengrabcraft_engine::batch::apply(picture, &steps).map_err(|e| e.to_string())?;
+            // A page of the PDF, rather than a file of its own.
+            if let Some(pdf) = p.pdf.as_mut() {
+                pdf.add(&changed).map_err(|e| e.to_string())?;
+                return Ok(String::new());
+            }
             let format =
                 b.format.or_else(|| ImageFormat::from_extension(extension(&path))).filter(|f| FORMATS.contains(f)).unwrap_or(ImageFormat::Png);
             let out = out_path(&path, &b.pattern, n, format, b.stamp, &|p| self.services.file_exists(p));
@@ -232,6 +306,7 @@ impl Editor {
             Ok(out)
         })();
         match result {
+            Ok(out) if out.is_empty() => {}
             Ok(out) => p.written.push(out),
             Err(e) => {
                 log::warn!("batch: {} not changed: {e}", file_name(&path));
@@ -271,7 +346,11 @@ pub fn show(ed: &mut Editor, ctx: &egui::Context) {
                     let total = b.files.len().max(1);
                     ui.add(egui::ProgressBar::new(p.next as f32 / total as f32).text(format!("{} of {}", p.next.min(total), b.files.len())));
                     if p.done {
-                        let words = format!("{} written beside the originals.", p.written.len());
+                        let words = match (b.pdf_to.as_deref(), p.written.first()) {
+                            (Some(to), Some(_)) => format!("The PDF is saved as {to}."),
+                            (Some(_), None) => "No PDF was made.".to_string(),
+                            _ => format!("{} written beside the originals.", p.written.len()),
+                        };
                         ui.label(egui::RichText::new(words).color(t.muted));
                         for (path, why) in p.failed.iter().take(6) {
                             ui.label(egui::RichText::new(format!("{}: {why}", file_name(path))).color(t.danger));
@@ -280,8 +359,8 @@ pub fn show(ed: &mut Editor, ctx: &egui::Context) {
                 }
             });
             let n = b.files.len();
-            let label = format!("Change {n} Picture{}", if n == 1 { "" } else { "s" });
-            let ready = n > 0 && !b.changes.is_empty() && !b.running();
+            let label = format!("{} {n} Picture{}", if b.makes_pdf() { "Make a PDF of" } else { "Change" }, if n == 1 { "" } else { "s" });
+            let ready = b.ready() && !b.asking;
             let buttons = [FooterButton::primary(&label).enabled(ready), FooterButton::cancel(if b.running() { "Stop" } else { "Close" })];
             match widgets::dialog_footer(ui, &buttons).and_then(|i| buttons.get(i)).map(|b| b.role) {
                 Some(Role::Default) => start = true,
@@ -299,8 +378,13 @@ pub fn show(ed: &mut Editor, ctx: &egui::Context) {
         }
         return;
     }
-    if start {
+    if start && b.makes_pdf() {
+        // Where the PDF goes is asked first; the batch starts when it's answered.
+        b.asking = true;
+        ed.services.request_save("Captures.pdf", &[("PDF", &["pdf"])]);
+    } else if start {
         b.stamp = ed.services.now();
+        b.pdf_to = None;
         b.progress = Some(Progress::default());
         ctx.request_repaint();
     }
@@ -354,7 +438,12 @@ fn body(ed: &mut Editor, b: &mut Batch, ui: &mut Ui) {
         });
     });
     if b.changes.is_empty() {
-        ui.label(egui::RichText::new("Add what to do to each picture: resize it, a border, a shadow…").color(t.muted));
+        let words = if b.makes_pdf() {
+            "None are needed for a PDF; add some to change each picture first (resize it, a border…)."
+        } else {
+            "Add what to do to each picture: resize it, a border, a shadow…"
+        };
+        ui.label(egui::RichText::new(words).color(t.muted));
     }
     let mut remove = None;
     let mut up = None;
@@ -390,13 +479,32 @@ fn body(ed: &mut Editor, b: &mut Batch, ui: &mut Ui) {
     ui.add_space(8.0);
     egui::Grid::new("batch-save").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
         ui.label("Save as");
-        egui::ComboBox::from_id_salt("batch-format").selected_text(b.format.map_or("Each as it was", ImageFormat::label)).show_ui(ui, |ui| {
+        let shown = match b.format {
+            None => "Each as it was",
+            Some(ImageFormat::Pdf) => ONE_PDF,
+            Some(f) => f.label(),
+        };
+        egui::ComboBox::from_id_salt("batch-format").selected_text(shown).show_ui(ui, |ui| {
             ui.selectable_value(&mut b.format, None, "Each as it was");
             for f in FORMATS {
                 ui.selectable_value(&mut b.format, Some(f), f.label());
             }
+            ui.selectable_value(&mut b.format, Some(ImageFormat::Pdf), ONE_PDF);
         });
         ui.end_row();
+        if b.makes_pdf() {
+            ui.label("");
+            let words = if b.files.len() > MAX_PAGES {
+                egui::RichText::new(format!("A PDF has {MAX_PAGES} pages at most: leave some pictures out.")).small().color(t.danger)
+            } else {
+                egui::RichText::new("A page for each picture, in the order listed. Where the PDF is saved is asked when you start.")
+                    .small()
+                    .color(t.muted)
+            };
+            ui.label(words);
+            ui.end_row();
+            return;
+        }
         ui.label("Name");
         ui.add(egui::TextEdit::singleline(&mut b.pattern).desired_width(280.0));
         ui.end_row();

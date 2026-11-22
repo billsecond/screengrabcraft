@@ -167,7 +167,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Captures folder of your choosing | Has | |
 | PNG, JPEG, WebP, BMP, GIF, PDF | Has | |
 | TIFF, HEIF | Missing | |
-| Multi-page PDF of several captures | Missing | |
+| Multi-page PDF of several captures | Has | All captures' PDF of These (the pictures shown, or those chosen with Ctrl+click), or Batch Changes' "One PDF, a page each": a page for each picture, changed first if asked, saved where the owner says |
 | Copy, save | Has | |
 | Open in another program | Part | Show in Folder |
 | Links, uploads, chat and cloud drives | Not planned | needs a network service |
@@ -282,7 +282,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 7. Tags, favourites, and captures sorted by the program they were taken from (#68).
 8. Print; batch changes; captures on a timer or at a set time (#72).
 9. A picture per click made into a how-to guide (#74).
-10. Several areas in one capture; a freehand area.
+10. Several areas in one capture; a freehand area (#78).
+11. A multi-page PDF of several captures.
 
 **Still to build, in this order**
 
