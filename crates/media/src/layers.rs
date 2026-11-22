@@ -278,6 +278,44 @@ impl TextStyle {
     }
 }
 
+/// The face a text item's words are in: the program's own fonts (see `screengrabcraft_render::text`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextFont {
+    /// The sans serif, regular and bold, as each graphic sets it.
+    #[default]
+    Sans,
+    /// The sans serif slanted.
+    Slanted,
+    /// The fixed-width face (each letter as wide as the next), for a typed or technical look.
+    Mono,
+}
+
+impl TextFont {
+    pub const ALL: [TextFont; 3] = [TextFont::Sans, TextFont::Slanted, TextFont::Mono];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextFont::Sans => "Sans",
+            TextFont::Slanted => "Sans, slanted",
+            TextFont::Mono => "Fixed width",
+        }
+    }
+
+    pub fn is_sans(&self) -> bool {
+        *self == TextFont::Sans
+    }
+
+    /// How the graphics name it (their font names say the weight too).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            TextFont::Sans => "",
+            TextFont::Slanted => "-Italic",
+            TextFont::Mono => "-Mono",
+        }
+    }
+}
+
 /// A screen transition: what it does to the picture over its time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +352,9 @@ pub enum What {
         /// Its main colour (the bar, the line, the tag), as `#rrggbb`.
         #[serde(default)]
         color: String,
+        /// The face its words are in.
+        #[serde(default, skip_serializing_if = "TextFont::is_sans")]
+        font: TextFont,
     },
     Transition {
         kind: TransitionKind,
@@ -879,7 +920,7 @@ pub struct Template {
 fn text(style: TextStyle, title: &str, subtitle: &str, color: &str, place: Placement, len: u64, intro: AnimKind) -> Item {
     Item {
         len,
-        what: What::Text { style, title: title.to_string(), subtitle: subtitle.to_string(), color: color.to_string() },
+        what: What::Text { style, title: title.to_string(), subtitle: subtitle.to_string(), color: color.to_string(), font: TextFont::Sans },
         place,
         intro: Anim { kind: intro, len: 450_000 },
         outro: Anim { kind: if intro == AnimKind::None { AnimKind::None } else { AnimKind::Fade }, len: 350_000 },
@@ -1576,81 +1617,86 @@ impl Timeline {
     /// Layers, items and media read from a file, made safe: too many dropped, numbers in range,
     /// items in order and apart, items of media that isn't there dropped, ids unique.
     pub(crate) fn check_layers(&mut self) {
-        self.media.truncate(MAX_MEDIA);
-        let mut seen = std::collections::BTreeSet::new();
-        self.media.retain(|m| seen.insert(m.id));
-        for m in &mut self.media {
-            m.name = clip_text(&m.name, 120);
-            m.duration = m.duration.min(u64::MAX / 8);
+        check_parts(&mut self.media, &mut self.layers);
+    }
+}
+
+/// [`Timeline::check_layers`] for a bin and layers of their own (a template's).
+pub(crate) fn check_parts(bin: &mut Vec<MediaItem>, layers: &mut Vec<Layer>) {
+    bin.truncate(MAX_MEDIA);
+    let mut seen = std::collections::BTreeSet::new();
+    bin.retain(|m| seen.insert(m.id));
+    for m in bin.iter_mut() {
+        m.name = clip_text(&m.name, 120);
+        m.duration = m.duration.min(u64::MAX / 8);
+    }
+    let media = bin.clone();
+    layers.truncate(MAX_LAYERS);
+    let mut items = 0usize;
+    for l in layers.iter_mut() {
+        l.volume = if l.volume.is_finite() { l.volume.clamp(0.0, 2.0) } else { 1.0 };
+        l.name = clip_text(&l.name, 60);
+        l.items.retain(|i| match &i.what {
+            What::Media { id } => media.iter().any(|m| m.id == *id),
+            _ => true,
+        });
+        l.mono = l.mono && l.kind == LayerKind::Sound;
+        for i in &mut l.items {
+            // Only a video's sound is apart from its picture.
+            let video = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+            i.sound_only = i.sound_only && video;
+            i.at = i.at.min(u64::MAX / 8);
+            i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
+            i.from = i.from.min(u64::MAX / 8);
+            i.place = i.place.clamped();
+            i.look = std::mem::take(&mut i.look).checked();
+            i.keys.truncate(MAX_KEYS);
+            for k in &mut i.keys {
+                k.at = k.at.min(u64::MAX / 8);
+                k.place = k.place.clamped();
+            }
+            i.keys.sort_by_key(|k| k.at);
+            i.keys.dedup_by_key(|k| k.at);
+            i.intro.len = i.intro.len.min(10_000_000);
+            i.outro.len = i.outro.len.min(10_000_000);
+            if let What::Text { title, subtitle, color, .. } = &mut i.what {
+                *title = clip_text(title, MAX_TEXT);
+                *subtitle = clip_text(subtitle, MAX_TEXT);
+                *color = clip_text(color, 9);
+            }
+            if let What::Freeze { h } = &mut i.what {
+                *h = freeze_height(*h);
+            }
         }
-        let media = self.media.clone();
-        self.layers.truncate(MAX_LAYERS);
-        let mut items = 0usize;
-        for l in &mut self.layers {
-            l.volume = if l.volume.is_finite() { l.volume.clamp(0.0, 2.0) } else { 1.0 };
-            l.name = clip_text(&l.name, 60);
-            l.items.retain(|i| match &i.what {
-                What::Media { id } => media.iter().any(|m| m.id == *id),
-                _ => true,
-            });
-            l.mono = l.mono && l.kind == LayerKind::Sound;
-            for i in &mut l.items {
-                // Only a video's sound is apart from its picture.
-                let video = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
-                i.sound_only = i.sound_only && video;
-                i.at = i.at.min(u64::MAX / 8);
-                i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
-                i.from = i.from.min(u64::MAX / 8);
-                i.place = i.place.clamped();
-                i.look = std::mem::take(&mut i.look).checked();
-                i.keys.truncate(MAX_KEYS);
-                for k in &mut i.keys {
-                    k.at = k.at.min(u64::MAX / 8);
-                    k.place = k.place.clamped();
-                }
-                i.keys.sort_by_key(|k| k.at);
-                i.keys.dedup_by_key(|k| k.at);
-                i.intro.len = i.intro.len.min(10_000_000);
-                i.outro.len = i.outro.len.min(10_000_000);
-                if let What::Text { title, subtitle, color, .. } = &mut i.what {
-                    *title = clip_text(title, MAX_TEXT);
-                    *subtitle = clip_text(subtitle, MAX_TEXT);
-                    *color = clip_text(color, 9);
-                }
-                if let What::Freeze { h } = &mut i.what {
-                    *h = freeze_height(*h);
-                }
+        l.items.sort_by_key(|i| i.at);
+        let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
+        for i in std::mem::take(&mut l.items) {
+            if items < MAX_ITEMS && kept.last().is_none_or(|p| p.end() <= i.at) {
+                items += 1;
+                kept.push(i);
             }
-            l.items.sort_by_key(|i| i.at);
-            let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
-            for i in std::mem::take(&mut l.items) {
-                if items < MAX_ITEMS && kept.last().is_none_or(|p| p.end() <= i.at) {
-                    items += 1;
-                    kept.push(i);
-                }
-            }
-            l.items = kept;
         }
-        // Every layer and item a number of its own.
-        let mut used = std::collections::BTreeSet::new();
-        for m in &self.media {
-            used.insert(m.id);
+        l.items = kept;
+    }
+    // Every layer and item a number of its own.
+    let mut used = std::collections::BTreeSet::new();
+    for m in bin.iter() {
+        used.insert(m.id);
+    }
+    let mut next = used.iter().max().copied().unwrap_or(0).saturating_add(1);
+    let mut fresh = |id: &mut u32, used: &mut std::collections::BTreeSet<u32>| {
+        if *id == 0 || !used.insert(*id) {
+            while used.contains(&next) {
+                next = next.saturating_add(1);
+            }
+            *id = next;
+            used.insert(next);
         }
-        let mut next = used.iter().max().copied().unwrap_or(0).saturating_add(1);
-        let mut fresh = |id: &mut u32, used: &mut std::collections::BTreeSet<u32>| {
-            if *id == 0 || !used.insert(*id) {
-                while used.contains(&next) {
-                    next = next.saturating_add(1);
-                }
-                *id = next;
-                used.insert(next);
-            }
-        };
-        for l in &mut self.layers {
-            fresh(&mut l.id, &mut used);
-            for i in &mut l.items {
-                fresh(&mut i.id, &mut used);
-            }
+    };
+    for l in layers.iter_mut() {
+        fresh(&mut l.id, &mut used);
+        for i in &mut l.items {
+            fresh(&mut i.id, &mut used);
         }
     }
 }

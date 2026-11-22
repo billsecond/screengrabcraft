@@ -266,6 +266,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
   transitions, to drag onto the timeline; and a bin for your own pictures, videos and sound. Each
   card shows the item as it will be on the video, where and as large; hold the pointer on one and
   it plays, larger.
+- **Templates and themes of your own**: the Library's Yours section keeps what's on the layers
+  (or just the item chosen) under a name, look and all, kept in the settings folder; its card
+  drops it on another recording, each item where it was from the template's start. Themes gives
+  the titles, lower thirds and callouts colours and a face (the program's sans, slanted, or fixed
+  width): a few come with it, Save as Yours keeps your own, Apply to This Video restyles what's
+  there, and what's added from the Library comes in it. A text item's panel changes its face too.
 - Each track and layer has a switch to **hide or mute** it, and arrows to **move it up or down**
   (a layer higher up is in front); **double-click its name to rename it** (or use the right
   button). Each sound track has a volume slider; the camera's corner, size and shape (square,

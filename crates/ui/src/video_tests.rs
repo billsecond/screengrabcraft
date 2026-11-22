@@ -3987,3 +3987,196 @@ fn zooms_follow_the_clicks_from_the_library_and_the_pictures_are_put_in_turn() {
     assert!(count(&v.frame_at(2_000_000), [0xE0, 0x20, 0x20]) > 1000, "the picture on the video");
     shot(&mut h, "video-pictures-in-turn");
 }
+
+/// A host that keeps the owner's templates and themes (in memory, by kind and name).
+#[derive(Clone, Default)]
+struct KeepHost(std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<(String, String), Vec<u8>>>>);
+
+impl crate::services::Services for KeepHost {
+    fn can_keep(&self) -> bool {
+        true
+    }
+    fn kept(&self, kind: crate::services::Kept) -> Vec<(String, Vec<u8>)> {
+        let all = self.0.lock().unwrap();
+        all.iter().filter(|((k, _), _)| k == kind.folder()).map(|((_, n), b)| (n.clone(), b.clone())).collect()
+    }
+    fn keep(&self, kind: crate::services::Kept, name: &str, bytes: &[u8]) -> Result<(), String> {
+        self.0.lock().unwrap().insert((kind.folder().to_string(), name.to_string()), bytes.to_vec());
+        Ok(())
+    }
+    fn forget(&self, kind: crate::services::Kept, name: &str) -> Result<(), String> {
+        self.0.lock().unwrap().remove(&(kind.folder().to_string(), name.to_string()));
+        Ok(())
+    }
+}
+
+fn host_harness(host: Box<dyn crate::services::Services>, settings: EditorSettings) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(host, settings);
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h
+}
+
+/// The text items on the video's layers: their style, colour and face.
+fn texts_on(h: &Harness<'_, Editor>) -> Vec<(screengrabcraft_media::layers::TextStyle, String, screengrabcraft_media::layers::TextFont)> {
+    let v = h.state().video.as_ref().unwrap();
+    v.session
+        .timeline
+        .layers
+        .iter()
+        .flat_map(|l| l.items.iter())
+        .filter_map(|i| match &i.what {
+            screengrabcraft_media::layers::What::Text { style, color, font, .. } => Some((*style, color.clone(), *font)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_layers_kept_as_a_template_of_your_own_go_on_again_and_a_theme_colours_the_titles() {
+    use screengrabcraft_media::layers::{TextFont, TextStyle};
+    let host = KeepHost::default();
+    let mut h = host_harness(Box::new(host.clone()), EditorSettings::default());
+    on_video(&mut h, |v, ed, ctx| {
+        v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("lower-bar"), None, 0);
+        v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("title"), None, 1_000_000);
+    });
+    h.run_steps(2);
+    // Yours: a name, and the layers kept under it.
+    h.get_by_label("Yours").click();
+    h.run_steps(2);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Save the Layers")).is_disabled(), "not without a name");
+    h.state_mut().video.as_mut().unwrap().yours.template_name = "My intro".into();
+    h.run_steps(1);
+    h.get_by_label("Save the Layers").click();
+    h.run_steps(3);
+    assert_eq!(crate::services::Services::kept(&host, crate::services::Kept::VideoTemplates).len(), 1, "kept by the host");
+    assert!(h.query_by_label("My intro").is_some(), "its card");
+    shot(&mut h, "video-library-yours");
+    // The video's items taken off, then the template put back from the playhead.
+    on_video(&mut h, |v, ed, ctx| {
+        let ids: Vec<(u32, u32)> = v.session.timeline.layers.iter().flat_map(|l| l.items.iter().map(move |i| (l.id, i.id))).collect();
+        for (layer, item) in ids {
+            v.session.execute("video.deleteItem", &serde_json::json!({"layer": layer, "item": item})).unwrap();
+        }
+        v.playhead = 2_000_000;
+        let _ = (ed, ctx);
+    });
+    h.run_steps(1);
+    h.get_by_label("Add My intro").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let starts: Vec<u64> = v.session.timeline.layers.iter().flat_map(|l| l.items.iter().map(|i| i.at)).collect();
+        assert_eq!(starts, vec![2_000_000, 3_000_000], "where they were from its start, from the playhead");
+        assert_eq!(v.session.undo_label(), Some("Add the Template"));
+    }
+    // Opened again later, it's still there (read from the host).
+    let mut again = host_harness(Box::new(host.clone()), EditorSettings::default());
+    again.get_by_label("Yours").click();
+    again.run_steps(2);
+    assert!(again.query_by_label("My intro").is_some());
+    // Themes: Sunset chosen, applied to the video, and what comes from the Library in it.
+    h.get_by_label("Yours").click();
+    h.run_steps(1);
+    h.get_by_label("Themes").click();
+    h.run_steps(2);
+    h.get_by_value("As each was made").click();
+    h.run_steps(2);
+    h.get_by_label("Sunset").click();
+    h.run_steps(2);
+    assert_eq!(h.state().settings.video_theme, "Sunset", "the settings keep its name");
+    shot(&mut h, "video-library-theme-chosen");
+    scroll_library_to(&mut h, "Apply to This Video");
+    h.get_by_label("Apply to This Video").click();
+    h.run_steps(2);
+    let texts = texts_on(&h);
+    assert!(texts.contains(&(TextStyle::LowerBar, "#e4572e".into(), TextFont::Slanted)), "{texts:?}");
+    assert!(texts.contains(&(TextStyle::Title, "#fff3e6".into(), TextFont::Slanted)), "{texts:?}");
+    scroll_library_to(&mut h, "Add Angled");
+    h.get_by_label("Add Angled").click();
+    h.run_steps(3);
+    assert_eq!(texts_on(&h).iter().filter(|t| t.0 == TextStyle::LowerBar && t.1 == "#e4572e").count(), 2, "a new one in the theme");
+    shot(&mut h, "video-library-themes");
+    // Kept as a theme of the owner's, under another name.
+    h.state_mut().video.as_mut().unwrap().yours.theme_name = "Brand".into();
+    h.run_steps(1);
+    scroll_library_to(&mut h, "Save as Yours");
+    h.get_by_label("Save as Yours").click();
+    h.run_steps(2);
+    let themes = crate::services::Services::kept(&host, crate::services::Kept::VideoThemes);
+    assert_eq!(themes.len(), 1);
+    assert!(String::from_utf8_lossy(&themes[0].1).contains("#e4572e"));
+    assert_eq!(h.state().settings.video_theme, "Brand");
+    // A new window with those settings starts in it.
+    let mut fresh = host_harness(Box::new(host.clone()), EditorSettings { video_theme: "Brand".into(), ..EditorSettings::default() });
+    fresh.get_by_label("Themes").click();
+    fresh.run_steps(2);
+    assert!(fresh.query_by_label("Delete This Theme").is_some(), "Brand, the owner's, in use");
+    // A text item's face from its panel.
+    let (layer, item) = {
+        let v = h.state().video.as_ref().unwrap();
+        let l = v.session.timeline.layers.iter().find(|l| !l.items.is_empty()).unwrap();
+        (l.id, l.items[0].id)
+    };
+    h.state_mut().video.as_mut().unwrap().item = Some((layer, item));
+    h.run_steps(2);
+    // The item panel's, at the right (the theme's is in the library).
+    h.get_all_by_value("Sans, slanted").max_by(|a, b| a.rect().min.x.total_cmp(&b.rect().min.x)).unwrap().click();
+    h.run_steps(2);
+    h.get_by_label("Fixed width").click();
+    h.run_steps(2);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(matches!(&v.session.timeline.item(layer, item).unwrap().what, screengrabcraft_media::layers::What::Text { font: TextFont::Mono, .. }));
+    if let Ok(dir) = std::env::var("SGC_SHOTS") {
+        let f = h.state_mut().video.as_mut().unwrap().frame_at(4_500_000);
+        image::RgbaImage::from_raw(f.width(), f.height(), f.pixels().to_vec()).unwrap().save(format!("{dir}/video-theme-frame.png")).unwrap();
+    }
+}
+
+#[test]
+fn in_the_browser_templates_and_themes_are_greyed_out_and_say_why() {
+    let mut h = harness();
+    on_video(&mut h, |v, ed, ctx| v.drop_on_timeline(ed, ctx, &crate::video::LibDrop::Template("lower-bar"), None, 0));
+    h.get_by_label("Yours").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().yours.template_name = "My intro".into();
+    h.run_steps(1);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Save the Layers")).is_disabled());
+}
+
+/// Does something to the video view with the editor beside it (as the editor's own frame does).
+fn on_video(h: &mut Harness<'_, Editor>, f: impl FnOnce(&mut crate::video::VideoView, &mut Editor, &egui::Context)) {
+    let ctx = egui::Context::default();
+    let ed = h.state_mut();
+    let mut v = ed.video.take().unwrap();
+    f(&mut v, ed, &ctx);
+    ed.video = Some(v);
+}
+
+/// Scrolls the library panel at the left until `label` is in its upper part.
+fn scroll_library_to(h: &mut Harness<'_, Editor>, label: &str) {
+    for _ in 0..30 {
+        let y = h.get_by_label(label).rect().center().y;
+        if (130.0..360.0).contains(&y) {
+            return;
+        }
+        h.hover_at(egui::pos2(150.0, 300.0));
+        h.run_steps(1);
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, if y < 130.0 { 3.0 } else { -3.0 }),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(3);
+    }
+}

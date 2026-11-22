@@ -16,7 +16,7 @@ use screengrabcraft_render::lottie::Animation;
 use screengrabcraft_render::text;
 use serde_json::{Value, json};
 
-use crate::layers::TextStyle;
+use crate::layers::{TextFont, TextStyle};
 
 /// The size the graphics are designed at (they're scaled to the video's).
 pub const W: f32 = 1920.0;
@@ -116,9 +116,9 @@ enum Wt {
     Black,
 }
 
-/// How wide words are at a size, a weight and a letter spacing (thousandths of the size).
-fn width(words: &str, size: f32, wt: Wt, track: f32) -> f32 {
-    let style = Style { font_size: 64.0, bold: wt != Wt::Reg, ..Style::default() };
+/// How wide words are in a face at a size, a weight and a letter spacing (thousandths of the size).
+fn width_in(face: TextFont, words: &str, size: f32, wt: Wt, track: f32) -> f32 {
+    let style = Style { font_size: 64.0, bold: wt != Wt::Reg, italic: face == TextFont::Slanted, mono: face == TextFont::Mono, ..Style::default() };
     let n = words.chars().count().saturating_sub(1) as f32;
     text::layout(words, &style, None).width * size / 64.0 + n * track / 1000.0 * size + if wt == Wt::Black { size * 0.03 } else { 0.0 }
 }
@@ -131,11 +131,11 @@ fn line(words: &str, most: usize) -> String {
 
 /// Words shortened to fit `max` wide (a word at a time where it can be, else a letter at a time),
 /// an ellipsis saying so.
-fn fit(words: &str, size: f32, wt: Wt, max: f32) -> String {
-    if width(words, size, wt, 0.0) <= max {
+fn fit(face: TextFont, words: &str, size: f32, wt: Wt, max: f32) -> String {
+    if width_in(face, words, size, wt, 0.0) <= max {
         return words.to_string();
     }
-    let wide = |s: &str| width(&format!("{s}…"), size, wt, 0.0);
+    let wide = |s: &str| width_in(face, &format!("{s}…"), size, wt, 0.0);
     let mut cut: Vec<&str> = words.split(' ').take(60).collect();
     while cut.len() > 1 && wide(&cut.join(" ")) > max {
         cut.pop();
@@ -148,11 +148,11 @@ fn fit(words: &str, size: f32, wt: Wt, max: f32) -> String {
 }
 
 /// Words broken into lines no wider than `max`, at most `lines` of them.
-fn wrap(words: &str, size: f32, wt: Wt, max: f32, lines: usize) -> Vec<String> {
+fn wrap(face: TextFont, words: &str, size: f32, wt: Wt, max: f32, lines: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for word in words.split_whitespace().take(200) {
         match out.last_mut() {
-            Some(l) if width(&format!("{l} {word}"), size, wt, 0.0) <= max => {
+            Some(l) if width_in(face, &format!("{l} {word}"), size, wt, 0.0) <= max => {
                 l.push(' ');
                 l.push_str(word);
             }
@@ -230,11 +230,13 @@ enum Dir {
 struct Build {
     layers: Vec<Value>,
     total: f32,
+    /// The face its words are in.
+    face: TextFont,
 }
 
 impl Build {
-    fn new(total: f32) -> Build {
-        Build { layers: Vec::new(), total: total.max(OUT * 2.0 + 2.0) }
+    fn new(total: f32, face: TextFont) -> Build {
+        Build { layers: Vec::new(), total: total.max(OUT * 2.0 + 2.0), face }
     }
 
     /// Where the going starts.
@@ -355,6 +357,7 @@ impl Build {
             Wt::Bold => "Sans-Bold",
             Wt::Black => "Sans-Black",
         };
+        let face = format!("{face}{}", self.face.suffix());
         let mut doc = json!({"s": size, "f": face, "t": words, "j": just, "fc": colour, "lh": size * 1.24, "tr": track});
         if wt == Wt::Black
             && let Some(o) = doc.as_object_mut()
@@ -375,7 +378,7 @@ impl Build {
         let d = (size * 0.03).max(1.5);
         for (off, alpha) in [(d, 0.42), (d * 2.6, 0.16)] {
             let ks = json!({"p": self.on_off(from, from + 11.0, vec![x + off * 0.5, y + size * 0.3 + off], vec![x + off * 0.5, y + off]), "o": self.on_off(from, from + 8.0, vec![0.0], vec![alpha * 100.0])});
-            let doc = json!({"s": size, "f": if wt == Wt::Reg { "Sans" } else { "Sans-Bold" }, "t": words, "j": just, "fc": BLACK, "lh": size * 1.24, "sw": d * 1.4, "sc": BLACK});
+            let doc = json!({"s": size, "f": format!("{}{}", if wt == Wt::Reg { "Sans" } else { "Sans-Bold" }, self.face.suffix()), "t": words, "j": just, "fc": BLACK, "lh": size * 1.24, "sw": d * 1.4, "sc": BLACK});
             self.push(json!({"ty": 5, "nm": "behind", "ks": ks, "t": {"d": {"k": [{"s": doc, "t": 0}]}}}));
         }
     }
@@ -418,7 +421,7 @@ impl Build {
             (z, vec![0.0], E::Lin),
         ]);
         let p = keys(&[(a, vec![x, y + size * 0.25], E::Out), (a + 9.0, vec![x, y], E::Lin)]);
-        let face = if wt == Wt::Reg { "Sans" } else { "Sans-Bold" };
+        let face = format!("{}{}", if wt == Wt::Reg { "Sans" } else { "Sans-Bold" }, self.face.suffix());
         let mut doc = json!({"s": size, "f": face, "t": words, "j": 2, "fc": colour, "lh": size * 1.2, "tr": track});
         if wt == Wt::Black
             && let Some(d) = doc.as_object_mut()
@@ -524,8 +527,8 @@ fn count_from(title: &str) -> u32 {
 
 /// The points of a checklist: a line of the title each (blank lines skipped), at most five, each
 /// short enough to fit `max` wide.
-fn points(title: &str, size: f32, max: f32) -> Vec<String> {
-    title.lines().take(200).map(|l| line(l, 120)).filter(|l| !l.is_empty()).take(5).map(|l| fit(&l, size, Wt::Reg, max)).collect()
+fn points(face: TextFont, title: &str, size: f32, max: f32) -> Vec<String> {
+    title.lines().take(200).map(|l| line(l, 120)).filter(|l| !l.is_empty()).take(5).map(|l| fit(face, &l, size, Wt::Reg, max)).collect()
 }
 
 /// The corners of a plate `r` whose right end is cut on a slant (`lean` wider at the top).
@@ -533,9 +536,19 @@ fn slanted(r: Rect, lean: f32) -> [P; 4] {
     [[r.x, r.y], [r.x + r.w + lean, r.y], [r.x + r.w, r.y + r.h], [r.x, r.y + r.h]]
 }
 
-/// Builds a stock graphic `len_us` long with these words and this colour. `size` is the item's
-/// size (for the overlays whose size is built in: the highlight, the circle, the spotlight).
+/// Builds a stock graphic `len_us` long with these words and this colour, its words in the sans
+/// serif. `size` is the item's size (for the overlays whose size is built in: the highlight, the
+/// circle, the spotlight).
 pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len_us: u64, size: f32) -> Option<Graphic> {
+    build_in(TextFont::Sans, style, title, subtitle, accent, len_us, size)
+}
+
+/// [`build`], its words in `face`: measured in it, so they fit their plates as they do in the sans.
+pub fn build_in(face: TextFont, style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len_us: u64, size: f32) -> Option<Graphic> {
+    let width = |words: &str, size: f32, wt: Wt, track: f32| width_in(face, words, size, wt, track);
+    let wrap = |words: &str, size: f32, wt: Wt, max: f32, lines: usize| wrap(face, words, size, wt, max, lines);
+    let points = |title: &str, size: f32, max: f32| points(face, title, size, max);
+    let fit = |words: &str, size: f32, wt: Wt, max: f32| fit(face, words, size, wt, max);
     let total = (len_us.min(3_600_000_000) as f32 / 1e6 * FPS).max(OUT * 2.0 + 2.0);
     let a = rgb(accent);
     // A checklist's lines, before the words are made one line.
@@ -543,7 +556,7 @@ pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len
     let (title, sub) = (line(title, 160), line(subtitle, 400));
     let has_sub = !sub.is_empty();
     let size = if size.is_finite() { size.clamp(0.05, 1.0) } else { 0.3 };
-    let mut b = Build::new(total);
+    let mut b = Build::new(total, face);
     let r = Rect::new;
     let middle = (W / 2.0, H / 2.0);
     // Where the old, simpler lower thirds were put by default: these keep that place.
@@ -685,7 +698,7 @@ pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len
                 b.push(json!({"ty": 4, "nm": "window", "td": 1, "ks": {}, "shapes": [rc(r(lbw, y, W - lbw, h), 0.0), fl(WHITE, 1.0)]}));
                 let p = keys(&[(0.0, vec![lbw + 70.0, y + 46.0], E::Lin), (total, vec![lbw + 70.0 - 150.0 * total / FPS, y + 46.0], E::Lin)]);
                 let ks = json!({"p": p, "o": b.on_off(6.0, 14.0, vec![0.0], vec![100.0])});
-                let doc = json!({"s": 30.0, "f": "Sans", "t": crawl, "j": 0, "fc": WHITE});
+                let doc = json!({"s": 30.0, "f": format!("Sans{}", b.face.suffix()), "t": crawl, "j": 0, "fc": WHITE});
                 b.push(json!({"ty": 5, "nm": "subtitle", "tt": 1, "ks": ks, "t": {"d": {"k": [{"s": doc, "t": 0}]}}}));
             }
             b.plate(r(0.0, y - 5.0, W, 5.0), 0.0, fl(a, 1.0), 0.0, 14.0, Dir::Right);
@@ -972,7 +985,7 @@ pub fn build(style: TextStyle, title: &str, subtitle: &str, accent: [u8; 3], len
                         ]),
                     )
                 };
-                let doc = json!({"s": size, "f": "Sans-Black", "t": (n - k).to_string(), "j": 2, "fc": WHITE, "sw": size * 0.03, "sc": WHITE});
+                let doc = json!({"s": size, "f": format!("Sans-Black{}", b.face.suffix()), "t": (n - k).to_string(), "j": 2, "fc": WHITE, "sw": size * 0.03, "sc": WHITE});
                 // About the middle of its figure.
                 let ks = json!({"a": fixed(&[0.0, -size * 0.355]), "p": fixed(&[cx, cy]), "s": s, "o": o});
                 b.push(json!({"ty": 5, "nm": "title", "ip": from, "op": if last { b.total } else { to }, "ks": ks, "t": {"d": {"k": [{"s": doc, "t": 0}]}}}));
@@ -1646,11 +1659,11 @@ mod tests {
         assert_eq!(said, ["5", "4", "3", "2", "1"]);
         // Blank lines skipped, five at most, a line too long shortened.
         let long = "word ".repeat(80);
-        let list = points(&format!("One\n\n  Two  \n{long}\nFour\nFive\nSix"), 36.0, 640.0);
+        let list = points(TextFont::Sans, &format!("One\n\n  Two  \n{long}\nFour\nFive\nSix"), 36.0, 640.0);
         assert_eq!(list.len(), 5);
         assert_eq!((list[0].as_str(), list[1].as_str()), ("One", "Two"));
-        assert!(list[2].ends_with('…') && width(&list[2], 36.0, Wt::Reg, 0.0) <= 640.0, "{}", list[2]);
-        assert!(points("\n \n", 36.0, 640.0).is_empty());
+        assert!(list[2].ends_with('…') && width_in(TextFont::Sans, &list[2], 36.0, Wt::Reg, 0.0) <= 640.0, "{}", list[2]);
+        assert!(points(TextFont::Sans, "\n \n", 36.0, 640.0).is_empty());
     }
 
     #[test]

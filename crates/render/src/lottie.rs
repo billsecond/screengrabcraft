@@ -579,8 +579,13 @@ impl Animation {
         let font = doc.get("f").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
         let bold = ["bold", "black", "heavy", "semibold", "demi"].iter().any(|w| font.contains(w));
         // Laid out at a fixed size and scaled, so any size is drawn.
-        let style =
-            screengrabcraft_model::Style { font_size: 64.0, bold, italic: font.contains("italic"), ..screengrabcraft_model::Style::default() };
+        let style = screengrabcraft_model::Style {
+            font_size: 64.0,
+            bold,
+            italic: font.contains("italic"),
+            mono: font.contains("mono"),
+            ..screengrabcraft_model::Style::default()
+        };
         let mut lay = text::layout(&words, &style, None);
         lay.lines.truncate(12);
         let k = size / 64.0;

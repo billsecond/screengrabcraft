@@ -43,6 +43,7 @@ mod screen_frame;
 mod sound;
 pub(crate) mod transcript;
 mod transitions;
+mod yours;
 pub use library::{LibDrop, LibTab};
 
 pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
@@ -339,12 +340,15 @@ pub struct VideoView {
     pub(crate) learning: Option<camera_key::Learning>,
     /// A clip's or an item's effects copied, to paste on another (as `video.copyEffects` said them).
     pub(crate) copied_effects: Option<Value>,
+    /// The owner's templates and themes, and the theme in use.
+    pub(crate) yours: yours::Yours,
 }
 
-/// A small button with a triangle pointing up (or down): true when it's clicked.
-fn order_button(ui: &mut Ui, rect: Rect, up: bool, enabled: bool, label: &str) -> bool {
+/// A small button with a triangle pointing up (or down) for what `key` names (a track or a layer:
+/// two of the same name each have their own): true when it's clicked.
+fn order_button(ui: &mut Ui, rect: Rect, up: bool, enabled: bool, label: &str, key: &str) -> bool {
     let t = Tokens::get(ui.ctx());
-    let resp = ui.interact(rect, ui.id().with(("order", label)), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = ui.interact(rect, ui.id().with(("order", key, up)), if enabled { Sense::click() } else { Sense::hover() });
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label));
     if enabled && resp.hovered() {
         ui.painter().rect_filled(rect, 3.0, t.hover);
@@ -626,6 +630,7 @@ impl VideoView {
             renaming: None,
             learning: None,
             copied_effects: None,
+            yours: Default::default(),
             type_words: false,
         }
     }
@@ -3010,10 +3015,10 @@ impl VideoView {
         let a = Rect::from_min_size(arrows.min, vec2(17.0, 17.0));
         let b = Rect::from_min_size(arrows.min + vec2(19.0, 0.0), vec2(17.0, 17.0));
         let mut moved = None;
-        if order_button(ui, a, true, up, &format!("Move {name} Up")) {
+        if order_button(ui, a, true, up, &format!("Move {name} Up"), &format!("{target:?}")) {
             moved = Some(true);
         }
-        if order_button(ui, b, false, down, &format!("Move {name} Down")) {
+        if order_button(ui, b, false, down, &format!("Move {name} Down"), &format!("{target:?}")) {
             moved = Some(false);
         }
         moved
@@ -3537,6 +3542,7 @@ impl VideoView {
                             media.iter().find(|m| m.id == *id).map(|m| if m.duration > 0 { m.duration } else { 5_000_000 }).unwrap_or(3_000_000)
                         }
                         LibDrop::Blend(_) => 0,
+                        LibDrop::Yours(name) => self.yours.templates.iter().find(|t| &t.name == name).map_or(3_000_000, |t| t.length().max(1)),
                     };
                     let y = match layer_at(p.y) {
                         Some(_) => any_row(((p.y - rows_top) / ROW_H).floor().max(0.0) as usize),

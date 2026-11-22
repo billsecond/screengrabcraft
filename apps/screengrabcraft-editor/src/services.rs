@@ -16,7 +16,7 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{
-    DialogResult, Filter, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
+    DialogResult, Filter, Kept, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
 };
 
 /// Files larger than this are not opened.
@@ -373,6 +373,22 @@ impl Services for DesktopServices {
 
     fn save_settings(&self, settings: &EditorSettings) {
         self.settings_file.save(settings);
+    }
+
+    fn can_keep(&self) -> bool {
+        !paths::no_prefs()
+    }
+
+    fn kept(&self, kind: Kept) -> Vec<(String, Vec<u8>)> {
+        store::kept(kind.folder())
+    }
+
+    fn keep(&self, kind: Kept, name: &str, bytes: &[u8]) -> Result<(), String> {
+        store::keep(kind.folder(), name, bytes)
+    }
+
+    fn forget(&self, kind: Kept, name: &str) -> Result<(), String> {
+        store::forget(kind.folder(), name)
     }
 
     fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
