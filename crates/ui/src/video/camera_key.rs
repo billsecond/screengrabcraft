@@ -94,6 +94,44 @@ impl VideoView {
         }
     }
 
+    /// What shows where the camera's background is taken away: the screen, the camera's own
+    /// picture blurred, or a picture of the media bin.
+    fn camera_behind(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::timeline::Behind;
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let behind = self.session.timeline.camera.behind;
+        let pictures: Vec<(u32, String)> =
+            self.session.timeline.media.iter().filter(|m| m.kind == MediaKind::Picture).map(|m| (m.id, m.name.clone())).collect();
+        let name = |b: Behind| match b {
+            Behind::Screen => "The screen".to_string(),
+            Behind::Blur => "Your room, blurred".to_string(),
+            Behind::Picture(id) => pictures.iter().find(|(m, _)| *m == id).map_or("A picture".to_string(), |(_, n)| n.clone()),
+        };
+        ui.add_space(6.0);
+        ui.label(RichText::new("Behind you").size(12.0).color(t.muted));
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("camera-behind").width(ui.available_width()).selected_text(name(behind)).show_ui(ui, |ui| {
+            for b in [Behind::Screen, Behind::Blur] {
+                if ui.selectable_label(behind == b, name(b)).clicked() {
+                    chosen = Some(json!({"behind": if b == Behind::Blur { "blur" } else { "screen" }}));
+                }
+            }
+            for (id, n) in &pictures {
+                if ui.selectable_label(behind == Behind::Picture(*id), n).on_hover_text("A picture of the Media bin").clicked() {
+                    chosen = Some(json!({"behind": "picture", "picture": id}));
+                }
+            }
+        });
+        if pictures.is_empty() {
+            ui.label(RichText::new("Pictures brought into the Media bin can go behind you too.").size(12.0).color(t.muted));
+        }
+        if let Some(p) = chosen {
+            self.run(ed, &ctx, "video.cameraKey", p);
+        }
+    }
+
     /// What's taken away from the camera's picture: nothing, a colour (and which, how far from
     /// it), or the background (learnt, or being learnt).
     pub(super) fn camera_background(&mut self, ed: &mut Editor, ui: &mut Ui) {
@@ -121,6 +159,9 @@ impl VideoView {
             if remove == Remove::Background && self.rec.plate().is_none() {
                 self.learn_background(ed, &ctx);
             }
+        }
+        if cam.remove != Remove::Nothing {
+            self.camera_behind(ed, ui);
         }
         match cam.remove {
             Remove::Nothing => {}

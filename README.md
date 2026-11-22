@@ -215,7 +215,8 @@ the picture editor to the video editor. Its timeline has a row for each track:
   background model (the one Remove Background uses, on this computer) looks at four of the
   camera's pictures and learns what the room behind you looks like, then every picture keeps
   what differs from it. Keep the camera still; Learn It Again if the light changed. What it
-  learnt is kept in the recording file.
+  learnt is kept in the recording file. **Behind you** then says what shows where it was taken
+  away: the screen, your room blurred, or a picture you brought into the Media bin.
 - **Keys pressed**: in a recording that kept the shortcuts pressed (see above), the Keys Pressed
   section of the panel shows each as keys on the video for a moment after it's pressed, where the
   edits put that moment: at the bottom (above the captions), the top or a corner, any size, light
@@ -290,7 +291,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
   burns them into the MP4, and an `.srt` and a `.txt` are saved beside the recording (and beside
   each MP4 made, as it was edited). When you use speakers rather than headphones, the others
   heard again by your microphone aren't written down twice. Turn them off with Captions in the
-  Recorder; File › Make Captions makes them for a recording that has none.
+  Recorder; File › Make Captions makes them for a recording that has none. View › **Light Up Each
+  Word as It's Said** lights each word in turn on the picture and in the video made (when each
+  word is said is worked out from its line's time by its length).
 
 ## Editing
 
