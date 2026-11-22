@@ -303,6 +303,8 @@ pub struct Editor {
     pub(crate) details: crate::details::State,
     /// Simplify, while it reads the text.
     pub(crate) simplify: crate::simplify::State,
+    /// Edit Text in the Picture: the reader at work, and the lines offered to pick from.
+    pub(crate) edit_text: crate::edit_text::State,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -406,6 +408,7 @@ impl Editor {
             grab_text: crate::grab_text::State::default(),
             details: crate::details::State::default(),
             simplify: crate::simplify::State::default(),
+            edit_text: crate::edit_text::State::default(),
         }
     }
 
@@ -1377,6 +1380,7 @@ impl Editor {
         crate::grab_text::show(self, &ctx);
         crate::details::show(self, &ctx);
         crate::simplify::show(self, &ctx);
+        crate::edit_text::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
@@ -1391,6 +1395,7 @@ impl Editor {
             || self.grab_text.busy()
             || self.details.busy()
             || self.simplify.busy()
+            || self.edit_text.busy()
         {
             return;
         }
@@ -1500,7 +1505,9 @@ impl Editor {
             }
         }
         if plain(Key::Escape) {
-            if crate::eyedropper::active(ctx) {
+            if self.edit_text.picking() {
+                self.edit_text.stop();
+            } else if crate::eyedropper::active(ctx) {
                 // Only the eyedropper goes: the selection it was taking a colour for stays.
                 crate::eyedropper::cancel(ctx);
             } else if self.area.is_some() {
@@ -1808,6 +1815,7 @@ impl Editor {
                     ui.separator();
                     crate::grab_text::item(self, ui);
                     crate::details::item(self, ui);
+                    crate::edit_text::item(self, ui);
                     ui.separator();
                     crate::simplify::item(self, ui);
                 });

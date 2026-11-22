@@ -228,6 +228,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         crate::details::hide
     ),
     cmd!(
+        "image.editText",
+        "Edit Text in the Picture",
+        "Image",
+        None,
+        r##"{"line": {"text": "…", "rect": {"x", "y", "w", "h"}} (a line read off the picture, in its pixels), "text"?: "the new words (default: the line's)", "color"?: "#RRGGBB" (the letters'; default: found), "background"?: "#RRGGBB" (default: the colour round the line), "fontSize"?: px (default: as tall as the line's letters), "font"?: "a font on the computer", "bold"?: false} → {"cover": id, "text": id, "fontSize", "color", "background"} — the line covered with its background's colour and a text annotation put in its place, its letters where the old ones were, selected"##,
+        always,
+        crate::edit_text::edit_text
+    ),
+    cmd!(
         "image.simplify",
         "Simplify",
         "Image",
