@@ -1,16 +1,16 @@
 //! The effects added after the first ones: colour changes that can be kept to an area (hue and
-//! saturation, sepia, sharpen, blur), other edges (wavy, faded, a bevel), perspective, a page
-//! curl, a reflection, a watermark and the capture's details. Their entries are in
-//! [`crate::registry::COMMANDS`].
+//! saturation, sepia, sharpen, blur, a colour replaced by another), other edges (wavy, faded, a
+//! bevel), perspective, a page curl, a reflection, a watermark and the capture's details. Their
+//! entries are in [`crate::registry::COMMANDS`].
 
 use screengrabcraft_model::{Color, FontName, Raster, RasterError};
 use screengrabcraft_render::adjust;
 use screengrabcraft_render::effects::{self, Edges};
 use screengrabcraft_render::region::{self, Region};
-use screengrabcraft_render::{frame, marks};
+use screengrabcraft_render::{frame, marks, matte};
 use serde_json::{Value, json};
 
-use crate::registry::{boolean, color, num};
+use crate::registry::{boolean, color, int, num, pixel_param};
 use crate::session::Session;
 use crate::{EngineError, Result};
 
@@ -57,6 +57,60 @@ pub(crate) fn hue_saturation(s: &mut Session, p: &Value) -> Result<Value> {
 pub(crate) fn sepia(s: &mut Session, p: &Value) -> Result<Value> {
     let amount = or(p, "amount", 100.0);
     colours(s, p, |r| Ok(adjust::sepia(r, amount)))
+}
+
+/// A colour, and the colours within the tolerance of it, replaced by another: everywhere, or only
+/// where it joins the pixel at `x`, `y`; on the area if one is given (the point then in it).
+pub(crate) fn replace_color(s: &mut Session, p: &Value) -> Result<Value> {
+    let tolerance = int(p, "tolerance", 24, 0, 255)? as u8;
+    let at = pixel_param(s, p)?;
+    let colour = match (p.get("color"), at) {
+        (None | Some(Value::Null), Some((x, y))) => {
+            s.doc.base.pixel(x, y).ok_or_else(|| EngineError::Params("the point is outside the picture".to_string()))?
+        }
+        (None | Some(Value::Null), None) => return Err(EngineError::Params("give a `color`, or the `x` and `y` of a pixel of it".to_string())),
+        _ => color(p, "color", Color::TRANSPARENT)?,
+    };
+    if p.get("with").is_none_or(Value::is_null) {
+        return Err(EngineError::Params("`with` is the colour to put in its place, like #RRGGBB".to_string()));
+    }
+    let with = color(p, "with", Color::BLACK)?;
+    let joined = boolean(p, "contiguous", false);
+    if joined && at.is_none() {
+        return Err(EngineError::Params("`contiguous` needs the `x` and `y` to start from".to_string()));
+    }
+    // Kept to an area: the area's box worked on alone, then put back where the area's shape is.
+    let reg = area(s, p)?;
+    let (x0, y0) = reg.as_ref().map_or((0, 0), |r| (r.x, r.y));
+    let part = match &reg {
+        None => None,
+        Some(r) => Some(s.doc.base.crop(r.x, r.y, r.w, r.h).ok_or(RasterError::Empty(r.w, r.h))?),
+    };
+    let on = part.as_ref().unwrap_or(&s.doc.base);
+    let region = match at {
+        Some((x, y)) if joined => {
+            let (Some(x), Some(y)) = (x.checked_sub(x0).filter(|x| *x < on.width()), y.checked_sub(y0).filter(|y| *y < on.height())) else {
+                return Err(EngineError::Params("the point is outside the selected area".to_string()));
+            };
+            matte::Region::From(x, y)
+        }
+        _ => matte::Region::Everywhere,
+    };
+    let out = matte::replace_colour(on, colour, with, tolerance, region)?;
+    if out.replaced == 0 {
+        let place = if reg.is_some() { "the selected area" } else { "the picture" };
+        return Err(EngineError::Failed(format!("nothing in {place} is close enough to {} to replace", colour.to_hex())));
+    }
+    s.doc.base = match &reg {
+        None => out.picture,
+        Some(r) if r.is_box() => {
+            let mut whole = s.doc.base.clone();
+            effects::paste(&mut whole, &out.picture, i64::from(r.x), i64::from(r.y));
+            whole
+        }
+        Some(r) => region::blend_in(&s.doc.base, &out.picture, r),
+    };
+    Ok(json!({ "color": colour.to_hex(), "with": with.to_hex(), "replaced": out.replaced, "softened": out.softened }))
 }
 
 pub(crate) fn sharpen(s: &mut Session, p: &Value) -> Result<Value> {

@@ -238,7 +238,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   move with the picture. An area chosen with the Selection tool can be cut out from its right-click
   menu too.
 - **Properties and Effects, docked at the right**: Properties (the quick styles and the tool
-  properties) over Effects (brightness and contrast; hue, saturation and gamma; sharpen; blur;
+  properties) over Effects (brightness and contrast; hue, saturation and gamma; a colour
+  replaced by another, picked from the picture with the eyedropper, everywhere or only where it
+  joins the point picked; sharpen; blur;
   border, drop shadow, round corners; torn, wavy and faded edges, a bevel; perspective, a page
   curl, a reflection; a watermark of words or a picture, over the picture or under its words and
   lines; the capture's details written on it; each opened with its settings and Apply;
@@ -263,7 +265,7 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
-  WebP, BMP, GIF or PDF.
+  WebP, BMP, TIFF, GIF or PDF. TIFF files open too.
 
 The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 

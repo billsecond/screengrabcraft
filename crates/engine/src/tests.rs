@@ -403,6 +403,58 @@ fn a_colour_goes_everywhere_or_from_a_pixel() {
 }
 
 #[test]
+fn a_colour_is_replaced_everywhere_or_where_it_joins_a_point() {
+    // Two red squares on blue: everywhere, both; from a point in one, only that one.
+    let two = || {
+        let mut s = square_on_blue();
+        for y in 2..8 {
+            for x in 2..8 {
+                let i = (y * 60 + x) * 4;
+                s.doc.base.pixels_mut()[i..i + 4].copy_from_slice(&[229, 57, 53, 255]);
+            }
+        }
+        s
+    };
+    let yellow = Color::rgb(0xFF, 0xD6, 0x00);
+    let mut s = two();
+    let out = s.execute("effect.replaceColor", &json!({"color": "#E53935", "with": "#FFD600"})).unwrap();
+    assert_eq!(out["replaced"], 20 * 20 + 6 * 6);
+    assert_eq!((s.doc.base.pixel(30, 20), s.doc.base.pixel(4, 4)), (Some(yellow), Some(yellow)));
+    assert_eq!(s.doc.base.pixel(0, 0), Some(Color::rgb(30, 90, 200)));
+    assert_eq!(s.undo_label(), Some("Replace a Colour"));
+    s.undo();
+    assert!(!s.can_undo());
+    // The colour of the pixel clicked, only where it joins it.
+    let out = s.execute("effect.replaceColor", &json!({"x": 30, "y": 20, "with": "#FFD600", "contiguous": true})).unwrap();
+    assert_eq!(out["replaced"], 20 * 20);
+    assert_eq!(out["color"], "#E53935");
+    assert_eq!(s.doc.base.pixel(4, 4), Some(Color::rgb(229, 57, 53)), "the other square stays");
+    // Kept to an area: only the part of the big square in it, and the point must be in it.
+    let mut s = two();
+    s.execute("effect.replaceColor", &json!({"color": "#E53935", "with": "#FFD600", "area": {"x": 0, "y": 0, "w": 30, "h": 40}})).unwrap();
+    assert_eq!((s.doc.base.pixel(25, 20), s.doc.base.pixel(35, 20)), (Some(yellow), Some(Color::rgb(229, 57, 53))));
+    assert_eq!(s.doc.base.pixel(4, 4), Some(yellow));
+    let mut s = two();
+    let joined = json!({"x": 35, "y": 20, "with": "#FFD600", "contiguous": true, "area": {"x": 0, "y": 0, "w": 30, "h": 40}});
+    assert!(s.execute("effect.replaceColor", &joined).is_err(), "the point is outside the area");
+    // Nothing of the colour, or nothing to put in its place: an error that changes nothing.
+    for bad in [
+        json!({"color": "#00FF00", "with": "#FFD600", "tolerance": 3}),
+        json!({"color": "#E53935"}),
+        json!({"with": "#FFD600"}),
+        json!({"color": "#E53935", "with": "#FFD600", "contiguous": true}),
+        json!({"x": 500, "y": 5, "with": "#FFD600"}),
+        json!({"color": "#E53935", "with": "yellowish"}),
+        json!({"color": "#E53935", "with": "#FFD600", "tolerance": "lots"}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("effect.replaceColor", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+    assert!(!s.can_undo());
+}
+
+#[test]
 fn a_fill_colours_one_area_in_one_undo_step() {
     let mut s = square_on_blue();
     let out = s.execute("image.fill", &json!({"x": 30, "y": 20, "color": "#FFD600"})).unwrap();
@@ -779,6 +831,7 @@ fn colour_effects_change_the_whole_picture_or_an_area() {
         ("effect.brightness", json!({"brightness": 40})),
         ("effect.hueSaturation", json!({"hue": 120})),
         ("effect.hueSaturation", json!({"gamma": 2})),
+        ("effect.replaceColor", json!({"color": "#DC1E1E", "with": "#1E5AC8"})),
         ("effect.blur", json!({"radius": 3})),
     ] {
         let mut s = red();

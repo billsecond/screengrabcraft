@@ -626,7 +626,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         if let Some(h) = hover
             && resp.hovered()
         {
-            let colour = ed.colour_at(ed.view.to_image(h));
+            let at = ed.view.to_image(h);
+            let colour = ed.colour_at(at);
             match colour {
                 Some(c) => {
                     ctx.set_cursor_icon(CursorIcon::None);
@@ -638,7 +639,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     p.rect_stroke(swatch.expand(1.5), 5.0, Stroke::new(1.0, Color32::from_black_alpha(200)), StrokeKind::Outside);
                     crate::icons::paint_pointer(&p, h, crate::icons::Icon::Eyedropper, POINTER);
                     if resp.clicked_by(egui::PointerButton::Primary) || resp.drag_stopped_by(egui::PointerButton::Primary) {
-                        crate::eyedropper::picked(&ctx, c);
+                        let pixel = (at.x >= 0.0 && at.y >= 0.0).then(|| (at.x.floor() as u32, at.y.floor() as u32));
+                        crate::eyedropper::picked_at(&ctx, c, pixel);
                     }
                 }
                 None => ctx.set_cursor_icon(CursorIcon::NotAllowed),

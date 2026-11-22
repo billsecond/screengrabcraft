@@ -32,7 +32,9 @@ base64 = "0.22"
 getrandom = "0.3"
 
 # Pictures: decoding what is opened or pasted, encoding what is saved. Rust all the way down.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
+# TIFF written LZW-compressed with the horizontal predictor (MIT; the image crate reads it).
+tiff = { version = "0.11", default-features = false, features = ["lzw"] }
 gif = "0.14"
 # Drawing the annotations onto the picture (paths, strokes, gradients, anti-aliasing): a
 # port of a subset of Skia, Rust only, the browser build included.

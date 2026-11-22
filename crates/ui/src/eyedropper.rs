@@ -1,7 +1,8 @@
 //! The eyedropper: a colour taken from the picture for one of the colour buttons.
 //!
 //! A colour button's menu starts it ([`start`], naming the button); the canvas then shows the
-//! eyedropper as the pointer and, on a click, hands the colour under it over ([`picked`]); the
+//! eyedropper as the pointer and, on a click, hands the colour under it over ([`picked_at`], with
+//! the pixel it was on, for a window that wants the place too: [`take_point`]); the
 //! button takes it on its next frame ([`take`]) like any colour chosen in its menu, so it goes to
 //! the selection or the tool the same way, with its undo step. Esc or the right button puts the
 //! eyedropper away ([`cancel`]). The state lives in egui's memory for the window, as the buttons
@@ -16,6 +17,8 @@ struct State {
     for_button: Option<String>,
     /// A colour picked, for that button.
     picked: Option<(String, Color)>,
+    /// The pixel of the picture it was picked on, for that button.
+    point: Option<(String, (u32, u32))>,
 }
 
 fn id() -> Id {
@@ -32,7 +35,7 @@ fn set(ctx: &Context, s: State) {
 
 /// Picks a colour from the picture for the colour button called `button`.
 pub fn start(ctx: &Context, button: &str) {
-    set(ctx, State { for_button: Some(button.to_string()), picked: None });
+    set(ctx, State { for_button: Some(button.to_string()), ..State::default() });
 }
 
 /// Whether a colour is being picked from the picture.
@@ -52,9 +55,27 @@ pub fn cancel(ctx: &Context) {
 
 /// The colour clicked on the picture: the eyedropper is put away and the button gets it.
 pub fn picked(ctx: &Context, c: Color) {
+    picked_at(ctx, c, None);
+}
+
+/// [`picked`], on the picture's pixel `at`.
+pub fn picked_at(ctx: &Context, c: Color, at: Option<(u32, u32)>) {
     let s = get(ctx);
     if let Some(button) = s.for_button {
-        set(ctx, State { for_button: None, picked: Some((button, c)) });
+        let point = at.map(|p| (button.clone(), p));
+        set(ctx, State { for_button: None, picked: Some((button, c)), point });
+    }
+}
+
+/// The pixel the colour for the colour button called `button` was picked on, once.
+pub fn take_point(ctx: &Context, button: &str) -> Option<(u32, u32)> {
+    let s = get(ctx);
+    match s.point {
+        Some((b, p)) if b == button => {
+            set(ctx, State { point: None, ..s });
+            Some(p)
+        }
+        _ => None,
     }
 }
 
@@ -91,5 +112,19 @@ mod tests {
         start(&ctx, "Text colour");
         cancel(&ctx);
         assert!(!active(&ctx));
+    }
+
+    #[test]
+    fn the_pixel_a_colour_was_picked_on_is_kept_for_its_button_once() {
+        let ctx = Context::default();
+        start(&ctx, "Colour to replace");
+        picked_at(&ctx, Color::RED, Some((12, 7)));
+        assert_eq!(take_point(&ctx, "Fill colour"), None, "not for another button");
+        assert_eq!(take(&ctx, "Colour to replace"), Some(Color::RED));
+        assert_eq!(take_point(&ctx, "Colour to replace"), Some((12, 7)), "kept apart from the colour");
+        assert_eq!(take_point(&ctx, "Colour to replace"), None, "once");
+        start(&ctx, "Colour to replace");
+        picked(&ctx, Color::BLACK);
+        assert_eq!(take_point(&ctx, "Colour to replace"), None, "picked nowhere in particular");
     }
 }

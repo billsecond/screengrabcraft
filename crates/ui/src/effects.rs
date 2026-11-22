@@ -40,6 +40,7 @@ impl Default for Effects {
                 // The colours first, then the edges and the shape, then what is written on it.
                 e(Dialog::brightness()),
                 e(Dialog::hue()),
+                e(Dialog::replace()),
                 Section::Colours,
                 e(Dialog::sharpen()),
                 e(Dialog::blur()),

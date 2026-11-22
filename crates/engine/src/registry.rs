@@ -461,6 +461,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         fx::hue_saturation
     ),
     cmd!(
+        "effect.replaceColor",
+        "Replace a Colour",
+        "Effects",
+        None,
+        r##"{"color"?: "#RRGGBB" (or the pixel at x, y), "x"?: px, "y"?: px, "with": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 24 (0 to 255 a channel), "contiguous"?: false, "area"?: {"x", "y", "w", "h"}} → {"replaced": pixels, "softened": pixels} — the colour, and the colours that close to it, become `with` everywhere, or only where they join x, y; the smooth edges round them are mixed with the new colour instead of the old"##,
+        always,
+        fx::replace_color
+    ),
+    cmd!(
         "effect.sharpen",
         "Sharpen",
         "Effects",
@@ -1198,7 +1207,7 @@ fn remove_solid_background(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// The pixel at `x`, `y`, if they are given.
-fn pixel_param(s: &Session, p: &Value) -> Result<Option<(u32, u32)>> {
+pub(crate) fn pixel_param(s: &Session, p: &Value) -> Result<Option<(u32, u32)>> {
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
     if !given("x") && !given("y") {
         return Ok(None);

@@ -143,7 +143,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Hue, saturation, gamma** | Has | with lightness, in one effect |
 | Greyscale, invert | Has | |
 | **Sepia, sharpen, blur all** | Has | |
-| Colour replaced by another | Part | by see-through only |
+| **Colour replaced by another** | Has | Effects › Replace a Colour… and the Effects pane: a colour, chosen or picked from the picture with the eyedropper, and those within a tolerance of it, become another everywhere or only where they join the point picked; near colours keep their shade and smooth edges take the new colour; kept to a selected area too. Make a Colour Transparent (Image menu) turns one see-through |
 | **Perspective, page curl, reflection** | Has | the annotations move with a tilt; a page curl at any corner |
 | **Watermark (a picture or words)** | Has | in a corner, the middle or all over, turned; over the picture, or under its words and lines |
 | **Capture details written on the picture (time, program)** | Part | the time (from the capture's file), what it is of and its size, in a corner or on a strip below; captures don't record the program yet, so its name is typed |
@@ -166,7 +166,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Captures sorted by program or website, tags, favourites | Missing | |
 | Captures folder of your choosing | Has | |
 | PNG, JPEG, WebP, BMP, GIF, PDF | Has | |
-| TIFF, HEIF | Missing | |
+| **TIFF**, HEIF | Part | TIFF opened and saved (Export As, the command line; LZW-compressed, see-through kept), in the browser too; HEIF isn't opened: there is a pure-Rust decoder under MIT or Apache-2.0 (heifer; the other, heic, is AGPL), but HEIF pictures are HEVC, which is covered by patents, so shipping a decoder for it is the owner's call |
 | Multi-page PDF of several captures | Missing | |
 | Copy, save | Has | |
 | Open in another program | Part | Show in Folder |
@@ -293,6 +293,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 17. Effect presets; the picture rotated by any angle (#105).
 18. Rulers, guides and snapping; measuring a distance (#108).
 19. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
+20. TIFF opened and saved; a colour replaced by another.
 
 **Still to build, in this order**
 
