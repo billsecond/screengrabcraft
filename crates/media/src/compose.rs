@@ -463,6 +463,21 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 })
                 .collect()
         };
+        // The same from any sample (before the recording's start: silence).
+        let raw = |start: i64, n: usize| -> Vec<[f32; 2]> {
+            let skip = usize::try_from(start.saturating_neg().max(0)).unwrap_or(n).min(n);
+            let mut s = vec![[0.0; 2]; skip];
+            s.extend(read(u64::try_from(start.max(0)).unwrap_or(0), n - skip));
+            s
+        };
+        // With its background noise taken out, if it's to be.
+        let noise = (t.denoise > 0.0).then(|| rec.noise(t.stream));
+        let source = |start: i64, n: usize| -> Vec<[f32; 2]> {
+            match &noise {
+                Some(p) => crate::denoise::cleaned(&raw, p, t.denoise, stereo, start, n),
+                None => raw(start, n),
+            }
+        };
         for c in &t.clips {
             let (at, from, len) = (to_samples(c.at), to_samples(c.from), to_samples(c.len));
             let (a, b) = (first.max(at), end.min(at.saturating_add(len)));
@@ -470,25 +485,20 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 continue;
             }
             let n = (b - a) as usize;
+            let from = i64::try_from(from).unwrap_or(i64::MAX / 4);
             let sound = if c.speed == crate::timeline::NORMAL_SPEED {
-                read(from + (a - at), n)
+                source(from.saturating_add_unsigned(a - at), n)
             } else {
                 // Faster or slower, at its own pitch.
-                let clip = |start: i64, n: usize| -> Vec<[f32; 2]> {
-                    // Before the recording's start: silence.
-                    let abs = i64::try_from(from).unwrap_or(i64::MAX).saturating_add(start);
-                    let skip = usize::try_from(abs.saturating_neg().max(0)).unwrap_or(n).min(n);
-                    let mut s = vec![[0.0; 2]; skip];
-                    s.extend(read(u64::try_from(abs.max(0)).unwrap_or(0), n - skip));
-                    s
-                };
-                crate::stretch::stretched(&clip, c.rate(), a - at, n)
+                crate::stretch::stretched(&|start, n| source(from.saturating_add(start), n), c.rate(), a - at, n)
             };
             let base = (a - first) as usize * 2;
+            let faded = c.fade_in > 0 || c.fade_out > 0;
             for (k, [l, r]) in sound.iter().enumerate() {
+                let gain = if faded { t.volume * c.fade_at(to_us(a - at + k as u64)) } else { t.volume };
                 if let Some(o) = out.get_mut(base + k * 2..base + k * 2 + 2) {
-                    o[0] += l * t.volume;
-                    o[1] += r * t.volume;
+                    o[0] += l * gain;
+                    o[1] += r * gain;
                 }
             }
         }
@@ -657,6 +667,33 @@ mod tests {
         tl.split(1_000_000, Some(1)).unwrap();
         tl.delete_clip(1, 1).unwrap();
         assert!(mix(&r, &tl, to_samples(1_500_000), 10).iter().all(|v| *v == 0.0));
+    }
+
+    #[test]
+    fn a_sound_clip_fades_in_and_out_and_a_steady_hum_is_taken_out() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        tl.set_muted(2, true).unwrap();
+        let m = 1000.0 / 32768.0;
+        let at = |tl: &Timeline, us: u64| mix(&r, tl, to_samples(us), 1)[0];
+        // A second up from silence, half a second down to it, on the 2 s microphone.
+        tl.set_fade(1, 0, Some(1_000_000), Some(500_000)).unwrap();
+        assert!(at(&tl, 0).abs() < 1e-6);
+        assert!((at(&tl, 500_000) - m * 0.5).abs() < m * 0.02, "half way up: {}", at(&tl, 500_000));
+        assert!((at(&tl, 1_200_000) - m).abs() < 1e-6, "all the way up");
+        assert!((at(&tl, 1_750_000) - m * 0.5).abs() < m * 0.02, "half way down");
+        // Split in the middle: the first piece keeps the fade in, the second the fade out.
+        tl.split(1_000_000, Some(1)).unwrap();
+        let c = &tl.tracks[1].clips;
+        assert_eq!((c[0].fade_in, c[0].fade_out, c[1].fade_in, c[1].fade_out), (1_000_000, 0, 0, 500_000));
+        assert!((at(&tl, 1_200_000) - m).abs() < 1e-6);
+        // The microphone's steady hum (all it has) is learnt as its noise and taken out.
+        let mut tl = Timeline::new(&r);
+        tl.set_muted(2, true).unwrap();
+        tl.set_denoise(1, 1.0).unwrap();
+        let after = at(&tl, 1_000_000);
+        assert!(after.abs() < m * 0.3, "{after} of {m}");
+        assert!(tl.set_denoise(0, 1.0).is_err(), "the screen has no noise to take out");
     }
 
     #[test]

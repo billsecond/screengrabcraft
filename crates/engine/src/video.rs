@@ -239,6 +239,26 @@ fn speed(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({"from": from, "to": end, "speed": f64::from(hundredths) / 100.0, "length": s.timeline.length()}))
 }
 
+/// A sound clip's fades: how long its sound takes to come up at its start and go down at its end.
+fn fade(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (track, clip) = (index(p, "track")?, index(p, "clip")?);
+    let given = |key: &str| -> Result<Option<u64>> { if p.get(key).is_some_and(|v| !v.is_null()) { int(p, key).map(Some) } else { Ok(None) } };
+    let (fade_in, fade_out) = (given("in")?, given("out")?);
+    if fade_in.is_none() && fade_out.is_none() {
+        return Err(EngineError::Params("say how long a fade: `in`, `out` or both, in µs".to_string()));
+    }
+    s.timeline.set_fade(track, clip, fade_in, fade_out).map_err(edit_err)?;
+    let c = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).copied().unwrap_or_default();
+    Ok(json!({"in": c.fade_in, "out": c.fade_out}))
+}
+
+/// How much of a sound track's background noise is taken out.
+fn denoise(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let amount = number(p, "amount")?.ok_or_else(|| EngineError::Params("`amount` is missing: 0 takes nothing out, 1 the most".to_string()))?;
+    s.timeline.set_denoise(index(p, "track")?, amount).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 fn mute(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let muted = p.get("muted").and_then(Value::as_bool).ok_or_else(|| EngineError::Params("`muted` must be true or false".to_string()))?;
     s.timeline.set_muted(index(p, "track")?, muted).map_err(edit_err)?;
@@ -519,6 +539,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         params: r#"{"from": µs, "to": µs, "speed": 0.1..10, "track"?: n}: plays the stretch faster or slower (2 twice as fast, 0.5 half, 1 as recorded) on every track, or one; what follows moves up to follow on, voices keep their pitch. Says where the stretch now ends"#,
         run: speed,
     },
+    VideoCommand {
+        id: "video.fade",
+        label: "Fade",
+        params: r#"{"track": n, "clip": n, "in"?: µs, "out"?: µs}: how long a sound clip's sound takes to come up from silence at its start and go down to it at its end (0: at once)"#,
+        run: fade,
+    },
+    VideoCommand {
+        id: "video.denoise",
+        label: "Background Noise",
+        params: r#"{"track": n, "amount": 0..1}: takes a sound track's steady background noise (a fan, a hum, hiss) out, learnt from the track itself; 0 takes nothing out"#,
+        run: denoise,
+    },
     VideoCommand { id: "video.mute", label: "Mute", params: r#"{"track": n, "muted": bool}"#, run: mute },
     VideoCommand { id: "video.volume", label: "Volume", params: r#"{"track": n, "volume": 0..2}"#, run: volume },
     VideoCommand {
@@ -706,6 +738,30 @@ mod tests {
         for bad in [json!({"from": 0, "to": 1}), json!({"from": 0, "to": 9, "speed": 0}), json!({"from": 0, "to": 9, "speed": "fast"})] {
             assert!(s.execute("video.speed", &bad).is_err(), "{bad}");
         }
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn a_sound_clip_fades_and_its_tracks_noise_is_taken_out_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.fade", &json!({"track": 1, "clip": 0, "in": 1_500_000, "out": 99_000_000})).unwrap();
+        assert_eq!((r["in"].as_u64(), r["out"].as_u64()), (Some(1_500_000), Some(3_500_000)), "the fade out given has its way, up to the clip");
+        assert_eq!(s.undo_label(), Some("Fade"));
+        s.execute("video.denoise", &json!({"track": 1, "amount": 0.6})).unwrap();
+        assert_eq!(s.timeline.tracks[1].denoise, 0.6);
+        assert_eq!(s.undo_label(), Some("Background Noise"));
+        for bad in [
+            json!({"track": 0, "clip": 0, "in": 5}),
+            json!({"track": 1, "clip": 0}),
+            json!({"track": 1, "clip": 7, "in": 5}),
+            json!({"track": 0, "amount": 0.5}),
+            json!({"track": 1, "amount": "lots"}),
+        ] {
+            let id = if bad.get("amount").is_some() { "video.denoise" } else { "video.fade" };
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
     }
 

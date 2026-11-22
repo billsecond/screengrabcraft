@@ -12,6 +12,7 @@ pub mod captions;
 #[cfg(target_os = "windows")]
 pub mod clip;
 pub mod compose;
+pub mod denoise;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;
 #[cfg(target_os = "windows")]

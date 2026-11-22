@@ -67,7 +67,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Countdown before recording | Part | the capture delay; no countdown of its own |
 | Longest recording | Has | Settings |
 | Microphone heard as silent (muted or not allowed) said plainly | Has | after the recording |
-| Background noise taken out | Missing | |
+| Background noise taken out | Has | in the video editor, after recording: a track at a time |
 | Pointer: where it is, clicks, which pointer | Has | |
 | Pointer made larger, smoothed, click rings, hidden | Has | |
 | Pointer highlighted, spotlit or magnified; click sounds | Missing | |
@@ -237,8 +237,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Waves drawn; volume for each track | Has | |
 | Volume changed along a clip | Missing | |
-| **Fade in and out** | Missing | |
-| **Background noise taken out** | Missing | |
+| **Fade in and out** | Has | a sound clip at its start and end |
+| **Background noise taken out** | Has | the steady noise learnt from the track itself and turned down, on this computer (no trained model) |
 | Levels evened out; music lowered under the voice | Missing | |
 | Sound of a video apart from its picture; mono | Missing | |
 | Narration recorded over the video | Missing | |
@@ -276,37 +276,37 @@ By how much someone using it every day would miss each one. Built ones move to a
    (0.1.54; Windows).
 2. Zoom and pan in the video editor: zoom into part of the screen and back (0.1.55).
 3. Cut Out: take a strip out of a picture and close the gap (0.1.56).
-4. Speed: a stretch of video played faster or slower, voices at their own pitch.
+4. Speed: a stretch of video played faster or slower, voices at their own pitch (#58).
+5. Sound faded in and out at a clip's ends; background noise taken out of a track.
 
 **Still to build, in this order**
 
-1. Fade sound in and out; take background noise out.
-2. Edit captions: put a word right, split, join, move.
-3. Scrolling capture that scrolls by itself.
-4. Pointer highlight, spotlight and magnifier; click sounds.
-5. Step badges as letters or Roman numerals, and other badge shapes.
-6. Polygons, triangles and stars; curved arrows.
-7. A stamp library with search, emoji, and pictures of your own as stamps.
-8. Markers on the timeline, kept as chapters in the MP4.
-9. A frame saved as a picture; just the chosen stretch; just the sound.
-10. Hold a frame.
-11. Keys pressed shown in the video.
-12. Any font on the computer.
-13. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-14. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+1. Edit captions: put a word right, split, join, move.
+2. Scrolling capture that scrolls by itself.
+3. Pointer highlight, spotlight and magnifier; click sounds.
+4. Step badges as letters or Roman numerals, and other badge shapes.
+5. Polygons, triangles and stars; curved arrows.
+6. A stamp library with search, emoji, and pictures of your own as stamps.
+7. Markers on the timeline, kept as chapters in the MP4.
+8. A frame saved as a picture; just the chosen stretch; just the sound.
+9. Hold a frame.
+10. Keys pressed shown in the video.
+11. Any font on the computer.
+12. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+13. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-15. Rotate, group and align annotations; select all of one kind.
-16. Magic wand, eraser, ellipse and freehand selections.
-17. Camera background removed, or a colour removed.
-18. Transitions between clips; keyframe animation.
-19. Drawing on the screen while recording.
-20. Volume along a clip; music lowered under the voice; levels evened out.
-21. Tags, favourites, and captures sorted by program.
-22. Templates; several pictures combined into one.
-23. A picture per click made into a how-to guide.
-24. Groups, pushing later clips along, locked and solo tracks, clip colours.
-25. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-26. Print; batch changes; captures on a timer or at a set time.
-27. Cutting words from the transcript; filler words taken out.
-28. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+14. Rotate, group and align annotations; select all of one kind.
+15. Magic wand, eraser, ellipse and freehand selections.
+16. Camera background removed, or a colour removed.
+17. Transitions between clips; keyframe animation.
+18. Drawing on the screen while recording.
+19. Volume along a clip; music lowered under the voice; levels evened out.
+20. Tags, favourites, and captures sorted by program.
+21. Templates; several pictures combined into one.
+22. A picture per click made into a how-to guide.
+23. Groups, pushing later clips along, locked and solo tracks, clip colours.
+24. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+25. Print; batch changes; captures on a timer or at a set time.
+26. Cutting words from the transcript; filler words taken out.
+27. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

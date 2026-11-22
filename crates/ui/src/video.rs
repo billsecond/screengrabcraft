@@ -1543,7 +1543,7 @@ impl VideoView {
             let track = self.session.timeline.tracks.get(ti)?;
             let c = track.clips.get(ci)?;
             let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
-            Some((name, c.at, c.len, c.end(), c.speed))
+            Some((name, c.at, c.len, c.end(), c.speed, !track.kind.is_video()))
         });
         let stretch = self.range;
         let ctx = ui.ctx().clone();
@@ -1559,7 +1559,7 @@ impl VideoView {
                         ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(((wide - 6.0) / 2.0).floor(), 28.0)))
                     };
                     let mut first = true;
-                    if let Some((name, at, len, end, speed)) = clip {
+                    if let Some((name, at, len, end, speed, sound)) = clip {
                         // What's chosen, said, with what's most often done to it.
                         ui.label(RichText::new(format!("{name} clip")).size(16.0).color(t.text));
                         let pace = if speed == screengrabcraft_media::timeline::NORMAL_SPEED {
@@ -1591,6 +1591,10 @@ impl VideoView {
                         self.speed_buttons(ed, ui);
                         ui.add_space(4.0);
                         note(ui, "Every track plays this stretch at the speed, so they stay together; voices keep their pitch.".to_string());
+                        if sound && let Some((ti, ci)) = self.selected {
+                            section(ui, "Sound", &mut false);
+                            self.sound_section(ed, ui, ti, ci);
+                        }
                         first = false;
                     } else if let Some((a, b)) = stretch {
                         ui.label(RichText::new("Chosen stretch").size(16.0).color(t.text));
@@ -1643,6 +1647,62 @@ impl VideoView {
                     );
                 });
             });
+    }
+
+    /// A sound clip's fades, and how much of its track's background noise is taken out.
+    fn sound_section(&mut self, ed: &mut Editor, ui: &mut Ui, track: usize, clip: usize) {
+        let ctx = ui.ctx().clone();
+        let t = Tokens::get(ui.ctx());
+        let Some((c, denoise)) = self.session.timeline.tracks.get(track).and_then(|tr| Some((*tr.clips.get(clip)?, tr.denoise))) else { return };
+        let most = (c.len.min(screengrabcraft_media::timeline::MAX_FADE_US) as f32 / 1e6).max(0.1);
+        for (label, key, value, tip) in [
+            ("Fade in", "in", c.fade_in, "How long its sound takes to come up from silence at its start"),
+            ("Fade out", "out", c.fade_out, "How long its sound takes to go down to silence at its end"),
+        ] {
+            ui.label(RichText::new(label).size(12.0).color(t.muted));
+            let mut secs = value as f32 / 1e6;
+            let r = ui
+                .scope(|ui| {
+                    ui.spacing_mut().slider_width = (ui.available_width() - 76.0).max(80.0);
+                    ui.add(egui::Slider::new(&mut secs, 0.0..=most).fixed_decimals(1).suffix(" s"))
+                })
+                .inner
+                .on_hover_text(tip);
+            if r.drag_started() {
+                self.session.begin("Fade");
+            }
+            if r.changed() {
+                let p = json!({"track": track, "clip": clip, key: (secs.max(0.0) * 1e6).round() as u64});
+                if r.dragged() {
+                    let _ = self.session.drag("video.fade", &p);
+                } else {
+                    self.run(ed, &ctx, "video.fade", p);
+                }
+            }
+            if r.drag_stopped() {
+                self.session.commit();
+            }
+            ui.add_space(6.0);
+        }
+        let mut amount = denoise * 100.0;
+        let r = named_slider(ui, "Background noise taken out", &mut amount, 0.0..=100.0, "%")
+            .on_hover_text("A steady fan, hum or hiss is learnt from the track and turned down; voices stay");
+        if r.drag_started() {
+            self.session.begin("Background Noise");
+        }
+        if r.changed() {
+            let p = json!({"track": track, "amount": amount / 100.0});
+            if r.dragged() {
+                let _ = self.session.drag("video.denoise", &p);
+            } else {
+                self.run(ed, &ctx, "video.denoise", p);
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("The noise is taken out of the whole track, on this computer.").size(12.0).color(t.muted));
     }
 
     /// The mouse pointer on the video: shown or not, how large, how smooth, its clicks ringed.
@@ -2386,6 +2446,17 @@ impl VideoView {
                     self.run(ed, ctx, "video.mute", json!({"track": i, "muted": !track.muted}));
                     ui.close();
                 }
+                if !track.kind.is_video() {
+                    let on = track.denoise > 0.0;
+                    if ui
+                        .add(egui::Button::new("Take Out Background Noise").selected(on))
+                        .on_hover_text("A steady fan, hum or hiss, learnt from this track and turned down; voices stay")
+                        .clicked()
+                    {
+                        self.run(ed, ctx, "video.denoise", json!({"track": i, "amount": if on { 0.0 } else { 0.6 }}));
+                        ui.close();
+                    }
+                }
                 if ui.button("Rename…").on_hover_text("Its name here, and in the transcript for what's heard on it").clicked() {
                     self.start_rename(Rename::Track(i), track.name.as_deref().unwrap_or(name), false);
                     ui.close();
@@ -2725,6 +2796,22 @@ impl VideoView {
                                 egui::FontId::proportional(12.0),
                                 t.text,
                             );
+                        }
+                        // Its fades: the sound rising from its start's bottom corner, falling to its end's.
+                        let (fi, fo) = (clip.fade_in.min(clip.len), clip.fade_out.min(clip.len));
+                        for (fade, start) in [(fi, true), (fo, false)] {
+                            if fade == 0 {
+                                continue;
+                            }
+                            let w = (x_of(clip.at + fade) - x_of(clip.at)).min(r.width());
+                            let (edge, inner) = if start { (r.min.x, r.min.x + w) } else { (r.max.x, r.max.x - w) };
+                            let shade = Color32::from_black_alpha(110);
+                            painter.add(egui::Shape::convex_polygon(
+                                vec![pos2(edge, r.min.y), pos2(inner, r.min.y), pos2(edge, r.max.y)],
+                                shade,
+                                Stroke::NONE,
+                            ));
+                            painter.line_segment([pos2(edge, r.max.y), pos2(inner, r.min.y)], Stroke::new(1.5, Color32::WHITE));
                         }
                         // Faster or slower than recorded: its speed in its top right corner.
                         if clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED && r.width() > 34.0 {

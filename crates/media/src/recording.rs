@@ -417,6 +417,8 @@ pub struct Recording {
     pub finished: bool,
     /// How long it is, in µs.
     pub duration_us: u64,
+    /// Each sound track's steady noise, learnt the first time its noise is taken out.
+    noise: Mutex<BTreeMap<u8, std::sync::Arc<Vec<f32>>>>,
 }
 
 /// Where a stretch of sound ends, in µs.
@@ -532,7 +534,18 @@ impl Recording {
         .min(MAX_DURATION_US);
         let captions = captions.map(|c: Captions| c.checked(duration_us));
         let pointer = crate::pointer::Track::new(pointer_samples, pointer_shapes);
-        let mut rec = Recording { source, header, frames, audio, timeline, captions, pointer, finished: finished.is_some(), duration_us };
+        let mut rec = Recording {
+            source,
+            header,
+            frames,
+            audio,
+            timeline,
+            captions,
+            pointer,
+            finished: finished.is_some(),
+            duration_us,
+            noise: Mutex::default(),
+        };
         if let Some(t) = rec.timeline.take() {
             rec.timeline = Some(t.checked(&rec));
         }
@@ -546,6 +559,27 @@ impl Recording {
     /// The pictures of a track, in order.
     pub fn frames(&self, stream: u8) -> &[FrameEntry] {
         self.frames.get(&stream).map(Vec::as_slice).unwrap_or_default()
+    }
+
+    /// A sound track's steady noise (see [`crate::denoise::learn`]): learnt from the track the
+    /// first time it's asked for, then kept.
+    pub fn noise(&self, stream: u8) -> std::sync::Arc<Vec<f32>> {
+        let known =
+            |n: &Mutex<BTreeMap<u8, std::sync::Arc<Vec<f32>>>>| n.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&stream).cloned();
+        if let Some(n) = known(&self.noise) {
+            return n;
+        }
+        let channels = self.stream(stream).map(|s| usize::from(s.channels.clamp(1, 2))).unwrap_or(1);
+        let samples = self.audio.get(&stream).and_then(|a| a.last()).map(|a| a.first.saturating_add(a.count)).unwrap_or(0);
+        let read = |start: u64, n: usize| -> Vec<f32> {
+            self.sound(stream, start, n)
+                .chunks(channels)
+                .map(|c| c.iter().map(|v| f32::from(*v)).sum::<f32>() / (32768.0 * channels as f32))
+                .collect()
+        };
+        let learnt = std::sync::Arc::new(crate::denoise::learn(&read, samples));
+        self.noise.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(stream, learnt.clone());
+        learnt
     }
 
     /// A track's length in µs (to its last picture or sample; the whole recording at least for

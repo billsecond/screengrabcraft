@@ -55,7 +55,21 @@ pub struct Clip {
     /// had speeds play as recorded.
     #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
     pub speed: u16,
+    /// How long its sound takes to come up from silence at its start (µs of the timeline); 0:
+    /// at once. Sound only.
+    #[serde(default, rename = "fadeIn", skip_serializing_if = "is_zero")]
+    pub fade_in: u64,
+    /// How long its sound takes to go down to silence at its end.
+    #[serde(default, rename = "fadeOut", skip_serializing_if = "is_zero")]
+    pub fade_out: u64,
 }
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
+/// The longest fade.
+pub const MAX_FADE_US: u64 = 30_000_000;
 
 impl Default for Clip {
     fn default() -> Clip {
@@ -66,11 +80,50 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED }
+        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0 }
     }
 
     pub fn end(&self) -> u64 {
         self.at.saturating_add(self.len)
+    }
+
+    /// Its first `len` µs: the rest cut off (and its fade out with it).
+    fn head(&self, len: u64) -> Clip {
+        if len >= self.len {
+            return *self;
+        }
+        Clip { len, fade_out: 0, ..*self }
+    }
+
+    /// What follows its first `skip` µs, where it was (its fade in left behind).
+    fn tail(&self, skip: u64) -> Clip {
+        if skip == 0 {
+            return *self;
+        }
+        let skip = skip.min(self.len);
+        Clip { at: self.at.saturating_add(skip), from: self.source_at(skip), len: self.len - skip, fade_in: 0, ..*self }
+    }
+
+    /// How loud its sound is `d` µs into it, faded in and out: 0 to 1. Fades longer than the
+    /// clip share it.
+    pub fn fade_at(&self, d: u64) -> f32 {
+        let (fi, fo) = (self.fade_in.min(MAX_FADE_US), self.fade_out.min(MAX_FADE_US));
+        if fi == 0 && fo == 0 {
+            return 1.0;
+        }
+        let both = fi.saturating_add(fo);
+        let (fi, fo) = if both > self.len { (scale(fi, self.len, both), scale(fo, self.len, both)) } else { (fi, fo) };
+        // A smooth rise (a quarter of a sine wave, squared).
+        let rise = |x: f32| (x.clamp(0.0, 1.0) * std::f32::consts::FRAC_PI_2).sin().powi(2);
+        let mut g = 1.0;
+        if fi > 0 && d < fi {
+            g *= rise(d as f32 / fi as f32);
+        }
+        let left = self.len.saturating_sub(d);
+        if fo > 0 && left < fo {
+            g *= rise(left as f32 / fo as f32);
+        }
+        g
     }
 
     /// Its speed in hundredths, kept in range.
@@ -118,6 +171,14 @@ pub struct Track {
     /// on it); none: what it is (Microphone), and You or Others in the transcript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// How much of its background noise (a fan, a hum, hiss) is taken out: 0 none, to 1 the most.
+    /// Sound only.
+    #[serde(default, skip_serializing_if = "is_quiet")]
+    pub denoise: f32,
+}
+
+fn is_quiet(v: &f32) -> bool {
+    !v.is_finite() || *v <= 0.0
 }
 
 /// The longest name a track or a layer is given.
@@ -226,7 +287,7 @@ impl Timeline {
             .map(|s| {
                 let len = rec.stream_duration(s.id);
                 let clips = if len >= MIN_CLIP_US { vec![Clip::new(0, 0, len)] } else { Vec::new() };
-                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None }
+                Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None, denoise: 0.0 }
             })
             .collect();
         Timeline {
@@ -262,6 +323,8 @@ impl Timeline {
             t.kind = f.kind;
             t.name = t.name.as_deref().and_then(clean_name);
             t.volume = if t.volume.is_finite() { t.volume.clamp(0.0, 2.0) } else { 1.0 };
+            t.denoise = if t.denoise.is_finite() && !t.kind.is_video() { t.denoise.clamp(0.0, 1.0) } else { 0.0 };
+            let sound = !t.kind.is_video();
             let source = rec.stream_duration(t.stream);
             let mut clips: Vec<Clip> = t
                 .clips
@@ -271,7 +334,15 @@ impl Timeline {
                     let from = c.from.min(source);
                     let most = Clip { speed, ..Clip::new(0, from, 0) }.played(source - from);
                     let len = c.len.min(most);
-                    (len >= MIN_CLIP_US).then_some(Clip { at: c.at.min(u64::MAX / 4), from, len, speed })
+                    let fade = |f: u64| if sound { f.min(MAX_FADE_US) } else { 0 };
+                    (len >= MIN_CLIP_US).then_some(Clip {
+                        at: c.at.min(u64::MAX / 4),
+                        from,
+                        len,
+                        speed,
+                        fade_in: fade(c.fade_in),
+                        fade_out: fade(c.fade_out),
+                    })
                 })
                 .take(10_000)
                 .collect();
@@ -340,12 +411,12 @@ impl Timeline {
             for c in &t.clips {
                 // The part before the cut, and the part after it moved back.
                 if c.at < from {
-                    let len = c.len.min(from - c.at);
-                    out.push(Clip { len, ..*c });
+                    out.push(c.head(from - c.at));
                 }
                 if c.end() > to {
-                    let skip = to.saturating_sub(c.at);
-                    out.push(Clip { at: c.at.max(to) - gap, from: c.source_at(skip), len: c.len - skip, speed: c.speed });
+                    let mut after = c.tail(to.saturating_sub(c.at));
+                    after.at = c.at.max(to) - gap;
+                    out.push(after);
                 }
             }
             out.retain(|c| c.len >= MIN_CLIP_US);
@@ -378,11 +449,10 @@ impl Timeline {
                 }
                 // The part before the stretch, and the part after it, where it was.
                 if c.at < from {
-                    out.push(Clip { len: from - c.at, ..*c });
+                    out.push(c.head(from - c.at));
                 }
                 if c.end() > to {
-                    let skip = to - c.at;
-                    out.push(Clip { at: to, from: c.source_at(skip), len: c.len - skip, speed: c.speed });
+                    out.push(c.tail(to - c.at));
                 }
             }
             out.retain(|c| c.len >= MIN_CLIP_US);
@@ -406,8 +476,8 @@ impl Timeline {
             if let Some(k) = t.clips.iter().position(|c| c.at + MIN_CLIP_US <= at && at + MIN_CLIP_US <= c.end()) {
                 let c = t.clips[k];
                 let first = at - c.at;
-                t.clips[k].len = first;
-                t.clips.insert(k + 1, Clip { at, from: c.source_at(first), len: c.len - first, speed: c.speed });
+                t.clips[k] = c.head(first);
+                t.clips.insert(k + 1, c.tail(first));
                 made += 1;
             }
         }
@@ -438,7 +508,7 @@ impl Timeline {
         let floor = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0).max(c.at.saturating_sub(c.played(c.from)));
         let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
         let from = if to >= c.at { c.source_at(to - c.at) } else { c.from.saturating_sub(scale(c.at - to, c.pace(), 100)) };
-        let moved = Clip { at: to, from, len: c.end().saturating_sub(to), speed: c.speed };
+        let moved = Clip { at: to, from, len: c.end().saturating_sub(to), ..c };
         if let Some(slot) = clips.get_mut(clip) {
             *slot = moved;
         }
@@ -524,16 +594,18 @@ impl Timeline {
                     continue;
                 }
                 if c.at < from {
-                    out.push(Clip { len: from - c.at, ..*c });
+                    out.push(c.head(from - c.at));
                 }
-                // The part in the stretch, at its new speed.
+                // The part in the stretch, at its new speed (with its fades, if they're in it).
                 let (a, b) = (c.at.max(from), c.end().min(to));
                 let pace = scale(c.pace(), speed, was).clamp(u64::from(MIN_SPEED), u64::from(MAX_SPEED));
                 let (na, nb) = (map(a), map(b));
-                out.push(Clip { at: na, from: c.source_at(a - c.at), len: nb.saturating_sub(na), speed: u16::try_from(pace).unwrap_or(MAX_SPEED) });
+                let part = c.tail(a - c.at).head(b - a);
+                out.push(Clip { at: na, len: nb.saturating_sub(na), speed: u16::try_from(pace).unwrap_or(MAX_SPEED), ..part });
                 if c.end() > to {
-                    let skip = to - c.at;
-                    out.push(Clip { at: map(to), from: c.source_at(skip), len: c.end() - to, speed: c.speed });
+                    let mut after = c.tail(to - c.at);
+                    after.at = map(to);
+                    out.push(after);
                 }
             }
             // Apart (rounding may leave a microsecond over), and no slivers.
@@ -553,6 +625,49 @@ impl Timeline {
             self.retime_layers(&map);
         }
         Ok(map(to))
+    }
+
+    /// How long a sound clip's sound takes to come up at its start (`fade_in`) and go down at its
+    /// end (`fade_out`), µs; either left as it is if not given. Together they're never longer
+    /// than the clip: the one given has its way (both given, the fade in).
+    pub fn set_fade(&mut self, track: usize, clip: usize, fade_in: Option<u64>, fade_out: Option<u64>) -> Result<(), EditError> {
+        if self.track(track)?.kind.is_video() {
+            return Err(EditError::Invalid("only sound fades in and out (a picture fades with a transition from the Library)".to_string()));
+        }
+        let (clips, mut c) = self.clip_mut(track, clip)?;
+        let cap = |v: u64| v.min(MAX_FADE_US).min(c.len);
+        match (fade_in, fade_out) {
+            (Some(i), Some(o)) => {
+                c.fade_in = cap(i);
+                c.fade_out = cap(o).min(c.len - c.fade_in);
+            }
+            (Some(i), None) => {
+                c.fade_in = cap(i);
+                c.fade_out = c.fade_out.min(c.len - c.fade_in);
+            }
+            (None, Some(o)) => {
+                c.fade_out = cap(o);
+                c.fade_in = c.fade_in.min(c.len - c.fade_out);
+            }
+            (None, None) => {}
+        }
+        if let Some(slot) = clips.get_mut(clip) {
+            *slot = c;
+        }
+        Ok(())
+    }
+
+    /// How much of a sound track's background noise is taken out: 0 none, to 1 the most.
+    pub fn set_denoise(&mut self, track: usize, amount: f32) -> Result<(), EditError> {
+        if !amount.is_finite() {
+            return Err(EditError::Invalid("how much noise to take out is not a number".to_string()));
+        }
+        let t = self.track_mut(track)?;
+        if t.kind.is_video() {
+            return Err(EditError::Invalid("only a sound track has noise to take out".to_string()));
+        }
+        t.denoise = amount.clamp(0.0, 1.0);
+        Ok(())
     }
 
     pub fn set_muted(&mut self, track: usize, muted: bool) -> Result<(), EditError> {
@@ -591,7 +706,8 @@ mod tests {
     use super::*;
 
     fn two_tracks() -> Timeline {
-        let full = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 10_000_000)], name: None };
+        let full =
+            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 10_000_000)], name: None, denoise: 0.0 };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -828,6 +944,41 @@ mod tests {
         assert_eq!((clips[0].speed, clips[1].speed), (MIN_SPEED, MAX_SPEED));
         assert_eq!(clips[0].len, 9_000_000, "4 s at a tenth of the speed is 40 s");
         assert_eq!(clips[1].len, 400_000, "4 s at ten times is 0.4 s");
+    }
+
+    #[test]
+    fn fades_stay_with_the_ends_of_a_clip_through_edits() {
+        let mut t = two_tracks();
+        assert!(t.set_fade(0, 0, Some(1_000_000), None).is_err(), "the screen doesn't fade");
+        t.set_fade(1, 0, Some(2_000_000), Some(3_000_000)).unwrap();
+        // Longer than the clip, together: the one given now has its way.
+        t.set_fade(1, 0, None, Some(9_000_000)).unwrap();
+        assert_eq!((t.tracks[1].clips[0].fade_in, t.tracks[1].clips[0].fade_out), (1_000_000, 9_000_000));
+        t.set_fade(1, 0, Some(2_000_000), Some(3_000_000)).unwrap();
+        // A cut in the middle: the start keeps the fade in, the end the fade out.
+        t.cut(4_000_000, 5_000_000).unwrap();
+        let c = &t.tracks[1].clips;
+        assert_eq!((c[0].fade_in, c[0].fade_out, c[1].fade_in, c[1].fade_out), (2_000_000, 0, 0, 3_000_000));
+        // Sped up, the end piece keeps its fade; trimmed, it stays.
+        t.set_speed(6_000_000, 9_000_000, 200, None).unwrap();
+        assert_eq!(t.tracks[1].clips.last().map(|c| c.fade_out), Some(3_000_000));
+        t.trim_start(1, 0, 500_000).unwrap();
+        assert_eq!(t.tracks[1].clips[0].fade_in, 2_000_000);
+        assert!(t.set_fade(1, 9, Some(1), None).is_err());
+        // How loud: silent at the start, full in the middle.
+        let c = Clip { fade_in: 1_000_000, fade_out: 1_000_000, ..Clip::new(0, 0, 4_000_000) };
+        assert_eq!((c.fade_at(0), c.fade_at(2_000_000), c.fade_at(4_000_000)), (0.0, 1.0, 0.0));
+        assert!((c.fade_at(500_000) - 0.5).abs() < 1e-3);
+        // Noise taken out: a sound track only, kept in range.
+        t.set_denoise(1, 7.0).unwrap();
+        assert_eq!(t.tracks[1].denoise, 1.0);
+        assert!(t.set_denoise(0, 0.5).is_err() && t.set_denoise(1, f32::NAN).is_err());
+        // Written and read again; old edits have neither.
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"fadeIn\"") && json.contains("\"denoise\""));
+        assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
+        let old: Timeline = serde_json::from_str(r#"{"tracks":[{"stream":1,"kind":"microphone","clips":[{"at":0,"from":0,"len":5}]}]}"#).unwrap();
+        assert_eq!((old.tracks[0].denoise, old.tracks[0].clips[0].fade_in), (0.0, 0));
     }
 
     #[test]
