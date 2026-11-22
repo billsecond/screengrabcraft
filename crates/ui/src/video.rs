@@ -253,6 +253,8 @@ pub struct VideoView {
     thumbs: std::collections::HashMap<String, egui::TextureHandle>,
     /// The template whose card the pointer is on, and since when: its preview plays from then.
     lib_hover: Option<(&'static str, f64)>,
+    /// How long each picture shows when the media bin's pictures are put in turn (seconds).
+    picture_secs: f32,
     /// That preview's picture, and the graphics built for it.
     preview_tex: Option<egui::TextureHandle>,
     preview_texts: screengrabcraft_media::layer_draw::TextCache,
@@ -573,6 +575,7 @@ impl VideoView {
             lib_tab: LibTab::default(),
             thumbs: Default::default(),
             lib_hover: None,
+            picture_secs: 4.0,
             preview_tex: None,
             preview_texts: Default::default(),
             canvas_drag: None,
@@ -1569,6 +1572,15 @@ impl VideoView {
                         ui.close();
                     }
                     self.hold_menu(ed, ui, &ctx, "Hold the Frame at the Playhead", self.playhead);
+                    if ui
+                        .add_enabled(self.session.has_clicks(), egui::Button::new("Zoom on the Clicks"))
+                        .on_hover_text("A zoom for each run of clicks: ordinary zooms, to change or delete")
+                        .on_disabled_hover_text("This recording kept no clicks")
+                        .clicked()
+                    {
+                        self.zoom_on_clicks(ed, &ctx);
+                        ui.close();
+                    }
                     let what = if self.item.is_some() {
                         "Delete the Item"
                     } else if self.range.is_some() {

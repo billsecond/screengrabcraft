@@ -3355,3 +3355,59 @@ fn the_pointer_is_hidden_for_a_stretch_and_what_moves_is_blurred_from_the_panel(
     assert!(h.query_by_label("How much").is_some());
     shot(&mut h, "video-motion-blur");
 }
+
+#[test]
+fn zooms_follow_the_clicks_from_the_library_and_the_pictures_are_put_in_turn() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::What;
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // The Library's Zoom and Pan section: a zoom made where it clicked (at 2 s).
+    h.get_by_label("Zoom and Pan").click();
+    h.run_steps(3);
+    h.get_by_label("Zoom on the Clicks").click();
+    h.run_steps(3);
+    {
+        let tl = &h.state().video.as_ref().unwrap().session.timeline;
+        let l = tl.layers.last().unwrap();
+        assert_eq!(l.name, "Zooms on the clicks");
+        assert!(matches!(l.items[0].what, What::Zoom) && l.items[0].at < 2_000_000 && l.items[0].end() > 2_000_000);
+    }
+    h.state_mut().video.as_mut().unwrap().playhead = 2_000_000;
+    h.run_steps(3);
+    shot(&mut h, "video-zoom-on-clicks");
+    // Again: every click is zoomed on already, which it says.
+    h.get_by_label("Zoom on the Clicks").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.layers.len(), 1);
+    // A recording without clicks: greyed out.
+    let mut h = media_harness(MediaHost::default());
+    h.get_by_label("Zoom and Pan").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Zoom on the Clicks")).is_disabled());
+    // Pictures brought in, put in turn from the Media bin.
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    h.get_by_label("Import Media…").click();
+    h.run_steps(1);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/One.png".to_string(), "C:/Pictures/Two.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Put the Pictures in Turn").click();
+    h.run_steps(3);
+    let v = h.state_mut().video.as_mut().unwrap();
+    let l = v.session.timeline.layers.iter().find(|l| l.name == "Pictures").unwrap();
+    assert_eq!(l.items.iter().map(|i| (i.at, i.len)).collect::<Vec<_>>(), vec![(0, 4_000_000), (4_000_000, 4_000_000)]);
+    assert!(count(&v.frame_at(2_000_000), [0xE0, 0x20, 0x20]) > 1000, "the picture on the video");
+    shot(&mut h, "video-pictures-in-turn");
+}
