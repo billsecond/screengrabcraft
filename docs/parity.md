@@ -291,7 +291,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 16. Capture presets with effects added as they're taken, a folder and a format of their own, and
     `--preset <name>` (#93).
 17. Open With: a capture in a program of the owner's choosing (Windows; #94).
-18. The camera full screen, swapped with the screen while recording.
+18. The camera full screen, swapped with the screen while recording (#98).
 
 **Still to build, in this order**
 
