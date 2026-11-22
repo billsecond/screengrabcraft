@@ -17,7 +17,8 @@ pub use color::Color;
 pub use document::{DocError, Document, Meta, Order};
 pub use geom::{IRect, Pt, Rect};
 pub use object::{
-    ArrowHeads, BadgeShape, CalloutForm, Handle, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot, TextAlign,
+    ArrowHeads, BadgeShape, CalloutForm, Handle, HeadShape, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot,
+    TextAlign,
 };
 pub use quick::QuickStyle;
 pub use raster::{MAX_PIXELS, MAX_SIDE, Raster, RasterError};

@@ -91,7 +91,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Add Annotation",
         "Annotate",
         None,
-        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
+        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}} (arrow also "bend"?: 0.3, how far its middle bows to the left of the way it points as a share of its length, -1.5 to 1.5, and "head"?: "notched"|"triangle"|"open"|"dot"|"bar"), boxes {"rect":{"x","y","w","h"}}, polygon {"rect", "sides"?: 3 (3 to 12), "star"?: false}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
         always,
         add_object
     ),
@@ -118,7 +118,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Apply Quick Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
+        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true, "bend"?: 0.3, "head"?: "notched"|"triangle"|"open"|"dot"|"bar", "sides"?: 5, "star"?: true, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
         has_selection,
         apply_look
     ),

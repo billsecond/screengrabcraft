@@ -1001,6 +1001,7 @@ impl EditorSettings {
             },
             Kind::Stamp => ShapeOptions { stamp: Some(self.stamp.unwrap_or_default()), ..ShapeOptions::default() },
             Kind::Spotlight => ShapeOptions { round: Some(false), ..ShapeOptions::default() },
+            Kind::Polygon => ShapeOptions { sides: Some(crate::object::MIN_SIDES), star: Some(false), ..ShapeOptions::default() },
             Kind::Step => ShapeOptions {
                 labels: Some(crate::object::StepLabels::Numbers),
                 badge: Some(crate::object::BadgeShape::Circle),
@@ -1013,6 +1014,11 @@ impl EditorSettings {
         let mut kept = self.options.get(&kind.family()).copied().unwrap_or_default();
         if kind.family() == Kind::Rect {
             kept.round = None;
+            // A polygon's corners say nothing of a rectangle or an ellipse.
+            if kind != Kind::Polygon {
+                kept.sides = None;
+                kept.star = None;
+            }
         }
         defaults.merged(kept)
     }
@@ -1040,7 +1046,9 @@ impl EditorSettings {
 
     /// The style a tool draws with: the last one used, or the kind's default.
     pub fn style(&self, kind: Kind) -> Style {
-        self.styles.get(&kind).copied().unwrap_or_else(|| kind.default_style())
+        // Polygons look as the Shape tool's rectangles did until they have a look of their own.
+        let shared = || if kind == Kind::Polygon { self.styles.get(&Kind::Rect).copied() } else { None };
+        self.styles.get(&kind).copied().or_else(shared).unwrap_or_else(|| kind.default_style())
     }
 
     /// Puts `path` first in the recent files.

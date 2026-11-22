@@ -29,7 +29,10 @@ fn main() -> Result<(), String> {
         d.add(s, k.default_style()).map(|_| ())
     };
     let e = |r: Result<(), screengrabcraft_model::DocError>| r.map_err(|e| e.to_string());
-    e(add(&mut d, Shape::Arrow { from: Pt::new(420.0, 470.0), to: Pt::new(250.0, 330.0), heads: ArrowHeads::End }))?;
+    e(add(
+        &mut d,
+        Shape::Arrow { from: Pt::new(420.0, 470.0), to: Pt::new(250.0, 330.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+    ))?;
     e(add(&mut d, Shape::Rect { rect: Rect::new(330.0, 90.0, 260.0, 90.0), radius: 10.0 }))?;
     e(add(&mut d, Shape::Ellipse { rect: Rect::new(620.0, 90.0, 200.0, 110.0) }))?;
     e(add(&mut d, Shape::highlight(Rect::new(324.0, 229.0, 387.0, 22.0))))?;

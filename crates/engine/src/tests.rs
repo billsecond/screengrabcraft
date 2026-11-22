@@ -467,7 +467,16 @@ fn a_quick_style_changes_the_selection_in_one_undo_step() {
     assert_eq!(c.style.fill, Color::rgb(0x1E, 0x88, 0xE5));
     assert_eq!(c.style.font_size, size, "the text keeps its size");
     let a = s.doc.get(arrow).unwrap();
-    assert_eq!(a.shape, Shape::Arrow { from: Pt::new(100.0, 20.0), to: Pt::new(150.0, 60.0), heads: screengrabcraft_model::ArrowHeads::Both });
+    assert_eq!(
+        a.shape,
+        Shape::Arrow {
+            from: Pt::new(100.0, 20.0),
+            to: Pt::new(150.0, 60.0),
+            heads: screengrabcraft_model::ArrowHeads::Both,
+            bend: 0.0,
+            head: Default::default()
+        }
+    );
     assert_eq!(s.undo_label(), Some("Apply Quick Style"));
     assert!(s.undo());
     assert!(matches!(s.doc.get(callout).unwrap().shape, Shape::Callout { form: screengrabcraft_model::CalloutForm::Rounded, .. }));
@@ -598,4 +607,47 @@ fn cut_out_takes_a_strip_out_and_moves_the_annotations_with_the_picture() {
     assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": "zigzag"})).is_err());
     assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": 3})).is_err());
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
+}
+
+/// Polygons and stars come in from scripts and are kept in range; an arrow bends and stays bent
+/// through a flip the other way round.
+#[test]
+fn polygons_stars_and_curved_arrows() {
+    let mut s = session();
+    let p = add(&mut s, json!({"type": "polygon", "rect": {"x": 10, "y": 10, "w": 60, "h": 50}, "sides": 5, "star": true}));
+    let tri = add(&mut s, json!({"type": "polygon", "rect": {"x": 80, "y": 10, "w": 60, "h": 50}}));
+    let big = add(&mut s, json!({"type": "polygon", "rect": {"x": 80, "y": 10, "w": 60, "h": 50}, "sides": 1000}));
+    let shape = |s: &Session, id| s.doc.get(id).unwrap().shape.clone();
+    assert!(matches!(shape(&s, p), Shape::Polygon { sides: 5, star: true, .. }));
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 3, star: false, .. }), "a triangle unless it says");
+    assert!(matches!(shape(&s, big), Shape::Polygon { sides: 12, .. }), "at most twelve");
+    // A look turns a triangle into a hexagon, or into an ellipse and back.
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"sides": 6}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 6, .. }));
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"round": true}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Ellipse { .. }));
+    s.execute("object.look", &json!({"ids": [tri.0], "options": {"sides": 4}})).unwrap();
+    assert!(matches!(shape(&s, tri), Shape::Polygon { sides: 4, .. }));
+    // A curved arrow, bent by a look, straightened, and a bend out of range kept in it.
+    let a = add(&mut s, json!({"type": "arrow", "from": {"x": 10, "y": 80}, "to": {"x": 110, "y": 80}, "bend": 0.3}));
+    let bend = |s: &Session, id| match s.doc.get(id).unwrap().shape {
+        Shape::Arrow { bend, .. } => bend,
+        _ => f32::NAN,
+    };
+    assert_eq!(bend(&s, a), 0.3);
+    s.execute("object.look", &json!({"ids": [a.0], "options": {"bend": 0, "head": "dot"}})).unwrap();
+    assert_eq!(bend(&s, a), 0.0);
+    assert!(matches!(shape(&s, a), Shape::Arrow { head: screengrabcraft_model::HeadShape::Dot, .. }));
+    let wild = add(&mut s, json!({"type": "arrow", "from": {"x": 10, "y": 80}, "to": {"x": 110, "y": 80}, "bend": 1e9}));
+    assert_eq!(bend(&s, wild), screengrabcraft_model::object::MAX_BEND);
+    // A flip mirrors the bend, so the arrow bows the way it did on the picture.
+    s.execute("object.look", &json!({"ids": [a.0], "options": {"bend": 0.3}})).unwrap();
+    let before = screengrabcraft_model::object::bend_middle(Pt::new(10.0, 80.0), Pt::new(110.0, 80.0), 0.3);
+    s.execute("image.flip", &json!({"horizontal": true})).unwrap();
+    let Shape::Arrow { from, to, bend, .. } = shape(&s, a) else { panic!("an arrow") };
+    let after = screengrabcraft_model::object::bend_middle(from, to, bend);
+    assert!((after.y - before.y).abs() < 0.01 && (after.x - (200.0 - before.x)).abs() < 0.01, "{before:?} {after:?}");
+    let before = s.doc.clone();
+    assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "rect": {"x": 0, "y": 0, "w": 5, "h": 5}, "sides": "many"}})).is_err());
+    assert_eq!(s.doc, before);
 }

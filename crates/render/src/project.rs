@@ -356,7 +356,11 @@ mod tests {
 
     fn doc() -> Document {
         let mut d = Document::new(Raster::filled(30, 20, Color::WHITE).unwrap());
-        d.add(Shape::Arrow { from: Pt::new(1.0, 1.0), to: Pt::new(20.0, 10.0), heads: Default::default() }, Kind::Arrow.default_style()).unwrap();
+        d.add(
+            Shape::Arrow { from: Pt::new(1.0, 1.0), to: Pt::new(20.0, 10.0), heads: Default::default(), bend: 0.0, head: Default::default() },
+            Kind::Arrow.default_style(),
+        )
+        .unwrap();
         let key = d.add_image(Raster::filled(3, 3, Color::RED).unwrap()).unwrap();
         d.add(Shape::Image { rect: Rect::new(5.0, 5.0, 3.0, 3.0), image: key }, Kind::Image.default_style()).unwrap();
         d.add(Shape::Text { rect: Rect::new(0.0, 0.0, 20.0, 10.0), text: "hi ✓".into() }, Kind::Text.default_style()).unwrap();
@@ -478,7 +482,13 @@ mod tests {
         for i in 0..n {
             undo.push(Step { label: format!("Draw {i}"), doc: d.clone() });
             d.add(
-                Shape::Arrow { from: Pt::new(1.0, 1.0), to: Pt::new(10.0 + i as f32, 10.0), heads: Default::default() },
+                Shape::Arrow {
+                    from: Pt::new(1.0, 1.0),
+                    to: Pt::new(10.0 + i as f32, 10.0),
+                    heads: Default::default(),
+                    bend: 0.0,
+                    head: Default::default(),
+                },
                 Kind::Arrow.default_style(),
             )
             .unwrap();

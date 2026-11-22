@@ -571,3 +571,66 @@ fn nothing_selected_the_panel_says_how_things_are_moved() {
     }
     shot(&mut h, "move-tips");
 }
+
+/// The Shape tool's picker draws triangles and stars; the Shape button keeps drawing them; an
+/// arrow is bent by the handle in its middle, and its picker makes the next one curved.
+#[test]
+fn shapes_draw_triangles_and_stars_and_arrows_bend() {
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Rect));
+    click(&mut h, "Shape options");
+    click(&mut h, "Triangle");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Polygon));
+    let (a, b) = (at(&h, 30.0, 30.0), at(&h, 130.0, 120.0));
+    drag(&mut h, a, b);
+    let last = |h: &Harness<'_, Editor>| h.state().session.doc.objects.last().map(|o| o.shape.clone());
+    assert!(matches!(last(&h), Some(Shape::Polygon { sides: 3, star: false, .. })), "{:?}", last(&h));
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "Star");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let (a, b) = (at(&h, 150.0, 30.0), at(&h, 250.0, 120.0));
+    drag(&mut h, a, b);
+    assert!(matches!(last(&h), Some(Shape::Polygon { sides: 5, star: true, .. })), "{:?}", last(&h));
+    // Six points for the next one, from the picker.
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "6");
+    shot(&mut h, "shape-picker-polygons");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!((h.state().tool_options(Kind::Polygon).sides, h.state().tool_options(Kind::Polygon).star), (Some(6), Some(true)));
+    // Another tool and back: the Shape button still draws stars.
+    click(&mut h, "Arrow (A)");
+    click(&mut h, "Shape (R, O)");
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Polygon));
+    // An arrow, bent by its middle handle: one undo step.
+    click(&mut h, "Arrow (A)");
+    let (a, b) = (at(&h, 40.0, 220.0), at(&h, 240.0, 220.0));
+    drag(&mut h, a, b);
+    let (m, up) = (at(&h, 140.0, 220.0), at(&h, 140.0, 170.0));
+    drag(&mut h, m, up);
+    let Some(Shape::Arrow { bend, .. }) = last(&h) else { panic!("an arrow") };
+    assert!((bend - 0.25).abs() < 0.03, "bowed up a quarter of its length: {bend}");
+    assert_eq!(h.state().session.undo_label(), Some("Resize"));
+    // An open head, from the picker: on the arrow, and on the next ones.
+    click(&mut h, "Shape options");
+    click(&mut h, "Open V");
+    shot(&mut h, "arrow-shape-options");
+    assert!(matches!(last(&h), Some(Shape::Arrow { head: screengrabcraft_model::HeadShape::Open, .. })), "{:?}", last(&h));
+    assert_eq!(h.state().tool_options(Kind::Arrow).head, Some(screengrabcraft_model::HeadShape::Open));
+    // The picker straightens it.
+    click(&mut h, "Straight");
+    let Some(Shape::Arrow { bend, .. }) = last(&h) else { panic!("an arrow") };
+    assert_eq!(bend, 0.0);
+    // Undone, it is bent again, for the picture of it.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state_mut().session.undo());
+    h.run_steps(2);
+    shot(&mut h, "polygons-and-curved-arrow");
+}

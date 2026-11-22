@@ -2,8 +2,8 @@
 //! pixels under them (blur, pixelate, spotlight, magnify) work on what has been drawn so far, so
 //! a blur hides an arrow drawn before it and not one drawn after.
 
-use screengrabcraft_model::object::{PIN_POINT, arrow_head, step_radius};
-use screengrabcraft_model::{ArrowHeads, BadgeShape, CalloutForm, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::object::{PIN_POINT, arrow_head, bent_points, polygon_points, step_radius};
+use screengrabcraft_model::{ArrowHeads, BadgeShape, CalloutForm, Color, Document, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
     Transform,
@@ -198,9 +198,9 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
     let style = o.style.clamped();
     let bounds = o.shape.bounds(&style);
     match &o.shape {
-        Shape::Arrow { from, to, heads } => {
-            let (from, to, heads) = (*from, *to, *heads);
-            with_style(canvas, bounds, &style, &|c, t| draw_arrow(c, t, from, to, heads, &style));
+        Shape::Arrow { from, to, heads, bend, head } => {
+            let (from, to, heads, bend, head) = (*from, *to, *heads, *bend, *head);
+            with_style(canvas, bounds, &style, &|c, t| draw_arrow(c, t, (from, to, bend), heads, head, &style));
         }
         Shape::Line { from, to } => {
             let (from, to) = (*from, *to);
@@ -225,6 +225,14 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let rect = *rect;
             with_style(canvas, bounds, &style, &|c, t| {
                 if let Some(path) = oval(rect) {
+                    fill_and_stroke(c, &path, &style, t);
+                }
+            });
+        }
+        Shape::Polygon { rect, sides, star } => {
+            let corners = polygon_points(*rect, *sides, *star);
+            with_style(canvas, bounds, &style, &|c, t| {
+                if let Some(path) = polygon(&corners) {
                     fill_and_stroke(c, &path, &style, t);
                 }
             });
@@ -311,9 +319,46 @@ fn fill_and_stroke(c: &mut Pixmap, path: &Path, style: &Style, t: Transform) {
     }
 }
 
-fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads, style: &Style) {
-    let d = to.sub(from);
-    let len = d.length();
+/// The point `dist` along a line through `points` from its start, and the index of the piece
+/// it's on; the end when the line is shorter.
+fn along(points: &[Pt], dist: f32) -> (Pt, usize) {
+    let mut left = dist.max(0.0);
+    for (i, w) in points.windows(2).enumerate() {
+        if let [a, b] = w {
+            let l = a.distance(*b);
+            if l >= left && l > 0.0 {
+                return (a.lerp(*b, left / l), i);
+            }
+            left -= l;
+        }
+    }
+    (points.last().copied().unwrap_or(Pt::ZERO), points.len().saturating_sub(2))
+}
+
+/// The line through `points` with `start` taken off its start and `end` off its end.
+fn trimmed(points: &[Pt], start: f32, end: f32) -> Vec<Pt> {
+    let total: f32 = points.windows(2).map(|w| if let [a, b] = w { a.distance(*b) } else { 0.0 }).sum();
+    if total <= start + end {
+        let (p, _) = along(points, total / 2.0);
+        return vec![p, p];
+    }
+    let (a, ia) = along(points, start);
+    let (b, ib) = along(points, total - end);
+    let mut out = vec![a];
+    out.extend(points.iter().skip(ia + 1).take(ib.saturating_sub(ia)));
+    out.push(b);
+    out
+}
+
+fn line_length(points: &[Pt]) -> f32 {
+    points.windows(2).map(|w| if let [a, b] = w { a.distance(*b) } else { 0.0 }).sum()
+}
+
+/// An arrow along `line` (from, to, bend), with `heads` shaped `shape`.
+fn draw_arrow(c: &mut Pixmap, t: Transform, line: (Pt, Pt, f32), heads: ArrowHeads, shape: HeadShape, style: &Style) {
+    let (from, to, bend) = line;
+    let points = bent_points(from, to, bend, 64);
+    let len = line_length(&points);
     let ink = paint(style.stroke);
     if len < 0.5 {
         if let Some(dot) = circle(from, style.width / 2.0) {
@@ -321,8 +366,6 @@ fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads,
         }
         return;
     }
-    let dir = d.scale(1.0 / len);
-    let normal = Pt::new(-dir.y, dir.x);
     let (mut head_len, mut head_half) = arrow_head(style.width);
     let n_heads = match heads {
         ArrowHeads::None => 0.0,
@@ -337,39 +380,75 @@ fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads,
     }
     let start_head = matches!(heads, ArrowHeads::Start | ArrowHeads::Both);
     let end_head = matches!(heads, ArrowHeads::End | ArrowHeads::Both);
-    let a = if start_head { from.add(dir.scale(head_len * 0.7)) } else { from };
-    let b = if end_head { to.sub(dir.scale(head_len * 0.7)) } else { to };
-    let mut pb = PathBuilder::new();
-    pb.move_to(a.x, a.y);
-    pb.line_to(b.x, b.y);
-    if let Some(shaft) = pb.finish() {
-        c.stroke_path(
-            &shaft,
-            &ink,
-            &stroke_of(style.width, style.dashed, if heads == ArrowHeads::None { LineCap::Round } else { LineCap::Butt }),
-            t,
-            None,
-        );
-    }
-    let head = |tip: Pt, dir: Pt| -> Option<Path> {
-        let base = tip.sub(dir.scale(head_len));
-        let notch = tip.sub(dir.scale(head_len * 0.78));
-        let left = base.add(normal.scale(head_half));
-        let right = base.sub(normal.scale(head_half));
-        let mut pb = PathBuilder::new();
-        pb.move_to(tip.x, tip.y);
-        pb.line_to(left.x, left.y);
-        pb.line_to(notch.x, notch.y);
-        pb.line_to(right.x, right.y);
-        pb.close();
-        pb.finish()
+    // How much of the line a head covers: the shaft stops under it.
+    let under = match shape {
+        HeadShape::Notched | HeadShape::Triangle => head_len * 0.7,
+        HeadShape::Open => style.width * 0.5,
+        HeadShape::Dot => head_half * 0.5,
+        HeadShape::Bar => 0.0,
     };
-    if end_head && let Some(p) = head(to, dir) {
-        c.fill_path(&p, &ink, FillRule::Winding, t, None);
+    let shaft = trimmed(&points, if start_head { under } else { 0.0 }, if end_head { under } else { 0.0 });
+    if let Some(path) = open_line(&shaft) {
+        let cap = if heads == ArrowHeads::None || shape == HeadShape::Open { LineCap::Round } else { LineCap::Butt };
+        c.stroke_path(&path, &ink, &stroke_of(style.width, style.dashed, cap), t, None);
     }
-    if start_head && let Some(p) = head(from, dir.scale(-1.0)) {
-        c.fill_path(&p, &ink, FillRule::Winding, t, None);
+    // Each head points the way the line runs over its own length.
+    let head = |c: &mut Pixmap, tip: Pt, back: Pt| {
+        let d = tip.sub(back);
+        let l = d.length();
+        if l <= 0.0 {
+            return;
+        }
+        let dir = d.scale(1.0 / l);
+        let normal = Pt::new(-dir.y, dir.x);
+        let base = tip.sub(dir.scale(head_len));
+        let (left, right) = (base.add(normal.scale(head_half)), base.sub(normal.scale(head_half)));
+        let fill = |c: &mut Pixmap, path: Option<Path>| {
+            if let Some(p) = path {
+                c.fill_path(&p, &ink, FillRule::Winding, t, None);
+            }
+        };
+        let line = |c: &mut Pixmap, pts: &[Pt]| {
+            if let Some(p) = open_line(pts) {
+                let s = Stroke { width: style.width.max(1.0), line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+                c.stroke_path(&p, &ink, &s, t, None);
+            }
+        };
+        match shape {
+            HeadShape::Notched => fill(c, polygon(&[tip, left, tip.sub(dir.scale(head_len * 0.78)), right])),
+            HeadShape::Triangle => fill(c, polygon(&[tip, left, right])),
+            // The lines' round ends reach past their points: the point is drawn that much back.
+            HeadShape::Open => {
+                let w = style.width.max(1.0) * 0.5;
+                let back = dir.scale(w);
+                line(c, &[left.sub(back), tip.sub(back), right.sub(back)]);
+            }
+            HeadShape::Dot => fill(c, circle(tip.sub(dir.scale(head_half * 0.6)), head_half * 0.6)),
+            HeadShape::Bar => line(c, &[tip.add(normal.scale(head_half)), tip.sub(normal.scale(head_half))]),
+        }
+    };
+    if end_head {
+        let (back, _) = along(&points, len - head_len);
+        head(c, to, back);
     }
+    if start_head {
+        let (back, _) = along(&points, head_len);
+        head(c, from, back);
+    }
+}
+
+/// An open line through `points`.
+fn open_line(points: &[Pt]) -> Option<Path> {
+    let (first, rest) = points.split_first()?;
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.x, first.y);
+    if rest.is_empty() {
+        pb.line_to(first.x + 0.01, first.y);
+    }
+    for p in rest {
+        pb.line_to(p.x, p.y);
+    }
+    pb.finish()
 }
 
 fn draw_text_box(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, style: &Style) {
@@ -748,8 +827,8 @@ mod tests {
         let key = d.add_image(Raster::filled(10, 10, Color::BLACK).unwrap()).unwrap();
         let r = Rect::new(20.0, 20.0, 80.0, 50.0);
         let shapes = vec![
-            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(150.0, 100.0), heads: ArrowHeads::Both },
-            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(5.2, 5.0), heads: ArrowHeads::End },
+            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(150.0, 100.0), heads: ArrowHeads::Both, bend: 0.0, head: Default::default() },
+            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(5.2, 5.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
             Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(199.0, 119.0) },
             Shape::Rect { rect: r, radius: 12.0 },
             Shape::Ellipse { rect: r },
@@ -786,6 +865,75 @@ mod tests {
         }
         let out = render(&d).unwrap();
         assert_eq!((out.width(), out.height()), (200, 120));
+    }
+
+    /// A filled triangle and star colour their inside and leave their box's corners alone; a
+    /// curved arrow is drawn along its bow, with its heads at its ends, and every polygon and
+    /// bend draws.
+    #[test]
+    fn polygons_fill_their_outline_and_arrows_bow() {
+        let style = Style { fill: Color::BLACK, stroke: Color::BLACK, width: 2.0, shadow: false, ..Style::default() };
+        let mut d = doc();
+        d.add(Shape::Polygon { rect: Rect::new(10.0, 10.0, 80.0, 70.0), sides: 3, star: false }, style).unwrap();
+        d.add(Shape::Polygon { rect: Rect::new(110.0, 10.0, 80.0, 80.0), sides: 5, star: true }, style).unwrap();
+        let out = render(&d).unwrap();
+        assert_eq!(px(&out, 50, 60), Color::BLACK, "inside the triangle");
+        assert_eq!(px(&out, 14, 14), Color::WHITE, "a corner of its box");
+        assert_eq!(px(&out, 150, 52), Color::BLACK, "the star's middle");
+        assert_eq!(px(&out, 114, 86), Color::WHITE, "between its points");
+        let mut d = doc();
+        let ink = Style { stroke: Color::BLACK, width: 4.0, shadow: false, ..Style::default() };
+        d.add(
+            Shape::Arrow { from: Pt::new(20.0, 100.0), to: Pt::new(180.0, 100.0), heads: ArrowHeads::Both, bend: 0.3, head: Default::default() },
+            ink,
+        )
+        .unwrap();
+        let out = render(&d).unwrap();
+        let top = screengrabcraft_model::object::bend_middle(Pt::new(20.0, 100.0), Pt::new(180.0, 100.0), 0.3);
+        assert_eq!(px(&out, top.x as u32, top.y as u32), Color::BLACK, "along the bow at {top:?}");
+        assert_eq!(px(&out, 100, 98), Color::WHITE, "not where a straight one would be");
+        for (x, y) in [(21, 99), (179, 99)] {
+            assert!(px(&out, x, y).r < 160, "a head at each end, at {x},{y}");
+        }
+        // Every head shape is drawn at the tip; an open head leaves the inside of its V empty,
+        // a filled one doesn't.
+        for shape in HeadShape::ALL {
+            let mut d = doc();
+            d.add(Shape::Arrow { from: Pt::new(20.0, 60.0), to: Pt::new(180.0, 60.0), heads: ArrowHeads::End, bend: 0.0, head: shape }, ink).unwrap();
+            let out = render(&d).unwrap();
+            let (hl, hh) = arrow_head(4.0);
+            let near_tip = (0..6).any(|dx| px(&out, 179 - dx, 60).r < 100);
+            assert!(near_tip, "{shape:?}: drawn at its tip");
+            // Inside the head, between its edge and the shaft (behind the notch, for the notched one).
+            let notched = px(&out, (180.0 - hl * 0.85) as u32, (60.0 - hh * 0.55) as u32);
+            let inside = px(&out, (180.0 - hl * 0.9) as u32, (60.0 - hh * 0.38) as u32);
+            match shape {
+                HeadShape::Notched => assert!(notched.r < 128, "{shape:?} is filled there: {notched:?}"),
+                HeadShape::Triangle => assert!(inside.r < 128, "{shape:?} is filled there: {inside:?}"),
+                HeadShape::Open => assert!(inside.r > 128, "{shape:?} is open there: {inside:?}"),
+                _ => {}
+            }
+        }
+        let mut d = doc();
+        for sides in 0..14 {
+            for star in [false, true] {
+                d.add(
+                    Shape::Polygon { rect: Rect::new(f32::from(sides as u8) * 12.0, 5.0, 10.0 + f32::from(sides as u8), 30.0), sides, star },
+                    style,
+                )
+                .unwrap();
+            }
+        }
+        for bend in [-2.0, -0.5, 0.0, 0.01, 1.5, f32::NAN] {
+            d.add(Shape::Arrow { from: Pt::new(10.0, 60.0), to: Pt::new(11.0, 61.0), heads: ArrowHeads::Both, bend, head: Default::default() }, ink)
+                .unwrap();
+            d.add(
+                Shape::Arrow { from: Pt::new(10.0, 60.0), to: Pt::new(190.0, 110.0), heads: ArrowHeads::Start, bend, head: Default::default() },
+                ink,
+            )
+            .unwrap();
+        }
+        assert!(render(&d).is_some());
     }
 
     /// Each badge is drawn in its own outline, its label inside it: a diamond leaves the corners
