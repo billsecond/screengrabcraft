@@ -41,6 +41,9 @@ pub struct VideoSession {
     /// How loud a track plays (dB), as the host measures it from the recording (the engine reads
     /// no sound itself): for evening levels out.
     measure: Option<Measure>,
+    /// What one part of the edits plays on its own, as the host hears it from the recording and the
+    /// media (the engine reads no sound itself): for lining sounds up.
+    listen: Option<Listen>,
     /// The recording's clicks (its own time, shares of the screen): what zooms follow.
     clicks: Vec<screengrabcraft_media::zoom::ClickAt>,
     /// How wide the video is for its height (its screen's, else its camera's; 16:9 without).
@@ -49,6 +52,10 @@ pub struct VideoSession {
 
 /// Measures how loud track `n` of these edits plays (dB of the full scale), before its volume.
 pub type Measure = Box<dyn Fn(&Timeline, usize) -> Option<f32> + Send + Sync>;
+
+/// What a part of these edits plays on its own: `count` mono samples at
+/// [`screengrabcraft_media::align::RATE`] from timeline time `from` (µs).
+pub type Listen = Box<dyn Fn(&Timeline, screengrabcraft_media::align::Part, u64, usize) -> Vec<f32> + Send + Sync>;
 
 fn edit_err(e: EditError) -> EngineError {
     match e {
@@ -111,6 +118,7 @@ impl VideoSession {
             revision: 0,
             heard,
             measure: None,
+            listen: None,
             clicks,
             aspect,
         }
@@ -126,6 +134,12 @@ impl VideoSession {
     /// evened out.
     pub fn set_measure(&mut self, m: Measure) {
         self.measure = Some(m);
+    }
+
+    /// How the host listens to a part of the edits (see [`Listen`]): without it, sounds can't be
+    /// lined up.
+    pub fn set_listen(&mut self, l: Listen) {
+        self.listen = Some(l);
     }
 
     /// Whether the recording kept any clicks (for zooms that follow them).
@@ -1067,6 +1081,101 @@ fn mono(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// A clip and the next one, going on from where it stops, made one again.
+fn join(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.join(unlocked(s, p)?, index(p, "clip")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// Every piece of a track (or of every unlocked track) going on from the one before joined to it.
+fn join_all(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
+    let n = s.timeline.join_all(track).map_err(edit_err)?;
+    if n == 0 {
+        return Err(EngineError::Params("there are no pieces going on from each other to join".to_string()));
+    }
+    Ok(json!({"joined": n}))
+}
+
+/// A part of the edits named in params: `{"track": n}` (with `"clip": n`, that clip), or
+/// `{"layer": id, "item": id}`. With where it is on the timeline (all of a track's clips).
+fn sound_part(s: &VideoSession, p: &Value) -> Result<(screengrabcraft_media::align::Part, Option<usize>, u64, u64)> {
+    use screengrabcraft_media::align::Part;
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => {
+            let i = index(p, "track")?;
+            let t = s.timeline.track(i).map_err(edit_err)?;
+            if t.kind.is_video() {
+                return Err(EngineError::Params("only a sound track is lined up by its sound".to_string()));
+            }
+            match p.get("clip") {
+                Some(_) => {
+                    let k = index(p, "clip")?;
+                    let c = t.clips.get(k).ok_or_else(|| edit_err(EditError::NoClip(i, k)))?;
+                    Ok((Part::Track(i), Some(k), c.at, c.end()))
+                }
+                None => Ok((Part::Track(i), None, t.clips.first().map_or(0, |c| c.at), t.clips.last().map_or(0, |c| c.end()))),
+            }
+        }
+        (None, Some(_)) => {
+            let (layer, item) = (id(p, "layer")?, id(p, "item")?);
+            let it = s.timeline.item(layer, item).ok_or_else(|| EngineError::Params("there's no such item".to_string()))?;
+            if !it.plays_sound(&s.timeline.media) {
+                return Err(EngineError::Params("that item has no sound to line up".to_string()));
+            }
+            Ok((Part::Item { layer, item }, None, it.at, it.end()))
+        }
+        _ => Err(EngineError::Params("say a `track` (and `clip`) or a `layer` and `item`".to_string())),
+    }
+}
+
+/// A clip (or an item) moved so its sound is in step with another's: the same voice recorded
+/// twice lined up by ear.
+fn line_up(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::align::{self, Part};
+    let listen = s.listen.as_ref().ok_or_else(|| EngineError::Failed("sound can't be listened to here".to_string()))?;
+    let within = if p.get("within").is_some() { int(p, "within")?.clamp(100_000, align::MOST_WITHIN) } else { 5_000_000 };
+    let (moving, clip, at, end) = sound_part(s, p)?;
+    if let Part::Track(_) = moving
+        && clip.is_none()
+    {
+        return Err(EngineError::Params("say which `clip` of the track moves".to_string()));
+    }
+    let with = p
+        .get("with")
+        .ok_or_else(|| EngineError::Params(r#"say what to line it up `with`: {"track": n} or {"layer": id, "item": id}"#.to_string()))?;
+    let (fixed, _, _, _) = sound_part(s, with)?;
+    if fixed == moving {
+        return Err(EngineError::Params("a sound is lined up with another, not with itself".to_string()));
+    }
+    let len = end.saturating_sub(at).min(align::MOST_LISTENED);
+    let heard = listen(&s.timeline, moving, at, align::to_samples(len) as usize);
+    let from = at.saturating_sub(within);
+    let lead = align::to_samples(at - from) as i64;
+    let other = listen(&s.timeline, fixed, from, align::to_samples((at - from).saturating_add(len).saturating_add(within)) as usize);
+    let (shift, sure) = align::offset(&other, &heard, lead, align::to_samples(within) as i64)
+        .ok_or_else(|| EngineError::Params("there's too little heard in one of them to line them up".to_string()))?;
+    if sure < align::SURE {
+        return Err(EngineError::Params("they don't sound alike enough to line up".to_string()));
+    }
+    let to = u64::try_from((i64::try_from(at).unwrap_or(i64::MAX) + align::to_us(shift)).max(0)).unwrap_or(0);
+    let now = match (moving, clip) {
+        (Part::Track(i), Some(k)) => {
+            if s.timeline.tracks.get(i).is_some_and(|t| t.locked) {
+                return Err(EngineError::Params("that track is locked: unlock it first".to_string()));
+            }
+            s.timeline.move_clips(i, k, to, false).map_err(edit_err)?;
+            s.timeline.tracks.get(i).and_then(|t| t.clips.get(k)).map_or(at, |c| c.at)
+        }
+        (Part::Item { layer, item }, _) => {
+            s.timeline.move_item(layer, item, Some(layer), to).map_err(edit_err)?;
+            s.timeline.item(layer, item).map_or(at, |i| i.at)
+        }
+        _ => at,
+    };
+    Ok(json!({"moved": i128::from(now) - i128::from(at), "sure": sure}))
+}
+
 /// A video item's sound put apart from its picture, on a sound layer.
 fn separate_sound(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let (layer, item) = s.timeline.separate_sound(id(p, "layer")?, id(p, "item")?).map_err(edit_err)?;
@@ -1401,6 +1510,24 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: solo,
     },
     VideoCommand {
+        id: "video.join",
+        label: "Join Clips",
+        params: r#"{"track": n, "clip": n}: the clip and the next one made one again, when the next goes on from where it stops (touching, from the same recording, as fast, the same way, with the same look)"#,
+        run: join,
+    },
+    VideoCommand {
+        id: "video.joinAll",
+        label: "Join the Pieces",
+        params: r#"{"track"?: n}: every clip of the track (or of every unlocked track) going on from the one before it joined to it: the pieces of splits made one again. Says how many joins"#,
+        run: join_all,
+    },
+    VideoCommand {
+        id: "video.lineUp",
+        label: "Line Up by Sound",
+        params: r#"{"track": n, "clip": n} or {"layer": id, "item": id}, "with": {"track": n} or {"layer": id, "item": id}, "within"?: µs (5 s; 0.1 to 30 s): the clip (with the clips grouped with it) or the item moved so its sound is in step with the other's: the two waves compared at every shift within reach (the same voice recorded twice). Says how far it moved (µs) and how alike they sound (0 to 1)"#,
+        run: line_up,
+    },
+    VideoCommand {
         id: "video.mono",
         label: "Mix to Mono",
         params: r#"{"track": n, "mono": bool} or {"layer": id, "mono": bool}: a sound track's (or a sound layer's) two sides mixed into one, heard the same from both speakers"#,
@@ -1719,6 +1846,80 @@ mod tests {
             json!({"track": 1, "layer": sl, "mono": true}),
         ] {
             assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pieces_are_joined_and_a_sound_is_lined_up_by_ear() {
+        use screengrabcraft_media::align::{Part, RATE};
+        let mut s = session();
+        s.execute("video.split", &json!({"at": 1_000_000})).unwrap();
+        s.execute("video.split", &json!({"at": 3_000_000})).unwrap();
+        s.execute("video.join", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!(s.undo_label(), Some("Join Clips"));
+        assert_eq!(s.timeline.tracks[0].clips.len(), 2);
+        assert_eq!(s.execute("video.joinAll", &json!({})).unwrap()["joined"], 3);
+        assert!(s.timeline.tracks.iter().all(|t| t.clips.len() == 1));
+        assert!(s.execute("video.joinAll", &json!({})).is_err(), "nothing left to join");
+        assert!(s.execute("video.join", &json!({"track": 0, "clip": 0})).is_err());
+        // A voice, made up: bursts of tones at uneven times (20 s at the listening rate).
+        let mut seed = 7u32;
+        let mut next = move || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let mut voice = vec![0.0f32; 20 * RATE as usize];
+        let mut at = 0usize;
+        while at < voice.len() {
+            let (len, hz) = (600 + (next() * 2_400.0) as usize, 150.0 + next() * 300.0);
+            for k in 0..len {
+                if let Some(v) = voice.get_mut(at + k) {
+                    *v = (std::f32::consts::TAU * hz * k as f32 / RATE as f32).sin() * 0.5;
+                }
+            }
+            at += len + 300 + (next() * 3_000.0) as usize;
+        }
+        let voice = std::sync::Arc::new(voice);
+        // No ears: refused.
+        let song = s.execute("video.addMedia", &json!({"kind": "sound", "name": "Desk.wav", "path": "C:/Desk.wav", "duration": 10_000_000})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": song["id"], "at": 0})).unwrap();
+        let what = json!({"layer": placed["layer"], "item": placed["item"], "with": {"track": 1}});
+        assert!(s.execute("video.lineUp", &what).is_err());
+        // The microphone heard the voice as it happened; the other recorder started 2 s late, so
+        // its sound placed at 0 is 2 s ahead of the microphone's: it moves 2 s later.
+        let v = voice.clone();
+        s.set_listen(Box::new(move |tl, part, from, n| {
+            (0..n)
+                .map(|k| {
+                    let t = from + k as u64 * 1_000_000 / RATE;
+                    let src = match part {
+                        Part::Track(1) => Some(t),
+                        Part::Item { layer, item } => {
+                            tl.item(layer, item).filter(|i| i.at <= t && t < i.end()).map(|i| t - i.at + i.from + 2_000_000)
+                        }
+                        _ => None,
+                    };
+                    src.and_then(|u| v.get((u * RATE / 1_000_000) as usize)).copied().unwrap_or(0.0)
+                })
+                .collect()
+        }));
+        let moved = s.execute("video.lineUp", &what).unwrap();
+        assert_eq!(s.undo_label(), Some("Line Up by Sound"));
+        assert!((moved["moved"].as_i64().unwrap() - 2_000_000).abs() <= 125, "{moved}");
+        assert!(moved["sure"].as_f64().unwrap() > 0.8);
+        let (l, i) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        assert!(s.timeline.item(l, i).unwrap().at.abs_diff(2_000_000) <= 125);
+        // Asked again, it stays.
+        assert!(s.execute("video.lineUp", &what).unwrap()["moved"].as_i64().unwrap().abs() <= 125);
+        for bad in [
+            json!({"layer": l, "item": i}),
+            json!({"layer": l, "item": i, "with": {"layer": l, "item": i}}),
+            json!({"track": 1, "with": {"layer": l, "item": i}}),
+            json!({"track": 0, "clip": 0, "with": {"track": 1}}),
+            json!({"layer": l, "item": i, "with": {"track": 1}, "within": "far"}),
+            json!({"layer": l, "item": i, "with": "the microphone"}),
+        ] {
+            assert!(s.execute("video.lineUp", &bad).is_err(), "{bad}");
         }
     }
 

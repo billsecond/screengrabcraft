@@ -1203,6 +1203,73 @@ impl Timeline {
         Ok(made)
     }
 
+    /// Whether clip `clip` of a track and the one after it are one stretch of the recording cut in
+    /// two: they touch, and the second goes on where the first stops (as fast, the same way, with
+    /// the same look; or two holds of one picture).
+    pub fn joinable(&self, track: usize, clip: usize) -> bool {
+        let Some(clips) = self.tracks.get(track).map(|t| &t.clips) else { return false };
+        let (Some(a), Some(b)) = (clips.get(clip), clips.get(clip + 1)) else { return false };
+        if b.at != a.end() || a.hold != b.hold || a.look != b.look {
+            return false;
+        }
+        if a.hold {
+            return a.from == b.from && a.len.saturating_add(b.len) <= MAX_HOLD_US;
+        }
+        // (A clip played faster may be a microsecond out, from rounding.)
+        let near = |x: u64, y: u64| x.abs_diff(y) <= 2;
+        a.speed == b.speed
+            && a.reverse == b.reverse
+            && if a.reverse { near(b.from.saturating_add(b.source_len()), a.from) } else { near(a.from.saturating_add(a.source_len()), b.from) }
+    }
+
+    /// Clip `clip` of a track and the one after it made one clip again (see [`Timeline::joinable`]):
+    /// the first's start, fade in, transition, colour and group, the second's fade out.
+    pub fn join(&mut self, track: usize, clip: usize) -> Result<(), EditError> {
+        self.track(track)?.clips.get(clip).ok_or(EditError::NoClip(track, clip))?;
+        if !self.joinable(track, clip) {
+            return Err(EditError::Invalid("only a clip and the next, going on from where it stops, are joined".to_string()));
+        }
+        let t = self.track_mut(track)?;
+        let (Some(a), Some(b)) = (t.clips.get(clip).copied(), t.clips.get(clip + 1).copied()) else { return Err(EditError::NoClip(track, clip + 1)) };
+        let joined = Clip {
+            from: if a.reverse && !a.hold { b.from } else { a.from },
+            len: a.len.saturating_add(b.len),
+            fade_out: b.fade_out,
+            group: a.group.or(b.group),
+            ..a
+        };
+        if let Some(slot) = t.clips.get_mut(clip) {
+            *slot = joined;
+        }
+        t.clips.remove(clip + 1);
+        Ok(())
+    }
+
+    /// Every clip of a track (or of every track but the locked ones) that goes on from the one
+    /// before it joined to it: the pieces of splits made one again. How many joins.
+    pub fn join_all(&mut self, track: Option<usize>) -> Result<usize, EditError> {
+        let which: Vec<usize> = match track {
+            Some(i) => {
+                self.track(i)?;
+                vec![i]
+            }
+            None => (0..self.tracks.len()).filter(|i| self.tracks.get(*i).is_some_and(|t| !t.locked)).collect(),
+        };
+        let mut n = 0;
+        for i in which {
+            let mut k = 0;
+            while k + 1 < self.tracks.get(i).map_or(0, |t| t.clips.len()) {
+                if self.joinable(i, k) {
+                    self.join(i, k)?;
+                    n += 1;
+                } else {
+                    k += 1;
+                }
+            }
+        }
+        Ok(n)
+    }
+
     /// Removes one clip, leaving silence (or no picture) where it was.
     pub fn delete_clip(&mut self, track: usize, clip: usize) -> Result<(), EditError> {
         let t = self.track_mut(track)?;
@@ -1938,6 +2005,51 @@ mod tests {
         assert_eq!(t.tracks[1].clips.first().map(|c| c.at), Some(5_000_000));
         assert!(t.lift(5, 5, None).is_err());
         assert!(t.lift(0, 5, Some(9)).is_err());
+    }
+
+    #[test]
+    fn pieces_that_go_on_from_each_other_are_joined_back_into_one() {
+        let mut t = two_tracks();
+        let whole = t.tracks[0].clips.clone();
+        t.split(3_000_000, None).unwrap();
+        t.split(6_000_000, Some(0)).unwrap();
+        assert_eq!(t.tracks[0].clips.len(), 3);
+        assert!(t.joinable(0, 0) && t.joinable(0, 1) && !t.joinable(0, 2) && !t.joinable(7, 0));
+        t.join(0, 0).unwrap();
+        assert_eq!(t.tracks[0].clips[0], Clip::new(0, 0, 6_000_000));
+        // Every track at once: back as recorded.
+        assert_eq!(t.join_all(None).unwrap(), 2);
+        assert_eq!(t.tracks[0].clips, whole);
+        assert_eq!(t.tracks[1].clips, whole);
+        // Pieces with a gap between them, or moved apart, aren't one stretch.
+        t.split(4_000_000, None).unwrap();
+        t.lift(4_000_000, 4_500_000, Some(1)).unwrap();
+        t.move_clip(0, 1, 4_300_000).unwrap();
+        assert!(!t.joinable(1, 0) && t.join(1, 0).is_err() && !t.joinable(0, 0));
+        // Played faster, or backwards: joined as they play, the second's fade out kept.
+        let mut f = two_tracks();
+        f.set_speed(0, 10_000_000, 200, Some(1)).unwrap();
+        f.split(1_234_567, Some(1)).unwrap();
+        f.set_fade(1, 1, None, Some(500_000)).unwrap();
+        f.join(1, 0).unwrap();
+        assert_eq!((f.tracks[1].clips.len(), f.tracks[1].clips[0].source_len(), f.tracks[1].clips[0].fade_out), (1, 10_000_000, 500_000));
+        let mut r = two_tracks();
+        r.set_reverse(0, 0, true).unwrap();
+        r.split(2_500_000, Some(0)).unwrap();
+        assert!(r.joinable(0, 0));
+        r.join(0, 0).unwrap();
+        assert_eq!(r.tracks[0].clips, vec![Clip { reverse: true, ..Clip::new(0, 0, 10_000_000) }]);
+        // A look of its own on one piece keeps them apart; two holds of one picture are one.
+        let mut l = two_tracks();
+        l.split(5_000_000, Some(0)).unwrap();
+        l.set_clip_look(0, 1, |k| k.brightness = 30).unwrap();
+        assert!(!l.joinable(0, 0));
+        let mut h = two_tracks();
+        h.hold_frame(2_000_000, 1_000_000).unwrap();
+        h.split(2_500_000, Some(0)).unwrap();
+        let held = h.tracks[0].clips.iter().position(|c| c.hold).unwrap();
+        h.join(0, held).unwrap();
+        assert_eq!(h.tracks[0].clips[held], Clip::held(2_000_000, 2_000_000, 1_000_000));
     }
 
     #[test]

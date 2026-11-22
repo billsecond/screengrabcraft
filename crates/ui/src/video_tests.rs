@@ -889,6 +889,8 @@ struct MediaHost {
     media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
     /// How fast each sound asked for plays (none is played).
     rates: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+    /// The sound a sound file brings in (stereo, 48 kHz), instead of a tone.
+    sound: std::sync::Arc<std::sync::Mutex<Option<Vec<i16>>>>,
 }
 
 impl crate::services::Services for MediaHost {
@@ -943,6 +945,9 @@ impl crate::services::Services for MediaHost {
         } else if path.ends_with(".sgvideo") {
             // Another recording: the made-up one, its picture and its hum.
             Loaded::recording(screengrabcraft_media::recording::Recording::open(Box::new(recording())).unwrap())
+        } else if let Some(s) = self.sound.lock().unwrap().clone() {
+            let duration = s.len() as u64 / 2 * 1_000_000 / 48_000;
+            Loaded { kind: MediaKind::Sound, duration, width: 0, height: 0, content: Content::Sound(s) }
         } else {
             let tone: Vec<i16> = (0..48_000 * 2)
                 .flat_map(|i| {
@@ -1197,6 +1202,107 @@ fn a_videos_sound_is_separated_tracks_go_mono_and_faster_playback_asks_for_sound
     h.key_press(egui::Key::J);
     h.run_steps(1);
     assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4]);
+}
+
+#[test]
+fn split_pieces_are_joined_back_from_the_right_button() {
+    let mut h = harness();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 2_000_000;
+    }
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    let clips = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.tracks.iter().map(|t| t.clips.len()).collect::<Vec<_>>();
+    assert_eq!(clips(&h), [2, 2, 2]);
+    // The ruler's right button: every track's pieces joined.
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + 60.0, lane.min.y + 8.0));
+    shot(&mut h, "video-join-menu");
+    h.get_by_label("Join the Pieces Back Together").click();
+    h.run_steps(3);
+    assert_eq!(clips(&h), [1, 1, 1]);
+    // Split again; the microphone's first clip joined with the next from its own right button.
+    h.key_press(egui::Key::S);
+    h.run_steps(2);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.selected = Some((1, 0));
+    }
+    h.run_steps(1);
+    right_click(&mut h, egui::pos2(lane.min.x + 40.0, top + 48.0 + 20.0));
+    h.get_by_label("Join with the Next Clip").click();
+    h.run_steps(3);
+    assert_eq!(clips(&h), [2, 1, 2]);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[1].clips[0].len, 4_000_000);
+}
+
+/// A made-up voice at 48 kHz: bursts of tones at uneven times, quiet between.
+fn voice(secs: usize) -> Vec<i16> {
+    let mut seed = 99u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        (seed >> 8) as f32 / (1u32 << 24) as f32
+    };
+    let mut out = vec![0i16; secs * 48_000];
+    let mut at = 0usize;
+    while at < out.len() {
+        let (len, hz) = (4_000 + (next() * 14_000.0) as usize, 150.0 + next() * 300.0);
+        for k in 0..len {
+            if let Some(v) = out.get_mut(at + k) {
+                *v = ((std::f32::consts::TAU * hz * k as f32 / 48_000.0).sin() * 9_000.0) as i16;
+            }
+        }
+        at += len + 2_000 + (next() * 18_000.0) as usize;
+    }
+    out
+}
+
+#[test]
+fn a_sound_brought_in_is_lined_up_with_the_microphone_by_ear() {
+    use crate::services::DialogResult;
+    // A recording whose microphone heard the voice; another recorder that started 1.5 s later.
+    let said = voice(8);
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 160, height: 90, channels: 0 },
+        StreamInfo { id: 2, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    for t in 0..60u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(160, 90, Color::WHITE).unwrap()).unwrap();
+        w.audio(2, t * 4800, &said[t as usize * 4800..(t as usize + 1) * 4800]).unwrap();
+    }
+    let bytes = w.finish(6_000_000).unwrap();
+    let host = MediaHost::default();
+    *host.sound.lock().unwrap() = Some(said[72_000..72_000 + 4 * 48_000].iter().flat_map(|v| [*v / 2, *v / 2]).collect());
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Talk.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Talk.sgvideo".into(), path, bytes });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Recorder/Desk.wav".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Desk.wav").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.expect("the sound chosen");
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at, 0);
+    // Its panel: Line Up by Sound With, the microphone.
+    h.get_by_label("Line Up by Sound With").click();
+    h.run_steps(2);
+    shot(&mut h, "video-line-up-menu");
+    h.get_all_by_label("Microphone").last().unwrap().click();
+    h.run_steps(3);
+    let at = h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().at;
+    assert!(at.abs_diff(1_500_000) <= 250, "moved to where the voice is heard: {at}");
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("1.50 s later")), "{:?}", h.state().toast_text());
+    shot(&mut h, "video-lined-up");
 }
 
 #[test]

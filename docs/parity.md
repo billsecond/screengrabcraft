@@ -186,11 +186,11 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Trim, slide a clip | Has | |
 | Choose a stretch; play it | Has | |
 | **Push later clips along when moving one** | Has | Shift-drag a clip: every later clip of its track (and of its group's tracks) moves with it |
-| Join pieces back together | Part | Revert to Recording brings every track back |
+| **Join pieces back together** | Has | a clip's right button joins it with the next when that goes on from where it stops (split apart, not moved); a track's right button joins all its pieces, the ruler's every track's. Revert to Recording brings every track back whole |
 | **Hold a frame (freeze)** | Has | H, the Edit menu or the ruler's right button: every track waits while the picture is held, the sound silent; its end dragged, or its panel, holds it longer |
 | **Speed up or slow down a stretch** | Has | a quarter as fast to eight times (any speed from a tenth to ten times by command), every track together; voices keep their pitch |
 | **Play a clip backwards** | Has | a clip's right button or its panel (and the clips grouped with it): the picture and the sound turned round; captions and keys pressed aren't shown on it |
-| Line up clips by their sound | Missing | |
+| **Line up clips by their sound** | Has | a sound clip's or a sound item's right button (or the item's panel), Line Up by Sound With: it moves so its sound is in step with the other's, their loudness and then their waves compared at every shift within 5 s, on this computer (the same voice recorded twice) |
 | **Groups of clips** | Has | a clip grouped with the other tracks' clips over the same time (its right button): they move together; Ungroup takes them apart |
 | Markers; chapters | Has | M marks the playhead; the markers are the MP4's chapters (both kinds of MP4) |
 | **Clip colours** | Has | eight, from a clip's right button |
@@ -299,6 +299,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart) (#113).
 24. Sound while playing faster (J and L), at its own pitch; a video's sound apart from its picture;
     tracks and sound layers mixed to mono (#116).
+25. Pieces of a track joined back together; a clip or an item lined up with another by its sound.
 
 **Still to build, in this order**
 
@@ -318,5 +319,5 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 15. Print; batch changes; captures on a timer or at a set time.
-16. The rest: pinning onto surfaces, motion paths, lining up by sound,
-    see-through video, HDR, QR codes, measuring, spell check.
+16. The rest: pinning onto surfaces, motion paths, see-through video, HDR, QR codes, measuring,
+    spell check.

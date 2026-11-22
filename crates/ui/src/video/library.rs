@@ -881,6 +881,10 @@ impl VideoView {
                 self.run(ed, ctx, "video.mono", json!({"layer": layer, "mono": mono}));
             }
         }
+        if item.plays_sound(&media) {
+            ui.add_space(4.0);
+            self.line_up_menu(ed, ui, ctx, json!({"layer": layer, "item": item.id}));
+        }
     }
 
     /// A zoom's settings: how close, where, and how it goes in and out.
