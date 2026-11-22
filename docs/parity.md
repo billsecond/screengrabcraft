@@ -59,7 +59,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Microphone and the computer's sound | Has | the computer's sound on Windows only |
 | Camera in a corner: square, rounded, circle | Has | |
 | Camera full screen, swapped with the screen while recording | Part | with the screen off the camera is the video |
-| Camera border, mirrored camera | Missing | |
+| Camera border, mirrored camera | Has | Mirror and Border (with its colour) under the Recorder's camera picture, shown there as they will be; the video editor's camera panel changes both, and how wide the border is |
 | Camera background blurred or replaced | Missing | |
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
@@ -222,7 +222,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Camera background removed (no green screen) | Missing | |
 | A colour removed (green screen) | Missing | |
 | Colour adjustments and looks | Missing | |
-| Border, shadow, rounded corners on a clip | Part | the camera's shapes |
+| Border, shadow, rounded corners on a clip | Part | the camera's shapes and its border |
 | Device frames, masks, blend modes | Missing | |
 | Spotlight, blur a region | Has | |
 | Motion blur, freeze a region | Missing | |
@@ -286,6 +286,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 11. A multi-page PDF of several captures (#80).
 12. Captures pinned at the front of the Recent strip (#83).
 13. A countdown before a recording; a still from the camera (#84).
+14. A border round the camera, and the camera mirrored.
 
 **Still to build, in this order**
 

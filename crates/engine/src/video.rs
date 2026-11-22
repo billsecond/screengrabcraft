@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use screengrabcraft_media::recording::Recording;
-use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, Timeline};
+use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, MAX_CAMERA_BORDER, Timeline};
+use screengrabcraft_model::Color;
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result};
@@ -249,6 +250,17 @@ fn camera(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if let Some(v) = p.get("size") {
         let size = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`size` must be a number".to_string()))?;
         c.size = (size as f32).clamp(0.1, 0.5);
+    }
+    if let Some(v) = p.get("border") {
+        let border = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`border` must be a number".to_string()))?;
+        c.border = (border as f32).clamp(0.0, MAX_CAMERA_BORDER);
+    }
+    if let Some(v) = p.get("borderColor") {
+        c.border_color = serde_json::from_value::<Color>(v.clone())
+            .map_err(|_| EngineError::Params("`borderColor` is a colour, \"#RRGGBB\" or \"#RRGGBBAA\"".to_string()))?;
+    }
+    if let Some(v) = p.get("mirror") {
+        c.mirror = v.as_bool().ok_or_else(|| EngineError::Params("`mirror` must be true or false".to_string()))?;
     }
     Ok(json!({}))
 }
@@ -503,7 +515,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.camera",
         label: "Camera",
-        params: r#"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5}"#,
+        params: r##"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5, "border"?: 0..0.1 (a share of the picture's shorter side, 0 is none), "borderColor"?: "#RRGGBB", "mirror"?: bool}"##,
         run: camera,
     },
     VideoCommand {
@@ -687,6 +699,26 @@ mod tests {
         assert!(s.timeline.tracks[1].muted);
         s.execute("video.revert", &json!({})).unwrap();
         assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_cameras_border_and_mirror_are_set_and_undone() {
+        let mut s = session();
+        s.execute("video.camera", &json!({"border": 0.04, "borderColor": "#FF8800", "mirror": true})).unwrap();
+        let c = s.timeline.camera;
+        assert_eq!((c.border, c.border_color, c.mirror), (0.04, Color::rgb(0xFF, 0x88, 0), true));
+        assert_eq!(s.undo_label(), Some("Camera"));
+        // Too wide is the widest; a wrong value changes nothing (not even what came with it).
+        s.execute("video.camera", &json!({"border": 5})).unwrap();
+        assert_eq!(s.timeline.camera.border, MAX_CAMERA_BORDER);
+        let before = s.timeline.clone();
+        for junk in [json!({"mirror": "yes"}), json!({"border": "wide"}), json!({"border": null}), json!({"size": 0.3, "borderColor": "orange"})] {
+            assert!(s.execute("video.camera", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera, screengrabcraft_media::timeline::CameraLayout::default());
     }
 
     #[test]

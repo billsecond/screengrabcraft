@@ -103,15 +103,40 @@ pub struct CameraLayout {
     /// in its corner.
     #[serde(default)]
     pub at: Option<[f32; 2]>,
+    /// A line round the camera's picture, inside its shape: its width as a share of the
+    /// picture's shorter side, 0 (none) to [`MAX_CAMERA_BORDER`].
+    #[serde(default)]
+    pub border: f32,
+    /// The border's colour.
+    #[serde(default = "border_color")]
+    pub border_color: screengrabcraft_model::Color,
+    /// The camera's picture flipped left to right, as in a mirror.
+    #[serde(default)]
+    pub mirror: bool,
 }
+
+/// The widest border round the camera, as a share of its picture's shorter side.
+pub const MAX_CAMERA_BORDER: f32 = 0.1;
 
 fn camera_size() -> f32 {
     0.22
 }
 
+fn border_color() -> screengrabcraft_model::Color {
+    screengrabcraft_model::Color::WHITE
+}
+
 impl Default for CameraLayout {
     fn default() -> CameraLayout {
-        CameraLayout { corner: Corner::default(), size: camera_size(), shape: CameraShape::default(), at: None }
+        CameraLayout {
+            corner: Corner::default(),
+            size: camera_size(),
+            shape: CameraShape::default(),
+            at: None,
+            border: 0.0,
+            border_color: border_color(),
+            mirror: false,
+        }
     }
 }
 
@@ -135,7 +160,7 @@ impl Default for CaptionOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     pub tracks: Vec<Track>,
@@ -223,6 +248,7 @@ impl Timeline {
             tracks.push(t);
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
+        self.camera.border = if self.camera.border.is_finite() { self.camera.border.clamp(0.0, MAX_CAMERA_BORDER) } else { 0.0 };
         self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
         let mut checked = Timeline {
             tracks,

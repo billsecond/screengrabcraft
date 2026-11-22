@@ -528,9 +528,20 @@ pub struct VideoOptions {
     pub camera: bool,
     /// The camera by number; `None` is the first one.
     pub camera_index: Option<u32>,
+    /// The camera flipped left to right in the video, as in a mirror (the recording starts with
+    /// it so; the video editor can change it).
+    pub camera_mirror: bool,
+    /// A line round the camera in the video: its width in hundredths of the picture's shorter
+    /// side, 0 (none) to 10.
+    pub camera_border: u8,
+    /// The line's colour.
+    pub camera_border_color: crate::Color,
     /// Video Production: captions of what's said, made on this computer after the recording.
     pub captions: bool,
 }
+
+/// The widest border round the camera, in hundredths of its picture's shorter side.
+pub const CAMERA_BORDER_MAX: u8 = 10;
 
 impl Default for VideoOptions {
     /// A quick video: the screen and what the computer plays.
@@ -542,6 +553,9 @@ impl Default for VideoOptions {
             microphone_name: None,
             camera: false,
             camera_index: None,
+            camera_mirror: false,
+            camera_border: 0,
+            camera_border_color: crate::Color::WHITE,
             captions: true,
         }
     }
@@ -557,6 +571,9 @@ impl VideoOptions {
             microphone_name: None,
             camera: true,
             camera_index: None,
+            camera_mirror: false,
+            camera_border: 0,
+            camera_border_color: crate::Color::WHITE,
             captions: true,
         }
     }
@@ -1622,6 +1639,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            ..VideoOptions::default()
         };
         let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
         assert!(!off.records_anything(&none, true, true));
