@@ -992,6 +992,14 @@ impl Service {
         self.keeping_held = held;
         self.keeping = true;
         let settings = preset.as_ref().map_or_else(|| self.settings.clone(), |p| p.keep_with(&self.settings));
+        // A preset's own folder is remembered, so its captures are in the Recent strip and All
+        // captures even after the preset changes folder.
+        if save
+            && let Some(f) = preset.as_ref().and_then(|p| p.folder.as_deref())
+            && self.settings.note_folder(f)
+        {
+            store::save_settings(&self.settings);
+        }
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         // On Windows the picture goes to the clipboard on the worker, once the editor has it (a
