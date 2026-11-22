@@ -935,6 +935,22 @@ impl Editor {
         }
     }
 
+    /// Open With: the picture as shown, with its annotations, handed to a program the owner chooses
+    /// in the system's own window for choosing one.
+    pub fn open_with(&mut self, ctx: &egui::Context) {
+        if let Err(why) = self.services.can_open_with() {
+            self.error(ctx, why);
+            return;
+        }
+        let Some(picture) = self.flattened() else {
+            self.error(ctx, "The picture could not be drawn to open it elsewhere");
+            return;
+        };
+        if let Err(e) = self.services.open_picture_with(&picture, &self.name) {
+            self.error(ctx, e);
+        }
+    }
+
     pub fn copy_whole(&mut self, ctx: &egui::Context) {
         let Some(pic) = self.flattened() else { return };
         match self.services.copy_image(&pic) {
@@ -1602,6 +1618,16 @@ impl Editor {
                     };
                     if print.clicked() {
                         self.print(&ctx);
+                        ui.close();
+                    }
+                    let can_open = self.services.can_open_with();
+                    let open_with = ui.add_enabled(can_open.is_ok(), egui::Button::new("Open With\u{2026}"));
+                    let open_with = match &can_open {
+                        Ok(()) => open_with.on_hover_text("The picture as shown, in a program you choose"),
+                        Err(why) => open_with.on_disabled_hover_text(why),
+                    };
+                    if open_with.clicked() {
+                        self.open_with(&ctx);
                         ui.close();
                     }
                     if self.services.has_paths()

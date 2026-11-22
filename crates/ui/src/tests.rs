@@ -882,6 +882,8 @@ struct DiskState {
     save_answer: Option<String>,
     asked_save: Vec<String>,
     dialog: Option<crate::services::DialogResult>,
+    /// The captures handed to a program the owner chose (Open With).
+    opened_with: Vec<String>,
 }
 
 /// A host with a fake disk, shared with the test.
@@ -924,6 +926,15 @@ impl Disk {
 }
 
 impl Services for Disk {
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        self.0.borrow_mut().opened_with.push(path.to_string());
+        Ok(())
+    }
+
     fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
         let mut s = self.0.borrow_mut();
         s.asked_save.push(suggested_name.to_string());
@@ -2226,6 +2237,60 @@ fn print_sends_the_picture_as_shown_and_is_greyed_out_where_there_is_no_printing
     h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
     h.run_steps(2);
     assert!(h.state().toast_text().is_some_and(|t| t.contains("Printing needs")), "{:?}", h.state().toast_text());
+}
+
+/// A host with a system window for choosing a program: the pictures handed to it.
+#[derive(Clone, Default)]
+struct Opener(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Opener {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn open_with_hands_the_picture_as_shown_to_a_program_and_is_greyed_out_where_it_cant() {
+    let opener = Opener::default();
+    let mut ed = Editor::new(Box::new(opener.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Open With\u{2026}");
+    assert_eq!(opener.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // No window for it here: greyed out.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Open With\u{2026}")).is_disabled());
+}
+
+#[test]
+fn a_capture_in_the_strip_is_opened_with_a_program_from_its_menu() {
+    let disk = many_captures(3);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 001.png").rect();
+    right_click(&mut h, thumb.center());
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/strip-open-with.png"));
+    }
+    h.get_by_label("Open With\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().opened_with, vec!["captures/Capture 001.png".to_string()]);
 }
 
 fn decoded(disk: &Disk, path: &str) -> Raster {

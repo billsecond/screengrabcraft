@@ -169,7 +169,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | TIFF, HEIF | Missing | |
 | Multi-page PDF of several captures | Has | All captures' PDF of These (the pictures shown, or those chosen with Ctrl+click), or Batch Changes' "One PDF, a page each": a page for each picture, changed first if asked, saved where the owner says |
 | Copy, save | Has | |
-| Open in another program | Part | Show in Folder |
+| Open in another program | Part | Open With… (the File menu: the picture as shown; a capture's right-click menu in the strip: its file) in Windows' own window for choosing a program, and Show in Folder; greyed out elsewhere |
 | Links, uploads, chat and cloud drives | Not planned | needs a network service |
 
 ## Editing a video: the timeline
@@ -289,7 +289,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 14. A border round the camera, and the camera mirrored (#87).
 15. QR codes read and made (#91).
 16. Capture presets with effects added as they're taken, a folder and a format of their own, and
-    `--preset <name>`.
+    `--preset <name>` (#93).
+17. Open With: a capture in a program of the owner's choosing (Windows).
 
 **Still to build, in this order**
 

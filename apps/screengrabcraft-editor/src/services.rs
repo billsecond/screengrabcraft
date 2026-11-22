@@ -360,6 +360,18 @@ impl Services for DesktopServices {
         screengrabcraft_desktop::print::available()
     }
 
+    fn can_open_with(&self) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::available()
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_picture_with(picture, name)
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_with(std::path::Path::new(path))
+    }
+
     fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
         screengrabcraft_desktop::library::for_paths(paths)
     }

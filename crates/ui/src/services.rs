@@ -244,6 +244,23 @@ pub trait Services {
         Err("Printing needs ScreenGrabCraft on the desktop".to_string())
     }
 
+    /// Whether a capture can be handed to a program the owner chooses, or why not (Open With is
+    /// greyed out, saying so).
+    fn can_open_with(&self) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// The picture as shown (`name` is what it's called) handed to a program the owner chooses, in
+    /// the system's own window for choosing one.
+    fn open_picture_with(&self, _picture: &Raster, _name: &str) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// A capture's file handed to a program the owner chooses.
+    fn open_file_with(&self, _path: &str) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
     /// What's known of these captures (their tags, whether each is a favourite, the program each
     /// was taken from), under their paths as given.
     fn library(&self, _paths: &[String]) -> Library {

@@ -260,6 +260,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
   WebP, BMP, GIF or PDF.
 - **Print** (File › Print, Ctrl+P) through Windows' own printing window (greyed out elsewhere).
+- **Open With…** (the File menu for the picture as shown, or a capture's right-click menu in the
+  strip for its file): Windows' own window for choosing a program to open it in (greyed out
+  elsewhere).
 - **Batch Changes** (File menu, or Batch Change These in All captures): the same changes (resize,
   border, shadow, torn edge, round corners, brightness and contrast, grayscale, invert, trim) made
   to many pictures at once, each saved beside its picture under a name pattern (`{name} changed`).
