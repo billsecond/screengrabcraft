@@ -119,6 +119,8 @@ impl Composer {
             && let Some(src) = timeline.source_time(i, t)
             && let Some(cam) = self.camera_at(stream, src)
         {
+            // Mirrored: flipped left to right, as the owner sees themself.
+            let cam = if timeline.camera.mirror { screengrabcraft_render::effects::flip(&cam, true).unwrap_or(cam) } else { cam };
             if screen_shown {
                 overlay_camera(&mut out, &cam, timeline);
             } else {
@@ -249,24 +251,25 @@ pub fn scale(src: &Raster, w: u32, h: u32) -> Option<Raster> {
 }
 
 /// How much of a pixel at `(x, y)` (from the top left of a `w × h` box) the camera's shape
-/// covers, 0 to 1, smoothed over a pixel at the edge.
-fn coverage(shape: CameraShape, x: f32, y: f32, w: f32, h: f32) -> f32 {
-    let (cx, cy) = (x + 0.5, y + 0.5);
-    match shape {
-        CameraShape::Rectangle => 1.0,
-        CameraShape::Circle => {
-            let r = w.min(h) / 2.0;
-            let d = ((cx - w / 2.0).powi(2) + (cy - h / 2.0).powi(2)).sqrt();
-            (r - d + 0.5).clamp(0.0, 1.0)
-        }
-        CameraShape::Rounded => {
-            let r = w.min(h) * 0.12;
-            let qx = (cx - w / 2.0).abs() - (w / 2.0 - r);
-            let qy = (cy - h / 2.0).abs() - (h / 2.0 - r);
-            let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r;
-            (0.5 - outside).clamp(0.0, 1.0)
-        }
+/// covers, 0 to 1, smoothed over a pixel at the edge. `inset` pulls the shape in that far all
+/// round (the inside of a border).
+fn coverage(shape: CameraShape, x: f32, y: f32, w: f32, h: f32, inset: f32) -> f32 {
+    // From the box's middle.
+    let (cx, cy) = ((x + 0.5 - w / 2.0).abs(), (y + 0.5 - h / 2.0).abs());
+    let (hw, hh) = (w / 2.0 - inset, h / 2.0 - inset);
+    if hw <= 0.0 || hh <= 0.0 {
+        return 0.0;
     }
+    let outside = match shape {
+        CameraShape::Rectangle => (cx - hw).max(cy - hh),
+        CameraShape::Circle => (cx * cx + cy * cy).sqrt() - (w.min(h) / 2.0 - inset),
+        CameraShape::Rounded => {
+            let r = (w.min(h) * 0.12 - inset).max(0.0);
+            let (qx, qy) = (cx - (hw - r), cy - (hh - r));
+            (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - r
+        }
+    };
+    (0.5 - outside).clamp(0.0, 1.0)
 }
 
 /// The colour of a speaker's captions on the picture: the others' white, yours yellow.
@@ -407,13 +410,19 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
         Some(cam.clone())
     };
     let Some(small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
+    // The border, inside the shape (at least a pixel wide when there is one), over the picture's
+    // edge.
+    let border = layout.border.clamp(0.0, crate::timeline::MAX_CAMERA_BORDER);
+    let border = if border > 0.0 { (border * cw.min(ch)).max(1.0) } else { 0.0 };
+    let line = layout.border_color;
+    let line_a = f32::from(line.a) / 255.0;
     // (It may be part off the picture: only what is on it is drawn.)
     let (x0, y0) = (x0 as i64, y0 as i64);
     let (sw, ow_px, oh_px) = (small.width() as usize, out.width() as i64, out.height() as i64);
     let dst = out.pixels_mut();
     for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
         for (x, p) in row.as_chunks::<4>().0.iter().enumerate() {
-            let a = coverage(layout.shape, x as f32, y as f32, cw, ch);
+            let a = coverage(layout.shape, x as f32, y as f32, cw, ch, 0.0);
             if a <= 0.0 {
                 continue;
             }
@@ -421,10 +430,13 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
             if dx < 0 || dy < 0 || dx >= ow_px || dy >= oh_px {
                 continue;
             }
+            // How much of the pixel is the border's rather than the picture's.
+            let edge = if border > 0.0 { (1.0 - coverage(layout.shape, x as f32, y as f32, cw, ch, border)) * line_a } else { 0.0 };
             let i = ((dy * ow_px + dx) * 4) as usize;
             if let Some(d) = dst.get_mut(i..i + 3) {
-                for (dv, sv) in d.iter_mut().zip(p) {
-                    *dv = (f32::from(*sv) * a + f32::from(*dv) * (1.0 - a)).round() as u8;
+                for ((dv, sv), lv) in d.iter_mut().zip(p).zip([line.r, line.g, line.b]) {
+                    let src = f32::from(*sv) * (1.0 - edge) + f32::from(lv) * edge;
+                    *dv = (src * a + f32::from(*dv) * (1.0 - a)).round() as u8;
                 }
             }
         }
@@ -795,5 +807,65 @@ mod tests {
         assert_eq!(out.pixel(28, 28).unwrap().r, 255);
         assert_eq!(out.pixel(4, 4).unwrap().r, 0);
         assert_eq!(out.pixel(80, 80).unwrap().r, 0);
+    }
+
+    #[test]
+    fn a_border_goes_round_the_camera_inside_its_shape() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        tl.camera.corner = Corner::TopLeft;
+        tl.camera.shape = CameraShape::Rectangle;
+        tl.camera.size = 0.5;
+        let red = Color::rgb(255, 0, 0);
+        let draw = |tl: &Timeline| {
+            let mut out = Raster::filled(100, 100, Color::BLACK).unwrap();
+            overlay_camera(&mut out, &Raster::filled(40, 30, Color::WHITE).unwrap(), tl);
+            out
+        };
+        // None: white to the edge (the camera is 50 × 38 at 3, 3).
+        assert_eq!(draw(&tl).pixel(3, 20).unwrap(), Color::WHITE);
+        tl.camera.border = 0.1;
+        tl.camera.border_color = red;
+        let out = draw(&tl);
+        // About 4 px of red at each edge, the picture inside, nothing outside.
+        for (x, y) in [(3, 20), (5, 20), (52, 20), (28, 3), (28, 40)] {
+            assert_eq!(out.pixel(x, y).unwrap(), red, "{x}, {y}");
+        }
+        assert_eq!(out.pixel(28, 20).unwrap(), Color::WHITE);
+        assert_eq!(out.pixel(1, 20).unwrap(), Color::BLACK);
+        // A circle's border is a ring: the box's corners stay as they were.
+        tl.camera.shape = CameraShape::Circle;
+        let out = draw(&tl);
+        assert_eq!(out.pixel(4, 4).unwrap(), Color::BLACK);
+        assert_eq!(out.pixel(4, 28).unwrap(), red);
+        assert_eq!(out.pixel(28, 28).unwrap(), Color::WHITE);
+        // Any width asked for is kept within bounds, and see-through borders let the picture show.
+        for border in [f32::NAN, -1.0, 99.0] {
+            tl.camera.border = border;
+            let _ = draw(&tl);
+        }
+        tl.camera.shape = CameraShape::Rectangle;
+        tl.camera.border = 0.1;
+        tl.camera.border_color = Color::rgba(255, 0, 0, 0);
+        assert_eq!(draw(&tl).pixel(3, 20).unwrap(), Color::WHITE);
+    }
+
+    #[test]
+    fn a_mirrored_camera_is_flipped_left_to_right() {
+        let streams = vec![StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 }];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        // White on the left, black on the right.
+        let px: Vec<u8> = (0..32 * 24).flat_map(|i| if i % 32 < 16 { [255, 255, 255, 255] } else { [0, 0, 0, 255] }).collect();
+        let pic = Raster::new(32, 24, px).unwrap();
+        let jpeg = screengrabcraft_render::encode(&pic, screengrabcraft_model::ImageFormat::Jpeg, 95).unwrap();
+        w.jpeg_frame(3, 0, &jpeg).unwrap();
+        let r = Arc::new(Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let f = c.frame(&tl, 100_000);
+        assert!(f.pixel(8, 24).unwrap().r > 200 && f.pixel(56, 24).unwrap().r < 50);
+        tl.camera.mirror = true;
+        let f = c.frame(&tl, 100_000);
+        assert!(f.pixel(8, 24).unwrap().r < 50 && f.pixel(56, 24).unwrap().r > 200);
     }
 }

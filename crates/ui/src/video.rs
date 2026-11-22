@@ -31,7 +31,7 @@ use screengrabcraft_engine::VideoSession;
 use screengrabcraft_media::captions::{self, Captions, Cue, Speaker};
 use screengrabcraft_media::compose::{self, Composer};
 use screengrabcraft_media::recording::{self, Recording, StreamKind};
-use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
+use screengrabcraft_media::timeline::{CameraShape, Corner, MAX_CAMERA_BORDER, Track};
 use serde_json::{Value, json};
 
 mod export_window;
@@ -1657,6 +1657,45 @@ impl VideoView {
         }
         if r.drag_stopped() {
             self.session.commit();
+        }
+        ui.add_space(8.0);
+        // The border: how wide (none at 0) and its colour.
+        let mut border = cam.border * 100.0;
+        let r = named_slider(ui, "Border", &mut border, 0.0..=MAX_CAMERA_BORDER * 100.0, "%")
+            .on_hover_text("A line round the camera, as a share of its picture's height; 0 is none");
+        if r.drag_started() {
+            self.session.begin("Camera");
+        }
+        if r.changed() {
+            let p = json!({"border": border / 100.0});
+            if r.dragged() {
+                let _ = self.session.drag("video.camera", &p);
+            } else {
+                self.run(ed, &ctx, "video.camera", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+        ui.horizontal(|ui| {
+            ui.label(small("Border colour"));
+            let c = cam.border_color;
+            let mut c32 = Color32::from_rgb(c.r, c.g, c.b);
+            let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, "The border's colour"));
+            if r.on_hover_text("The colour of the line round the camera").changed() {
+                let mut p = json!({"borderColor": format!("#{:02X}{:02X}{:02X}", c32.r(), c32.g(), c32.b())});
+                // A colour chosen with no border yet shows one.
+                if cam.border <= 0.0 {
+                    p["border"] = json!(0.03);
+                }
+                self.run(ed, &ctx, "video.camera", p);
+            }
+        });
+        ui.add_space(6.0);
+        let mut mirror = cam.mirror;
+        if ui.checkbox(&mut mirror, "Mirror").on_hover_text("The camera flipped left to right, as you see yourself in a mirror").changed() {
+            self.run(ed, &ctx, "video.camera", json!({"mirror": mirror}));
         }
         ui.add_space(4.0);
         ui.label(small("Or drag the camera on the picture to put it anywhere."));

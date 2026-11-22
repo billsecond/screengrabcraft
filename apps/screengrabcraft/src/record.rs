@@ -1027,7 +1027,14 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     }
     let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
     let file = std::fs::File::create(&file_path).map_err(|e| format!("{}: {e}", file_path.display()))?;
-    let writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
+    let mut writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
+    // The camera's look chosen in the Recorder (mirrored, a border): the recording starts with it
+    // as its edits, which the video editor can change.
+    if d.camera.is_some()
+        && let Some(look) = camera_look(&plan.options)
+    {
+        writer.edit(&look).map_err(|e| e.to_string())?;
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Item>();
     let waiting = Arc::new(AtomicUsize::new(0));
     let w = waiting.clone();
@@ -1118,6 +1125,21 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         return Ok(Output::Cancelled);
     }
     made.map(|d| Output::Video(plan.out.clone(), d))
+}
+
+/// The edits a recording starts with for the camera's look the owner chose (mirrored, a border),
+/// or none when it's as the camera sends it. Only the camera's place is in them: the tracks are
+/// filled in whole when the recording is opened.
+fn camera_look(o: &VideoOptions) -> Option<Timeline> {
+    let border = o.camera_border.min(screengrabcraft_model::settings::CAMERA_BORDER_MAX);
+    if !o.camera_mirror && border == 0 {
+        return None;
+    }
+    let mut tl = Timeline::default();
+    tl.camera.mirror = o.camera_mirror;
+    tl.camera.border = f32::from(border) / 100.0;
+    tl.camera.border_color = o.camera_border_color;
+    Some(tl)
 }
 
 /// How much sound came, for the log and to tell a microphone that heard nothing.
@@ -1735,6 +1757,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            ..VideoOptions::default()
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1782,6 +1805,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            ..VideoOptions::default()
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1809,6 +1833,32 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_recording_starts_with_the_cameras_chosen_look() {
+        assert!(camera_look(&VideoOptions::production()).is_none(), "as the camera sends it: no edits");
+        let o = VideoOptions { camera_mirror: true, camera_border: 50, camera_border_color: Color::rgb(0, 120, 255), ..VideoOptions::production() };
+        let look = camera_look(&o).unwrap();
+        // Written first, as the recorder does, then the pictures: opened, every track is whole.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.edit(&look).unwrap();
+        let jpeg =
+            screengrabcraft_render::encode(&Raster::filled(16, 12, Color::WHITE).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 80).unwrap();
+        for t in 0..10u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(64, 48, Color::BLACK).unwrap()).unwrap();
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let rec = recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
+        let tl = rec.timeline.clone().unwrap();
+        assert!(tl.camera.mirror);
+        assert_eq!(tl.camera.border, 0.1, "at most the widest");
+        assert_eq!(tl.camera.border_color, Color::rgb(0, 120, 255));
+        assert_eq!(tl.tracks, Timeline::new(&rec).tracks);
     }
 
     #[test]
@@ -1893,6 +1943,7 @@ mod tests {
                 camera: true,
                 camera_index: None,
                 captions: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -2024,6 +2075,7 @@ mod tests {
                 camera: false,
                 camera_index: None,
                 captions: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -2079,6 +2131,7 @@ mod tests {
                 camera: false,
                 camera_index: None,
                 captions: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),

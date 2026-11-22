@@ -129,6 +129,37 @@ fn the_camera_moves_to_another_corner_and_becomes_a_circle() {
 }
 
 #[test]
+fn the_camera_is_mirrored_and_given_a_border_of_its_own_colour() {
+    let mut h = harness();
+    h.get_by_label("Mirror").click();
+    h.run_steps(2);
+    let cam = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera;
+    assert!(cam(&h).mirror);
+    h.get_by_label("The border's colour");
+    // Wider (from the engine, as its slider does) and orange.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.camera", &serde_json::json!({"border": 0.08, "borderColor": "#FF8800"})).unwrap();
+    }
+    h.run_steps(3);
+    assert_eq!((cam(&h).border, cam(&h).border_color), (0.08, Color::rgb(0xFF, 0x88, 0)));
+    // The picture shows it: orange round the camera, in its corner.
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera is on the picture");
+    shot(&mut h, "video-camera-border");
+    let img = h.render().unwrap();
+    let orange = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        p[0] > 220 && (110..170).contains(&p[1]) && p[2] < 60
+    };
+    assert!(orange(r.min.x + 1.5, r.center().y) && orange(r.center().x, r.max.y - 1.5), "{r:?}");
+    assert!(!orange(r.center().x, r.center().y));
+    // Undone a step at a time.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(cam(&h).border, 0.0);
+    assert!(cam(&h).mirror);
+}
+
+#[test]
 fn deleting_a_selected_clip_leaves_a_gap_on_its_track_only() {
     let mut h = harness();
     if let Some(v) = h.state_mut().video.as_mut() {
