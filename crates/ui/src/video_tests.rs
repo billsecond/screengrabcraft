@@ -1315,6 +1315,50 @@ fn media_is_replaced_keeping_its_effects_and_effects_are_pasted_on_another() {
     assert_eq!(clips[1].look, clips[0].look);
 }
 
+#[test]
+fn a_picture_moves_along_a_curved_path_and_is_pinned_by_its_corners() {
+    use crate::services::DialogResult;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Pictures/Logo.png".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Logo.png").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        for (at, x, y) in [(500_000u64, 0.2, 0.7), (1_500_000, 0.5, 0.25), (2_500_000, 0.8, 0.7)] {
+            v.session.execute("video.keyframe", &serde_json::json!({"layer": layer, "item": item, "at": at, "x": x, "y": y})).unwrap();
+        }
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "intro": "none"})).unwrap();
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(2);
+    let it = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    // Its Corner Pin (above its Motion in the panel): its top right corner dragged up and right.
+    scroll_side_panel_to(&mut h, "Pin its corners");
+    h.get_by_label("Pin its corners").click();
+    h.run_steps(2);
+    assert!(it(&h).look.pinned);
+    let before = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let r = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    crate::tests::drag(&mut h, r.right_top(), r.right_top() + egui::vec2(40.0, -30.0));
+    let pin = it(&h).look.pin;
+    assert!(pin[1][0] > 0.02 && pin[1][1] < -0.02 && pin[0] == [0.0, 0.0], "{pin:?}");
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Pin Corner"));
+    let after = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    assert_ne!(before.pixels(), after.pixels(), "drawn in perspective");
+    shot(&mut h, "video-corner-pin");
+    // Its Motion: along a curved path, drawn on the picture.
+    scroll_side_panel_to(&mut h, "Along a curved path");
+    h.get_by_label("Along a curved path").click();
+    h.run_steps(2);
+    assert!(it(&h).path);
+    shot(&mut h, "video-motion-path");
+}
+
 /// A made-up voice at 48 kHz: bursts of tones at uneven times, quiet between.
 fn voice(secs: usize) -> Vec<i16> {
     let mut seed = 99u32;

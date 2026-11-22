@@ -809,6 +809,20 @@ fn draw_item(
             let pic = store.picture(*id, at)?;
             let ready = pictures.get(*id, &pic)?;
             let rect = media_rect(item, pic.width(), pic.height(), w, h);
+            if item.look.pinned {
+                // In perspective between its four corners: its box's, moved and grown with it, each
+                // moved as its pin says.
+                let look = item.look.clone().checked();
+                let (cx, cy, k) = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0, m.scale.max(0.01));
+                let at = |x: f32, y: f32, [px, py]: [f32; 2]| [(x - cx) * k + cx + m.dx + px * w, (y - cy) * k + cy + m.dy + py * h];
+                let [a, b, c, d] = look.pin;
+                let q =
+                    [at(rect.x, rect.y, a), at(rect.x + rect.w, rect.y, b), at(rect.x + rect.w, rect.y + rect.h, c), at(rect.x, rect.y + rect.h, d)];
+                crate::warp::draw(pix, &ready, look.crop, &q, m.alpha);
+                let (x0, y0) = (q.iter().map(|p| p[0]).fold(f32::INFINITY, f32::min), q.iter().map(|p| p[1]).fold(f32::INFINITY, f32::min));
+                let (x1, y1) = (q.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max), q.iter().map(|p| p[1]).fold(f32::NEG_INFINITY, f32::max));
+                return Some((Rect::new(x0, y0, x1 - x0, y1 - y0), Transform::identity()));
+            }
             if item.look.is_plain() {
                 picture_at(pix, &ready, rect, m);
             } else {
@@ -1063,6 +1077,29 @@ mod tests {
         let mut mixed = vec![0.0f32; 20];
         mix_layers(&mut mixed, &tl, &OnePicture(red), 48_000, 10);
         assert!(mixed.iter().all(|v| (*v - 0.5).abs() < 1e-6), "{mixed:?}");
+    }
+
+    #[test]
+    fn a_pinned_picture_is_drawn_in_perspective_between_its_corners() {
+        let mut tl = timeline();
+        let pic = tl
+            .add_media(layers::MediaItem { name: "Logo.png".into(), path: "C:/Logo.png".into(), width: 10, height: 10, ..Default::default() })
+            .unwrap();
+        let none = layers::Anim { kind: AnimKind::None, len: 0 };
+        // A square in the middle (40 to 60), its top right corner pulled up and right by 20.
+        let mut look = layers::ItemLook { pinned: true, ..Default::default() };
+        look.pin[1] = [0.2, -0.2];
+        let item =
+            Item { what: What::Media { id: pic }, place: Placement { x: 0.5, y: 0.5, w: 0.2, opacity: 1.0 }, intro: none, look, ..Item::default() };
+        tl.place(item, None, 0).unwrap();
+        let red = Arc::new(Raster::filled(10, 10, Color::rgb(255, 0, 0)).unwrap());
+        let mut out = grey(100, 100);
+        draw_layers(&mut out, &tl, &OnePicture(red), 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+        let r = |x: u32, y: u32| out.pixel(x, y).unwrap().r;
+        assert_eq!(r(45, 55), 255, "inside where it was");
+        assert_eq!(r(72, 30), 255, "and where its corner was pulled to");
+        assert_eq!(r(35, 55), 120, "nothing left of it");
+        assert_eq!(r(45, 25), 120, "nor above its left side");
     }
 
     /// A video whose picture is blue and whose sound is 0.4 on the left, 0.1 on the right.

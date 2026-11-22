@@ -155,6 +155,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
   Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
   as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
   sound, music and media go down while the microphone is heard, and back up after.
+- **Motion along a path**: with two keyframes or more, an item's Motion has Along a curved path:
+  it goes through their places on a smooth curve without stopping at them. While it's chosen,
+  its way shows on the picture as a dashed line with a dot at each keyframe.
+- **Corner pin**: a picture's or a video's panel has Corner Pin. Its four round handles are then
+  dragged anywhere on the picture, and it's drawn in perspective between them (a screen seen at an
+  angle, a poster on a wall).
 - **Replace media, copy effects**: an item's right button (or its panel's Effects) has Replace
   With, to show another file of the Media bin in its place, keeping its time, place, look, motion
   and animations. Copy Effects and Paste Effects put one item's look, entrance, exit and motion on

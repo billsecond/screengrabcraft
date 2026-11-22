@@ -56,8 +56,22 @@ pub struct Importing {
 /// A drag on the picture: what's moved or resized, where it was taken hold of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CanvasDrag {
-    Item { layer: u32, item: u32, grab: Vec2, resize: Option<(f32, f32)> },
-    Camera { grab: Vec2, resize: Option<(f32, f32)> },
+    Item {
+        layer: u32,
+        item: u32,
+        grab: Vec2,
+        resize: Option<(f32, f32)>,
+    },
+    Camera {
+        grab: Vec2,
+        resize: Option<(f32, f32)>,
+    },
+    /// A pinned picture's corner (0 top left, then round).
+    Pin {
+        layer: u32,
+        item: u32,
+        corner: usize,
+    },
 }
 
 /// A card's picture is drawn on a video this large (16:9), then made a third as large: the card
@@ -992,6 +1006,17 @@ impl VideoView {
             ui.label(
                 RichText::new("With keyframes, changing it changes the keyframe at the playhead (or adds one there).").size(12.0).color(t.muted),
             );
+            let mut path = item.path;
+            if ui
+                .add_enabled(item.keys.len() >= 2 && !matches!(item.what, What::Zoom), egui::Checkbox::new(&mut path, "Along a curved path"))
+                .on_hover_text(
+                    "Through its keyframes' places on a smooth curve, without stopping at them; the path shows on the picture while it's chosen",
+                )
+                .on_disabled_hover_text("Two keyframes or more make a path")
+                .changed()
+            {
+                self.run(ed, ctx, "video.setItem", json!({"layer": layer, "item": item.id, "path": path}));
+            }
             if ui.button("Remove Every Keyframe").on_hover_text("It stays where the last one had it").clicked() {
                 self.run(ed, ctx, "video.removeKeyframe", json!({"layer": layer, "item": item.id, "all": true}));
             }
@@ -1084,6 +1109,28 @@ impl VideoView {
                 }
             });
         });
+        // Pinned onto a slanted surface: its four corners dragged on the picture.
+        super::section(ui, "Corner Pin", first);
+        let mut pinned = look.pinned;
+        if ui
+            .checkbox(&mut pinned, "Pin its corners")
+            .on_hover_text(
+                "Drag its four corners on the picture: it's drawn in perspective between them (a screen seen at an angle, a poster on a wall)",
+            )
+            .changed()
+        {
+            set(self, json!({"pinned": pinned}), false);
+        }
+        if look.pinned {
+            ui.label(
+                RichText::new("Drag the round handles at its corners on the picture. While pinned it isn't turned, rounded or bordered.")
+                    .size(12.0)
+                    .color(t.muted),
+            );
+            if ui.button("Put the Corners Back").on_hover_text("Its corners where its box has them").clicked() {
+                set(self, json!({"pin": [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]}), false);
+            }
+        }
     }
 
     /// An item's mask (the shape it's shown in, or that's cut out of it: where in it and how
@@ -1174,6 +1221,47 @@ impl VideoView {
 
     // ---- on the picture ----
 
+    /// The way the chosen item goes on the picture (screen points), when it has two keyframes or
+    /// more: the line (a curve, along a path) through its keyframes' places, and those places.
+    fn chosen_path(&self, pic: Rect) -> Option<(Vec<Pos2>, Vec<Pos2>)> {
+        let (layer, id) = self.item?;
+        let item = self.session.timeline.item(layer, id)?;
+        if item.keys.len() < 2 {
+            return None;
+        }
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let f = pic.width() / vw.max(1.0);
+        let on = |p: layers::Placement| pic.min + vec2(p.x * vw * f, p.y * vh * f);
+        let (a, b) = (item.keys.first()?.at, item.keys.last()?.at);
+        let steps = 64u64;
+        let curve = (0..=steps).map(|k| on(item.place_at(item.at.saturating_add(a + (b - a) * k / steps)))).collect();
+        let points = item.keys.iter().map(|k| on(k.place)).collect();
+        Some((curve, points))
+    }
+
+    /// Where the chosen item's pinned corners are on the picture (screen points), and where they'd
+    /// be unpinned (its box's corners), when it's pinned: top left, top right, bottom right, bottom
+    /// left.
+    fn pin_corners(&self, pic: Rect) -> Option<([Pos2; 4], [Pos2; 4])> {
+        let (layer, id) = self.item?;
+        let item = self.session.timeline.item(layer, id)?.placed_at(self.playhead).into_owned();
+        if !item.look.pinned {
+            return None;
+        }
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let r = layer_draw::item_rect(&item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
+        let f = pic.width() / vw.max(1.0);
+        let box_ = [pos2(r.x, r.y), pos2(r.x + r.w, r.y), pos2(r.x + r.w, r.y + r.h), pos2(r.x, r.y + r.h)];
+        let base = box_.map(|p| pic.min + vec2(p.x * f, p.y * f));
+        let pin = item.look.clone().checked().pin;
+        let mut moved = base;
+        for (k, m) in moved.iter_mut().enumerate() {
+            let [dx, dy] = pin.get(k).copied().unwrap_or([0.0; 2]);
+            *m += vec2(dx * vw * f, dy * vh * f);
+        }
+        Some((moved, base))
+    }
+
     /// Where something chosen is on the picture shown in `pic` (screen points): the item chosen,
     /// or the camera.
     fn chosen_rect(&self, pic: Rect) -> Option<Rect> {
@@ -1234,11 +1322,27 @@ impl VideoView {
         let video_at = |p: Pos2| ((p - pic.min) / f).to_pos2();
         let corners = |r: Rect| [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
         let chosen = self.chosen_rect(pic);
-        if let Some(r) = chosen {
+        // The way it goes, through its keyframes' places.
+        if let Some((line, points)) = self.chosen_path(pic) {
+            let way = Stroke::new(2.0, Color32::from_rgb(0xFF, 0xD5, 0x4F));
+            ui.painter().add(egui::Shape::dashed_line(&line, way, 6.0, 4.0));
+            for p in points {
+                ui.painter().circle(p, 4.5, Color32::from_rgb(0xFF, 0xD5, 0x4F), Stroke::new(1.0, Color32::BLACK));
+            }
+        }
+        let pins = self.pin_corners(pic);
+        if let Some(r) = chosen.filter(|_| pins.is_none()) {
             ui.painter().rect_stroke(r, 0.0, Stroke::new(1.5, t.accent), StrokeKind::Outside);
             for c in corners(r) {
                 ui.painter().rect_filled(Rect::from_center_size(c, vec2(9.0, 9.0)), 2.0, Color32::WHITE);
                 ui.painter().rect_stroke(Rect::from_center_size(c, vec2(9.0, 9.0)), 2.0, Stroke::new(1.0, t.accent), StrokeKind::Outside);
+            }
+        }
+        // A pinned picture: its four corners, round, to drag anywhere.
+        if let Some((moved, _)) = pins {
+            ui.painter().add(egui::Shape::closed_line(moved.to_vec(), Stroke::new(1.0, t.accent)));
+            for c in moved {
+                ui.painter().circle(c, 6.0, Color32::WHITE, Stroke::new(1.5, t.accent));
             }
         }
         if let Some(p) = resp.hover_pos()
@@ -1282,13 +1386,21 @@ impl VideoView {
         if resp.drag_started()
             && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
         {
+            // A pinned picture's corner moves that corner.
+            let pin_corner = pins.and_then(|(moved, _)| moved.iter().position(|c| c.distance(p) <= HANDLE));
+            if let (Some(corner), Some((layer, item))) = (pin_corner, self.item) {
+                self.session.begin("Pin Corner");
+                self.canvas_drag = Some(CanvasDrag::Pin { layer, item, corner });
+            }
             // A corner of what's chosen resizes it; inside it, or on another, moves.
             let mut target = match chosen {
-                Some(r) if corners(r).iter().any(|c| c.distance(p) <= HANDLE) => Some((true, r)),
+                _ if pin_corner.is_some() => None,
+                Some(r) if pins.is_none() && corners(r).iter().any(|c| c.distance(p) <= HANDLE) => Some((true, r)),
                 Some(r) if r.contains(p) => Some((false, r)),
                 _ => None,
             };
             if target.is_none()
+                && pin_corner.is_none()
                 && let Some(sel) = pick(self, p)
             {
                 self.item = sel;
@@ -1336,6 +1448,19 @@ impl VideoView {
             };
             let mut lines = (None, None);
             match d {
+                CanvasDrag::Pin { layer, item, corner } => {
+                    // That corner moved from where its box has it to the pointer.
+                    if let Some((_, base)) = self.pin_corners(pic)
+                        && let Some(b) = base.get(corner)
+                        && let Some(it) = self.session.timeline.item(layer, item)
+                    {
+                        let mut pin = it.look.pin;
+                        if let Some(c) = pin.get_mut(corner) {
+                            *c = [(p.x - b.x) / f / vw, (p.y - b.y) / f / vh];
+                        }
+                        let _ = self.session.drag("video.setItem", &json!({"layer": layer, "item": item, "pin": pin}));
+                    }
+                }
                 CanvasDrag::Item { layer, item, grab, resize } => {
                     // With keyframes, it's the keyframe at the playhead that's moved (made there
                     // if there's none).

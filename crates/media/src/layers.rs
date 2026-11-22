@@ -350,6 +350,10 @@ pub struct Item {
     /// Only its media's sound: a video's sound apart from its picture, on a sound layer.
     #[serde(skip_serializing_if = "is_off")]
     pub sound_only: bool,
+    /// Its keyframes a path it moves along: through their places on a smooth curve, not stopping
+    /// at them, easing out of the first and into the last.
+    #[serde(skip_serializing_if = "is_off")]
+    pub path: bool,
 }
 
 /// How an item is framed on the picture: turned about its middle, and, a picture or a video, cut
@@ -379,6 +383,18 @@ pub struct ItemLook {
     /// A device drawn round it (a picture or a video).
     #[serde(skip_serializing_if = "no_device")]
     pub device: crate::frame::Device,
+    /// Pinned onto a slanted surface: drawn in perspective between its four corners, each moved
+    /// from where its box has it by `pin` (a picture or a video).
+    #[serde(skip_serializing_if = "is_off")]
+    pub pinned: bool,
+    /// How far each corner is moved, shares of the video's width and height: top left, top
+    /// right, bottom right, bottom left.
+    #[serde(skip_serializing_if = "no_pin")]
+    pub pin: [[f32; 2]; 4],
+}
+
+fn no_pin(p: &[[f32; 2]; 4]) -> bool {
+    p.iter().flatten().all(|v| *v == 0.0)
 }
 
 fn is_normal(b: &BlendMode) -> bool {
@@ -401,6 +417,8 @@ impl Default for ItemLook {
             blend: BlendMode::Normal,
             mask: Mask::default(),
             device: crate::frame::Device::None,
+            pinned: false,
+            pin: [[0.0; 2]; 4],
         }
     }
 }
@@ -417,6 +435,7 @@ impl ItemLook {
             && self.blend == BlendMode::Normal
             && self.mask.is_none()
             && self.device == crate::frame::Device::None
+            && !self.pinned
     }
 
     /// Drawn on a picture of its own first: masked, or laid on what's under it other than as it is.
@@ -438,6 +457,8 @@ impl ItemLook {
             blend: self.blend,
             mask: self.mask.checked(),
             device: self.device,
+            pinned: self.pinned,
+            pin: self.pin.map(|c| c.map(|v| f(v, -1.0, 1.0))),
         }
     }
 }
@@ -597,6 +618,7 @@ impl Default for Item {
             look: ItemLook::default(),
             silent: false,
             sound_only: false,
+            path: false,
         }
     }
 }
@@ -613,7 +635,9 @@ impl Item {
     }
 
     /// Where it is at timeline time `t`: its place, or with keyframes, eased from the one
-    /// before to the one after (before the first, the first's; after the last, the last's).
+    /// before to the one after (before the first, the first's; after the last, the last's). Along
+    /// a path, it goes through the keyframes' places on a smooth curve without stopping at them,
+    /// easing out of the first and into the last.
     pub fn place_at(&self, t: u64) -> Placement {
         let d = t.saturating_sub(self.at);
         let k = self.keys.partition_point(|k| k.at <= d);
@@ -622,10 +646,30 @@ impl Item {
             (Some(a), None) => a.place,
             (None, Some(b)) => b.place,
             (Some(a), Some(b)) => {
-                let f = (d - a.at) as f32 / b.at.saturating_sub(a.at).max(1) as f32;
-                // Slow away from one and into the next.
-                let f = f.clamp(0.0, 1.0);
-                between(a.place, b.place, f * f * (3.0 - 2.0 * f)).clamped()
+                let f = ((d - a.at) as f32 / b.at.saturating_sub(a.at).max(1) as f32).clamp(0.0, 1.0);
+                if !self.path {
+                    // Slow away from one and into the next.
+                    return between(a.place, b.place, f * f * (3.0 - 2.0 * f)).clamped();
+                }
+                let last = self.keys.len() - 1;
+                // Eased out of the first and into the last; steady through the rest.
+                let f = match (k - 1 == 0, k == last) {
+                    (true, true) => f * f * (3.0 - 2.0 * f),
+                    (true, false) => f * f,
+                    (false, true) => 1.0 - (1.0 - f) * (1.0 - f),
+                    (false, false) => f,
+                };
+                let at = |i: usize| self.keys.get(i.min(last)).map_or(a.place, |k| k.place);
+                let (p0, p3) = (at((k - 1).saturating_sub(1)), at(k + 1));
+                let curve = |v0: f32, v1: f32, v2: f32, v3: f32| {
+                    // Through v1 and v2, leaving and arriving as the points either side say.
+                    let (f2, f3) = (f * f, f * f * f);
+                    0.5 * (2.0 * v1 + (v2 - v0) * f + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * f2 + (3.0 * v1 - v0 - 3.0 * v2 + v3) * f3)
+                };
+                let mut p = between(a.place, b.place, f);
+                p.x = curve(p0.x, a.place.x, b.place.x, p3.x);
+                p.y = curve(p0.y, a.place.y, b.place.y, p3.y);
+                p.clamped()
             }
         }
     }
@@ -1740,6 +1784,29 @@ mod tests {
 
     fn at(x: f32) -> Placement {
         Placement { x, ..Placement::default() }
+    }
+
+    #[test]
+    fn along_a_path_an_item_curves_through_its_points_without_stopping() {
+        // Three points: left, top middle, right, a second apart.
+        let key = |at: u64, x: f32, y: f32| Key { at, place: Placement { x, y, ..Placement::default() } };
+        let mut it = Item { len: 3_000_000, keys: vec![key(0, 0.1, 0.8), key(1_000_000, 0.5, 0.2), key(2_000_000, 0.9, 0.8)], ..Item::default() };
+        it.path = true;
+        // On the way to the top it bends outwards: where it's a third of the way across (x 0.37),
+        // it's well above the straight line (y 0.4 there), and it passes through the point.
+        let near = (0..=100u64).map(|k| it.place_at(k * 10_000)).min_by(|a, b| (a.x - 0.37).abs().total_cmp(&(b.x - 0.37).abs())).unwrap();
+        assert!(near.y < 0.37, "{near:?}");
+        assert!((it.place_at(1_000_000).y - 0.2).abs() < 1e-5 && (it.place_at(1_000_000).x - 0.5).abs() < 1e-5);
+        // It doesn't stop at the middle point: it's moving just before and after it.
+        let (b, a) = (it.place_at(950_000), it.place_at(1_050_000));
+        assert!(a.x - b.x > 0.02, "{} {}", b.x, a.x);
+        // Without the path it stops there (eased in and out).
+        it.path = false;
+        let (b, a) = (it.place_at(990_000), it.place_at(1_010_000));
+        assert!(a.x - b.x < 0.001);
+        // It starts and ends where its first and last points are.
+        it.path = true;
+        assert_eq!((it.place_at(0).x, it.place_at(3_000_000).x), (0.1, 0.9));
     }
 
     #[test]
