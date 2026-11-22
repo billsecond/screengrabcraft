@@ -16,6 +16,13 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::hotkeys::Registered;
 
+/// What runs that the main menu stops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Running {
+    pub timed: bool,
+    pub steps: bool,
+}
+
 /// What a menu item does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
@@ -47,6 +54,9 @@ pub enum Item {
     /// Captures on a timer: their settings (the Capture page), or stop them while they run.
     TimedCaptures,
     StopTimed,
+    /// Step capture: start it, or stop it and make the guide.
+    RecordSteps,
+    StopSteps,
 }
 
 /// How a recording is, for its menu.
@@ -132,7 +142,7 @@ pub fn entries(
     shortcut: &dyn Fn(CaptureMode) -> Option<String>,
     presets: &[(String, Option<String>)],
     update: Option<&str>,
-    timed: bool,
+    running: Running,
 ) -> Vec<Entry> {
     let capture = |m: CaptureMode| Entry::Item(label(m.label(), shortcut(m)), Item::Capture(m));
     let mut e: Vec<Entry> = [
@@ -149,10 +159,15 @@ pub fn entries(
     .into_iter()
     .map(capture)
     .collect();
-    e.push(if timed {
+    e.push(if running.timed {
         Entry::Item("Stop Captures on a Timer".to_string(), Item::StopTimed)
     } else {
         Entry::Item("Captures on a Timer…".to_string(), Item::TimedCaptures)
+    });
+    e.push(if running.steps {
+        Entry::Item("Stop Recording Steps".to_string(), Item::StopSteps)
+    } else {
+        Entry::Item("Record Steps for a How-to Guide".to_string(), Item::RecordSteps)
     });
     e.push(Entry::Delays);
     if !presets.is_empty() {
@@ -209,8 +224,8 @@ pub struct Tray {
     transcribing: Option<String>,
     /// The update waiting, as its item says it (`Install Update 0.1.8`); see `crate::update`.
     pub update: Option<String>,
-    /// Captures on a timer are running (the menu stops them).
-    pub timed: bool,
+    /// Captures on a timer, or step capture, are running (the menu stops them).
+    pub running: Running,
     /// The menu of captures, kept while the recording's own menu is shown.
     main: Option<Menu>,
     /// The recording's menu as it was last built, and its items.
@@ -242,7 +257,7 @@ impl Tray {
             recording: false,
             transcribing: None,
             update: None,
-            timed: false,
+            running: Running::default(),
             main: None,
             shown: None,
             recording_items: Vec::new(),
@@ -284,7 +299,7 @@ impl Tray {
         let shortcut = |m: CaptureMode| keys.label(&settings.hotkeys, m);
         let presets: Vec<(String, Option<String>)> =
             settings.presets.iter().enumerate().map(|(i, p)| (p.title(i + 1), keys.preset_label(p))).collect();
-        for entry in entries(&shortcut, &presets, self.update.as_deref(), self.timed) {
+        for entry in entries(&shortcut, &presets, self.update.as_deref(), self.running) {
             match entry {
                 Entry::Item(text, item) => {
                     let mi = MenuItem::new(&text, true, None);
@@ -505,7 +520,7 @@ mod tests {
 
     fn menu() -> Vec<Entry> {
         let shortcut = |m: CaptureMode| (m == CaptureMode::Video).then(|| "Ctrl+Alt+Shift+PrintScreen".to_string());
-        entries(&shortcut, &[], None, false)
+        entries(&shortcut, &[], None, Running::default())
     }
 
     fn words(e: &Entry) -> Option<&str> {
@@ -547,7 +562,7 @@ mod tests {
 
     #[test]
     fn an_update_waiting_has_its_item_with_the_settings() {
-        let m = entries(&|_| None, &[], Some("Install Update 9.9.9"), false);
+        let m = entries(&|_| None, &[], Some("Install Update 9.9.9"), Running::default());
         let settings = m.iter().position(|e| words(e) == Some("Settings…")).unwrap();
         assert_eq!(m.get(settings + 1), Some(&Entry::Item("Install Update 9.9.9".to_string(), Item::InstallUpdate)));
     }
@@ -555,17 +570,18 @@ mod tests {
     #[test]
     fn captures_on_a_timer_have_an_item_that_stops_them_while_they_run() {
         let has = |m: &[Entry], it: Item| m.iter().any(|e| matches!(e, Entry::Item(_, i) if *i == it));
-        let off = entries(&|_| None, &[], None, false);
+        let off = entries(&|_| None, &[], None, Running::default());
         assert!(has(&off, Item::TimedCaptures) && !has(&off, Item::StopTimed));
-        let on = entries(&|_| None, &[], None, true);
+        let on = entries(&|_| None, &[], None, Running { timed: true, steps: true });
         assert!(has(&on, Item::StopTimed) && !has(&on, Item::TimedCaptures));
+        assert!(has(&on, Item::StopSteps) && !has(&on, Item::RecordSteps) && has(&off, Item::RecordSteps));
     }
 
     #[test]
     fn the_capture_presets_have_a_submenu_after_the_delays_when_there_are_any() {
         assert!(!menu().iter().any(|e| matches!(e, Entry::Presets(_))), "none without presets");
         let presets = [("Docs shot".to_string(), Some("Ctrl+Alt+D".to_string())), ("Wide".to_string(), None)];
-        let m = entries(&|_| None, &presets, None, false);
+        let m = entries(&|_| None, &presets, None, Running::default());
         let delays = m.iter().position(|e| *e == Entry::Delays).unwrap();
         let Some(Entry::Presets(names)) = m.get(delays + 1) else { panic!("{m:?}") };
         assert_eq!(names.len(), 2);

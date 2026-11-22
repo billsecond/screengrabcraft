@@ -212,6 +212,14 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         }
     }
     ui.add_space(16.0);
+    ui.label(RichText::new("How-to Guide").strong());
+    ui.label(RichText::new("Each click takes a picture of the window clicked, with the click marked. Stop, and the steps are numbered, to put in order, word and save as a PDF, a web page or Markdown.").size(12.0).color(Tokens::get(ui.ctx()).muted));
+    if widgets::button(ui, "Record Steps").clicked() {
+        // The window goes first, so it isn't in the first step.
+        *close = true;
+        crate::steps::start(svc);
+    }
+    ui.add_space(16.0);
     let waiting = svc.timed.at.map(|_| svc.settings.timed.at.clone());
     let status = svc.timed.problem.clone().unwrap_or_else(|| svc.timed.status());
     let (changed, action) = timed_section(ui, &mut svc.settings.timed, svc.timed.running(), &status, waiting.as_deref());

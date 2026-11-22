@@ -14,6 +14,7 @@ pub mod codec;
 pub mod cut;
 pub mod draw;
 pub mod effects;
+pub mod guide;
 pub mod lottie;
 pub mod matte;
 pub mod pdf;
