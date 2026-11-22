@@ -868,6 +868,10 @@ pub struct EditorSettings {
     pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
+    /// Where a part of the picture moved with the Selection tool was is filled from round it
+    /// (rather than left see-through).
+    #[serde(deserialize_with = "or_default")]
+    pub fill_lifted: bool,
 }
 
 /// The Fill tool's settings.

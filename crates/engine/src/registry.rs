@@ -196,7 +196,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Move Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: "rect"|"ellipse"|"freehand"|"wand", "points"?: [{"x", "y"}] (freehand), "seed"?: {"x", "y"}, "tolerance"?: 32, "contiguous"?: true (wand), "invert"?: false} — takes that part out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: "rect"|"ellipse"|"freehand"|"wand", "points"?: [{"x", "y"}] (freehand), "seed"?: {"x", "y"}, "tolerance"?: 32, "contiguous"?: true (wand), "invert"?: false, "fill"?: false} — takes that part out of the picture as a placed picture, selected, leaving it see-through (with "fill", filled from round it); returns {"id": id}"#,
         always,
         lift
     ),
@@ -205,7 +205,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Delete Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false} (as image.lift) — makes that part of the picture see-through"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false, "fill"?: false} (as image.lift) — makes that part of the picture see-through, or with "fill" fills it from round it (takes something out of the picture)"#,
         always,
         erase
     ),
@@ -226,6 +226,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         r##"{"lines"?: [{"text": "…", "rect": {"x", "y", "w", "h"}, "words"?: [{"text", "rect"}]}] (the text read off the picture, in its pixels; without them the text reader the host lent reads the picture as shown), "find"?: ["email", "phone", "card", "address"] (default: all four), "cover"?: "blur"|"pixelate"|"box", "color"?: "#000000" (the box's), "area"?: {"x", "y", "w", "h"} (only there), "select"?: true} → {"hidden": n, "ids": [id], "email": n, "phone": n, "card": n, "address": n, "lines": n} — each email address, phone number, card number (Luhn's check) and line like a postal address found is covered by an annotation of its own, to move or delete. Faces aren't found"##,
         always,
         crate::details::hide
+    ),
+    cmd!(
+        "image.simplify",
+        "Simplify",
+        "Image",
+        None,
+        r##"{"tolerance"?: 12 (0 to 64 a channel: how far apart neighbouring pixels of one area may be), "lines"?: [{"text", "rect", "words"?}] (the lines of text read; without them the reader the host lent reads them, unless "read" is false, else they are found from the marks), "read"?: true, "area"?: {"x", "y", "w", "h"}, "background"?: true, "group"?: true} → {"ids": [id], "blocks": n, "bars": n, "marks": n} — the picture's parts drawn over it as plain shapes under the other annotations: a box of its background's colour, flat boxes for areas of one colour, small boxes for icons and grey bars for lines of text, as one group"##,
+        always,
+        crate::simplify::simplify
     ),
     cmd!(
         "image.eraseStroke",
@@ -797,7 +806,7 @@ fn lift(s: &mut Session, p: &Value) -> Result<Value> {
     let reg = region_param(s, p)?;
     let piece = region::piece(&s.doc.base, &reg).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
     let key = s.doc.add_image(piece)?;
-    s.doc.base = region::erase(&s.doc.base, &reg);
+    s.doc.base = if boolean(p, "fill", false) { region::fill_around(&s.doc.base, &reg) } else { region::erase(&s.doc.base, &reg) };
     // Where it was, looking as it did (no shadow, no border).
     let style = Style { shadow: false, ..Kind::Image.default_style() };
     let id = s.doc.add(Shape::Image { rect: reg.rect(), image: key }, style)?;
@@ -807,7 +816,7 @@ fn lift(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn erase(s: &mut Session, p: &Value) -> Result<Value> {
     let reg = region_param(s, p)?;
-    s.doc.base = region::erase(&s.doc.base, &reg);
+    s.doc.base = if boolean(p, "fill", false) { region::fill_around(&s.doc.base, &reg) } else { region::erase(&s.doc.base, &reg) };
     Ok(Value::Null)
 }
 

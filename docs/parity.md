@@ -101,8 +101,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Cut Out: take a strip out and close the gap** | Has (0.1.56) | columns or rows; straight, saw or wave |
 | Blur, pixelate | Has | |
 | **Personal details found and hidden by themselves** | Part | Image › Hide Personal Details…: email addresses, phone numbers, card numbers (Luhn's check) and address lines, found by Grab Text's reader and covered with a blur, a pixelate or a solid box, each an annotation to move or delete; Windows only; faces aren't found (no face model with a clear open licence) |
-| Simplify (screen parts drawn as plain shapes) | Missing | |
-| Lift a button or a block and move it, filling where it was | Missing | |
+| **Simplify (screen parts drawn as plain shapes)** | Has | Image › Simplify: areas of one colour become flat boxes in their colour, icons small boxes, lines of text grey bars (from Grab Text's lines on Windows, from the marks themselves elsewhere); one group under the other annotations |
+| **Lift a button or a block and move it, filling where it was** | Has | the Selection tool's "Fill where a moved part was", and Fill from Round It to take something out |
 | Edit text in the picture, in a matching font | Missing | |
 | Step numbers that count themselves | Has | |
 | **Steps as letters or Roman numerals; other badge shapes** | Has | A, B, C, a, b, c, I, II, III, i, ii, iii, each counting on its own; circle, rounded square, square, diamond, hexagon, pin |
@@ -286,6 +286,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 10. Magic wand, an eraser, ellipse and freehand selections; invert the selection.
 11. Templates; several pictures combined into one.
 12. Personal details hidden by themselves: emails, phone and card numbers, addresses (Windows; not faces).
+13. Simplify; a part of the picture lifted and moved, filled where it was.
 
 **Still to build, in this order**
 
@@ -306,7 +307,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. Tags, favourites, and captures sorted by program.
 16. A picture per click made into a how-to guide.
 17. Groups, pushing later clips along, locked and solo tracks, clip colours.
-18. Simplify; lift and move parts; edit text in place.
+18. Edit text in place.
 19. Print; batch changes; captures on a timer or at a set time.
 20. Cutting words from the transcript; filler words taken out.
 21. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing

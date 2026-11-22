@@ -10,6 +10,7 @@ pub mod details;
 pub mod fx;
 pub mod registry;
 pub mod session;
+pub mod simplify;
 pub mod video;
 
 pub use registry::{COMMANDS, CommandSpec, describe, find, merge_style, parse_object};

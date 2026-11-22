@@ -513,7 +513,22 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
         if ui.add_enabled(any, egui::Button::new("Invert")).on_hover_text("Everything but the area (Ctrl+Shift+I)").clicked() {
             ed.invert_area();
         }
+        if ui
+            .add_enabled(any, egui::Button::new("Fill from Round It"))
+            .on_hover_text("Take what is in the area out of the picture: the colours round it close over it")
+            .clicked()
+        {
+            ed.fill_area_from_round(&ctx);
+        }
     });
+    ui.add_space(8.0);
+    if ui
+        .checkbox(&mut ed.settings.fill_lifted, "Fill where a moved part was")
+        .on_hover_text("A part of the picture dragged away leaves its place filled from the colours round it, not see-through")
+        .changed()
+    {
+        ed.services.save_settings(&ed.settings);
+    }
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(

@@ -306,6 +306,116 @@ pub fn blend_in(r: &Raster, done: &Raster, reg: &Region) -> Raster {
     out
 }
 
+/// The picture with what is in `reg` filled from round it: from the pixels just outside it
+/// inwards, a ring at a time, each pixel the average of its neighbours already known (a flat
+/// background closes over seamlessly; a gradient is carried in). Blended at its soft edges. With
+/// nothing round it (all of the picture), it is made see-through.
+pub fn fill_around(r: &Raster, reg: &Region) -> Raster {
+    let (pw, ph) = (r.width() as usize, r.height() as usize);
+    // The box worked in: the region's, with a pixel round it to fill from.
+    let x0 = (reg.x as usize).saturating_sub(1);
+    let y0 = (reg.y as usize).saturating_sub(1);
+    let x1 = (reg.x as usize + reg.w as usize + 1).min(pw);
+    let y1 = (reg.y as usize + reg.h as usize + 1).min(ph);
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w == 0 || h == 0 {
+        return r.clone();
+    }
+    let src = r.pixels();
+    let mut colour = vec![[0f32; 4]; w * h];
+    let mut known = vec![false; w * h];
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = ((x0 + x) as u32, (y0 + y) as u32);
+            let i = y * w + x;
+            if reg.coverage(px, py) == 0 {
+                let j = ((y0 + y) * pw + x0 + x) * 4;
+                if let (Some(c), Some(p)) = (colour.get_mut(i), src.get(j..j + 4)) {
+                    *c = [f32::from(p[0]), f32::from(p[1]), f32::from(p[2]), f32::from(p[3])];
+                }
+                if let Some(k) = known.get_mut(i) {
+                    *k = true;
+                }
+            }
+        }
+    }
+    if !known.iter().any(|k| *k) {
+        return erase(r, reg);
+    }
+    let near: [(isize, isize, f32); 8] =
+        [(-1, 0, 2.0), (1, 0, 2.0), (0, -1, 2.0), (0, 1, 2.0), (-1, -1, 1.0), (1, -1, 1.0), (-1, 1, 1.0), (1, 1, 1.0)];
+    let neighbour = |i: usize, dx: isize, dy: isize| -> Option<usize> {
+        let (x, y) = ((i % w) as isize + dx, (i / w) as isize + dy);
+        (x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h).then(|| y as usize * w + x as usize)
+    };
+    // The first ring: the pixels to fill that touch one known.
+    let mut ring: Vec<usize> = (0..w * h)
+        .filter(|&i| {
+            !known.get(i).copied().unwrap_or(true)
+                && near.iter().any(|(dx, dy, _)| neighbour(i, *dx, *dy).is_some_and(|n| known.get(n).copied().unwrap_or(false)))
+        })
+        .collect();
+    let mut queued = vec![false; w * h];
+    for &i in &ring {
+        if let Some(q) = queued.get_mut(i) {
+            *q = true;
+        }
+    }
+    while !ring.is_empty() {
+        let mut done = Vec::with_capacity(ring.len());
+        for &i in &ring {
+            let (mut sum, mut weight) = ([0f32; 4], 0f32);
+            for (dx, dy, wt) in near {
+                if let Some(n) = neighbour(i, dx, dy)
+                    && known.get(n).copied().unwrap_or(false)
+                    && let Some(c) = colour.get(n)
+                {
+                    for (s, v) in sum.iter_mut().zip(c) {
+                        *s += v * wt;
+                    }
+                    weight += wt;
+                }
+            }
+            if weight > 0.0 {
+                done.push((i, sum.map(|s| s / weight)));
+            }
+        }
+        let mut next = Vec::new();
+        for (i, c) in done {
+            if let Some(slot) = colour.get_mut(i) {
+                *slot = c;
+            }
+            if let Some(k) = known.get_mut(i) {
+                *k = true;
+            }
+        }
+        for &i in &ring {
+            for (dx, dy, _) in near {
+                if let Some(n) = neighbour(i, dx, dy)
+                    && !known.get(n).copied().unwrap_or(true)
+                    && !queued.get(n).copied().unwrap_or(true)
+                {
+                    if let Some(q) = queued.get_mut(n) {
+                        *q = true;
+                    }
+                    next.push(n);
+                }
+            }
+        }
+        ring = next;
+    }
+    // The region's box of the picture, filled, blended back in at the region's soft edges.
+    let Some(mut filled) = r.crop(reg.x, reg.y, reg.w, reg.h) else { return r.clone() };
+    let fw = reg.w as usize;
+    for (k, p) in filled.pixels_mut().as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (x, y) = (reg.x as usize + k % fw - x0, reg.y as usize + k / fw - y0);
+        if let Some(c) = colour.get(y * w + x) {
+            *p = c.map(|v| v.round().clamp(0.0, 255.0) as u8);
+        }
+    }
+    blend_in(r, &filled, reg)
+}
+
 /// The pixels an eraser `width` pixels wide passes over along `points`, on a picture of
 /// `pw`×`ph`. None when it passes over none.
 pub fn stroke(pw: u32, ph: u32, points: &[Pt], width: f32) -> Result<Option<Region>, RasterError> {
@@ -377,6 +487,33 @@ mod tests {
         assert!(region(&r, Rect::default(), &AreaShape::Wand { seed: Pt::new(-1.0, 5.0), tolerance: 10, contiguous: true }, false).is_none());
         // Everything inverted is nothing.
         assert!(region(&r, Rect::new(0.0, 0.0, 40.0, 30.0), &AreaShape::Rect, true).is_none());
+    }
+
+    #[test]
+    fn a_hole_is_filled_from_round_it() {
+        let r = pic();
+        // The middle square, taken out: the white round it closes over it.
+        let sq = region(&r, Rect::new(14.0, 9.0, 8.0, 8.0), &AreaShape::Rect, false).unwrap();
+        let filled = fill_around(&r, &sq);
+        for (x, y) in [(15, 10), (17, 12), (20, 15)] {
+            assert_eq!(filled.pixel(x, y), Some(Color::WHITE), "{x},{y}");
+        }
+        // The rest is as it was (the corner square too).
+        assert_eq!(filled.pixel(2, 2), r.pixel(2, 2));
+        // Between two colours, a hole takes some of each.
+        let mut halves = Raster::filled(20, 10, Color::rgb(0, 0, 0)).unwrap();
+        for (i, p) in halves.pixels_mut().chunks_mut(4).enumerate() {
+            if i % 20 >= 10 {
+                p.copy_from_slice(&[200, 200, 200, 255]);
+            }
+        }
+        let mid = region(&halves, Rect::new(6.0, 2.0, 8.0, 6.0), &AreaShape::Ellipse, false).unwrap();
+        let f = fill_around(&halves, &mid);
+        let (left, right) = (f.pixel(7, 5).unwrap(), f.pixel(12, 5).unwrap());
+        assert!(left.r < right.r, "{left:?} {right:?}");
+        // All of the picture: nothing round it, so it is made see-through.
+        let all = region(&r, Rect::new(0.0, 0.0, 40.0, 30.0), &AreaShape::Rect, false).unwrap();
+        assert_eq!(fill_around(&r, &all).pixel(5, 5).map(|c| c.a), Some(0));
     }
 
     #[test]
