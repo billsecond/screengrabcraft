@@ -838,11 +838,102 @@ pub struct CapturePreset {
     /// Its own shortcut, if it has one.
     #[serde(deserialize_with = "or_none")]
     pub hotkey: Option<Hotkey>,
+    /// Effects added to the picture as it's taken.
+    #[serde(deserialize_with = "or_default")]
+    pub effects: PresetEffects,
+    /// Where its captures are saved, instead of the captures folder (none: the captures folder).
+    #[serde(deserialize_with = "or_none")]
+    pub folder: Option<String>,
+    /// The file format its captures are saved in, instead of the settings' (none: the settings').
+    #[serde(deserialize_with = "or_none")]
+    pub format: Option<ImageFormat>,
 }
 
 impl Default for CapturePreset {
     fn default() -> CapturePreset {
-        CapturePreset { name: "New preset".to_string(), area: PresetArea::Region, delay_secs: 0, after: AfterCapture::default(), hotkey: None }
+        CapturePreset {
+            name: "New preset".to_string(),
+            area: PresetArea::Region,
+            delay_secs: 0,
+            after: AfterCapture::default(),
+            hotkey: None,
+            effects: PresetEffects::default(),
+            folder: None,
+            format: None,
+        }
+    }
+}
+
+/// The widest border and the largest corner a preset's effects have, in pixels.
+pub const PRESET_BORDER_MAX: u32 = 100;
+pub const PRESET_RADIUS_MAX: u32 = 200;
+
+/// Effects a capture preset adds to its picture as it's taken, made by the editor's own commands
+/// (as Batch Changes makes them), in this order: grey, the border, the round corners, the torn
+/// edge, the shadow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PresetEffects {
+    /// In shades of grey.
+    pub grayscale: bool,
+    /// A border this many pixels wide; 0 is none.
+    pub border: u32,
+    pub border_color: crate::Color,
+    /// Corners rounded to this radius in pixels; 0 is square.
+    pub round_corners: u32,
+    /// The bottom edge torn off.
+    pub torn_edge: bool,
+    /// A soft shadow under it.
+    pub shadow: bool,
+}
+
+impl Default for PresetEffects {
+    fn default() -> PresetEffects {
+        PresetEffects { grayscale: false, border: 0, border_color: crate::Color::BLACK, round_corners: 0, torn_edge: false, shadow: false }
+    }
+}
+
+impl PresetEffects {
+    /// Whether there are any.
+    pub fn any(&self) -> bool {
+        !self.steps().is_empty()
+    }
+
+    /// The commands that make them (the id and its parameters), in order.
+    pub fn steps(&self) -> Vec<(String, serde_json::Value)> {
+        use serde_json::json;
+        let mut steps = Vec::new();
+        if self.grayscale {
+            steps.push(("effect.grayscale".to_string(), json!({})));
+        }
+        if self.border > 0 {
+            steps.push(("effect.border".to_string(), json!({"width": self.border.min(PRESET_BORDER_MAX), "color": self.border_color.to_hex()})));
+        }
+        if self.round_corners > 0 {
+            steps.push(("effect.roundCorners".to_string(), json!({"radius": self.round_corners.min(PRESET_RADIUS_MAX)})));
+        }
+        if self.torn_edge {
+            steps.push(("effect.tornEdge".to_string(), json!({"bottom": true})));
+        }
+        if self.shadow {
+            steps.push(("effect.shadow".to_string(), json!({})));
+        }
+        steps
+    }
+
+    /// What they are, in a few words ("Border, Shadow"), or none.
+    pub fn describe(&self) -> Option<String> {
+        let names: Vec<&str> = [
+            (self.grayscale, "Grey"),
+            (self.border > 0, "Border"),
+            (self.round_corners > 0, "Round corners"),
+            (self.torn_edge, "Torn edge"),
+            (self.shadow, "Shadow"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        (!names.is_empty()).then(|| names.join(", "))
     }
 }
 
@@ -853,7 +944,22 @@ impl CapturePreset {
         self.name = self.name.chars().filter(|c| !c.is_control()).take(PRESET_NAME_MAX).collect();
         self.area = self.area.clamped();
         self.delay_secs = self.delay_secs.min(60);
+        self.effects.border = self.effects.border.min(PRESET_BORDER_MAX);
+        self.effects.round_corners = self.effects.round_corners.min(PRESET_RADIUS_MAX);
+        self.folder = self.folder.map(|f| f.trim().to_string()).filter(|f| !f.is_empty() && !f.chars().any(char::is_control));
         self
+    }
+
+    /// The settings its capture is kept with: its own folder and file format, where it has them.
+    pub fn keep_with(&self, s: &Settings) -> Settings {
+        let mut s = s.clone();
+        if let Some(f) = self.folder.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+            s.folder = Some(f.to_string());
+        }
+        if let Some(format) = self.format {
+            s.format = format;
+        }
+        s
     }
 
     /// Its name as menus show it, the `n`th of the list: `Preset n` when it has none.
@@ -861,6 +967,20 @@ impl CapturePreset {
         let name = self.name.trim();
         if name.is_empty() { format!("Preset {n}") } else { name.to_string() }
     }
+}
+
+/// The preset a script names (`--preset "Docs shot"`): by its name as menus show it, in any case,
+/// or by its number in the list (from 1).
+pub fn preset_named(presets: &[CapturePreset], name: &str) -> Option<usize> {
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    presets
+        .iter()
+        .enumerate()
+        .position(|(i, p)| p.title(i + 1).to_lowercase() == name)
+        .or_else(|| name.parse::<usize>().ok().filter(|n| (1..=presets.len()).contains(n)).map(|n| n - 1))
 }
 
 /// The capture service's settings (`settings.json`).
@@ -1353,6 +1473,9 @@ mod tests {
                 delay_secs: 3,
                 after: AfterCapture { show_bar: false, open_editor: false, copy: true, save: false },
                 hotkey: Some(Hotkey::new(true, true, false, false, "D")),
+                effects: PresetEffects { border: 3, shadow: true, ..PresetEffects::default() },
+                folder: Some("D:/Docs/Shots".into()),
+                format: Some(ImageFormat::Jpeg),
             },
             CapturePreset { name: "Wide".into(), area: PresetArea::Shape { w: 16, h: 9 }, ..CapturePreset::default() },
             CapturePreset { name: "Page".into(), area: PresetArea::Scrolling, ..CapturePreset::default() },
@@ -1383,6 +1506,49 @@ mod tests {
         assert_eq!(s.presets[0].delay_secs, 60);
         assert_eq!(s.presets[1].area, PresetArea::Shape { w: 1, h: SHAPE_MAX });
         assert_eq!(s.presets[2].name.chars().count(), PRESET_NAME_MAX);
+    }
+
+    #[test]
+    fn a_presets_effects_are_its_commands_in_order_and_its_folder_and_format_its_own() {
+        let none = PresetEffects::default();
+        assert!(!none.any() && none.describe().is_none());
+        let all = PresetEffects { grayscale: true, border: 500, border_color: crate::Color::WHITE, round_corners: 12, torn_edge: true, shadow: true };
+        let ids: Vec<String> = all.steps().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["effect.grayscale", "effect.border", "effect.roundCorners", "effect.tornEdge", "effect.shadow"]);
+        assert_eq!(all.steps()[1].1, serde_json::json!({"width": PRESET_BORDER_MAX, "color": "#FFFFFF"}), "at most the widest");
+        assert_eq!(all.describe().as_deref(), Some("Grey, Border, Round corners, Torn edge, Shadow"));
+        // Its folder and format, else the settings'.
+        let s = Settings { folder: Some("C:/Captures".into()), format: ImageFormat::Png, ..Settings::default() };
+        let own = CapturePreset { folder: Some(" D:/Docs ".into()), format: Some(ImageFormat::Jpeg), ..CapturePreset::default() };
+        let kept = own.keep_with(&s);
+        assert_eq!((kept.folder.as_deref(), kept.format), (Some("D:/Docs"), ImageFormat::Jpeg));
+        let kept = CapturePreset::default().keep_with(&s);
+        assert_eq!((kept.folder.as_deref(), kept.format), (Some("C:/Captures"), ImageFormat::Png));
+        // A blank or broken folder is none; one from an older version has none of these.
+        let p =
+            CapturePreset { folder: Some("  ".into()), effects: PresetEffects { round_corners: 9999, ..none }, ..CapturePreset::default() }.clamped();
+        assert_eq!((p.folder, p.effects.round_corners), (None, PRESET_RADIUS_MAX));
+        let old: CapturePreset = serde_json::from_str(r#"{"name": "Old", "area": "window"}"#).unwrap();
+        assert_eq!((old.effects, old.folder, old.format), (none, None, None));
+        let odd: CapturePreset = serde_json::from_str(r#"{"name": "Odd", "effects": 5, "folder": [1], "format": "tiff"}"#).unwrap();
+        assert_eq!((odd.name.as_str(), odd.effects, odd.folder, odd.format), ("Odd", none, None, None));
+    }
+
+    #[test]
+    fn a_preset_is_found_by_its_name_or_its_number() {
+        let presets = vec![
+            CapturePreset { name: "Docs shot".into(), ..CapturePreset::default() },
+            CapturePreset { name: " ".into(), ..CapturePreset::default() },
+            CapturePreset { name: "3".into(), ..CapturePreset::default() },
+        ];
+        assert_eq!(preset_named(&presets, "docs SHOT "), Some(0));
+        assert_eq!(preset_named(&presets, "Preset 2"), Some(1), "as menus name it");
+        assert_eq!(preset_named(&presets, "2"), Some(1));
+        assert_eq!(preset_named(&presets, "3"), Some(2), "its name first");
+        assert_eq!(preset_named(&presets, "4"), None);
+        assert_eq!(preset_named(&presets, "0"), None);
+        assert_eq!(preset_named(&presets, ""), None);
+        assert_eq!(preset_named(&presets, "Nothing"), None);
     }
 
     #[test]

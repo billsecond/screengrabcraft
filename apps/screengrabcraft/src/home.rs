@@ -8,7 +8,7 @@ use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, vec2};
 use screengrabcraft_desktop::{launch, paths, service};
 use screengrabcraft_model::settings::KEYS;
 use screengrabcraft_model::settings::VideoOptions;
-use screengrabcraft_model::settings::{FIXED_MAX, FIXED_MIN, PRESETS_MAX, SHAPES};
+use screengrabcraft_model::settings::{FIXED_MAX, FIXED_MIN, PRESET_BORDER_MAX, PRESET_RADIUS_MAX, PRESETS_MAX, PresetEffects, SHAPES};
 use screengrabcraft_model::{CaptureMode, CapturePreset, Hotkey, Hotkeys, ImageFormat, PresetArea, Theme};
 use screengrabcraft_ui::icons::{self, Icon};
 use screengrabcraft_ui::theme::Tokens;
@@ -670,6 +670,8 @@ fn presets_editor(ui: &mut Ui, presets: &mut Vec<CapturePreset>) -> Option<usize
                         }
                     });
                     ui.end_row();
+                    preset_effects_row(ui, i, &mut p.effects);
+                    preset_file_rows(ui, i, p);
                     hotkey_row_in(ui, "Shortcut", ("preset-key", i), &mut p.hotkey, None);
                 });
             });
@@ -694,6 +696,68 @@ fn presets_editor(ui: &mut Ui, presets: &mut Vec<CapturePreset>) -> Option<usize
         );
     }
     run
+}
+
+/// A preset's effects, added to its picture as it's taken: a grid row.
+fn preset_effects_row(ui: &mut Ui, i: usize, fx: &mut PresetEffects) {
+    ui.label("Effects");
+    ui.horizontal_wrapped(|ui| {
+        let mut border = fx.border > 0;
+        if ui.checkbox(&mut border, "Border").changed() {
+            fx.border = if border { 4 } else { 0 };
+        }
+        if border {
+            ui.add(egui::DragValue::new(&mut fx.border).range(1..=PRESET_BORDER_MAX).suffix(" px"));
+            let c = fx.border_color;
+            let mut c32 = Color32::from_rgb(c.r, c.g, c.b);
+            let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, format!("Preset {} border colour", i + 1)));
+            if r.on_hover_text("The border's colour").changed() {
+                fx.border_color = screengrabcraft_model::Color::rgb(c32.r(), c32.g(), c32.b());
+            }
+        }
+        let mut round = fx.round_corners > 0;
+        if ui.checkbox(&mut round, "Round corners").changed() {
+            fx.round_corners = if round { 16 } else { 0 };
+        }
+        if round {
+            ui.add(egui::DragValue::new(&mut fx.round_corners).range(1..=PRESET_RADIUS_MAX).suffix(" px"));
+        }
+        ui.checkbox(&mut fx.torn_edge, "Torn edge").on_hover_text("The bottom edge torn off");
+        ui.checkbox(&mut fx.shadow, "Shadow");
+        ui.checkbox(&mut fx.grayscale, "Grey");
+    });
+    ui.end_row();
+}
+
+/// Where a preset's captures are saved and as what, when it saves them: grid rows.
+fn preset_file_rows(ui: &mut Ui, i: usize, p: &mut CapturePreset) {
+    let t = Tokens::get(ui.ctx());
+    ui.label("Saved in");
+    ui.horizontal(|ui| {
+        match p.folder.as_deref() {
+            Some(f) => ui.label(RichText::new(f).monospace().size(12.0)),
+            None => ui.label(RichText::new("The captures folder").color(t.muted)),
+        };
+        if widgets::button(ui, "Choose…").on_hover_text("A folder of this preset's own").clicked()
+            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+        {
+            p.folder = Some(dir.to_string_lossy().to_string());
+        }
+        if p.folder.is_some() && widgets::button(ui, "Captures Folder").on_hover_text("Save them with the rest").clicked() {
+            p.folder = None;
+        }
+    });
+    ui.end_row();
+    ui.label("As");
+    let shown = p.format.map_or_else(|| "As in Settings".to_string(), |f| f.label().to_string());
+    egui::ComboBox::from_id_salt(("preset-format", i)).width(190.0).selected_text(shown).show_ui(ui, |ui| {
+        ui.selectable_value(&mut p.format, None, "As in Settings");
+        for f in ImageFormat::ALL {
+            ui.selectable_value(&mut p.format, Some(f), f.label());
+        }
+    });
+    ui.end_row();
 }
 
 fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
@@ -1141,7 +1205,7 @@ mod tests {
     /// a wait, and captured; another is removed.
     #[test]
     fn a_preset_is_added_set_up_captured_and_removed() {
-        let mut h = Harness::builder().with_size(vec2(620.0, 760.0)).build_ui_state(
+        let mut h = Harness::builder().with_size(vec2(680.0, 980.0)).build_ui_state(
             |ui, (presets, run): &mut (Vec<CapturePreset>, Option<usize>)| {
                 screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Dark);
                 egui::CentralPanel::default().show(ui, |ui| {
@@ -1169,6 +1233,18 @@ mod tests {
             h.run_steps(1);
         }
         assert_eq!(h.state().0[0].after, AfterCapture { show_bar: false, open_editor: false, copy: true, save: false });
+        // A border and a shadow added as it's taken; saved as JPEG.
+        for what in ["Border", "Shadow"] {
+            h.get_by_label(what).click();
+            h.run_steps(2);
+        }
+        h.get_by_label("Preset 1 border colour");
+        assert_eq!(h.state().0[0].effects, PresetEffects { border: 4, shadow: true, ..PresetEffects::default() });
+        h.get_by_value("As in Settings").click();
+        h.run_steps(2);
+        h.get_by_label("JPEG").click();
+        h.run_steps(2);
+        assert_eq!((h.state().0[0].format, h.state().0[0].folder.as_deref()), (Some(ImageFormat::Jpeg), None));
         h.get_by_label("Add a preset").click();
         h.run_steps(2);
         assert_eq!(h.state().0.len(), 2);

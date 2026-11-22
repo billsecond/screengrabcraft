@@ -44,7 +44,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | HDR screens captured in their true colours | Missing | |
 | QR codes made or read | Has | the Image menu: Read QR Codes (the picture or the area selected) shows each code's words to copy, a web address shown and never opened; Make a QR Code… puts one of your words on the picture as a picture annotation. On this computer, every system |
 | Pictures sent from a phone | Not planned | needs a network service |
-| Capture presets (an area type, effects and where it goes, under one shortcut) | Part | the area (any kind, a shape or a set size), a wait, what happens after and a shortcut of its own, on the Capture page and in the tray; no effects added at capture time, and one captures folder and format for all |
+| Capture presets (an area type, effects and where it goes, under one shortcut) | Has | the area (any kind, a shape or a set size), a wait, what happens after, effects added as it's taken (border, round corners, torn edge, shadow, grey), a folder and a file format of its own and a shortcut of its own; on the Capture page, in the tray, and `screengrabcraft --preset <name>` for scripts and a desktop's own shortcuts |
 | After a capture: copy, open in the editor, save, or ask with a bar | Has | |
 | Every shortcut changed or turned off | Has | |
 
@@ -148,7 +148,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Watermark (a picture or words) | Missing | |
 | Capture details written on the picture (time, program) | Missing | |
 | Effects on a selected area only | Missing | |
-| Effects added at capture time | Missing | |
+| Effects added at capture time | Has | by a capture preset: border, round corners, torn edge, shadow, grey, made by the editor's own effects |
 
 ## Pictures: changing, keeping, sharing
 
@@ -287,7 +287,9 @@ By how much someone using it every day would miss each one. Built ones move to a
 12. Captures pinned at the front of the Recent strip (#83).
 13. A countdown before a recording; a still from the camera (#84).
 14. A border round the camera, and the camera mirrored (#87).
-15. QR codes read and made.
+15. QR codes read and made (#91).
+16. Capture presets with effects added as they're taken, a folder and a format of their own, and
+    `--preset <name>`.
 
 **Still to build, in this order**
 

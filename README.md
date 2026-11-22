@@ -71,8 +71,10 @@ off too (the video editor never is: it stays as you left it).
 
 **Capture presets** (Settings › Capture presets) are captures of your own making: a region, a region
 held to a shape (16:9, square…) or of a set size placed with a click, a freehand area, a window, the screen, all
-screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); and a
-shortcut of its own. They're on the Capture page and in the tray menu (Capture Presets).
+screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); effects
+added as it's taken (a border, round corners, a torn edge, a shadow, grey); a folder and a file format
+of its own; and a shortcut of its own. They're on the Capture page and in the tray menu (Capture
+Presets), and `screengrabcraft --preset <name>` takes one from a script or a desktop's own shortcut.
 
 **Captures on a timer** (the Capture page, or Captures on a Timer in the tray): one every so many
 seconds of the screen with the pointer, all screens or the last area, saved straight to the
@@ -281,7 +283,8 @@ screengrabcraft-cli service status
 
 The capture service takes requests too, which is how a capture is bound to a key on a Wayland
 desktop (where programs can't take global shortcuts): `screengrabcraft --capture region`,
-`--capture adjust|window|screen|all|repeat|scrolling|gif|text`, `--delay 5`, `--settings`, `--quit`.
+`--capture adjust|window|screen|all|repeat|scrolling|gif|text`, a capture preset by its name or number
+(`--preset "Docs shot"` or `--capture preset:2`), `--delay 5`, `--settings`, `--quit`.
 
 ## Platforms
 

@@ -438,10 +438,22 @@ impl Service {
             match a.as_str() {
                 "--capture" => {
                     acted = true;
-                    match it.next().and_then(|m| CaptureMode::from_arg(m)) {
-                        Some(m) => self.start(m, 0),
-                        None => self.notify("Unknown capture", "Use region, window, screen, all, repeat, scrolling or gif.", None, None, true),
+                    let what = it.next().map(String::as_str).unwrap_or_default();
+                    match (what.get(..7).filter(|p| p.eq_ignore_ascii_case("preset:")), CaptureMode::from_arg(what)) {
+                        (Some(_), _) => self.run_preset_named(what.get(7..).unwrap_or_default()),
+                        (None, Some(m)) => self.start(m, 0),
+                        (None, None) => self.notify(
+                            "Unknown capture",
+                            "Use region, window, screen, all, repeat, scrolling, gif, or preset:<its name>.",
+                            None,
+                            None,
+                            true,
+                        ),
                     }
+                }
+                "--preset" => {
+                    acted = true;
+                    self.run_preset_named(it.next().map(String::as_str).unwrap_or_default());
                 }
                 "--delay" => {
                     acted = true;
@@ -619,6 +631,25 @@ impl Service {
         let Some(p) = self.settings.presets.get(i).cloned() else { return };
         log::info!("capture preset {} ({})", i + 1, p.area.describe());
         self.start_with(p.area.mode(), p.delay_secs, Some(p));
+    }
+
+    /// Starts the preset a script names (`--preset <name>`, `--capture preset:<name>`): by its name
+    /// or its number in the list. One that isn't there is said.
+    pub fn run_preset_named(&mut self, name: &str) {
+        match screengrabcraft_model::settings::preset_named(&self.settings.presets, name) {
+            Some(i) => self.run_preset(i),
+            None => {
+                let name: String = name.trim().chars().filter(|c| !c.is_control()).take(60).collect();
+                log::warn!("no capture preset is called {name:?}");
+                self.notify(
+                    "No such capture preset",
+                    format!("None is called “{name}”. Presets are named in Settings › Capture presets (or give its number)."),
+                    None,
+                    None,
+                    true,
+                );
+            }
+        }
     }
 
     /// The same from the service's own window, which goes first so it isn't in the picture.
@@ -946,14 +977,19 @@ impl Service {
     /// library notes.
     pub fn finish_from(&mut self, pic: Raster, source: &str, window: Option<Window>, action: Action) {
         let after = self.after();
-        self.preset = None;
+        // A preset's capture: its effects added now, kept in its own folder and format.
+        let preset = self.preset.take();
+        let pic = match &preset {
+            Some(p) => with_effects(pic, &p.effects),
+            None => pic,
+        };
         let (save, copy, edit) = what_to_keep(action, &after);
         // While recording, nothing comes up over the screen being recorded: the capture is saved
         // (and copied, if it's to be), and opened in the editor once the recording is over.
         let (save, edit, held) = held_while_recording(save, edit, self.recording.is_some() || self.restarting.is_some());
         self.keeping_held = held;
         self.keeping = true;
-        let settings = self.settings.clone();
+        let settings = preset.as_ref().map_or_else(|| self.settings.clone(), |p| p.keep_with(&self.settings));
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         // On Windows the picture goes to the clipboard on the worker, once the editor has it (a
@@ -1668,6 +1704,26 @@ fn keep(
     Ok(Done { saved, copied, edited, thumb })
 }
 
+/// A preset's effects added to its capture, by the editor's own commands (as Batch Changes adds
+/// them); the capture as it was if they can't be.
+fn with_effects(pic: Raster, effects: &screengrabcraft_model::settings::PresetEffects) -> Raster {
+    let steps = effects.steps();
+    if steps.is_empty() {
+        return pic;
+    }
+    let t = Instant::now();
+    match screengrabcraft_engine::batch::apply(pic.clone(), &steps) {
+        Ok(done) => {
+            log::info!("capture: the preset's effects added in {} ms", t.elapsed().as_millis());
+            done
+        }
+        Err(e) => {
+            log::warn!("capture: the preset's effects couldn't be added: {e}");
+            pic
+        }
+    }
+}
+
 /// The capture written: where it was saved (if it was), and the file for the editor (if it goes
 /// there).
 pub(crate) fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
@@ -1703,6 +1759,22 @@ pub(crate) fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_presets_effects_are_added_to_its_capture() {
+        use screengrabcraft_model::settings::PresetEffects;
+        let pic = Raster::filled(40, 30, screengrabcraft_model::Color::WHITE).unwrap();
+        let same = with_effects(pic.clone(), &PresetEffects::default());
+        assert!(same.same_pixels(&pic), "none: as it was, not even copied");
+        let red = screengrabcraft_model::Color::rgb(200, 0, 0);
+        let framed = with_effects(pic.clone(), &PresetEffects { border: 5, border_color: red, grayscale: true, ..PresetEffects::default() });
+        assert_eq!((framed.width(), framed.height()), (50, 40));
+        assert_eq!(framed.pixel(1, 1), Some(red), "the border after the grey, in its colour");
+        // With a shadow it grows more, and its corners are see-through where rounded.
+        let soft = with_effects(pic, &PresetEffects { round_corners: 8, shadow: true, ..PresetEffects::default() });
+        assert!(soft.width() > 40 && soft.height() > 30);
+        assert!(soft.pixel(0, 0).is_some_and(|c| c.a < 255));
+    }
 
     #[test]
     fn grab_texts_notice_shows_how_the_text_begins() {
