@@ -718,6 +718,30 @@ fn place(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({"layer": layer, "item": item}))
 }
 
+/// Narration recorded over the video (a sound file the host wrote): into the media bin, and on a
+/// sound layer of its own named for it from where it was recorded.
+fn add_narration(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::layers::{Anim, AnimKind, Item, LayerKind, MediaItem, MediaKind, What};
+    let path = text(p, "path")?.filter(|t| !t.trim().is_empty()).ok_or_else(|| EngineError::Params("`path` is the take's file".to_string()))?;
+    let duration = int(p, "duration")?;
+    if duration < screengrabcraft_media::timeline::MIN_CLIP_US {
+        return Err(EngineError::Params("the take is too short to keep".to_string()));
+    }
+    let name = text(p, "name")?.unwrap_or_else(|| "Narration".to_string());
+    let media = s.timeline.add_media(MediaItem { id: 0, name, path, kind: MediaKind::Sound, duration, width: 0, height: 0 }).map_err(edit_err)?;
+    let none = Anim { kind: AnimKind::None, len: 0 };
+    let item = Item { len: duration, what: What::Media { id: media }, intro: none, outro: none, ..Item::default() };
+    let (layer, item) = s.timeline.place(item, None, int(p, "at")?).map_err(edit_err)?;
+    // Named for what it is: Narration, Narration 2 …
+    let taken = |n: &str| s.timeline.layers.iter().any(|l| l.name == n && l.kind == LayerKind::Sound);
+    let name = (1..=screengrabcraft_media::layers::MAX_LAYERS + 1)
+        .map(|k| if k == 1 { "Narration".to_string() } else { format!("Narration {k}") })
+        .find(|n| !taken(n))
+        .unwrap_or_else(|| "Narration".to_string());
+    s.timeline.set_layer(layer, None, None, Some(&name)).map_err(edit_err)?;
+    Ok(json!({"media": media, "layer": layer, "item": item}))
+}
+
 /// A theme given as `"theme"`: `{"name", "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}`,
 /// if it's given (null: none).
 fn theme_param(p: &Value) -> Result<Option<screengrabcraft_media::yours::VideoTheme>> {
@@ -2016,6 +2040,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: place,
     },
     VideoCommand {
+        id: "video.addNarration",
+        label: "Record Narration",
+        params: r#"{"path": the take's sound file, "duration": µs, "at": µs, "name"?: text}: into the media bin and on a sound layer of its own (Narration, Narration 2 …) from there"#,
+        run: add_narration,
+    },
+    VideoCommand {
         id: "video.applyTheme",
         label: "Apply the Theme",
         params: r##"{"theme": {"name"?, "main", "mark", "words": "#rrggbb", "font": "sans"|"slanted"|"mono"}}: every title, lower third, callout and graphic on the layers in its colours (main: bars, boxes and cards; mark: highlights, circles, arrows, clicks; words: a plain title) and its face; how many changed"##,
@@ -3190,5 +3220,27 @@ mod layer_tests {
         let placed = other.timeline.item(id(&p, "layer").unwrap(), id(&p, "item").unwrap()).unwrap().clone();
         assert!(matches!(&placed.what, What::Text { color, font: TextFont::Slanted, .. } if color == "#123456"));
         assert!(other.execute("video.applyTheme", &json!({"theme": 5})).is_err());
+    }
+
+    #[test]
+    fn narration_goes_on_a_sound_layer_of_its_own_where_it_was_recorded() {
+        use screengrabcraft_media::layers::{LayerKind, MediaKind};
+        let mut s = session();
+        let p = json!({"path": "C:/Captures/Talk narration.wav", "name": "Talk narration.wav", "duration": 2_500_000, "at": 1_000_000});
+        let v = s.execute("video.addNarration", &p).unwrap();
+        assert_eq!(s.undo_label(), Some("Record Narration"));
+        let l = s.timeline.layer(id(&v, "layer").unwrap()).unwrap().clone();
+        assert_eq!((l.name.as_str(), l.kind), ("Narration", LayerKind::Sound));
+        assert_eq!((l.items[0].at, l.items[0].len), (1_000_000, 2_500_000));
+        assert_eq!(s.timeline.media[0].kind, MediaKind::Sound);
+        // A second take over it: a layer of its own too.
+        let p2 = json!({"path": "C:/Captures/Talk narration (2).wav", "duration": 1_000_000, "at": 1_500_000});
+        let v2 = s.execute("video.addNarration", &p2).unwrap();
+        assert_eq!(s.timeline.layer(id(&v2, "layer").unwrap()).unwrap().name, "Narration 2");
+        for bad in
+            [json!({"path": "", "duration": 1_000_000, "at": 0}), json!({"path": "a.wav", "duration": 5, "at": 0}), json!({"path": "a.wav", "at": 0})]
+        {
+            assert!(s.execute("video.addNarration", &bad).is_err(), "{bad}");
+        }
     }
 }

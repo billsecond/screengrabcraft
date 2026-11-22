@@ -612,7 +612,7 @@ impl VideoView {
                 }
             });
             ui.label(
-                RichText::new("For a narrated video, record your voice with Video Production and bring the recording in here.")
+                RichText::new("For a narrated video, talk over them with Record Narration (the side panel, with nothing chosen).")
                     .size(12.0)
                     .color(t.muted),
             );

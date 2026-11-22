@@ -204,6 +204,19 @@ impl Kept {
 /// Why nothing is kept here.
 pub const NOT_KEPT: &str = "Templates and themes of your own are kept by ScreenGrabCraft Editor on the desktop";
 
+/// Why narration can't be recorded here.
+pub const NO_NARRATION: &str = "Narration is recorded by ScreenGrabCraft Editor on the desktop, where it can use a microphone";
+
+/// A narration being recorded: the microphone on until it's finished (dropping it turns it off
+/// and keeps nothing).
+pub trait NarrationTake: Send {
+    /// How loud it is just now, 0 to 1 (for a meter).
+    fn level(&self) -> f32;
+    /// Turns the microphone off; the take written to a file of its own (a WAV beside the
+    /// recording): where, and how long it is (µs).
+    fn finish(self: Box<Self>) -> Result<(String, u64), String>;
+}
+
 /// Sound the host is playing; dropping it stops it.
 pub trait SoundOut {
     /// Where on the timeline the sound heard now is (µs), when the device says.
@@ -389,6 +402,23 @@ pub trait Services {
         _rate: i32,
     ) -> Option<Box<dyn SoundOut>> {
         None
+    }
+
+    /// Whether narration can be recorded here (there are microphones to ask for).
+    fn can_narrate(&self) -> bool {
+        false
+    }
+
+    /// The microphones narration can be recorded with, by name. Listing them turns none on.
+    fn microphones(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Turns a microphone on (by name; none: the one Video Production records with, as the
+    /// Recorder has it, else the system's default) to record narration for the recording at
+    /// `beside`: the take is written beside it when it's finished.
+    fn record_narration(&self, _mic: Option<&str>, _beside: &str) -> Result<Box<dyn NarrationTake>, String> {
+        Err(NO_NARRATION.to_string())
     }
 
     /// Opens a file in the program the system uses for it (a video in its player).

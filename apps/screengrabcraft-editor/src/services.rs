@@ -16,7 +16,8 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{
-    DialogResult, Filter, Kept, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
+    DialogResult, Filter, Kept, NarrationTake, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport,
+    VideoFormat, VideoJob,
 };
 
 /// Files larger than this are not opened.
@@ -487,6 +488,20 @@ impl Services for DesktopServices {
                 None
             }
         }
+    }
+
+    fn can_narrate(&self) -> bool {
+        cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux"))
+    }
+
+    fn microphones(&self) -> Vec<String> {
+        screengrabcraft_capture::audio::microphones()
+    }
+
+    fn record_narration(&self, mic: Option<&str>, beside: &str) -> Result<Box<dyn NarrationTake>, String> {
+        // None: the one Video Production records with, as the Recorder has it.
+        let mic = mic.map(str::to_string).or_else(|| store::load_settings().production.microphone_name);
+        Ok(Box::new(crate::narration::start(mic, Path::new(beside))?))
     }
 
     fn open_with_system(&self, path: &str) {

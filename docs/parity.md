@@ -75,7 +75,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Drawing on the screen while recording | Missing | |
 | A recording survives a crash | Part | the recording file is written as it goes |
 | Desktop icons hidden while recording | Missing | |
-| **A narrated video made from pictures** | Part | the Media bin's Put the Pictures in Turn: every picture one after another from the playhead, a few seconds each, as large as fits the video, fading from one to the next. They go over a recording (hide its screen for just them), not into a new empty video, and the voice isn't recorded over them in the editor: it's recorded with Video Production and brought in |
+| **A narrated video made from pictures** | Part | the Media bin's Put the Pictures in Turn: every picture one after another from the playhead, a few seconds each, as large as fits the video, fading from one to the next. They go over a recording (hide its screen for just them), not into a new empty video; the voice is recorded over them in the editor (Narration) |
 
 ## Editing a picture
 
@@ -241,7 +241,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Background noise taken out** | Has | the steady noise learnt from the track itself and turned down, on this computer (no trained model) |
 | **Levels evened out; music lowered under the voice** | Has | Even Out the Levels gives each sound track the volume that makes it as loud as the others (measured on this computer); Lower the rest under the voice turns the computer's sound, music and media down while the microphone is heard |
 | **Sound of a video apart from its picture; mono** | Has | a video on a layer: Separate the Sound (its panel or right button) puts its sound on a sound layer of its own at the same moment and leaves the video silent, each then moved, trimmed and deleted on its own. Mix to Mono: a sound track (its right button, its clip's panel) or a sound layer |
-| Narration recorded over the video | Missing | |
+| **Narration recorded over the video** | Has | the side panel's Narration: Record Narration turns the microphone on (Video Production's, or another chosen from the list) and plays the video from the playhead without its sound while you speak; Pause, Stop or the video's end ends it, and the take (a WAV beside the recording) goes on a sound layer of its own, Narration, from where it began. Desktop only: greyed out in the browser |
 | Captions made on this computer (You and Others) | Has | |
 | Captions shown, burned in, saved as `.srt` and `.txt` | Has | |
 | Transcript pane: who said what, click to go there | Has | |
@@ -308,6 +308,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once (#123).
 32. Templates and themes of your own in the video editor (#124).
 33. The sound turned round while playing backwards (J), as recorded (#125).
+34. Narration recorded over the video in the editor, onto a sound layer of its own.
 
 **Still to build, in this order**
 

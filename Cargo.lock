@@ -5416,6 +5416,7 @@ dependencies = [
  "log",
  "pollster 0.4.0",
  "rfd",
+ "screengrabcraft-capture",
  "screengrabcraft-desktop",
  "screengrabcraft-media",
  "screengrabcraft-model",

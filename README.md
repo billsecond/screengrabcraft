@@ -235,8 +235,13 @@ the picture editor to the video editor. Its timeline has a row for each track:
   They're ordinary zooms, to move, change or delete.
 - **Pictures in turn**: the Media bin's Put the Pictures in Turn places every picture there one
   after another from the playhead, a few seconds each (as many as asked), each as large as fits
-  the video, fading from one to the next. Hide the screen's track for a video of just them; for
-  a narrated one, record your voice with Video Production and bring that recording in too.
+  the video, fading from one to the next. Hide the screen's track for a video of just them, and
+  talk over them with Narration.
+- **Narration**: the side panel's Record Narration turns the microphone on (the one Video
+  Production records with, or another from its list) and plays the video from the playhead
+  without its sound while you speak. Pause (Space), Stop Narration or the video's end ends it: the
+  take is saved as a WAV beside the recording and goes on a sound layer of its own, Narration, from
+  where it began. The microphone is on only while it records.
 - **Motion blur**: the side panel's Motion Blur (or a zoom's panel) blurs what moves along its way:
   items sliding, growing or moving by their keyframes, and zooms going in, out or panning. Each
   such moment is drawn five times over the shutter and blended, so it takes longer to make.
