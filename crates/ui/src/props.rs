@@ -421,6 +421,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
         quick::section(ed, ui, kind);
         ui.add_space(8.0);
     }
+    if kind == Kind::Stamp {
+        crate::stamps::library(ed, ui);
+        ui.add_space(8.0);
+    }
     // A quick style may just have changed the selection.
     let first = first(ed);
     ui.separator();
@@ -1026,11 +1030,10 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
         if o.round.is_some() && kind.family() == Kind::Rect {
             ed.settings.options.entry(Kind::Rect).or_default().sides = None;
         }
-        // Each stamp starts in its own colour.
         if let Some(k) = o.stamp {
-            let mut style = ed.tool_style(Kind::Stamp);
-            style.fill = k.color();
-            ed.settings.styles.insert(Kind::Stamp, style);
+            ed.own_stamp = None;
+            choose_stamp(ed, &ctx, k);
+            return;
         }
         set_options(ed, &ctx, kind, o);
         if let Some(tool) = new_tool
@@ -1039,6 +1042,27 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
             ed.set_tool(tool);
         }
     }
+}
+
+/// Picks a stamp for the Stamp tool, in its own colour, and puts it (and its colour) on the
+/// selected stamps, one undo step.
+pub(crate) fn choose_stamp(ed: &mut Editor, ctx: &egui::Context, k: StampKind) {
+    let mut style = ed.tool_style(Kind::Stamp);
+    style.fill = k.color();
+    ed.settings.styles.insert(Kind::Stamp, style);
+    ed.set_tool_options(Kind::Stamp, ShapeOptions { stamp: Some(k), ..ShapeOptions::default() });
+    let ids: Vec<u64> = ed
+        .session
+        .selected()
+        .into_iter()
+        .filter(|id| ed.session.doc.get(*id).is_some_and(|o| o.shape.kind() == Kind::Stamp))
+        .map(|id| id.0)
+        .collect();
+    if !ids.is_empty() {
+        let fill = serde_json::to_value(k.color()).unwrap_or(serde_json::Value::Null);
+        ed.run(ctx, "object.look", serde_json::json!({ "ids": ids, "options": { "stamp": k }, "style": { "fill": fill } }));
+    }
+    ed.services.save_settings(&ed.settings);
 }
 
 /// A button with an arrow pointing where a callout's tail goes.

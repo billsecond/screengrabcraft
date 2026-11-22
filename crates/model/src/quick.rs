@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
-use crate::object::{ArrowHeads, BadgeShape, CalloutForm, Kind, ShapeOptions, StampKind, Style, TailSpot};
+use crate::object::{ArrowHeads, BadgeShape, CalloutForm, Kind, ShapeOptions, Style, TailSpot};
 
 /// A look for a tool: the style it draws with, and what it sets about the shape.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -227,13 +227,14 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
         }
         Kind::Stamp => {
             drop(row);
-            for k in StampKind::ALL {
-                let look = QuickStyle::new(kind, Style { fill: k.color(), ..base }, ShapeOptions { stamp: Some(k), ..none });
-                out.push(Preset { name: k.label().to_string(), look });
-            }
-            // The stamp in use, in the theme's colours.
+            // The stamp in use (picked in the stamp library) in the theme's colours, with a white
+            // ring and with a dark one.
             for s in &theme.swatches {
                 out.push(Preset { name: s.name.to_string(), look: QuickStyle::new(kind, Style { fill: s.color, ..base }, none) });
+            }
+            for s in &theme.swatches {
+                let dark = Style { fill: s.color, stroke: DARK_INK, ..base };
+                out.push(Preset { name: format!("{}, dark ring", s.name), look: QuickStyle::new(kind, dark, none) });
             }
         }
         Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Magnify => {

@@ -553,6 +553,79 @@ impl Services for DesktopServices {
         self.text_ready.get_or_init(screengrabcraft_desktop::text::ready).clone()?;
         Ok(Arc::new(SystemText))
     }
+
+    fn keeps_own_stamps(&self) -> bool {
+        stamps_dir().is_some()
+    }
+
+    fn own_stamps(&self) -> Vec<String> {
+        let Some(dir) = stamps_dir() else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let png = p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("png"));
+                if png { p.file_stem().and_then(|s| s.to_str()).map(str::to_string) } else { None }
+            })
+            .filter(|n| stamp_name_ok(n))
+            .collect();
+        names.sort();
+        names.truncate(screengrabcraft_ui::stamps::MAX_OWN);
+        names
+    }
+
+    fn own_stamp(&self, name: &str) -> Option<Raster> {
+        let bytes = read_limited(&stamp_file(name)?).ok()?;
+        screengrabcraft_render::codec::decode(&bytes).ok()
+    }
+
+    fn add_own_stamp(&self, png: &[u8]) -> Result<String, String> {
+        let dir = stamps_dir().ok_or("this run keeps no settings, so no stamps of your own")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let base = format!("stamp-{ms}");
+        let mut name = base.clone();
+        for i in 1..1000 {
+            if !dir.join(format!("{name}.png")).exists() {
+                break;
+            }
+            name = format!("{base}-{i}");
+        }
+        store::write_atomic(&dir.join(format!("{name}.png")), png).map_err(|e| e.to_string())?;
+        log::info!("kept a picture as a stamp: {name}.png, {} bytes", png.len());
+        Ok(name)
+    }
+
+    fn remove_own_stamp(&self, name: &str) -> Result<(), String> {
+        let file = stamp_file(name).ok_or("there is no such stamp")?;
+        std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        log::info!("took {name}.png out of the stamps");
+        Ok(())
+    }
+}
+
+/// The folder pictures of your own are kept in as stamps: `stamps` in the settings folder (none
+/// in a run that keeps no settings).
+fn stamps_dir() -> Option<PathBuf> {
+    if paths::no_prefs() {
+        return None;
+    }
+    Some(paths::settings_dir()?.join("stamps"))
+}
+
+/// Whether `name` is one the editor gives a stamp (letters, figures, - and _): nothing that
+/// reaches out of the folder.
+fn stamp_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A stamp's file, for a name the editor gave it.
+fn stamp_file(name: &str) -> Option<PathBuf> {
+    if !stamp_name_ok(name) {
+        return None;
+    }
+    Some(stamps_dir()?.join(format!("{name}.png")))
 }
 
 /// Grab Text with the system's own text reader ([`screengrabcraft_desktop::text`]).
