@@ -296,7 +296,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 20. The how-to guide saved as a word-processor document and as slides (#101).
 21. A still from the camera at the camera's own size (#103).
 22. A recording cut short by a crash kept and said when the service starts again (#104).
-23. Open menus, drop-downs and tooltips snapped to like windows (Windows).
+23. Open menus, drop-downs and tooltips snapped to like windows (Windows; #107).
 
 **Still to build, in this order**
 
