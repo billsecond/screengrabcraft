@@ -73,7 +73,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Pointer highlighted, spotlit or magnified; click sounds | Missing | |
 | Keys pressed shown in the video | Missing | |
 | Drawing on the screen while recording | Part | a pen, arrows, boxes and step numbers, drawn into the recording and fading after a few seconds (F8, the controls or the tray); Windows only, and not on a recording of every screen at once |
-| A recording survives a crash | Part | the recording file is written as it goes |
+| A recording survives a crash | Has | the recording file is written as it goes; when the capture service starts again after a crash, it keeps what was recorded (Record Video's moved from the temporary folder to the captures folder as "Recording cut short …") and says so, Edit opening it in the video editor |
 | Desktop icons hidden while recording | Missing | |
 | A narrated video made from pictures | Missing | |
 
@@ -294,7 +294,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 18. The camera full screen, swapped with the screen while recording (#98).
 19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
 20. The how-to guide saved as a word-processor document and as slides (#101).
-21. A still from the camera at the camera's own size.
+21. A still from the camera at the camera's own size (#103).
+22. A recording cut short by a crash kept and said when the service starts again.
 
 **Still to build, in this order**
 

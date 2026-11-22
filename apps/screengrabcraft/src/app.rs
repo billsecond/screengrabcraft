@@ -48,6 +48,8 @@ pub enum Msg {
     TextRead(Result<String, String>),
     /// A still from the camera, or why there is none.
     CameraStill(Result<Raster, String>),
+    /// A recording a crash cut short, found when the service started: where it's kept.
+    CutShort(PathBuf),
 }
 
 /// The window a capture was taken from: its program and its title.
@@ -254,6 +256,14 @@ impl Service {
         guard.set_waker(Box::new(move || wake.request_repaint()));
         // A service that went down during a capture left the editor hidden.
         editor_back();
+        // A recording it was making when it went down is kept, and the owner told.
+        let (t, c, captures) = (tx.clone(), ctx.clone(), paths::captures_dir(&settings));
+        let _ = std::thread::Builder::new().name("cut short".into()).spawn(move || {
+            if let Some(p) = record::cut_short(&captures) {
+                let _ = t.send(Msg::CutShort(p));
+                c.request_repaint();
+            }
+        });
         Service {
             settings,
             keys,
@@ -578,6 +588,11 @@ impl Service {
                 }
             }
             Msg::Picture(pic, source) => self.finish(pic, &source, Action::Default),
+            Msg::CutShort(p) => {
+                log::info!("a recording cut short is kept: {}", file_name(&p));
+                let name = file_name(&p);
+                self.notify("A recording was cut short: what it got is kept", name, Some(p), None, false);
+            }
             Msg::CameraStill(result) => {
                 self.camera_busy = false;
                 match result {

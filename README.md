@@ -131,7 +131,8 @@ puts the camera full screen with the screen in its corner, and back. Press the r
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
 and opens in the video editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
-sources are in Settings › Recording.
+sources are in Settings › Recording. If ScreenGrabCraft or the computer goes down while it records, what was
+recorded is kept: the next start says so, and Edit opens it in the video editor.
 
 ![The Recorder: the screen, the camera with its picture, the microphone and the computer's sound with their levels, each switched on, and the red Record button](docs/images/recorder.png)
 

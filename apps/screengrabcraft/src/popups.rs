@@ -818,6 +818,29 @@ mod tests {
         popup_harness(notice_size(&view()), Theme::Light, move |ui| notice_ui(ui, &view()))
     }
 
+    /// A recording a crash cut short is said when the service starts again, and opens to edit.
+    #[test]
+    fn a_recording_cut_short_is_said_and_opens_to_edit() {
+        let view = || NoticeView {
+            text: "A recording was cut short: what it got is kept",
+            detail: "Recording cut short 2026-11-21 10.05.00.sgvideo",
+            path: Some(Path::new("Recording cut short 2026-11-21 10.05.00.sgvideo")),
+            thumb: None,
+            error: false,
+        };
+        let mut h = popup_harness(notice_size(&view()), Theme::Light, move |ui| notice_ui(ui, &view()));
+        h.run_steps(2);
+        h.get_by_label("A recording was cut short: what it got is kept");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/notice-cut-short.png"));
+        }
+        h.get_by_label("Edit").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(NoticeChoice::Open));
+    }
+
     #[test]
     fn the_notice_has_its_actions_at_the_bottom_right_and_an_x_to_close_it() {
         let mut h = notice_harness(Some("Capture.png"));

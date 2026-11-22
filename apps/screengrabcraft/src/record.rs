@@ -661,6 +661,96 @@ impl Swaps {
     }
 }
 
+/// The note left in the settings folder while a video records: its recording's file. A
+/// recording that ends (kept, thrown away, or failed) takes it away; one cut short (the service
+/// or the computer went down) leaves it, and the service finds the recording when it starts again
+/// ([`cut_short`]).
+const UNDER_WAY: &str = "recording-under-way.txt";
+
+/// The largest note read back.
+const UNDER_WAY_MAX: u64 = 64 * 1024;
+
+fn under_way_note() -> Option<PathBuf> {
+    if screengrabcraft_desktop::paths::no_prefs() {
+        return None;
+    }
+    screengrabcraft_desktop::paths::settings_dir().map(|d| d.join(UNDER_WAY))
+}
+
+/// The recording under way, noted for as long as this lives.
+struct UnderWay(Option<PathBuf>);
+
+impl UnderWay {
+    fn note(file: &std::path::Path, created: &str) -> UnderWay {
+        UnderWay::note_at(under_way_note().filter(|_| screengrabcraft_desktop::paths::ensure_settings_dir().is_some()), file, created)
+    }
+
+    /// [`UnderWay::note`] in the note `note` (none: nowhere).
+    fn note_at(note: Option<PathBuf>, file: &std::path::Path, created: &str) -> UnderWay {
+        if let Some(n) = &note {
+            // Its file, and when it was started (for its name if it's kept), a line each.
+            let text = format!("{}\n{}\n", file.to_string_lossy(), created.replace(char::is_control, " "));
+            if let Err(e) = screengrabcraft_desktop::store::write_atomic(n, text.as_bytes()) {
+                log::warn!("the recording couldn't be noted as under way: {e}");
+            }
+        }
+        UnderWay(note)
+    }
+}
+
+impl Drop for UnderWay {
+    fn drop(&mut self) {
+        if let Some(n) = &self.0 {
+            let _ = std::fs::remove_file(n);
+        }
+    }
+}
+
+/// The recording a crash cut short, if the last one was (its note is read and taken away):
+/// Record Video's, in the temporary folder, is moved to `captures` (as "Recording cut short …"),
+/// so what was recorded is kept; Video Production's is where it was. None when there's none.
+pub fn cut_short(captures: &std::path::Path) -> Option<PathBuf> {
+    cut_short_from(&under_way_note()?, &std::env::temp_dir().join("ScreenGrabCraft"), captures)
+}
+
+/// [`cut_short`] from the note `note`, Record Video's recordings being kept in `temp`.
+fn cut_short_from(note: &std::path::Path, temp: &std::path::Path, captures: &std::path::Path) -> Option<PathBuf> {
+    let size = std::fs::metadata(note).ok()?.len();
+    let text = (size <= UNDER_WAY_MAX).then(|| std::fs::read_to_string(note).ok()).flatten();
+    let _ = std::fs::remove_file(note);
+    let text = text?;
+    let mut lines = text.lines();
+    let file = PathBuf::from(lines.next()?.trim());
+    let is_recording = file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(recording::EXT));
+    if !is_recording || !file.is_file() {
+        return None;
+    }
+    if file.parent() != Some(temp) {
+        return Some(file);
+    }
+    // Its name: when it was started, as far as it's safe in a file name.
+    let created: String = lines
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(40)
+        .map(|c| match c {
+            ':' => '.',
+            'T' => ' ',
+            c => c,
+        })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ' '))
+        .collect();
+    let name = if created.is_empty() { "Recording cut short".to_string() } else { format!("Recording cut short {created}") };
+    std::fs::create_dir_all(captures).ok()?;
+    let to = crate::app::free_path(captures, &name, recording::EXT);
+    if std::fs::rename(&file, &to).is_err() {
+        std::fs::copy(&file, &to).ok()?;
+        let _ = std::fs::remove_file(&file);
+    }
+    Some(to)
+}
+
 /// The edits Record Video's MP4 is made with: every track whole, the camera full screen where
 /// it was switched on.
 fn made_with(rec: &recording::Recording, full: Vec<[u64; 2]>) -> Timeline {
@@ -1099,6 +1189,8 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     }
     let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
     let file = std::fs::File::create(&file_path).map_err(|e| format!("{}: {e}", file_path.display()))?;
+    // Noted until it ends here, so a crash doesn't lose it (see `cut_short`).
+    let _under_way = UnderWay::note(&file_path, &plan.created);
     let mut writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
     // The camera's look chosen in the Recorder (mirrored, a border): the recording starts with it
     // as its edits, which the video editor can change.
@@ -1928,6 +2020,50 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(result.is_err());
+    }
+
+    /// A recording under way is noted, and the note goes when it ends; one a crash left is kept
+    /// when the service starts again.
+    #[test]
+    fn a_recording_cut_short_by_a_crash_is_kept_and_said() {
+        let base = std::env::temp_dir().join(format!("sgc-cut-short-{}", std::process::id()));
+        let (temp, captures, elsewhere) = (base.join("ScreenGrabCraft"), base.join("Captures"), base.join("Videos"));
+        for d in [&temp, &captures, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let note = base.join(UNDER_WAY);
+        // Record Video's, in the temporary folder: moved to the captures folder, named for when.
+        let file = temp.join(format!("recording-1.{}", recording::EXT));
+        std::fs::write(&file, b"SGVIDEO\x01 what was written").unwrap();
+        let crashed = UnderWay::note_at(Some(note.clone()), &file, "2026-11-21T10:05:00");
+        assert!(note.is_file(), "noted while it records");
+        std::mem::forget(crashed);
+        let kept = cut_short_from(&note, &temp, &captures).unwrap();
+        assert_eq!(kept, captures.join(format!("Recording cut short 2026-11-21 10.05.00.{}", recording::EXT)));
+        assert!(kept.is_file() && !file.exists() && !note.exists());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"SGVIDEO\x01 what was written");
+        // Video Production's: where it was, said.
+        let production = elsewhere.join(format!("Production.{}", recording::EXT));
+        std::fs::write(&production, b"SGVIDEO\x01").unwrap();
+        std::mem::forget(UnderWay::note_at(Some(note.clone()), &production, "x"));
+        assert_eq!(cut_short_from(&note, &temp, &captures), Some(production.clone()));
+        assert!(production.is_file());
+        // One that ended takes its note away: nothing to find.
+        drop(UnderWay::note_at(Some(note.clone()), &production, "x"));
+        assert!(!note.exists() && cut_short_from(&note, &temp, &captures).is_none());
+        // A note of a file that isn't there or isn't a recording, or junk: nothing, the note gone.
+        for text in [
+            format!("{}\n", elsewhere.join("gone.sgvideo").display()),
+            format!("{}\n", production.with_extension("png").display()),
+            "\u{0}\u{1}junk".to_string(),
+            "x".repeat(UNDER_WAY_MAX as usize + 10),
+            String::new(),
+        ] {
+            std::fs::write(&note, &text).unwrap();
+            assert!(cut_short_from(&note, &temp, &captures).is_none());
+            assert!(!note.exists());
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
