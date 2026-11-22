@@ -119,11 +119,13 @@ impl Composer {
             && let Some(src) = timeline.source_time(i, t)
             && let Some(cam) = self.camera_at(stream, src)
         {
+            let plate = self.rec.plate();
             if screen_shown {
-                overlay_camera(&mut out, &cam, timeline);
+                overlay_camera_keyed(&mut out, &cam, timeline, plate.as_deref());
             } else {
-                // Recorded (or shown) without the screen: the camera is the picture.
-                fill_camera(&mut out, &cam);
+                // Recorded (or shown) without the screen: the camera is the picture (what's
+                // taken away from it is black).
+                fill_camera_keyed(&mut out, &cam, &timeline.camera, plate.as_deref());
             }
         }
         // The layers over it (media, titles, overlays, transitions), the shortcuts pressed, the
@@ -346,11 +348,30 @@ pub fn draw_captions(out: &mut Raster, lines: &[&Cue]) {
 /// Draws the camera's picture over the whole of `out`, as large as fits, keeping its shape (a
 /// recording with no screen).
 pub fn fill_camera(out: &mut Raster, cam: &Raster) {
+    fill_camera_keyed(out, cam, &crate::timeline::CameraLayout::default(), None);
+}
+
+/// How much of each pixel of the camera's picture (as drawn, `pic`) is kept: what the layout
+/// takes away (a colour, or the background learnt in `plate`) gone; none when nothing is taken
+/// away (or the background hasn't been learnt yet). A colour's glow is taken out of `pic`.
+pub fn camera_keep(pic: &mut Raster, layout: &crate::timeline::CameraLayout, plate: Option<&crate::keyer::Plate>) -> Option<Vec<u8>> {
+    use crate::keyer::{Remove, colour_key, plate_key};
+    match layout.remove {
+        Remove::Nothing => None,
+        Remove::Colour => Some(colour_key(pic, layout.key_colour, layout.key_tolerance)),
+        Remove::Background => plate.map(|p| plate_key(pic, p)),
+    }
+}
+
+/// [`fill_camera`], with what the layout takes away from the camera's picture taken away (black
+/// there).
+pub fn fill_camera_keyed(out: &mut Raster, cam: &Raster, layout: &crate::timeline::CameraLayout, plate: Option<&crate::keyer::Plate>) {
     let (ow, oh) = (out.width(), out.height());
     let f = (f64::from(ow) / f64::from(cam.width().max(1))).min(f64::from(oh) / f64::from(cam.height().max(1)));
     let cw = ((f64::from(cam.width()) * f).round() as u32).clamp(1, ow.max(1));
     let ch = ((f64::from(cam.height()) * f).round() as u32).clamp(1, oh.max(1));
-    let Some(small) = (if (cw, ch) == (cam.width(), cam.height()) { Some(cam.clone()) } else { scale(cam, cw, ch) }) else { return };
+    let Some(mut small) = (if (cw, ch) == (cam.width(), cam.height()) { Some(cam.clone()) } else { scale(cam, cw, ch) }) else { return };
+    let keep = camera_keep(&mut small, layout, plate);
     let (x0, y0) = ((ow.saturating_sub(cw) / 2) as usize, (oh.saturating_sub(ch) / 2) as usize);
     let (sw, ow_px) = (small.width() as usize, ow as usize);
     if sw == 0 {
@@ -361,6 +382,14 @@ pub fn fill_camera(out: &mut Raster, cam: &Raster) {
         let i = ((y0 + y) * ow_px + x0) * 4;
         if let Some(d) = dst.get_mut(i..i + row.len()) {
             d.copy_from_slice(row);
+            if let Some(keep) = &keep {
+                for (x, p) in d.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                    let a = f32::from(keep.get(y * sw + x).copied().unwrap_or(255)) / 255.0;
+                    for c in p.iter_mut().take(3) {
+                        *c = (f32::from(*c) * a).round() as u8;
+                    }
+                }
+            }
         }
     }
 }
@@ -401,6 +430,12 @@ pub fn camera_rect(layout: &crate::timeline::CameraLayout, aspect: f32, ow: f32,
 
 /// Draws the camera's picture in its place on `out`, in its shape.
 pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
+    overlay_camera_keyed(out, cam, timeline, None);
+}
+
+/// [`overlay_camera`], with what the layout takes away from the camera's picture (a colour, or
+/// the background learnt in `plate`) showing the screen there.
+pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline, plate: Option<&crate::keyer::Plate>) {
     let layout = timeline.camera;
     let (ow, oh) = (out.width() as f32, out.height() as f32);
     let aspect = cam.width() as f32 / cam.height().max(1) as f32;
@@ -412,14 +447,16 @@ pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
     } else {
         Some(cam.clone())
     };
-    let Some(small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
+    let Some(mut small) = source.and_then(|s| scale(&s, cw as u32, ch as u32)) else { return };
+    let keep = camera_keep(&mut small, &layout, plate);
     // (It may be part off the picture: only what is on it is drawn.)
     let (x0, y0) = (x0 as i64, y0 as i64);
     let (sw, ow_px, oh_px) = (small.width() as usize, out.width() as i64, out.height() as i64);
     let dst = out.pixels_mut();
     for (y, row) in small.pixels().chunks_exact(sw * 4).enumerate() {
         for (x, p) in row.as_chunks::<4>().0.iter().enumerate() {
-            let a = coverage(layout.shape, x as f32, y as f32, cw, ch);
+            let kept = keep.as_ref().map_or(1.0, |k| f32::from(k.get(y * sw + x).copied().unwrap_or(255)) / 255.0);
+            let a = coverage(layout.shape, x as f32, y as f32, cw, ch) * kept;
             if a <= 0.0 {
                 continue;
             }
@@ -903,6 +940,66 @@ mod tests {
         tl.set_muted(screen, false).unwrap();
         let f = c.frame(&tl, 6_000_000);
         assert_eq!(count(&f, &is_grey), 0);
+    }
+
+    #[test]
+    fn the_cameras_green_screen_or_learnt_background_shows_the_screen_through() {
+        use crate::keyer::{GREEN, Remove};
+        // A white screen; a camera of a green screen with a red box (the person) in its middle.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 200, height: 100, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 80, height: 60, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(200, 100, Color::WHITE).unwrap()).unwrap();
+        let mut cam = Raster::filled(80, 60, Color::rgb(GREEN[0], GREEN[1], GREEN[2])).unwrap();
+        for y in 10..60u32 {
+            for x in 30..50u32 {
+                let i = ((y * 80 + x) * 4) as usize;
+                cam.pixels_mut()[i..i + 3].copy_from_slice(&[0xE0, 0x20, 0x20]);
+            }
+        }
+        let jpeg = screengrabcraft_render::encode(&cam, screengrabcraft_model::ImageFormat::Jpeg, 95).unwrap();
+        for t in 0..10u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        tl.camera.shape = CameraShape::Rectangle;
+        tl.camera.size = 0.5;
+        let mut c = Composer::new(r.clone(), &tl, 200, 100);
+        let count = |f: &Raster, pick: &dyn Fn(&[u8; 4]) -> bool| f.pixels().as_chunks::<4>().0.iter().filter(|p| pick(p)).count();
+        let green = |p: &[u8; 4]| p[1] > 120 && p[0] < 80;
+        let red = |p: &[u8; 4]| p[0] > 180 && p[1] < 80;
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &green) > 1000, "the green screen as recorded");
+        // Its colour taken away: the screen shows there, the person stays.
+        tl.camera.remove = Remove::Colour;
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &green) < 20, "{}", count(&f, &green));
+        assert!(count(&f, &red) > 300);
+        // The background learnt instead (no plate yet: the camera as it is, until it's learnt).
+        tl.camera.remove = Remove::Background;
+        assert!(count(&c.frame(&tl, 500_000), &green) > 1000);
+        let mut matte = vec![0u8; 80 * 60];
+        for y in 10..60usize {
+            for x in 30..50usize {
+                matte[y * 80 + x] = 255;
+            }
+        }
+        let learnt = crate::keyer::learn(&[(
+            screengrabcraft_render::decode(&jpeg).unwrap(),
+            screengrabcraft_render::matte::Matte::new(80, 60, matte).unwrap(),
+        )]);
+        r.set_plate(learnt.unwrap());
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &green) < 60, "{}", count(&f, &green));
+        assert!(count(&f, &red) > 300);
+        // Without the screen the camera is the picture: what's taken away is black.
+        tl.camera.remove = Remove::Colour;
+        tl.set_muted(0, true).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &green) < 20 && count(&f, &red) > 300);
     }
 
     #[test]
