@@ -119,6 +119,9 @@ fn answer(
         Ok(Some(s)) => {
             if is_video {
                 progress.store((feed.next_frame.saturating_mul(1000) / feed.frames.max(1)).min(999) as u32, Ordering::SeqCst);
+            } else if feed.frames == 0 {
+                // Just the sound: how far it has got.
+                progress.store((feed.next_sample.saturating_mul(1000) / feed.samples.max(1)).min(999) as u32, Ordering::SeqCst);
             }
             request.SetSample(&s)
         }
@@ -237,6 +240,107 @@ fn transcode(
         return Err(MediaError::Encode(t));
     }
     Ok(())
+}
+
+/// Just the sound of the recording as edited, as an M4A (AAC by Windows' own encoder): written
+/// beside `out` first, then put in place, with the markers as its chapters. `progress` goes from
+/// 0 to 1000; setting `cancel` stops it and leaves nothing behind.
+pub fn export_m4a(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
+    use windows::Media::MediaProperties::AudioEncodingQuality;
+    let length = timeline.length();
+    if length == 0 {
+        return Err(MediaError::Encode("there's nothing left to make a sound file of".to_string()));
+    }
+    let part: PathBuf = out.with_extension("m4a.part");
+    let timeline = Arc::new(timeline.clone());
+    let (inner_progress, inner_cancel, done) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicBool::new(false)), AtomicBool::new(false));
+    let go = || -> Result<(), MediaError> {
+        let err = |e: windows::core::Error| MediaError::Encode(e.message());
+        let feed = Arc::new(Mutex::new(Feed {
+            rec: rec.clone(),
+            timeline: timeline.clone(),
+            composer: Composer::new(rec.clone(), &timeline, 2, 2),
+            media: media.clone(),
+            width: 2,
+            height: 2,
+            fps: 1,
+            // No pictures: every request is for sound.
+            frames: 0,
+            next_frame: 0,
+            samples: compose::to_samples(length),
+            next_sample: 0,
+            trouble: None,
+        }));
+        let sound = AudioStreamDescriptor::Create(&AudioEncodingProperties::CreatePcm(48_000, 2, 16).map_err(err)?).map_err(err)?;
+        let source = MediaStreamSource::CreateFromDescriptor(&sound).map_err(err)?;
+        source.SetCanSeek(false).map_err(err)?;
+        source.SetDuration(TimeSpan { Duration: i64::try_from(length.saturating_mul(10)).unwrap_or(i64::MAX) }).map_err(err)?;
+        let (f, c, p) = (feed.clone(), inner_cancel.clone(), inner_progress.clone());
+        source
+            .SampleRequested(&TypedEventHandler::<MediaStreamSource, MediaStreamSourceSampleRequestedEventArgs>::new(move |_, args| {
+                match args.as_ref() {
+                    Some(a) => answer(&f, &c, &p, a),
+                    None => Ok(()),
+                }
+            }))
+            .map_err(err)?;
+        let profile = MediaEncodingProfile::CreateM4a(AudioEncodingQuality::High).map_err(err)?;
+        profile.SetAudio(&AudioEncodingProperties::CreateAac(48_000, 2, AAC_BITRATE).map_err(err)?).map_err(err)?;
+        std::fs::File::create(&part)?;
+        let file = StorageFile::GetFileFromPathAsync(&windows_path(&part)?).map_err(err)?.join().map_err(err)?;
+        let stream = file.OpenAsync(FileAccessMode::ReadWrite).map_err(err)?.join().map_err(err)?;
+        let transcoder = MediaTranscoder::new().map_err(err)?;
+        let prepared = transcoder.PrepareMediaStreamSourceTranscodeAsync(&source, &stream, &profile).map_err(err)?.join().map_err(err)?;
+        if !prepared.CanTranscode().map_err(err)? {
+            let why = prepared.FailureReason().map_err(err)?;
+            let _ = stream.Close();
+            return Err(MediaError::Encode(format!("Windows can't make this sound file ({why:?})")));
+        }
+        let made = prepared.TranscodeAsync().map_err(err)?.join().map_err(err);
+        let _ = stream.Close();
+        made?;
+        if inner_cancel.load(Ordering::SeqCst) {
+            return Err(MediaError::Encode("cancelled".to_string()));
+        }
+        if let Some(t) = feed.lock().unwrap_or_else(PoisonError::into_inner).trouble.take() {
+            return Err(MediaError::Encode(t));
+        }
+        Ok(())
+    };
+    let made = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            while !done.load(Ordering::SeqCst) {
+                if cancel.load(Ordering::SeqCst) {
+                    inner_cancel.store(true, Ordering::SeqCst);
+                }
+                progress.store(inner_progress.load(Ordering::SeqCst), Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        });
+        let r = if cancel.load(Ordering::SeqCst) { Err(MediaError::Encode("cancelled".to_string())) } else { go() };
+        done.store(true, Ordering::SeqCst);
+        let _ = watcher.join();
+        r
+    });
+    if let Err(e) = made {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    match crate::mp4::add_chapters_to_file(&part, &timeline.chapters()) {
+        Ok(true) => {}
+        Ok(false) => log::warn!("the chapters couldn't be put in the sound file (its index wasn't as expected)"),
+        Err(e) => log::warn!("the chapters couldn't be put in the sound file: {e}"),
+    }
+    std::fs::rename(&part, out)?;
+    progress.store(1000, Ordering::SeqCst);
+    Ok(Exported { width: 0, height: 0, frames: 0, bytes: std::fs::metadata(out)?.len(), duration_us: length })
 }
 
 /// Makes `out` (written beside it first, then put in place) from the recording as edited, with

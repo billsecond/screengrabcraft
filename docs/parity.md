@@ -257,9 +257,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | MP4 that plays everywhere, a smaller AV1 MP4, an animated GIF | Has | |
 | Captions in the picture or beside it | Has | |
 | Show in Folder, Play | Has | |
-| Just the sound (M4A, WAV) | Missing | |
-| A frame saved as a picture | Missing | |
-| Just the chosen stretch | Missing | |
+| **Just the sound (M4A, WAV)** | Has | File › Export Sound: WAV everywhere, M4A (AAC) by Windows' own encoder, so on Windows only |
+| **A frame saved as a picture** | Has | at the recording's own size, in the captures folder; it opens in the picture editor |
+| **Just the chosen stretch** | Has | Export Video with a stretch chosen: its captions and chapters with it |
 | See-through video (WebM) | Missing | |
 | A watermark | Missing | |
 | Several at once (batch) | Missing | |
@@ -280,7 +280,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 5. Sound faded in and out at a clip's ends; background noise taken out of a track (#61).
 6. Captions put right in the transcript: words, split, joined, moved (#64).
 7. The pointer in videos highlighted, spotlit or magnified; its clicks heard (#66).
-8. Markers on the timeline, kept as chapters in the MP4.
+8. Markers on the timeline, kept as chapters in the MP4 (#69).
+9. A frame saved as a picture; just the chosen stretch; just the sound (WAV, M4A).
 
 **Still to build, in this order**
 
@@ -288,25 +289,24 @@ By how much someone using it every day would miss each one. Built ones move to a
 2. Step badges as letters or Roman numerals, and other badge shapes.
 3. Polygons, triangles and stars; curved arrows.
 4. A stamp library with search, emoji, and pictures of your own as stamps.
-5. A frame saved as a picture; just the chosen stretch; just the sound.
-6. Hold a frame.
-7. Keys pressed shown in the video.
-8. Any font on the computer.
-9. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-10. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+5. Hold a frame.
+6. Keys pressed shown in the video.
+7. Any font on the computer.
+8. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+9. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-11. Rotate, group and align annotations; select all of one kind.
-12. Magic wand, eraser, ellipse and freehand selections.
-13. Camera background removed, or a colour removed.
-14. Transitions between clips; keyframe animation.
-15. Drawing on the screen while recording.
-16. Volume along a clip; music lowered under the voice; levels evened out.
-17. Tags, favourites, and captures sorted by program.
-18. Templates; several pictures combined into one.
-19. A picture per click made into a how-to guide.
-20. Groups, pushing later clips along, locked and solo tracks, clip colours.
-21. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-22. Print; batch changes; captures on a timer or at a set time.
-23. Cutting words from the transcript; filler words taken out.
-24. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+10. Rotate, group and align annotations; select all of one kind.
+11. Magic wand, eraser, ellipse and freehand selections.
+12. Camera background removed, or a colour removed.
+13. Transitions between clips; keyframe animation.
+14. Drawing on the screen while recording.
+15. Volume along a clip; music lowered under the voice; levels evened out.
+16. Tags, favourites, and captures sorted by program.
+17. Templates; several pictures combined into one.
+18. A picture per click made into a how-to guide.
+19. Groups, pushing later clips along, locked and solo tracks, clip colours.
+20. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+21. Print; batch changes; captures on a timer or at a set time.
+22. Cutting words from the transcript; filler words taken out.
+23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

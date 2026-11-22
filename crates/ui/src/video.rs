@@ -1238,6 +1238,9 @@ impl VideoView {
         if pressed(cmd(Key::E)) {
             self.open_export(ed, ctx);
         }
+        if pressed(KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S)) {
+            self.save_frame(ed, ctx);
+        }
         if pressed(cmd(Key::Plus)) || pressed(cmd(Key::Equals)) {
             self.zoom_ask = Some(1.25);
         }
@@ -1311,6 +1314,22 @@ impl VideoView {
                     ui.separator();
                     if ui.add_enabled(self.export.is_none(), egui::Button::new("Export Video…").shortcut_text("Ctrl+E")).clicked() {
                         self.open_export(ed, &ctx);
+                        ui.close();
+                    }
+                    if ui
+                        .add_enabled(self.export.is_none(), egui::Button::new("Export Sound…"))
+                        .on_hover_text("Just the sound of the video as edited: WAV, or M4A where Windows makes it")
+                        .clicked()
+                    {
+                        self.open_export_as(ed, &ctx, true);
+                        ui.close();
+                    }
+                    if ui
+                        .add(egui::Button::new("Save the Frame as a Picture").shortcut_text("Ctrl+Shift+S"))
+                        .on_hover_text("The picture at the playhead, in the captures folder; it opens in the Image Editor")
+                        .clicked()
+                    {
+                        self.save_frame(ed, &ctx);
                         ui.close();
                     }
                     if let Some(p) = &self.path
@@ -1689,11 +1708,22 @@ impl VideoView {
                             cut = half(ui, true, "Cut It Out").on_hover_text("Take it out of every track (Del)").clicked();
                             let_go = half(ui, true, "Let Go").on_hover_text("Choose nothing (Esc)").clicked();
                         });
+                        ui.add_space(6.0);
+                        let export = ui
+                            .add_enabled(self.export.is_none(), egui::Button::new("Export the Stretch…").min_size(vec2(wide, 28.0)))
+                            .on_hover_text("Make a video (or a GIF, or just the sound) of just this stretch")
+                            .clicked();
                         if cut {
                             self.delete(ed, &ctx);
                         }
                         if let_go {
                             self.range = None;
+                        }
+                        if export {
+                            self.open_export(ed, &ctx);
+                            if let Some(ExportStep::Choose(c)) = self.export.as_mut() {
+                                c.only_stretch = c.stretch.is_some();
+                            }
                         }
                         if self.range.is_some() {
                             section(ui, "Speed", &mut false);
@@ -2656,6 +2686,11 @@ impl VideoView {
                 }
                 if ui.button("Add a Marker Here").on_hover_text("A named moment: a chapter of the video made").clicked() {
                     self.add_marker(ed, ctx, at);
+                    ui.close();
+                }
+                if ui.button("Save This Frame as a Picture").on_hover_text("In the captures folder; it opens in the Image Editor").clicked() {
+                    self.seek(ed, at, now);
+                    self.save_frame(ed, ctx);
                     ui.close();
                 }
                 self.playing_items(ed, ui, at, now);

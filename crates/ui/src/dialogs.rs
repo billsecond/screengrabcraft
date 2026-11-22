@@ -283,6 +283,7 @@ fn video_shortcuts(ui: &mut Ui) {
             ("Ctrl+wheel", "Zoom the timeline around the pointer"),
             ("Wheel", "Scroll along the timeline"),
             ("Ctrl+E", "Export Video"),
+            ("Ctrl+Shift+S", "Save the frame at the playhead as a picture (it opens in the Image Editor)"),
             ("Ctrl+O", "Open"),
             ("Click the ruler", "Move the playhead there"),
             ("Drag a clip", "Slide it along its track; drag one of its ends to trim it"),

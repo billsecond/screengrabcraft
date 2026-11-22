@@ -1,6 +1,8 @@
-//! Export Video: a window to choose where the video goes, what it's made as and whether its
-//! captions go with it; a window while it's being made, with Cancel; and one when it's made, to
-//! play it or show it selected in its folder.
+//! Export Video: a window to choose where the video goes, what it's made as (a video, a GIF, or
+//! just the sound), whether the whole of it or just the chosen stretch, and whether its captions
+//! go with it; a window while it's being made, with Cancel; and one when it's made, to play it or
+//! show it selected in its folder. And Save the Frame as a Picture: the picture at the playhead,
+//! opened in the Image Editor.
 
 use egui::RichText;
 
@@ -42,6 +44,43 @@ pub struct ExportChoice {
     pub captions: CaptionsIn,
     /// What can be made here, the one every player opens first.
     pub formats: Vec<VideoFormat>,
+    /// The stretch chosen on the timeline when the window opened, if one was: it can be made
+    /// alone.
+    pub stretch: Option<(u64, u64)>,
+    /// Just that stretch is made (else the whole video).
+    pub only_stretch: bool,
+}
+
+/// The captions' choice made to fit what's made: no subtitles beside a GIF (it has no sound),
+/// none on the picture of just the sound.
+fn fit_captions(c: &mut ExportChoice) {
+    if !c.format.has_sound() && c.captions == CaptionsIn::Subtitles {
+        c.captions = CaptionsIn::Picture;
+    }
+    if !c.format.has_picture() && c.captions == CaptionsIn::Picture {
+        c.captions = CaptionsIn::Subtitles;
+    }
+}
+
+/// What a file made is, by its name: words for its windows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Made {
+    Video,
+    Gif,
+    Sound,
+}
+
+impl Made {
+    fn of(path: &str) -> Made {
+        let p = path.to_ascii_lowercase();
+        if p.ends_with(".gif") {
+            Made::Gif
+        } else if p.ends_with(".wav") || p.ends_with(".m4a") {
+            Made::Sound
+        } else {
+            Made::Video
+        }
+    }
 }
 
 /// Export Video's windows, one at a time.
@@ -73,6 +112,11 @@ fn folder(path: &str) -> String {
 impl VideoView {
     /// Export Video: opens the window to choose how (nothing is made until Export).
     pub fn open_export(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        self.open_export_as(ed, ctx, false);
+    }
+
+    /// Export Video's window, set to make just the sound (`sound`), or as it was last set.
+    pub fn open_export_as(&mut self, ed: &mut Editor, ctx: &egui::Context, sound: bool) {
         if matches!(self.export, Some(ExportStep::Making { .. })) {
             return;
         }
@@ -88,46 +132,127 @@ impl VideoView {
         let have_captions = !self.cues.is_empty();
         let usual = if self.session.timeline.captions.burn { CaptionsIn::Picture } else { CaptionsIn::Subtitles };
         let (format, captions) = match self.export_last {
-            Some((f, c)) if formats.contains(&f) => (f, c),
-            _ => (first, usual),
-        };
-        let captions = match (have_captions, captions) {
-            (false, _) => CaptionsIn::Off,
-            (true, CaptionsIn::Subtitles) if !format.has_sound() => CaptionsIn::Picture,
-            (true, c) => c,
+            Some((f, c)) if formats.contains(&f) && f.has_picture() != sound => (f, c),
+            _ if sound => match formats.iter().copied().find(|f| !f.has_picture()) {
+                Some(f) => (f, CaptionsIn::Off),
+                None => {
+                    ed.error(ctx, "Sound files are made by ScreenGrabCraft Editor on the desktop");
+                    return;
+                }
+            },
+            _ => (formats.iter().copied().find(|f| f.has_picture()).unwrap_or(first), usual),
         };
         let path = with_extension(&recording, format.extension());
-        self.export = Some(ExportStep::Choose(ExportChoice { path, chosen: false, format, captions, formats }));
+        let stretch = self.range.filter(|(a, b)| b > a);
+        let mut c = ExportChoice { path, chosen: false, format, captions, formats, stretch, only_stretch: false };
+        if !have_captions {
+            c.captions = CaptionsIn::Off;
+        }
+        fit_captions(&mut c);
+        self.export = Some(ExportStep::Choose(c));
     }
 
-    /// The save dialog Export Video's Change… opened has answered: the video goes there.
+    /// The picture at the playhead (as the video shows it, at the recording's own size), saved
+    /// in the captures folder and opened in the Image Editor: its window, through the host (in a
+    /// browser, downloaded).
+    pub fn save_frame(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        use screengrabcraft_model::ImageFormat;
+        let (sw, sh) = self
+            .rec
+            .header
+            .streams
+            .iter()
+            .find(|s| s.kind == screengrabcraft_media::recording::StreamKind::Screen)
+            .or_else(|| self.rec.header.streams.iter().find(|s| s.kind == screengrabcraft_media::recording::StreamKind::Camera))
+            .map(|s| (s.width, s.height))
+            .unwrap_or((1280, 720));
+        let (w, h) = screengrabcraft_media::compose::fit(sw, sh, 7680, 4320);
+        let timeline = &self.session.timeline;
+        let mut composer = screengrabcraft_media::compose::Composer::new(self.rec.clone(), timeline, w, h);
+        composer.set_media(self.library.clone());
+        composer.set_captions(self.showing_captions().then(|| self.cues.clone()));
+        let at = self.playhead.min(self.length().saturating_sub(1));
+        let picture = composer.frame(timeline, at);
+        let stem = std::path::Path::new(&self.name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Video".to_string());
+        let source = format!("{stem} {}", super::clock(at).replace(':', "."));
+        if !ed.services.has_paths() {
+            let made = screengrabcraft_render::encode(&picture, ImageFormat::Png, 90).map_err(|e| e.to_string());
+            match made.and_then(|png| ed.services.download(&format!("{source}.png"), &png)) {
+                Ok(()) => ed.toast(ctx, "The frame was saved as a picture"),
+                Err(e) => ed.error(ctx, format!("The frame could not be saved: {e}")),
+            }
+            return;
+        }
+        let saved = ed.services.new_picture_path(&source).and_then(|path| {
+            let format = std::path::Path::new(&path).extension().and_then(|e| e.to_str()).and_then(ImageFormat::from_extension);
+            let format = match format {
+                Some(f @ (ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Bmp)) => f,
+                _ => ImageFormat::Png,
+            };
+            let bytes = screengrabcraft_render::encode(&picture, format, 92).map_err(|e| e.to_string())?;
+            ed.services.write_file(&path, &bytes)?;
+            Ok(path)
+        });
+        match saved {
+            Ok(path) => {
+                log::info!("a frame saved as a picture: {w} × {h}, {}", file_name(&path));
+                if ed.services.open_in_other_editor(&path, false) {
+                    ed.toast(ctx, format!("{} saved, and opened in the Image Editor", file_name(&path)));
+                } else {
+                    ed.toast(ctx, format!("{} saved in the captures folder", file_name(&path)));
+                }
+            }
+            Err(e) => ed.error(ctx, format!("The frame could not be saved: {e}")),
+        }
+    }
+
+    /// The save dialog Export Video's Change… opened has answered: the video goes there. A name
+    /// ending as another kind of file this computer makes (`.gif`, `.wav`) makes that kind.
     pub fn export_saved_to(&mut self, path: &str) {
         let Some(ExportStep::Choose(c)) = self.export.as_mut() else { return };
         let ext = std::path::Path::new(path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
-        match ext.as_deref() {
-            Some("gif") if c.formats.contains(&VideoFormat::Gif) => c.format = VideoFormat::Gif,
-            Some("mp4") if c.format == VideoFormat::Gif => {
-                if let Some(mp4) = c.formats.iter().copied().find(|f| *f != VideoFormat::Gif) {
-                    c.format = mp4;
-                }
-            }
-            _ => {}
+        if let Some(ext) = ext.as_deref()
+            && ext != c.format.extension()
+            && let Some(f) = c.formats.iter().copied().find(|f| f.extension() == ext)
+        {
+            c.format = f;
         }
-        if !c.format.has_sound() && c.captions == CaptionsIn::Subtitles {
-            c.captions = CaptionsIn::Picture;
-        }
+        fit_captions(c);
         // A name without the extension of what's made gets it.
         c.path = if ext.as_deref() == Some(c.format.extension()) { path.to_string() } else { format!("{path}.{}", c.format.extension()) };
         c.chosen = true;
     }
 
+    /// What's made from the edits as chosen: the whole video, or a copy cut to the stretch.
+    fn export_timeline(&self, c: &ExportChoice) -> Result<screengrabcraft_media::timeline::Timeline, String> {
+        match c.stretch.filter(|_| c.only_stretch) {
+            Some((a, b)) => self.session.timeline.stretch(a, b).map_err(|e| e.to_string()),
+            None => Ok(self.session.timeline.clone()),
+        }
+    }
+
     /// Starts making the video as chosen.
     fn start_export(&mut self, ed: &mut Editor, ctx: &egui::Context, c: &ExportChoice) {
-        let captions = (!self.cues.is_empty() && c.captions != CaptionsIn::Off).then(|| self.cues.to_vec());
+        let timeline = match self.export_timeline(c) {
+            Ok(t) => t,
+            Err(e) => {
+                self.export = None;
+                ed.error(ctx, format!("The stretch can't be made: {e}"));
+                return;
+            }
+        };
+        // The captions as they fall on what's made (just the stretch: from its start).
+        let cues = if c.only_stretch && c.stretch.is_some() {
+            let said = screengrabcraft_media::captions::as_corrected(self.captions.as_ref(), &timeline);
+            screengrabcraft_media::captions::edited_cues(said.as_ref(), &timeline, &self.media_cues)
+        } else {
+            self.cues.to_vec()
+        };
+        let captions = (!cues.is_empty() && c.captions != CaptionsIn::Off).then_some(cues);
         let subtitles = captions.is_some() && c.captions == CaptionsIn::Subtitles && c.format.has_sound();
         let job = VideoJob {
             recording: self.rec.clone(),
-            timeline: self.session.timeline.clone(),
+            timeline,
             out: c.path.clone(),
             replace: c.chosen,
             format: c.format,
@@ -179,7 +304,7 @@ impl VideoView {
                 let mut answer = None;
                 modal("export-video").show(ctx, |ui| {
                     ui.set_width(500.0);
-                    let closed = widgets::title_bar(ui, "Export Video");
+                    let closed = widgets::title_bar(ui, if c.format.has_picture() { "Export Video" } else { "Export Sound" });
                     widgets::content(ui, |ui| self.choose(ed, ui, &mut c));
                     let buttons = [FooterButton::primary("Export"), FooterButton::cancel("Cancel")];
                     answer = widgets::dialog_footer(ui, &buttons).and_then(|i| buttons.get(i)).map(|b| b.role);
@@ -201,7 +326,7 @@ impl VideoView {
                 let mut stop = false;
                 modal("making-video").show(ctx, |ui| {
                     ui.set_width(440.0);
-                    stop |= widgets::title_bar(ui, "Exporting Video");
+                    stop |= widgets::title_bar(ui, if Made::of(&path) == Made::Sound { "Exporting Sound" } else { "Exporting Video" });
                     widgets::content(ui, |ui| {
                         let t = Tokens::get(ui.ctx());
                         let what = if stopping { "Stopping…".to_string() } else { format!("Making “{}”…", file_name(&path)) };
@@ -220,11 +345,15 @@ impl VideoView {
                 Some(ExportStep::Making { job, path, subtitles })
             }
             ExportStep::Made { path, subtitles } => {
-                let gif = path.to_ascii_lowercase().ends_with(".gif");
+                let (title, open) = match Made::of(&path) {
+                    Made::Gif => ("GIF Exported", "Open GIF"),
+                    Made::Sound => ("Sound Exported", "Play Sound"),
+                    Made::Video => ("Video Exported", "Play Video"),
+                };
                 let mut answer = None;
                 modal("video-made").show(ctx, |ui| {
                     ui.set_width(460.0);
-                    let closed = widgets::title_bar(ui, if gif { "GIF Exported" } else { "Video Exported" });
+                    let closed = widgets::title_bar(ui, title);
                     widgets::content(ui, |ui| {
                         let t = Tokens::get(ui.ctx());
                         ui.label(RichText::new(file_name(&path)).strong().size(15.0).color(t.text));
@@ -234,11 +363,7 @@ impl VideoView {
                             ui.label(RichText::new(format!("Its subtitles are beside it: {}", file_name(s))).color(t.muted));
                         }
                     });
-                    let buttons = [
-                        FooterButton::primary(if gif { "Open GIF" } else { "Play Video" }),
-                        FooterButton::plain("Show in Folder"),
-                        FooterButton::cancel("Close"),
-                    ];
+                    let buttons = [FooterButton::primary(open), FooterButton::plain("Show in Folder"), FooterButton::cancel("Close")];
                     answer = widgets::dialog_footer(ui, &buttons);
                     if closed {
                         answer = Some(2);
@@ -284,9 +409,11 @@ impl VideoView {
 
         heading(ui, "Format");
         let before = c.format;
+        // Every kind, those this computer can't make greyed out with why.
         egui::ComboBox::from_id_salt("export-format").width(ui.available_width()).selected_text(c.format.label()).show_ui(ui, |ui| {
-            for f in c.formats.clone() {
-                ui.selectable_value(&mut c.format, f, f.label());
+            for f in VideoFormat::ALL {
+                let can = c.formats.contains(&f);
+                ui.add_enabled_ui(can, |ui| ui.selectable_value(&mut c.format, f, f.label())).inner.on_disabled_hover_text(f.why_not());
             }
         });
         if c.format != before {
@@ -294,14 +421,25 @@ impl VideoView {
             if std::path::Path::new(&c.path).extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(before.extension())) {
                 c.path = with_extension(&c.path, c.format.extension());
             }
-            if !c.format.has_sound() && c.captions == CaptionsIn::Subtitles {
-                c.captions = CaptionsIn::Picture;
-            }
+            fit_captions(c);
         }
         if c.format == VideoFormat::Mp4Av1 {
             ui.label(RichText::new("Windows Media Player and older devices can't play these.").small().color(t.muted));
         }
+        if !c.format.has_picture() {
+            ui.label(RichText::new("The sound of the video as edited: every track and sound you added, mixed.").small().color(t.muted));
+        }
         ui.add_space(12.0);
+
+        // The chosen stretch alone, or the whole video.
+        if let Some((a, b)) = c.stretch {
+            heading(ui, "What");
+            let whole = format!("The whole video ({})", super::clock(self.session.timeline.length()));
+            ui.radio_value(&mut c.only_stretch, false, whole);
+            let part = format!("Just the chosen stretch: {} to {} ({})", super::clock(a), super::clock(b), super::clock(b.saturating_sub(a)));
+            ui.radio_value(&mut c.only_stretch, true, part);
+            ui.add_space(12.0);
+        }
 
         heading(ui, "Closed captions (AI generated)");
         if self.cues.is_empty() {
@@ -314,10 +452,12 @@ impl VideoView {
             c.captions = CaptionsIn::Off;
         } else {
             for option in [CaptionsIn::Off, CaptionsIn::Picture, CaptionsIn::Subtitles] {
-                let possible = option != CaptionsIn::Subtitles || c.format.has_sound();
-                ui.add_enabled_ui(possible, |ui| ui.radio_value(&mut c.captions, option, option.label()))
-                    .inner
-                    .on_disabled_hover_text("A GIF has no sound, so it has no subtitles");
+                let (possible, why) = match option {
+                    CaptionsIn::Subtitles => (c.format.has_sound(), "A GIF has no sound, so it has no subtitles"),
+                    CaptionsIn::Picture => (c.format.has_picture(), "Just the sound has no picture to put them on"),
+                    CaptionsIn::Off => (true, ""),
+                };
+                ui.add_enabled_ui(possible, |ui| ui.radio_value(&mut c.captions, option, option.label())).inner.on_disabled_hover_text(why);
             }
             ui.label(
                 RichText::new("Written down on this computer by speech recognition, which can mishear: check them before sharing.")
