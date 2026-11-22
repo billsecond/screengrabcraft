@@ -300,7 +300,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 24. Sound while playing faster (J and L), at its own pitch; a video's sound apart from its picture;
     tracks and sound layers mixed to mono (#116).
 25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
-26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another.
+26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another (#118).
 
 **Still to build, in this order**
 
