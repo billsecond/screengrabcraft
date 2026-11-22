@@ -251,7 +251,14 @@ fn cmd_text(args: &[String]) -> R<()> {
     let pic = screengrabcraft_render::render(&doc).ok_or("the picture couldn't be drawn")?;
     let lines = screengrabcraft_desktop::text::read(&pic)?;
     if args.iter().any(|a| a == "--json") {
-        let v: Vec<Value> = lines.iter().map(|l| json!({"text": l.text, "x": l.x, "y": l.y, "width": l.w, "height": l.h})).collect();
+        let r = |r: screengrabcraft_model::Rect| json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h});
+        let v: Vec<Value> = lines
+            .iter()
+            .map(|l| {
+                let words: Vec<Value> = l.words.iter().map(|w| json!({"text": w.text, "box": r(w.rect)})).collect();
+                json!({"text": l.text, "x": l.rect.x, "y": l.rect.y, "width": l.rect.w, "height": l.rect.h, "words": words})
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     } else {
         println!("{}", screengrabcraft_desktop::text::joined(&lines));
@@ -269,6 +276,10 @@ fn cmd_run(args: &[String]) -> R<()> {
         None => screengrabcraft_desktop::models::background_model().ok(),
     };
     session.background.set_model(model);
+    // image.hideDetails reads the picture's text with the system's reader (where there is one).
+    if screengrabcraft_desktop::text::ready().is_ok() {
+        session.reader.set(Some(std::sync::Arc::new(SystemText)));
+    }
     // Pictures lent to the commands that take one (a watermark's), in the order given.
     for (i, a) in args.iter().enumerate() {
         if a == "--picture" {
@@ -296,6 +307,15 @@ fn cmd_run(args: &[String]) -> R<()> {
         println!("{}", out.display());
     }
     Ok(())
+}
+
+/// The system's own text reader ([`screengrabcraft_desktop::text`]), lent to the commands.
+struct SystemText;
+
+impl screengrabcraft_engine::ReadText for SystemText {
+    fn read(&self, picture: &screengrabcraft_model::Raster) -> Result<Vec<screengrabcraft_model::TextLine>, String> {
+        screengrabcraft_desktop::text::read(picture)
+    }
 }
 
 fn cmd_stitch(args: &[String]) -> R<()> {

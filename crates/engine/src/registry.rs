@@ -219,6 +219,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         crop
     ),
     cmd!(
+        "image.hideDetails",
+        "Hide Personal Details",
+        "Image",
+        None,
+        r##"{"lines"?: [{"text": "…", "rect": {"x", "y", "w", "h"}, "words"?: [{"text", "rect"}]}] (the text read off the picture, in its pixels; without them the text reader the host lent reads the picture as shown), "find"?: ["email", "phone", "card", "address"] (default: all four), "cover"?: "blur"|"pixelate"|"box", "color"?: "#000000" (the box's), "area"?: {"x", "y", "w", "h"} (only there), "select"?: true} → {"hidden": n, "ids": [id], "email": n, "phone": n, "card": n, "address": n, "lines": n} — each email address, phone number, card number (Luhn's check) and line like a postal address found is covered by an annotation of its own, to move or delete. Faces aren't found"##,
+        always,
+        crate::details::hide
+    ),
+    cmd!(
         "image.eraseStroke",
         "Erase",
         "Image",

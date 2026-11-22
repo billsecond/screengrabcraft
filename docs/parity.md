@@ -100,7 +100,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Crop, trim borders | Has | |
 | **Cut Out: take a strip out and close the gap** | Has (0.1.56) | columns or rows; straight, saw or wave |
 | Blur, pixelate | Has | |
-| Text and personal details found and hidden by themselves | Missing | |
+| **Personal details found and hidden by themselves** | Part | Image › Hide Personal Details…: email addresses, phone numbers, card numbers (Luhn's check) and address lines, found by Grab Text's reader and covered with a blur, a pixelate or a solid box, each an annotation to move or delete; Windows only; faces aren't found (no face model with a clear open licence) |
 | Simplify (screen parts drawn as plain shapes) | Missing | |
 | Lift a button or a block and move it, filling where it was | Missing | |
 | Edit text in the picture, in a matching font | Missing | |
@@ -285,6 +285,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 9. Rotate, group, align, distribute and flip annotations; select all of one kind.
 10. Magic wand, an eraser, ellipse and freehand selections; invert the selection.
 11. Templates; several pictures combined into one.
+12. Personal details hidden by themselves: emails, phone and card numbers, addresses (Windows; not faces).
 
 **Still to build, in this order**
 
@@ -305,7 +306,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. Tags, favourites, and captures sorted by program.
 16. A picture per click made into a how-to guide.
 17. Groups, pushing later clips along, locked and solo tracks, clip colours.
-18. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+18. Simplify; lift and move parts; edit text in place.
 19. Print; batch changes; captures on a timer or at a set time.
 20. Cutting words from the transcript; filler words taken out.
 21. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing

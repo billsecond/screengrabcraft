@@ -633,7 +633,6 @@ struct SystemText;
 
 impl ReadText for SystemText {
     fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
-        let lines = screengrabcraft_desktop::text::read(picture)?;
-        Ok(lines.into_iter().map(|l| TextLine { text: l.text, rect: screengrabcraft_model::Rect::new(l.x, l.y, l.w, l.h) }).collect())
+        screengrabcraft_desktop::text::read(picture)
     }
 }

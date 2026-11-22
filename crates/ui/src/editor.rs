@@ -299,8 +299,8 @@ pub struct Editor {
     pub(crate) background: crate::background::State,
     /// Grab Text at work, and the text it read.
     pub(crate) grab_text: crate::grab_text::State,
-    /// What Grab Text is reading is the selected area (not all of the picture).
-    pub(crate) grab_text_area: bool,
+    /// Hide Personal Details: its window, and the reader at work for it.
+    pub(crate) details: crate::details::State,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -402,7 +402,7 @@ impl Editor {
             pointer_px: None,
             background: crate::background::State::default(),
             grab_text: crate::grab_text::State::default(),
-            grab_text_area: false,
+            details: crate::details::State::default(),
         }
     }
 
@@ -1364,6 +1364,7 @@ impl Editor {
         crate::background::show(self, &ctx);
         crate::compose::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
+        crate::details::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
@@ -1376,6 +1377,7 @@ impl Editor {
             || (self.pending.is_some() && !self.autosaves())
             || self.background.busy()
             || self.grab_text.busy()
+            || self.details.busy()
         {
             return;
         }
@@ -1784,6 +1786,7 @@ impl Editor {
                     crate::background::menu(self, ui);
                     ui.separator();
                     crate::grab_text::item(self, ui);
+                    crate::details::item(self, ui);
                 });
                 ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {

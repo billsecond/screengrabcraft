@@ -172,6 +172,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
   area selected, read on this computer by Windows' own text reader and shown to copy (put anything
   right first). On macOS and Linux it isn't there yet.
+- **Hide Personal Details** (Image menu, the right-click menu): email addresses, phone numbers,
+  card numbers and address lines found by the same reader, each covered with a blur, a pixelate
+  or a solid box that stays an annotation to move or delete (Windows; faces aren't found).
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a
