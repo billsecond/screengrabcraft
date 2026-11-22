@@ -512,6 +512,8 @@ mod tests {
             name: None,
             denoise: 0.0,
             points: Vec::new(),
+            locked: false,
+            solo: false,
         };
         Timeline {
             tracks: vec![track(0, StreamKind::Screen), track(1, StreamKind::SystemSound), track(2, StreamKind::Microphone)],

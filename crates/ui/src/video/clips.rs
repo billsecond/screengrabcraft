@@ -1,0 +1,145 @@
+//! Clips together and apart in the video editor: groups of clips that move together, clip
+//! colours, and tracks locked or played alone (the toggles in their headers).
+
+use egui::{Color32, Rect, Sense, Stroke, Ui, pos2, vec2};
+use screengrabcraft_media::timeline::Track;
+use serde_json::json;
+
+use super::VideoView;
+use crate::editor::Editor;
+use crate::theme::Tokens;
+
+/// The colours a clip can be given, by name.
+pub const COLOURS: [(&str, [u8; 3]); 8] = [
+    ("Red", [0xE5, 0x48, 0x4D]),
+    ("Orange", [0xF0, 0x8C, 0x2E]),
+    ("Yellow", [0xE8, 0xC5, 0x2A]),
+    ("Green", [0x3F, 0xB9, 0x50]),
+    ("Teal", [0x1F, 0xA8, 0xA0]),
+    ("Blue", [0x3B, 0x82, 0xF6]),
+    ("Purple", [0x8B, 0x5C, 0xF6]),
+    ("Pink", [0xE0, 0x5C, 0xB0]),
+];
+
+/// A clip's colour on the timeline: its own if it was given one, else `track`'s.
+pub(super) fn colour(colour: Option<u8>, track: Color32) -> Color32 {
+    colour.and_then(|k| COLOURS.get(usize::from(k))).map_or(track, |(_, [r, g, b])| Color32::from_rgb(*r, *g, *b))
+}
+
+/// A grouped clip's mark: two links of a chain at its bottom left.
+pub(super) fn draw_group_mark(painter: &egui::Painter, r: Rect) {
+    if r.width() < 30.0 {
+        return;
+    }
+    let base = pos2(r.min.x + 7.0, r.max.y - 9.0);
+    let s = Stroke::new(1.5, Color32::WHITE);
+    for dx in [0.0, 7.0] {
+        painter.rect_stroke(Rect::from_min_size(base + vec2(dx, 0.0), vec2(10.0, 6.0)), 3.0, s, egui::StrokeKind::Middle);
+    }
+}
+
+/// A locked track's row: stripes over it.
+pub(super) fn draw_locked(painter: &egui::Painter, row: Rect) {
+    let p = painter.with_clip_rect(row);
+    let stroke = Stroke::new(1.0, Color32::from_black_alpha(70));
+    let mut x = row.min.x - row.height();
+    while x < row.max.x {
+        p.line_segment([pos2(x, row.max.y), pos2(x + row.height(), row.min.y)], stroke);
+        x += 9.0;
+    }
+}
+
+/// A padlock, shut or open.
+fn padlock(painter: &egui::Painter, r: Rect, shut: bool, c: Color32) {
+    let body = Rect::from_min_max(pos2(r.min.x + 2.0, r.center().y - 1.0), pos2(r.max.x - 2.0, r.max.y - 2.0));
+    painter.rect_filled(body, 2.0, c);
+    let (left, right) = (body.min.x + 2.5, body.max.x - 2.5);
+    let top = r.min.y + 2.5;
+    let s = Stroke::new(1.6, c);
+    // The shackle: closed into the body, or swung up and open on its right.
+    let right_end = if shut { body.min.y } else { body.min.y - 3.0 };
+    painter.line_segment([pos2(left, body.min.y), pos2(left, top + 2.0)], s);
+    painter.line_segment([pos2(left, top + 2.0), pos2(right, top + 2.0)], s);
+    painter.line_segment([pos2(right, top + 2.0), pos2(right, right_end)], s);
+}
+
+/// A small toggle in a header: true when it's clicked.
+fn toggle(ui: &mut Ui, id: (&str, usize), rect: Rect, on: bool, tip: &str, draw: impl FnOnce(&egui::Painter, Rect, Color32)) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let resp = ui.interact(rect, ui.id().with(id), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, tip));
+    if on {
+        ui.painter().rect_filled(rect, 4.0, t.accent.gamma_multiply(0.85));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, t.hover);
+    }
+    draw(ui.painter(), rect.shrink(3.0), if on { Color32::WHITE } else { t.muted });
+    resp.on_hover_text(tip).clicked()
+}
+
+impl VideoView {
+    /// A track header's lock and (a sound track's) play-alone toggles, in `rect` (right to left).
+    pub(super) fn track_toggles(&mut self, ed: &mut Editor, ui: &mut Ui, rect: Rect, i: usize, track: &Track) {
+        let ctx = ui.ctx().clone();
+        let lock = Rect::from_min_size(pos2(rect.max.x - 22.0, rect.min.y), vec2(20.0, 20.0));
+        let tip = if track.locked { "Locked: its clips stay as they are. Click to unlock it." } else { "Lock it: its clips stay as they are" };
+        if toggle(ui, ("lock", i), lock, track.locked, tip, |p, r, c| padlock(p, r, track.locked, c)) {
+            self.run(ed, &ctx, "video.lock", json!({"track": i, "locked": !track.locked}));
+        }
+        if !track.kind.is_video() {
+            let solo = Rect::from_min_size(pos2(lock.min.x - 23.0, rect.min.y), vec2(20.0, 20.0));
+            let tip = if track.solo { "Played alone. Click to hear the others too." } else { "Play it alone: the other sound isn't heard" };
+            let draw = |p: &egui::Painter, r: Rect, c: Color32| {
+                p.text(r.center(), egui::Align2::CENTER_CENTER, "S", egui::FontId::proportional(12.0), c);
+            };
+            if toggle(ui, ("solo", i), solo, track.solo, tip, draw) {
+                self.run(ed, &ctx, "video.solo", json!({"track": i, "solo": !track.solo}));
+            }
+        }
+    }
+
+    /// The right button's clip items: its colour, and its group.
+    pub(super) fn clip_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, ti: usize, ci: usize) {
+        let Some(clip) = self.session.timeline.tracks.get(ti).and_then(|t| t.clips.get(ci)).copied() else { return };
+        ui.menu_button("Clip Colour", |ui| {
+            if ui.add(egui::Button::new("As Its Track").selected(clip.colour.is_none())).clicked() {
+                self.run(ed, ctx, "video.clipColour", json!({"track": ti, "clip": ci, "colour": null}));
+                ui.close();
+            }
+            for (k, (name, [r, g, b])) in COLOURS.iter().enumerate() {
+                let words = egui::RichText::new(*name).color(Color32::from_rgb(*r, *g, *b)).strong();
+                if ui.add(egui::Button::new(words).selected(clip.colour == Some(k as u8))).clicked() {
+                    self.run(ed, ctx, "video.clipColour", json!({"track": ti, "clip": ci, "colour": k}));
+                    ui.close();
+                }
+            }
+        });
+        // The clips of the other tracks over the same time: grouped with it, they move with it.
+        let others: Vec<(usize, usize)> = self
+            .session
+            .timeline
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(t, _)| *t != ti)
+            .flat_map(|(t, tr)| tr.clips.iter().enumerate().filter(|(_, c)| c.at < clip.end() && c.end() > clip.at).map(move |(c, _)| (t, c)))
+            .collect();
+        if clip.group.is_some() {
+            if ui.button("Ungroup").on_hover_text("Its group's clips move on their own again").clicked() {
+                self.run(ed, ctx, "video.ungroup", json!({"track": ti, "clip": ci}));
+                ui.close();
+            }
+        } else if ui
+            .add_enabled(!others.is_empty(), egui::Button::new("Group with the Clips Above and Below"))
+            .on_hover_text("It and the other tracks' clips over the same time move together")
+            .on_disabled_hover_text("No other track has a clip at this time")
+            .clicked()
+        {
+            let mut all = vec![(ti, ci)];
+            all.extend(others);
+            let list: Vec<[usize; 2]> = all.into_iter().map(|(t, c)| [t, c]).collect();
+            self.run(ed, ctx, "video.group", json!({"clips": list}));
+            ui.close();
+        }
+    }
+}

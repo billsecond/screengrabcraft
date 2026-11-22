@@ -68,6 +68,15 @@ fn index(p: &Value, key: &str) -> Result<usize> {
     usize::try_from(int(p, key)?).map_err(|_| EngineError::Params(format!("`{key}` is too large")))
 }
 
+/// The track asked for, if its clips can be changed (it isn't locked).
+fn unlocked(s: &VideoSession, p: &Value) -> Result<usize> {
+    let track = index(p, "track")?;
+    if s.timeline.tracks.get(track).is_some_and(|t| t.locked) {
+        return Err(EngineError::Params("that track is locked: unlock it first".to_string()));
+    }
+    Ok(track)
+}
+
 impl VideoSession {
     /// The recording's own edits if it has some, else every track whole.
     pub fn new(rec: &Recording) -> VideoSession {
@@ -224,14 +233,14 @@ fn cut(s: &mut VideoSession, p: &Value) -> Result<Value> {
 
 fn lift(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let (from, to) = (int(p, "from")?, int(p, "to")?);
-    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
     s.timeline.lift(from, to, track).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn split(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let at = int(p, "at")?;
-    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(unlocked(s, p)?) } else { None };
     let made = s.timeline.split(at, track).map_err(edit_err)?;
     if made == 0 {
         return Err(EngineError::Failed("there's no clip to split there".to_string()));
@@ -240,24 +249,25 @@ fn split(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn delete_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.delete_clip(index(p, "track")?, index(p, "clip")?).map_err(edit_err)?;
+    s.timeline.delete_clip(unlocked(s, p)?, index(p, "clip")?).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn trim_start(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.trim_start(index(p, "track")?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
+    s.timeline.trim_start(unlocked(s, p)?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn trim_end(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    let track = index(p, "track")?;
+    let track = unlocked(s, p)?;
     let source = s.source_len(track);
     s.timeline.trim_end(track, index(p, "clip")?, int(p, "to")?, source).map_err(edit_err)?;
     Ok(json!({}))
 }
 
 fn move_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.move_clip(index(p, "track")?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
+    let ripple = p.get("ripple").and_then(Value::as_bool).unwrap_or(false);
+    s.timeline.move_clips(index(p, "track")?, index(p, "clip")?, int(p, "to")?, ripple).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -291,7 +301,7 @@ fn hold_length(s: &mut VideoSession, p: &Value) -> Result<Value> {
 
 /// A sound clip's fades: how long its sound takes to come up at its start and go down at its end.
 fn fade(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    let (track, clip) = (index(p, "track")?, index(p, "clip")?);
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
     let given = |key: &str| -> Result<Option<u64>> { if p.get(key).is_some_and(|v| !v.is_null()) { int(p, key).map(Some) } else { Ok(None) } };
     let (fade_in, fade_out) = (given("in")?, given("out")?);
     if fade_in.is_none() && fade_out.is_none() {
@@ -630,17 +640,60 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+fn flag(p: &Value, key: &str) -> Result<bool> {
+    p.get(key).and_then(Value::as_bool).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false")))
+}
+
+fn lock(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_locked(index(p, "track")?, flag(p, "locked")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn solo(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.set_solo(index(p, "track")?, flag(p, "solo")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn clip_colour(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let colour = match p.get("colour") {
+        None | Some(Value::Null) => None,
+        Some(_) => Some(u8::try_from(index(p, "colour")?).map_err(|_| EngineError::Params("`colour` is 0 to 7, or null".to_string()))?),
+    };
+    s.timeline.set_clip_colour(index(p, "track")?, index(p, "clip")?, colour).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// Clips put in a group of their own: they move together.
+fn group(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let list = p.get("clips").and_then(Value::as_array).ok_or_else(|| EngineError::Params("`clips` is a list of [track, clip]".to_string()))?;
+    let mut clips = Vec::new();
+    for pair in list.iter().take(1_000) {
+        let n = |k: usize| pair.get(k).and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok());
+        match (n(0), n(1)) {
+            (Some(t), Some(c)) => clips.push((t, c)),
+            _ => return Err(EngineError::Params("each of `clips` is [track, clip]".to_string())),
+        }
+    }
+    let g = s.timeline.group(&clips).map_err(edit_err)?;
+    Ok(json!({"group": g}))
+}
+
+fn ungroup(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.ungroup(index(p, "track")?, index(p, "clip")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 /// A point of a sound track's volume line: added, changed or moved.
 fn volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let point = if p.get("point").is_some_and(|v| !v.is_null()) { Some(index(p, "point")?) } else { None };
-    let k = s.timeline.set_volume_point(index(p, "track")?, point, int(p, "at")?, number(p, "level")?).map_err(edit_err)?;
+    let k = s.timeline.set_volume_point(unlocked(s, p)?, point, int(p, "at")?, number(p, "level")?).map_err(edit_err)?;
     Ok(json!({"point": k}))
 }
 
 fn remove_volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
     let point = if all { None } else { Some(index(p, "point")?) };
-    s.timeline.remove_volume_point(index(p, "track")?, point).map_err(edit_err)?;
+    s.timeline.remove_volume_point(unlocked(s, p)?, point).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -708,7 +761,7 @@ fn transition(s: &mut VideoSession, p: &Value) -> Result<Value> {
         })?),
     };
     let len = if p.get("len").is_some_and(|v| !v.is_null()) { Some(int(p, "len")?) } else { None };
-    let (track, clip) = (index(p, "track")?, index(p, "clip")?);
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
     s.timeline.set_transition(track, clip, kind, len).map_err(edit_err)?;
     let x = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).and_then(|c| c.transition);
     Ok(json!({"kind": x.map(|x| x.kind), "len": x.map(|x| x.len)}))
@@ -828,7 +881,37 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand { id: "video.deleteClip", label: "Delete Clip", params: r#"{"track": n, "clip": n}: leaves a gap"#, run: delete_clip },
     VideoCommand { id: "video.trimStart", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_start },
     VideoCommand { id: "video.trimEnd", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_end },
-    VideoCommand { id: "video.moveClip", label: "Move Clip", params: r#"{"track": n, "clip": n, "to": µs}"#, run: move_clip },
+    VideoCommand {
+        id: "video.moveClip",
+        label: "Move Clip",
+        params: r#"{"track": n, "clip": n, "to": µs, "ripple"?: bool}: the clips grouped with it move as far; with `ripple` every later clip of their tracks moves along with them"#,
+        run: move_clip,
+    },
+    VideoCommand {
+        id: "video.lock",
+        label: "Lock Track",
+        params: r#"{"track": n, "locked": bool}: its clips stay as they are (cuts, speeds and holds of the whole video still move it)"#,
+        run: lock,
+    },
+    VideoCommand {
+        id: "video.solo",
+        label: "Play Alone",
+        params: r#"{"track": n, "solo": bool}: while any sound track plays alone, only those are heard"#,
+        run: solo,
+    },
+    VideoCommand {
+        id: "video.clipColour",
+        label: "Clip Colour",
+        params: r#"{"track": n, "clip": n, "colour": 0..7 | null}: its colour on the timeline (null: its track's)"#,
+        run: clip_colour,
+    },
+    VideoCommand {
+        id: "video.group",
+        label: "Group",
+        params: r#"{"clips": [[track, clip], …]}: two or more clips put in a group of their own: they move together"#,
+        run: group,
+    },
+    VideoCommand { id: "video.ungroup", label: "Ungroup", params: r#"{"track": n, "clip": n}: the group that clip is in taken apart"#, run: ungroup },
     VideoCommand {
         id: "video.speed",
         label: "Speed",
@@ -1060,6 +1143,36 @@ mod tests {
 
     fn session() -> VideoSession {
         VideoSession::new(&recording())
+    }
+
+    #[test]
+    fn a_locked_track_stays_as_it_is_and_grouped_clips_move_together() {
+        let mut s = session();
+        s.execute("video.split", &json!({"at": 2_000_000})).unwrap();
+        s.execute("video.lock", &json!({"track": 1, "locked": true})).unwrap();
+        assert_eq!(s.undo_label(), Some("Lock Track"));
+        for (id, p) in [
+            ("video.deleteClip", json!({"track": 1, "clip": 0})),
+            ("video.trimEnd", json!({"track": 1, "clip": 0, "to": 1_000_000})),
+            ("video.split", json!({"at": 1_000_000, "track": 1})),
+            ("video.volumePoint", json!({"track": 1, "at": 1_000_000})),
+        ] {
+            assert!(s.execute(id, &p).is_err(), "{id}");
+        }
+        s.execute("video.lock", &json!({"track": 1, "locked": false})).unwrap();
+        // The second halves grouped, the microphone's moved: the screen's goes with it.
+        s.execute("video.lift", &json!({"from": 2_000_000, "to": 2_500_000})).unwrap();
+        let v = s.execute("video.group", &json!({"clips": [[0, 1], [1, 1]]})).unwrap();
+        assert_eq!(v["group"].as_u64(), Some(1));
+        assert!(s.execute("video.group", &json!({"clips": [[0, 1], "x"]})).is_err());
+        s.execute("video.moveClip", &json!({"track": 1, "clip": 1, "to": 2_200_000})).unwrap();
+        assert_eq!((s.timeline.tracks[0].clips[1].at, s.timeline.tracks[1].clips[1].at), (2_200_000, 2_200_000));
+        s.execute("video.clipColour", &json!({"track": 0, "clip": 0, "colour": 5})).unwrap();
+        assert!(s.execute("video.clipColour", &json!({"track": 0, "clip": 0, "colour": 300})).is_err());
+        s.execute("video.solo", &json!({"track": 1, "solo": true})).unwrap();
+        assert!(s.execute("video.solo", &json!({"track": 0, "solo": true})).is_err());
+        s.execute("video.ungroup", &json!({"track": 0, "clip": 1})).unwrap();
+        assert!(s.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| c.group.is_none())));
     }
 
     #[test]

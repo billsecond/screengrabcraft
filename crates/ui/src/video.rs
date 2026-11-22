@@ -35,6 +35,7 @@ use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
 mod camera_key;
+mod clips;
 mod export_window;
 mod library;
 mod sound;
@@ -1861,6 +1862,7 @@ impl VideoView {
                         &[
                             ("Click", "the ruler to move the playhead; a clip or an item to select it."),
                             ("Drag", "a clip's end to trim it, the clip itself to slide it."),
+                            ("Shift-drag", "a clip to push the clips after it along with it."),
                             ("Handles", "either side of the playhead on the ruler: drag one out to choose a stretch. Play then plays just that."),
                             ("S", "splits at the playhead."),
                             ("T", "puts words on the video at the playhead."),
@@ -2384,6 +2386,8 @@ impl VideoView {
         if track_switch(ui, ("track", i), switch, if track.kind.is_video() { Switch::Picture } else { Switch::Sound }, shown) {
             self.run(ed, &ctx, "video.mute", json!({"track": i, "muted": shown}));
         }
+        // Locked, played alone: at the right of its second line.
+        self.track_toggles(ed, ui, Rect::from_min_max(pos2(row.min.x, row.min.y + 22.0), pos2(row.max.x - 4.0, row.min.y + 42.0)), i, track);
         if track.kind.is_video() {
             let device = self.rec.stream(track.stream).map(|s| s.name.clone()).unwrap_or_default();
             if !device.is_empty() && device != kind_name && device != name {
@@ -2391,7 +2395,7 @@ impl VideoView {
             }
             return;
         }
-        let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0, 20.0));
+        let vol = Rect::from_min_size(row.min + vec2(42.0, 22.0), vec2(row.width() - 52.0 - 46.0, 20.0));
         let mut v = track.volume * 100.0;
         let r = volume_slider(ui, vol, &mut v);
         if r.drag_started() {
@@ -2717,6 +2721,7 @@ impl VideoView {
                         ui.close();
                     }
                     self.transition_menu(ed, ui, ctx, i, c);
+                    self.clip_menu(ed, ui, ctx, i, c);
                 }
                 let gap = if track.kind.is_video() { "no picture" } else { "silence" };
                 if ui
@@ -2744,6 +2749,18 @@ impl VideoView {
                 let (off, on) = if track.kind.is_video() { ("Hide This Track", "Show This Track") } else { ("Mute This Track", "Unmute This Track") };
                 if ui.button(if track.muted { on } else { off }).clicked() {
                     self.run(ed, ctx, "video.mute", json!({"track": i, "muted": !track.muted}));
+                    ui.close();
+                }
+                if ui
+                    .button(if track.locked { "Unlock This Track" } else { "Lock This Track" })
+                    .on_hover_text("Locked, its clips stay as they are; cuts of the whole video still keep it in time")
+                    .clicked()
+                {
+                    self.run(ed, ctx, "video.lock", json!({"track": i, "locked": !track.locked}));
+                    ui.close();
+                }
+                if !track.kind.is_video() && ui.add(egui::Button::new("Play This Track Alone").selected(track.solo)).clicked() {
+                    self.run(ed, ctx, "video.solo", json!({"track": i, "solo": !track.solo}));
                     ui.close();
                 }
                 if !track.kind.is_video() {
@@ -3105,8 +3122,10 @@ impl VideoView {
                     let row = row_rect(i);
                     let lane_row = Rect::from_min_max(pos2(lane.min.x, row.min.y), pos2(lane.max.x, row.max.y));
                     painter.rect_filled(lane_row, 0.0, if i % 2 == 0 { t.window } else { t.panel });
-                    let colour = if track.muted { Color32::from_gray(140) } else { kind_colour(track.kind) };
+                    let track_colour = if track.muted { Color32::from_gray(140) } else { kind_colour(track.kind) };
                     for (c, clip) in track.clips.iter().enumerate() {
+                        // Its own colour, if it was given one.
+                        let colour = if track.muted { track_colour } else { clips::colour(clip.colour, track_colour) };
                         let r = Rect::from_min_max(pos2(x_of(clip.at), row.min.y + 3.0), pos2(x_of(clip.end()), row.max.y - 3.0));
                         if r.max.x < lane.min.x || r.min.x > lane.max.x {
                             continue;
@@ -3169,6 +3188,9 @@ impl VideoView {
                             painter.rect_filled(tag, 3.0, colour);
                             painter.text(tag.center(), egui::Align2::CENTER_CENTER, words, font, Color32::WHITE);
                         }
+                        if clip.group.is_some() {
+                            clips::draw_group_mark(&painter, r);
+                        }
                         // A sound clip's volume line: when it has points, or it's chosen.
                         let chosen_here = self.selected.is_some_and(|(st, _)| st == i);
                         if !track.kind.is_video() && (!track.points.is_empty() || chosen_here) {
@@ -3178,6 +3200,9 @@ impl VideoView {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
                             grips(&painter, r);
                         }
+                    }
+                    if track.locked {
+                        clips::draw_locked(&painter, lane_row);
                     }
                     // Its transitions across the cuts, and (a transition from the library over
                     // it) the cut it would go to.
@@ -3567,6 +3592,11 @@ impl VideoView {
                         Drag::Point { track, point }
                     } else if let Some(track) = row_at(p.y) {
                         match clip_at(track, p.x) {
+                            // A locked track's clip is chosen, not trimmed or moved.
+                            Some((clip, _)) if tracks.get(track).is_some_and(|t| t.locked) => {
+                                self.selected = Some((track, clip));
+                                Drag::Range(us_of(p.x).min(self.length()))
+                            }
                             Some((clip, Some(start))) => {
                                 self.selected = Some((track, clip));
                                 self.session.begin("Trim");
@@ -3624,7 +3654,9 @@ impl VideoView {
                             let len = tracks.get(track).and_then(|tr| tr.clips.get(clip)).map_or(0, |c| c.len);
                             let (to, edge) = caught_at(us.saturating_sub(grab), len, &edges(Some((track, clip)), None));
                             caught = edge;
-                            let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": to}));
+                            // Shift held: the later clips are pushed along (or pulled back) with it.
+                            let ripple = ctx.input(|i| i.modifiers.shift);
+                            let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": to, "ripple": ripple}));
                         }
                         Drag::Point { track, point } => {
                             // Up and down its level, along its moment (on a clip of the track).

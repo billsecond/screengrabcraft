@@ -140,6 +140,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
   track itself, on this computer; voices stay). The track's right button turns the noise off and
   on too.
+- **Groups, locks and colours**: a clip's right button groups it with the other tracks' clips over
+  the same time (they then move together) and gives it a colour. **Shift-drag** a clip to push
+  every later clip of its track along with it. The padlock in a track's header **locks** it (its
+  clips stay as they are; cuts of the whole video still keep it in time), and **S** plays a sound
+  track alone.
 - **Volume line and levels**: double-click a sound clip's wave (or use the track's right button) to
   put a point of its volume line there, and drag points up and down or along: the sound goes
   straight from one to the next, and the points stay with the sound through every edit. The Sound
