@@ -442,7 +442,19 @@ impl Animation {
         if !frame.is_finite() || !place.is_finite() {
             return;
         }
-        self.layers(pix, self.root.get("layers").unwrap_or(&Value::Null), frame, place, 1.0, 0);
+        self.layers(pix, self.root.get("layers").unwrap_or(&Value::Null), frame, place, 1.0, 0, 1.0);
+    }
+
+    /// [`render`](Animation::render), `reveal` of each text layer's letters written on (0 to 1):
+    /// those before it whole, the one being written fading on, none after it. For words that
+    /// write themselves on.
+    pub fn render_written(&self, pix: &mut Pixmap, secs: f32, place: Transform, reveal: f32) {
+        let frame = self.frame_at(secs);
+        if !frame.is_finite() || !place.is_finite() {
+            return;
+        }
+        let reveal = if reveal.is_finite() { reveal.clamp(0.0, 1.0) } else { 1.0 };
+        self.layers(pix, self.root.get("layers").unwrap_or(&Value::Null), frame, place, 1.0, 0, reveal);
     }
 
     /// A layer's transform through its parents, and its own opacity.
@@ -458,7 +470,8 @@ impl Animation {
         (t, o)
     }
 
-    fn layers(&self, pix: &mut Pixmap, layers: &Value, frame: f32, base: Transform, alpha: f32, depth: usize) {
+    #[allow(clippy::too_many_arguments)]
+    fn layers(&self, pix: &mut Pixmap, layers: &Value, frame: f32, base: Transform, alpha: f32, depth: usize, reveal: f32) {
         let list = items(layers, MAX_LAYERS);
         // The first layer is on top: drawn last.
         for (idx, l) in list.iter().enumerate().rev() {
@@ -479,7 +492,7 @@ impl Animation {
             let masks = items(l.get("masksProperties").unwrap_or(&Value::Null), 16);
             let matte = num("tt").filter(|t| *t >= 1.0).and_then(|t| idx.checked_sub(1).and_then(|j| list.get(j)).map(|src| (t, src)));
             if masks.is_empty() && matte.is_none() {
-                self.layer(pix, l, frame, world, o, depth, None);
+                self.layer(pix, l, frame, world, o, depth, None, reveal);
                 continue;
             }
             // Cut by a matte that is plain shapes: drawn straight on, through the shapes as a mask
@@ -493,12 +506,12 @@ impl Animation {
                 if kind >= 2.0 {
                     mask.invert();
                 }
-                self.layer(pix, l, frame, world, o, depth, Some(&mask));
+                self.layer(pix, l, frame, world, o, depth, Some(&mask), reveal);
                 continue;
             }
             // Drawn apart, cut by its masks and its matte, then put on.
             let Some(mut own) = Pixmap::new(pix.width(), pix.height()) else { continue };
-            self.layer(&mut own, l, frame, world, 1.0, depth, None);
+            self.layer(&mut own, l, frame, world, 1.0, depth, None, reveal);
             let cut: Vec<&Value> = masks.iter().filter(|m| m.get("mode").and_then(Value::as_str) != Some("n")).collect();
             if !cut.is_empty()
                 && let Some(mut mask) = Mask::new(pix.width(), pix.height())
@@ -517,7 +530,7 @@ impl Animation {
                 && let Some(mut shape) = Pixmap::new(pix.width(), pix.height())
             {
                 let (sw, _) = self.world(list, src, frame);
-                self.layer(&mut shape, src, frame, sw.post_concat(base), 1.0, depth, None);
+                self.layer(&mut shape, src, frame, sw.post_concat(base), 1.0, depth, None, 1.0);
                 let mut mask = Mask::from_pixmap(shape.as_ref(), MaskType::Alpha);
                 if kind >= 2.0 {
                     mask.invert();
@@ -529,7 +542,7 @@ impl Animation {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn layer(&self, pix: &mut Pixmap, l: &Value, frame: f32, world: Transform, alpha: f32, depth: usize, clip: Option<&Mask>) {
+    fn layer(&self, pix: &mut Pixmap, l: &Value, frame: f32, world: Transform, alpha: f32, depth: usize, clip: Option<&Mask>, reveal: f32) {
         match l.get("ty").and_then(f).map(|t| t as i32) {
             Some(4) => self.group(pix, l.get("shapes").unwrap_or(&Value::Null), frame, world, alpha, 0, clip),
             Some(1) => {
@@ -548,25 +561,31 @@ impl Animation {
                     items(self.root.get("assets").unwrap_or(&Value::Null), 200).iter().find(|a| a.get("id").and_then(Value::as_str) == Some(id));
                 if let Some(layers) = asset.and_then(|a| a.get("layers")) {
                     let start = l.get("st").and_then(f).unwrap_or(0.0);
-                    self.layers(pix, layers, frame - start, world, alpha, depth + 1);
+                    self.layers(pix, layers, frame - start, world, alpha, depth + 1, reveal);
                 }
             }
-            Some(5) => self.text(pix, l, world, alpha, clip),
+            Some(5) => self.text(pix, l, world, alpha, clip, reveal),
             _ => {}
         }
     }
 
     /// A text layer, in this program's own fonts: its origin is the start of its first line's
-    /// baseline (its middle, or its end, as it's justified).
-    fn text(&self, pix: &mut Pixmap, l: &Value, world: Transform, alpha: f32, clip: Option<&Mask>) {
+    /// baseline (its middle, or its end, as it's justified). `reveal` of its letters are written
+    /// on (1: all of them): those before it whole, the one being written fading on.
+    fn text(&self, pix: &mut Pixmap, l: &Value, world: Transform, alpha: f32, clip: Option<&Mask>, reveal: f32) {
         let Some(doc) = l.pointer("/t/d/k/0/s") else { return };
         let words = doc.get("t").and_then(Value::as_str).unwrap_or_default().replace('\r', "\n");
         let size = doc.get("s").and_then(f).unwrap_or(36.0).clamp(1.0, 2000.0);
         let font = doc.get("f").and_then(Value::as_str).unwrap_or_default().to_ascii_lowercase();
         let bold = ["bold", "black", "heavy", "semibold", "demi"].iter().any(|w| font.contains(w));
         // Laid out at a fixed size and scaled, so any size is drawn.
-        let style =
-            screengrabcraft_model::Style { font_size: 64.0, bold, italic: font.contains("italic"), ..screengrabcraft_model::Style::default() };
+        let style = screengrabcraft_model::Style {
+            font_size: 64.0,
+            bold,
+            italic: font.contains("italic"),
+            mono: font.contains("mono"),
+            ..screengrabcraft_model::Style::default()
+        };
         let mut lay = text::layout(&words, &style, None);
         lay.lines.truncate(12);
         let k = size / 64.0;
@@ -575,7 +594,13 @@ impl Animation {
         let just = doc.get("j").and_then(f).unwrap_or(0.0) as i32;
         // Tracking: its letters set apart, in thousandths of its size.
         let apart = doc.get("tr").and_then(f).unwrap_or(0.0).clamp(-200.0, 2000.0) / 1000.0 * 64.0;
-        let mut pb = PathBuilder::new();
+        // The letters written so far (all of them but while it's written on), and the one being
+        // written and how far.
+        let count: usize = lay.lines.iter().map(|l| l.glyphs.len()).sum();
+        let done = reveal.clamp(0.0, 1.0) * count as f32;
+        let (whole, part) = (done.floor() as usize, done.fract());
+        let mut before = 0usize;
+        let (mut pb, mut writing) = (PathBuilder::new(), PathBuilder::new());
         for (n, line) in lay.lines.iter().enumerate() {
             let mut line = line.clone();
             if apart != 0.0 {
@@ -585,32 +610,55 @@ impl Animation {
                 line.width = (line.width + apart * line.glyphs.len().saturating_sub(1) as f32).max(0.0);
             }
             let line = &line;
-            let one_line = text::Layout { lines: vec![line.clone()], width: line.width, ..lay.clone() };
             let dx = match just {
                 1 => -line.width,
                 2 => -line.width / 2.0,
                 _ => 0.0,
             };
             let origin = screengrabcraft_model::Pt::new(dx, -lay.ascent + lead * n as f32);
-            if let Some(p) = text::text_path(&one_line, &style, origin, line.width) {
-                pb.push_path(&p);
+            // Its letters written so far (placed as the whole line has them), and the one being
+            // written if it's in this line.
+            let shown = whole.saturating_sub(before).min(line.glyphs.len());
+            let glyphs = |r: std::ops::Range<usize>| line.glyphs.get(r).map(<[_]>::to_vec).unwrap_or_default();
+            let now = if shown < line.glyphs.len() && part > 0.0 && whole >= before { glyphs(shown..shown + 1) } else { Vec::new() };
+            for (out, gl) in [(&mut pb, glyphs(0..shown)), (&mut writing, now)] {
+                if gl.is_empty() {
+                    continue;
+                }
+                let one = text::Layout { lines: vec![text::Line { glyphs: gl, width: line.width }], width: line.width, ..lay.clone() };
+                if let Some(p) = text::text_path(&one, &style, origin, line.width) {
+                    out.push_path(&p);
+                }
+            }
+            before += line.glyphs.len();
+        }
+        let fill = doc.get("fc").map(list).unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
+        for (path, alpha) in [(pb.finish(), alpha), (writing.finish(), alpha * part)] {
+            if let Some(path) = path {
+                letters(pix, doc, &path, &fill, k, world, alpha, clip);
             }
         }
-        let Some(path) = pb.finish() else { return };
-        let fill = doc.get("fc").map(list).unwrap_or_else(|| vec![1.0, 1.0, 1.0]);
-        let place = Transform::from_scale(k, k).post_concat(world);
-        let mut paint = Paint { anti_alias: true, ..Paint::default() };
-        // An outline (in the fill's colour it makes the letters heavier), under the fill.
-        let edge = doc.get("sw").and_then(f).unwrap_or(0.0).clamp(0.0, 200.0);
-        if edge > 0.0 {
-            paint.set_color(colour(&doc.get("sc").map(list).unwrap_or_else(|| fill.clone()), alpha));
-            let stroke = Stroke { width: edge / k, line_join: LineJoin::Round, ..Stroke::default() };
-            pix.stroke_path(&path, &paint, &stroke, place, clip);
-        }
-        paint.set_color(colour(&fill, alpha));
-        pix.fill_path(&path, &paint, FillRule::Winding, place, clip);
     }
+}
 
+/// Letters' outlines drawn as a text layer's document says: an outline under the fill if it has
+/// one, then the fill (`k`: how much they're scaled from the size they were laid out at).
+#[allow(clippy::too_many_arguments)]
+fn letters(pix: &mut Pixmap, doc: &Value, path: &tiny_skia::Path, fill: &[f32], k: f32, world: Transform, alpha: f32, clip: Option<&Mask>) {
+    let place = Transform::from_scale(k, k).post_concat(world);
+    let mut paint = Paint { anti_alias: true, ..Paint::default() };
+    // An outline (in the fill's colour it makes the letters heavier), under the fill.
+    let edge = doc.get("sw").and_then(f).unwrap_or(0.0).clamp(0.0, 200.0);
+    if edge > 0.0 {
+        paint.set_color(colour(&doc.get("sc").map(list).unwrap_or_else(|| fill.to_vec()), alpha));
+        let stroke = Stroke { width: edge / k, line_join: LineJoin::Round, ..Stroke::default() };
+        pix.stroke_path(path, &paint, &stroke, place, clip);
+    }
+    paint.set_color(colour(fill, alpha));
+    pix.fill_path(path, &paint, FillRule::Winding, place, clip);
+}
+
+impl Animation {
     /// Fills a mask with a shape layer's paths (whatever their fills): the shape a matte cuts.
     fn mask_shapes(&self, mask: &mut Mask, list: &Value, frame: f32, base: Transform, depth: usize) {
         let all = items(list, MAX_ITEMS);
@@ -715,6 +763,43 @@ mod tests {
         let reds: Vec<usize> =
             pix.pixels().iter().enumerate().filter(|(_, p)| p.red() > 200 && p.green() < 50 && p.alpha() > 200).map(|(i, _)| i % 200).collect();
         (reds.len(), reds.iter().sum::<usize>() as f32 / reds.len().max(1) as f32)
+    }
+
+    #[test]
+    fn words_are_written_on_letter_by_letter_from_the_first() {
+        // Two lines of words in the middle, white, over nothing.
+        let mut v = sample();
+        v["layers"][0]["t"]["d"]["k"][0]["s"]["t"] = json!("Write\nthis");
+        v["layers"][0]["ks"]["p"]["k"] = json!([100, 40]);
+        let a = Animation::from_value(v).unwrap();
+        let ink = |reveal: f32| {
+            let mut pix = Pixmap::new(200, 100).unwrap();
+            a.render_written(&mut pix, 1.5, Transform::identity(), reveal);
+            let white: Vec<(usize, usize)> = pix
+                .pixels()
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.red() > 120 && p.green() > 120 && p.alpha() > 120)
+                .map(|(i, _)| (i % 200, i / 200))
+                .collect();
+            white
+        };
+        let all = ink(1.0);
+        assert!(all.len() > 100);
+        assert!(ink(0.0).is_empty(), "nothing written yet");
+        // A third: some of the first line, from its start, none of the second.
+        let third = ink(0.33);
+        // The first line's baseline is at 40, the second's about 30 below it.
+        let first_line = 50;
+        assert!(all.iter().any(|p| p.1 > 55), "two lines");
+        assert!(!third.is_empty() && third.len() * 4 < all.len() * 3, "{} {}", third.len(), all.len());
+        assert!(third.iter().all(|p| p.1 < first_line), "only the first line");
+        let (a_left, t_right) = (all.iter().map(|p| p.0).max().unwrap(), third.iter().map(|p| p.0).max().unwrap());
+        assert!(t_right + 10 < a_left, "from its start: {t_right} {a_left}");
+        // As it's written, more of it shows; whatever's asked, never more than all of it.
+        assert!(ink(0.8).len() > third.len());
+        assert_eq!(ink(f32::NAN).len(), all.len());
+        assert_eq!(ink(7.0).len(), all.len());
     }
 
     #[test]

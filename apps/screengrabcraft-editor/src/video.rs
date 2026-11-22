@@ -21,7 +21,7 @@ use screengrabcraft_model::{Color, Raster};
 use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoFormat, VideoJob};
 
 /// `path`, or `name (2).ext` and on beside it if that is taken.
-fn free(path: &Path) -> PathBuf {
+pub(crate) fn free(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
     }
@@ -38,11 +38,16 @@ fn free(path: &Path) -> PathBuf {
 
 /// What this computer can make, the one every player opens first.
 pub fn formats() -> Vec<VideoFormat> {
-    let mut f = Vec::with_capacity(3);
+    let mut f = Vec::with_capacity(5);
     if Codec::H264.available() {
         f.push(VideoFormat::Mp4);
     }
-    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif]);
+    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov]);
+    // Just the sound: M4A where Windows' own encoder makes it, WAV everywhere.
+    if export::m4a_available() {
+        f.push(VideoFormat::M4a);
+    }
+    f.push(VideoFormat::Wav);
     f
 }
 
@@ -61,9 +66,12 @@ pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String>
             let burned = captions.clone().filter(|_| job.burn).map(Arc::new);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job.format {
                 VideoFormat::Gif => export::export_gif(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel),
+                VideoFormat::Mov => export::export_mov(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel),
                 VideoFormat::Mp4 | VideoFormat::Mp4Av1 => {
                     export::export_with(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel)
                 }
+                VideoFormat::Wav => export::export_wav(job.recording, &job.timeline, job.media.clone(), &out, &progress, &cancel),
+                VideoFormat::M4a => export::export_m4a(job.recording, &job.timeline, job.media.clone(), &out, &progress, &cancel),
             }));
             let result = match made {
                 Ok(Ok(e)) => {
@@ -219,6 +227,10 @@ fn play_sign() -> Option<Raster> {
 pub struct Sound {
     from_us: u64,
     rate: u64,
+    /// How many times as fast as recorded it plays.
+    speed: u64,
+    /// It plays backwards (its sound turned round).
+    backwards: bool,
     /// Frames the device has played so far.
     played: Arc<AtomicU64>,
     stop: Arc<AtomicBool>,
@@ -229,7 +241,8 @@ pub struct Sound {
 impl SoundOut for Sound {
     fn position_us(&self) -> Option<u64> {
         let played = self.played.load(Ordering::Relaxed);
-        (played > 0).then(|| self.from_us + played.saturating_mul(1_000_000) / self.rate.max(1))
+        let gone = played.saturating_mul(1_000_000).saturating_mul(self.speed) / self.rate.max(1);
+        (played > 0).then(|| if self.backwards { self.from_us.saturating_sub(gone) } else { self.from_us.saturating_add(gone) })
     }
 }
 
@@ -249,7 +262,14 @@ const AHEAD_SECS: f64 = 0.25;
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 impl Sound {
-    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Result<Sound, String> {
+    /// Plays from `from_us`, `speed` times as fast as recorded (faster at its own pitch), or at -1
+    /// backwards, its sound turned round.
+    pub fn start(rec: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64, speed: i32) -> Result<Sound, String> {
+        let backwards = speed < 0;
+        if speed < -1 {
+            return Err("faster backwards plays without sound".to_string());
+        }
+        let speed = u64::from(speed.unsigned_abs().clamp(1, 8));
         let device = cpal::default_host().default_output_device().ok_or("there are no speakers")?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let rate = u64::from(config.sample_rate().max(1));
@@ -308,19 +328,38 @@ impl Sound {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let end = compose::to_samples(timeline.length());
-                let mut at48 = compose::to_samples(from_us);
+                let start = compose::to_samples(from_us);
+                // How much has been made (48 kHz samples as played), and where on the timeline it's got to.
+                let mut made = 0u64;
+                let mut at48 = start;
                 // Where between two 48 kHz samples the device's next one falls.
                 let mut pos = 0.0f64;
                 let mut last = [0.0f32; 2];
                 let step = 48_000.0 / rate as f64;
                 while !s.load(Ordering::SeqCst) {
                     let waiting = queue.lock().unwrap_or_else(PoisonError::into_inner).len();
-                    if (waiting as f64) < rate as f64 * AHEAD_SECS && at48 < end {
-                        let n = 4800usize;
-                        let mixed = compose::mix_with(&rec, &timeline, media.as_ref(), at48, n);
-                        at48 += n as u64;
+                    let more = if backwards { at48 > 0 } else { at48 < end };
+                    if (waiting as f64) < rate as f64 * AHEAD_SECS && more {
+                        // As recorded: the mix as it is; faster: the mix at its own pitch, a piece at a
+                        // time; backwards: the mix before where it's got to, turned round.
+                        let mixed = if backwards {
+                            let n = 4800usize;
+                            let piece = compose::mix_backwards(&rec, &timeline, media.as_ref(), at48, n);
+                            made += (piece.len() / 2) as u64;
+                            piece
+                        } else if speed == 1 {
+                            let n = 4800usize;
+                            made += n as u64;
+                            compose::mix_with(&rec, &timeline, media.as_ref(), at48, n)
+                        } else {
+                            let n = screengrabcraft_media::stretch::FRESH;
+                            let piece = compose::mix_faster(&rec, &timeline, media.as_ref(), start, speed as f64, made, n);
+                            made += n as u64;
+                            piece
+                        };
+                        at48 = if backwards { start.saturating_sub(made) } else { start.saturating_add(made.saturating_mul(speed)) };
                         let frames: Vec<[f32; 2]> = mixed.as_chunks::<2>().0.to_vec();
-                        let mut out = Vec::with_capacity((n as f64 / step) as usize + 2);
+                        let mut out = Vec::with_capacity((frames.len() as f64 / step) as usize + 2);
                         while pos < frames.len() as f64 {
                             let i = pos.floor() as usize;
                             let t = (pos - pos.floor()) as f32;
@@ -340,7 +379,7 @@ impl Sound {
             })
             .map_err(|e| e.to_string())?;
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(())) => Ok(Sound { from_us, rate, played, stop, thread: Some(thread) }),
+            Ok(Ok(())) => Ok(Sound { from_us, rate, speed, backwards, played, stop, thread: Some(thread) }),
             Ok(Err(e)) => Err(e),
             Err(_) => {
                 stop.store(true, Ordering::SeqCst);
@@ -356,7 +395,7 @@ pub struct Sound;
 
 #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
 impl Sound {
-    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64) -> Result<Sound, String> {
+    pub fn start(_rec: Arc<Recording>, _timeline: Timeline, _media: Arc<dyn MediaStore>, _from_us: u64, _speed: i32) -> Result<Sound, String> {
         Err("sound can't be played on this system yet".to_string())
     }
 }
@@ -404,7 +443,7 @@ mod tests {
         let tl = Timeline::new(&rec);
         let n = compose::to_samples(tl.length()) as usize;
         let loudest = compose::mix(&rec, &tl, 0, n).iter().fold(0f32, |m, s| m.max(s.abs()));
-        let sound = Sound::start(rec, tl, Arc::new(screengrabcraft_media::layer_draw::NoMedia), 0).expect("the speakers start");
+        let sound = Sound::start(rec, tl, Arc::new(screengrabcraft_media::layer_draw::NoMedia), 0, 1).expect("the speakers start");
         std::thread::sleep(Duration::from_millis(2500));
         let at = sound.position_us().unwrap_or(0);
         println!("played to {:.2} s in 2.5 s; the loudest sound in it {loudest:.3}", at as f64 / 1e6);

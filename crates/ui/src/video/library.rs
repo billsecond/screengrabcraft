@@ -35,6 +35,10 @@ const HANDLE: f32 = 10.0;
 pub enum LibDrop {
     Template(&'static str),
     Media(u32),
+    /// A transition between two clips, dropped where they meet.
+    Blend(screengrabcraft_media::timeline::Blend),
+    /// A template of the owner's, by its name.
+    Yours(String),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -54,8 +58,27 @@ pub struct Importing {
 /// A drag on the picture: what's moved or resized, where it was taken hold of.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CanvasDrag {
-    Item { layer: u32, item: u32, grab: Vec2, resize: Option<(f32, f32)> },
-    Camera { grab: Vec2, resize: Option<(f32, f32)> },
+    Item {
+        layer: u32,
+        item: u32,
+        grab: Vec2,
+        resize: Option<(f32, f32)>,
+    },
+    Camera {
+        grab: Vec2,
+        resize: Option<(f32, f32)>,
+    },
+    /// A pinned picture's corner (0 top left, then round).
+    Pin {
+        layer: u32,
+        item: u32,
+        corner: usize,
+    },
+    /// A point of the pointer's redrawn path.
+    PointerPoint {
+        path: usize,
+        point: usize,
+    },
 }
 
 /// A card's picture is drawn on a video this large (16:9), then made a third as large: the card
@@ -136,7 +159,7 @@ fn scene(x: f32, y: f32) -> [u8; 3] {
 
 /// The made-up screen as a picture `w × h`, toned down to the middle: white words and dark plates
 /// both read on it.
-fn backdrop(w: u32, h: u32) -> Option<Raster> {
+pub(super) fn backdrop(w: u32, h: u32) -> Option<Raster> {
     let (w, h) = (w.clamp(1, 4096), h.clamp(1, 4096));
     let mut px = Vec::with_capacity(w as usize * h as usize * 4);
     let tone = |c: u8, lift: f32| (f32::from(c) * 0.58 + lift) as u8;
@@ -160,6 +183,15 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         layers: Vec::new(),
         media: Vec::new(),
         pointer: Default::default(),
+        corrected: None,
+        markers: Vec::new(),
+        keys: Default::default(),
+        ducking: Default::default(),
+        watermark: Default::default(),
+        frame: Default::default(),
+        motion_blur: Default::default(),
+        pointer_hidden: Vec::new(),
+        pointer_paths: Vec::new(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
@@ -189,7 +221,7 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
     screengrabcraft_media::compose::scale(&pic, w / 3, h / 3)
 }
 
-fn texture(ctx: &egui::Context, name: &str, pic: &Raster) -> egui::TextureHandle {
+pub(super) fn texture(ctx: &egui::Context, name: &str, pic: &Raster) -> egui::TextureHandle {
     let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
     ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
 }
@@ -287,6 +319,8 @@ impl VideoView {
         if arrived {
             self.shown = None;
         }
+        // A new video's pictures, once they're all read in: put in turn.
+        self.poll_pictures(ed, ctx);
         if !self.importing.is_empty() || !self.rereading.is_empty() {
             ctx.request_repaint_after(std::time::Duration::from_millis(150));
         }
@@ -296,8 +330,11 @@ impl VideoView {
     /// the nearest place it fits; it's then chosen.
     pub fn drop_on_timeline(&mut self, ed: &mut Editor, ctx: &egui::Context, what: &LibDrop, layer: Option<u32>, at: u64) {
         let mut p = match what {
-            LibDrop::Template(key) => json!({"template": key}),
+            LibDrop::Template(key) => json!({"template": key, "theme": self.theme_param()}),
             LibDrop::Media(id) => json!({"media": id}),
+            LibDrop::Blend(kind) => return self.drop_blend(ed, ctx, *kind, None, at),
+            // Its own layers, whatever it was dropped on.
+            LibDrop::Yours(name) => return self.use_template(ed, ctx, name, at),
         };
         if let Some(o) = p.as_object_mut() {
             o.insert("at".into(), json!(at));
@@ -362,14 +399,18 @@ impl VideoView {
         // Looked for by name: everything that matches, whatever its section.
         ui.add(egui::TextEdit::singleline(&mut self.lib_search).hint_text("Search the library").desired_width(f32::INFINITY));
         ui.add_space(6.0);
+        self.load_yours(ed);
         let wanted = self.lib_search.trim().to_lowercase();
         if !wanted.is_empty() {
             let found: Vec<&layers::Template> =
                 lib.iter().filter(|x| x.name.to_lowercase().contains(&wanted) || x.group.label().to_lowercase().contains(&wanted)).collect();
-            if found.is_empty() {
+            let blends = super::transitions::matching(&wanted);
+            let own = self.yours.templates.iter().any(|x| x.name.to_lowercase().contains(&wanted));
+            if found.is_empty() && blends.is_empty() && !own {
                 ui.add_space(8.0);
                 ui.label(RichText::new(format!("Nothing in the library is called \u{201c}{}\u{201d}.", self.lib_search.trim())).color(t.muted));
             }
+            self.yours_section(ed, ui, ctx, &wanted);
             let mut budget = THUMBS_PER_FRAME;
             let mut hovered = false;
             for row in found.chunks(2) {
@@ -379,10 +420,27 @@ impl VideoView {
                     }
                 });
             }
+            self.blend_cards(ed, ui, ctx, &blends, super::transitions::GROUP, &mut budget);
             if !hovered {
                 self.lib_hover = None;
             }
             return;
+        }
+        // The owner's own templates, and the themes, first.
+        for (name, themes) in [(super::yours::YOURS, false), (super::yours::THEMES, true)] {
+            egui::CollapsingHeader::new(RichText::new(name).size(14.0).strong().color(t.text))
+                .id_salt(("library-section", name))
+                .default_open(false)
+                .show_unindented(ui, |ui| {
+                    ui.add_space(4.0);
+                    if themes {
+                        self.themes_section(ed, ui, ctx);
+                    } else {
+                        self.yours_section(ed, ui, ctx, "");
+                    }
+                    ui.add_space(6.0);
+                });
+            ui.add_space(2.0);
         }
         // A section for each kind, opened and closed by its heading (the first is open).
         let mut budget = THUMBS_PER_FRAME;
@@ -395,6 +453,9 @@ impl VideoView {
                 // (Not set in from its heading: the cards keep the whole width of the panel.)
                 .show_unindented(ui, |ui| {
                     ui.add_space(4.0);
+                    if g == Group::Zoom {
+                        self.zoom_on_clicks_button(ed, ui, ctx);
+                    }
                     for row in cards.chunks(2) {
                         ui.horizontal(|ui| {
                             for tpl in row {
@@ -405,9 +466,47 @@ impl VideoView {
                     ui.add_space(6.0);
                 });
             ui.add_space(2.0);
+            // Transitions between clips, after the zooms.
+            if g == Group::Zoom {
+                egui::CollapsingHeader::new(RichText::new(super::transitions::GROUP).size(14.0).strong().color(t.text))
+                    .id_salt(("library-section", super::transitions::GROUP))
+                    .default_open(false)
+                    .show_unindented(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Drop one where two clips of a track meet.").size(12.0).color(t.muted));
+                        ui.add_space(4.0);
+                        self.blend_cards(ed, ui, ctx, &screengrabcraft_media::timeline::Blend::ALL, "", &mut budget);
+                        ui.add_space(6.0);
+                    });
+                ui.add_space(2.0);
+            }
         }
         if !hovered {
             self.lib_hover = None;
+        }
+    }
+
+    /// Zoom on the Clicks: zooms that follow the recording's clicks (greyed out without any).
+    pub(super) fn zoom_on_clicks_button(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context) {
+        let t = Tokens::get(ctx);
+        let clicks = self.session.has_clicks();
+        if ui
+            .add_enabled(clicks, egui::Button::new("Zoom on the Clicks"))
+            .on_hover_text("A zoom for each run of clicks, in a little before and out a while after: ordinary zooms, to change or delete")
+            .on_disabled_hover_text("This recording kept no clicks")
+            .clicked()
+        {
+            self.zoom_on_clicks(ed, ctx);
+        }
+        ui.label(RichText::new("Or drag a zoom onto the timeline.").size(12.0).color(t.muted));
+        ui.add_space(6.0);
+    }
+
+    /// Zooms made on the clicks; the layer they're on is shown.
+    pub(super) fn zoom_on_clicks(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        match self.session.execute("video.zoomOnClicks", &json!({})) {
+            Ok(_) => self.item = None,
+            Err(e) => ed.error(ctx, e.to_string()),
         }
     }
 
@@ -424,6 +523,9 @@ impl VideoView {
         budget: &mut usize,
         hovered: &mut bool,
     ) {
+        // As it will be placed: in the theme in use.
+        let themed = self.themed(tpl);
+        let tpl = &themed;
         let key = format!("template-{}", tpl.key);
         if !self.thumbs.contains_key(&key) {
             if *budget > 0 {
@@ -497,6 +599,27 @@ impl VideoView {
             ui.add_space(20.0);
             ui.label(RichText::new("No media yet.").color(t.muted));
         }
+        // A video made of the pictures: one after another from the playhead, a few seconds each.
+        let pictures = media.iter().filter(|m| m.kind == MediaKind::Picture).count();
+        if pictures > 0 {
+            ui.horizontal(|ui| {
+                let put = ui
+                    .button("Put the Pictures in Turn")
+                    .on_hover_text("Every picture here, one after another from the playhead on a layer of its own, each as large as fits the video")
+                    .clicked();
+                ui.add(egui::DragValue::new(&mut self.picture_secs).range(1.0..=30.0).speed(0.1).suffix(" s each"));
+                if put {
+                    let each = (self.picture_secs.clamp(1.0, 30.0) * 1e6) as u64;
+                    self.run(ed, ctx, "video.picturesInTurn", json!({"each": each, "at": self.playhead}));
+                }
+            });
+            ui.label(
+                RichText::new("For a narrated video, talk over them with Record Narration (the side panel, with nothing chosen).")
+                    .size(12.0)
+                    .color(t.muted),
+            );
+            ui.add_space(8.0);
+        }
         let mut remove = None;
         for row in media.chunks(2) {
             ui.horizontal(|ui| {
@@ -546,7 +669,7 @@ impl VideoView {
     /// or + adds it at the playhead (true, with the card's response). A file of the bin can be taken out of it (its id goes
     /// in `remove`).
     #[allow(clippy::too_many_arguments)]
-    fn card(
+    pub(super) fn card(
         &mut self,
         ui: &mut Ui,
         what: LibDrop,
@@ -627,21 +750,42 @@ impl VideoView {
                     ui.label(RichText::new(item.label(&media)).size(16.0).color(t.text));
                     ui.label(RichText::new(format!("{} to {}", super::clock(item.at), super::clock(item.end()))).size(12.0).color(t.muted));
                     ui.add_space(10.0);
+                    // With keyframes, its place, size and opacity are those of the keyframe at the
+                    // playhead (made there if there's none).
+                    let keyed = !item.keys.is_empty();
+                    let (start, end) = (item.at, item.end());
                     let set = |s: &mut VideoView, p: serde_json::Value, dragging: bool| {
                         let mut p = p;
+                        let placing = keyed && ["x", "y", "w", "opacity"].iter().any(|k| p.get(*k).is_some());
                         if let Some(o) = p.as_object_mut() {
                             o.insert("layer".into(), json!(layer));
                             o.insert("item".into(), json!(id));
+                            if placing {
+                                o.insert("at".into(), json!(s.playhead.clamp(start, end)));
+                            }
                         }
+                        let cmd = if placing { "video.keyframe" } else { "video.setItem" };
                         if dragging {
-                            let _ = s.session.drag("video.setItem", &p);
+                            let _ = s.session.drag(cmd, &p);
                         } else {
-                            let _ = s.session.execute("video.setItem", &p);
+                            let _ = s.session.execute(cmd, &p);
                         }
                     };
+                    let place = item.place_at(self.playhead);
                     let mut first = true;
+                    if matches!(item.what, What::Freeze { .. }) {
+                        self.freeze_panel(ui, &item, &set);
+                        ui.add_space(16.0);
+                        if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
+                            self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
+                            self.item = None;
+                        }
+                        return;
+                    }
                     if matches!(item.what, What::Zoom) {
-                        self.zoom_panel(ui, &item, &set);
+                        self.zoom_panel(ui, &item, place, &set);
+                        super::section(ui, "Motion", &mut false);
+                        self.motion_section(ed, ui, &ctx, layer, &item);
                         ui.add_space(16.0);
                         if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                             self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
@@ -690,18 +834,39 @@ impl VideoView {
                         });
                         ui.add_space(4.0);
                     }
+                    if let What::Text { style, font, .. } = &item.what
+                        && style.has_words()
+                    {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Face").size(12.0).color(t.muted));
+                            egui::ComboBox::from_id_salt("item-font").width(150.0).selected_text(font.label()).show_ui(ui, |ui| {
+                                for f in layers::TextFont::ALL {
+                                    if ui.selectable_label(*font == f, f.label()).clicked() {
+                                        set(self, json!({ "font": f }), false);
+                                    }
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                    }
                     if on_picture {
                         let size_label = if matches!(item.what, What::Text { .. }) { "Size" } else { "Width, as a share of the video's" };
                         let (lo, hi) = if matches!(item.what, What::Text { .. }) { (0.3, 2.5) } else { (0.05, 1.0) };
-                        self.slider(ui, size_label, item.place.w, lo, hi, "w", &set);
-                        self.slider(ui, "Opacity", item.place.opacity, 0.1, 1.0, "opacity", &set);
+                        self.slider(ui, size_label, place.w, lo, hi, "w", &set);
+                        self.slider(ui, "Opacity", place.opacity, 0.1, 1.0, "opacity", &set);
+                        self.frame_section(ui, &item, &media, &mut first, &set);
+                        if !matches!(item.what, What::Text { style: layers::TextStyle::Blur, .. }) {
+                            self.mask_section(ui, &item, &mut first, &set);
+                        }
                         super::section(ui, "Position", &mut first);
-                        self.slider(ui, "Across", item.place.x, -0.5, 1.5, "x", &set);
-                        self.slider(ui, "Down", item.place.y, -0.5, 1.5, "y", &set);
+                        self.slider(ui, "Across", place.x, -0.5, 1.5, "x", &set);
+                        self.slider(ui, "Down", place.y, -0.5, 1.5, "y", &set);
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new("Or drag it on the picture: past the edges too. Drag a corner to resize it.").size(12.0).color(t.muted),
                         );
+                        super::section(ui, "Motion", &mut first);
+                        self.motion_section(ed, ui, &ctx, layer, &item);
                         super::section(ui, "Animation", &mut first);
                         egui::Grid::new("item-animation").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                             for (label, key, anim) in [("Entrance", "intro", item.intro), ("Exit", "outro", item.outro)] {
@@ -709,7 +874,11 @@ impl VideoView {
                                 egui::ComboBox::from_id_salt(("anim", key)).width(150.0).selected_text(anim.kind.label()).show_ui(ui, |ui| {
                                     for k in AnimKind::ALL {
                                         if ui.selectable_label(anim.kind == k, k.label()).clicked() {
-                                            set(self, json!({ key: k }), false);
+                                            // Writing takes a while longer than the others: a second
+                                            // or more (of no more than half of it).
+                                            let len_key = if key == "intro" { "introLen" } else { "outroLen" };
+                                            let len = if k == AnimKind::Write { anim.len.max(1_200_000) } else { anim.len };
+                                            set(self, json!({ key: k, len_key: len }), false);
                                         }
                                     }
                                 });
@@ -717,6 +886,15 @@ impl VideoView {
                             }
                         });
                     }
+                    self.item_sound_section(ed, ui, &ctx, layer, &item, &mut first);
+                    // Its media swapped, its effects copied or pasted.
+                    super::section(ui, "Effects", &mut first);
+                    ui.horizontal_wrapped(|ui| {
+                        if matches!(item.what, What::Media { .. }) {
+                            self.replace_menu(ed, ui, &ctx, layer, id);
+                        }
+                        self.effects_items(ed, ui, &ctx, json!({"layer": layer, "item": id}));
+                    });
                     ui.add_space(16.0);
                     if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                         self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
@@ -727,25 +905,83 @@ impl VideoView {
         true
     }
 
+    /// Whether an item is a video whose sound can be taken apart from its picture.
+    pub(super) fn separable(&self, item: &Item) -> bool {
+        let media = &self.session.timeline.media;
+        !item.sound_only
+            && !item.silent
+            && matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video))
+    }
+
+    /// A video's sound put apart from its picture, on a sound layer; the sound then chosen.
+    pub(super) fn separate_sound(&mut self, ed: &mut Editor, ctx: &egui::Context, layer: u32, item: u32) {
+        match self.session.execute("video.separateSound", &json!({"layer": layer, "item": item})) {
+            Ok(v) => {
+                let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok());
+                if let (Some(l), Some(i)) = (n("layer"), n("item")) {
+                    self.item = Some((l, i));
+                }
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
+    }
+
+    /// An item's sound: a video's taken apart from its picture or kept silent; a sound layer mixed
+    /// to mono.
+    fn item_sound_section(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, layer: u32, item: &Item, first: &mut bool) {
+        let t = Tokens::get(ctx);
+        let media = self.session.timeline.media.clone();
+        let video = matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+        let sound = item.layer_kind(&media) == layers::LayerKind::Sound;
+        if !video && !sound {
+            return;
+        }
+        super::section(ui, "Sound", first);
+        if video && !item.sound_only {
+            if ui
+                .add_enabled(self.separable(item), egui::Button::new("Separate the Sound").min_size(vec2(ui.available_width(), 28.0)))
+                .on_hover_text(super::SEPARATE_TIP)
+                .on_disabled_hover_text("Its sound is apart already, or silent")
+                .clicked()
+            {
+                self.separate_sound(ed, ctx, layer, item.id);
+            }
+            let mut heard = !item.silent;
+            if ui.checkbox(&mut heard, "Its sound heard with it").changed() {
+                self.run(ed, ctx, "video.setItem", json!({"layer": layer, "item": item.id, "silent": !heard}));
+            }
+        }
+        if item.sound_only {
+            ui.label(RichText::new("The video's sound, apart from its picture: it moves, trims and goes on its own.").size(12.0).color(t.muted));
+            ui.add_space(4.0);
+        }
+        if sound {
+            let mut mono = self.session.timeline.layer(layer).is_some_and(|l| l.mono);
+            if ui
+                .checkbox(&mut mono, "Mix the layer to mono")
+                .on_hover_text("Its two sides mixed into one, heard the same from both speakers")
+                .changed()
+            {
+                self.run(ed, ctx, "video.mono", json!({"layer": layer, "mono": mono}));
+            }
+        }
+        if item.plays_sound(&media) {
+            ui.add_space(4.0);
+            self.line_up_menu(ed, ui, ctx, json!({"layer": layer, "item": item.id}));
+        }
+    }
+
     /// A zoom's settings: how close, where, and how it goes in and out.
-    fn zoom_panel(&mut self, ui: &mut Ui, item: &Item, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+    fn zoom_panel(&mut self, ui: &mut Ui, item: &Item, place: layers::Placement, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
         let t = Tokens::get(ui.ctx());
         let mut first = true;
         super::section(ui, "Zoom", &mut first);
         ui.label(RichText::new("While it's chosen the picture shows all of the screen and the zoom's frame: drag the frame to where it zooms, and its corners to zoom closer or less.").size(12.0).color(t.muted));
         ui.add_space(6.0);
-        self.slider(
-            ui,
-            "Shows of the screen",
-            screengrabcraft_media::zoom::share(item.place.w),
-            screengrabcraft_media::zoom::MIN_SHARE,
-            1.0,
-            "w",
-            set,
-        );
+        self.slider(ui, "Shows of the screen", screengrabcraft_media::zoom::share(place.w), screengrabcraft_media::zoom::MIN_SHARE, 1.0, "w", set);
         super::section(ui, "Position", &mut first);
-        self.slider(ui, "Across", item.place.x, 0.0, 1.0, "x", set);
-        self.slider(ui, "Down", item.place.y, 0.0, 1.0, "y", set);
+        self.slider(ui, "Across", place.x, 0.0, 1.0, "x", set);
+        self.slider(ui, "Down", place.y, 0.0, 1.0, "y", set);
         super::section(ui, "Going in and out", &mut first);
         egui::Grid::new("zoom-ease").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             for (label, key, anim) in [("In", "intro", item.intro), ("Out", "outro", item.outro)] {
@@ -767,11 +1003,142 @@ impl VideoView {
         });
         ui.add_space(4.0);
         ui.label(RichText::new("A zoom that starts where another ends pans straight from one to the other.").size(12.0).color(t.muted));
+        ui.add_space(4.0);
+        let mut blur = self.session.timeline.motion_blur.on;
+        if ui
+            .checkbox(&mut blur, "Motion blur")
+            .on_hover_text("Going in, out or along, the screen blurred along its way (for every zoom and moving item: the side panel's Motion Blur)")
+            .changed()
+        {
+            let _ = self.session.execute("video.motionBlur", &json!({"on": blur}));
+        }
     }
 
-    /// Whether the item chosen is a zoom (the picture then shows all of the screen, to place it).
+    /// An item's keyframes: one added at the playhead, each gone to or taken away.
+    fn motion_section(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, layer: u32, item: &Item) {
+        let t = Tokens::get(ctx);
+        let on_it = (item.at..=item.end()).contains(&self.playhead);
+        let what = if matches!(item.what, What::Zoom) { "where it zooms and how close" } else { "where it is, how large and how see-through" };
+        if item.keys.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Keyframes move it: add one where it starts, move the playhead on, then change {what}; it goes there smoothly."
+                ))
+                .size(12.0)
+                .color(t.muted),
+            );
+            ui.add_space(4.0);
+        }
+        let add = ui
+            .add_enabled(on_it, egui::Button::new("Add Keyframe at the Playhead").min_size(vec2(ui.available_width(), 28.0)))
+            .on_hover_text(format!("Keeps {what} at this moment"))
+            .on_disabled_hover_text("Move the playhead onto the item first")
+            .clicked();
+        if add {
+            self.run(ed, ctx, "video.keyframe", json!({"layer": layer, "item": item.id, "at": self.playhead}));
+        }
+        let (mut go, mut remove) = (None, None);
+        for (k, key) in item.keys.iter().enumerate() {
+            let at = item.at.saturating_add(key.at);
+            let here = at.abs_diff(self.playhead) < screengrabcraft_media::timeline::MIN_CLIP_US;
+            ui.horizontal(|ui| {
+                // A diamond, as on the timeline, and when.
+                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                let (c, s) = (r.center(), 4.5);
+                let colour = if here { t.accent } else { t.text };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![pos2(c.x, c.y - s), pos2(c.x + s, c.y), pos2(c.x, c.y + s), pos2(c.x - s, c.y)],
+                    colour,
+                    Stroke::NONE,
+                ));
+                let words = RichText::new(super::clock(at)).size(12.5);
+                ui.label(if here { words.color(t.accent).strong() } else { words.color(t.text) });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").on_hover_text("Take this keyframe away").clicked() {
+                        remove = Some(k);
+                    }
+                    if ui.small_button("Go To").on_hover_text("Move the playhead to it").clicked() {
+                        go = Some(at);
+                    }
+                });
+            });
+        }
+        if !item.keys.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("With keyframes, changing it changes the keyframe at the playhead (or adds one there).").size(12.0).color(t.muted),
+            );
+            let mut path = item.path;
+            if ui
+                .add_enabled(item.keys.len() >= 2 && !matches!(item.what, What::Zoom), egui::Checkbox::new(&mut path, "Along a curved path"))
+                .on_hover_text(
+                    "Through its keyframes' places on a smooth curve, without stopping at them; the path shows on the picture while it's chosen",
+                )
+                .on_disabled_hover_text("Two keyframes or more make a path")
+                .changed()
+            {
+                self.run(ed, ctx, "video.setItem", json!({"layer": layer, "item": item.id, "path": path}));
+            }
+            if ui.button("Remove Every Keyframe").on_hover_text("It stays where the last one had it").clicked() {
+                self.run(ed, ctx, "video.removeKeyframe", json!({"layer": layer, "item": item.id, "all": true}));
+            }
+        }
+        if let Some(at) = go {
+            self.pause();
+            self.playhead = at;
+        }
+        if let Some(k) = remove {
+            self.run(ed, ctx, "video.removeKeyframe", json!({"layer": layer, "item": item.id, "key": k}));
+        }
+    }
+
+    /// Whether the item chosen is a zoom or a frozen region (the picture then shows all of the
+    /// screen, to place it).
     pub(super) fn zoom_chosen(&self) -> bool {
-        self.item.and_then(|(l, i)| self.session.timeline.item(l, i)).is_some_and(|it| matches!(it.what, What::Zoom))
+        self.item.and_then(|(l, i)| self.session.timeline.item(l, i)).is_some_and(|it| matches!(it.what, What::Zoom | What::Freeze { .. }))
+    }
+
+    /// A frozen region's panel: where it is and how large, and what it does.
+    fn freeze_panel(&mut self, ui: &mut Ui, item: &Item, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        let t = Tokens::get(ui.ctx());
+        let mut first = true;
+        let h = match item.what {
+            What::Freeze { h } => h,
+            _ => return,
+        };
+        let place = item.place;
+        super::section(ui, "Frozen Region", &mut first);
+        ui.label(
+            RichText::new("This part of the screen stays as it was when the item starts, while the rest plays on. Drag it on the picture, and its corners to size it; drag its ends on the timeline for how long.")
+                .size(12.0)
+                .color(t.muted),
+        );
+        ui.add_space(6.0);
+        self.slider(ui, "Width", place.w, 0.02, 1.0, "w", set);
+        self.slider(ui, "Height", h, 0.02, 1.0, "h", set);
+        super::section(ui, "Position", &mut first);
+        self.slider(ui, "Across", place.x, 0.0, 1.0, "x", set);
+        self.slider(ui, "Down", place.y, 0.0, 1.0, "y", set);
+        ui.add_space(4.0);
+        ui.label(RichText::new("The mouse pointer still shows over it.").size(12.0).color(t.muted));
+    }
+
+    /// A rectangle of the screen frozen over the chosen stretch, or for three seconds from the
+    /// playhead: chosen, to place and size it.
+    pub(super) fn freeze_region(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let (from, to) = self.range.unwrap_or((self.playhead, self.playhead.saturating_add(3_000_000).min(self.length().max(self.playhead + 1))));
+        match self.session.execute("video.freezeRegion", &json!({"from": from, "to": to})) {
+            Ok(v) => {
+                let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok());
+                if let (Some(l), Some(i)) = (n("layer"), n("item")) {
+                    self.item = Some((l, i));
+                    self.camera_chosen = false;
+                    self.pause();
+                    self.playhead = from;
+                }
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
     }
 
     /// A text being typed: each change one step of a single undo step, kept when typing stops.
@@ -783,6 +1150,160 @@ impl VideoView {
             set(self, p(), true);
         }
         if r.lost_focus() {
+            self.session.commit();
+        }
+    }
+
+    /// How an item is framed: turned (anything on the picture), and a picture or a video cut down
+    /// at its sides, with a border, rounded corners and a shadow.
+    fn frame_section(
+        &mut self,
+        ui: &mut Ui,
+        item: &Item,
+        media: &[layers::MediaItem],
+        first: &mut bool,
+        set: &dyn Fn(&mut VideoView, serde_json::Value, bool),
+    ) {
+        let t = Tokens::get(ui.ctx());
+        let look = item.look.clone().checked();
+        let mut deg = look.rotate;
+        let r = super::named_slider(ui, "Turn", &mut deg, -180.0..=180.0, "°");
+        self.look_change(&r, (deg - look.rotate).abs() > 0.4, json!({"rotate": deg.round()}), set);
+        let picture = matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind != MediaKind::Sound));
+        if !picture {
+            return;
+        }
+        super::section(ui, "Frame", first);
+        for (k, name) in ["Crop the left", "Crop the top", "Crop the right", "Crop the bottom"].into_iter().enumerate() {
+            let was = look.crop.get(k).copied().unwrap_or(0.0) * 100.0;
+            let mut v = was;
+            let r = super::named_slider(ui, name, &mut v, 0.0..=45.0, "%");
+            let mut crop = look.crop;
+            if let Some(c) = crop.get_mut(k) {
+                *c = v / 100.0;
+            }
+            self.look_change(&r, (v - was).abs() > 0.4, json!({"crop": crop}), set);
+        }
+        let mut border = look.border * 100.0;
+        let r = super::named_slider(ui, "Border, of its width", &mut border, 0.0..=10.0, "%");
+        self.look_change(&r, (border - look.border * 100.0).abs() > 0.05, json!({"border": border / 100.0}), set);
+        if look.border > 0.0 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Border colour").size(12.0).color(t.muted));
+                let [r, g, b] = layers::color(&look.border_colour, [0xff, 0xff, 0xff]);
+                let mut c = Color32::from_rgb(r, g, b);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    set(self, json!({"borderColour": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())}), false);
+                }
+            });
+        }
+        let mut radius = look.radius * 100.0;
+        let r = super::named_slider(ui, "Rounded corners", &mut radius, 0.0..=50.0, "%");
+        self.look_change(&r, (radius - look.radius * 100.0).abs() > 0.4, json!({"radius": radius / 100.0}), set);
+        let mut shadow = look.shadow;
+        if ui.checkbox(&mut shadow, "Shadow").on_hover_text("A soft shadow under it").changed() {
+            set(self, json!({"shadow": shadow}), false);
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Device round it").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("item-device").width(140.0).selected_text(look.device.label()).show_ui(ui, |ui| {
+                for d in screengrabcraft_media::frame::Device::ALL {
+                    if ui.selectable_label(look.device == d, d.label()).clicked() {
+                        set(self, json!({ "device": d }), false);
+                    }
+                }
+            });
+        });
+        // Pinned onto a slanted surface: its four corners dragged on the picture.
+        super::section(ui, "Corner Pin", first);
+        let mut pinned = look.pinned;
+        if ui
+            .checkbox(&mut pinned, "Pin its corners")
+            .on_hover_text(
+                "Drag its four corners on the picture: it's drawn in perspective between them (a screen seen at an angle, a poster on a wall)",
+            )
+            .changed()
+        {
+            set(self, json!({"pinned": pinned}), false);
+        }
+        if look.pinned {
+            ui.label(
+                RichText::new("Drag the round handles at its corners on the picture. While pinned it isn't turned, rounded or bordered.")
+                    .size(12.0)
+                    .color(t.muted),
+            );
+            if ui.button("Put the Corners Back").on_hover_text("Its corners where its box has them").clicked() {
+                set(self, json!({"pin": [[0.0, 0.0], [0.0, 0.0], [0.0, 0.0], [0.0, 0.0]]}), false);
+            }
+        }
+    }
+
+    /// An item's mask (the shape it's shown in, or that's cut out of it: where in it and how
+    /// large) and how it's blended with what's under it.
+    fn mask_section(&mut self, ui: &mut Ui, item: &Item, first: &mut bool, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        let t = Tokens::get(ui.ctx());
+        let look = item.look.clone().checked();
+        let mask = look.mask;
+        super::section(ui, "Mask and Blend", first);
+        egui::Grid::new("item-mask").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label(RichText::new("Shown in").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("mask-shape").width(150.0).selected_text(mask.shape.label()).show_ui(ui, |ui| {
+                for k in layers::MaskShape::ALL {
+                    if ui.selectable_label(mask.shape == k, k.label()).clicked() {
+                        set(self, json!({ "mask": k }), false);
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label(RichText::new("Blend").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("blend-mode").width(150.0).selected_text(look.blend.label()).show_ui(ui, |ui| {
+                for k in layers::BlendMode::ALL {
+                    if ui.selectable_label(look.blend == k, k.label()).clicked() {
+                        set(self, json!({ "blend": k }), false);
+                    }
+                }
+            });
+            ui.end_row();
+        });
+        if mask.is_none() {
+            return;
+        }
+        ui.add_space(4.0);
+        let mut cut = mask.cut;
+        if ui.checkbox(&mut cut, "Cut the shape out").on_hover_text("Everything but the shape shown, instead of only the shape").changed() {
+            // Cut out at its whole size it would hide everything: start at half its size.
+            let whole = mask.w >= 0.99 && mask.h >= 0.99;
+            let p = if cut && whole { json!({"maskCut": true, "maskArea": [mask.x, mask.y, 0.5, 0.5]}) } else { json!({ "maskCut": cut }) };
+            set(self, p, false);
+        }
+        let area = [mask.x, mask.y, mask.w, mask.h];
+        for (k, (name, lo, hi)) in
+            [("Shape across", -50.0, 150.0), ("Shape down", -50.0, 150.0), ("Shape width", 5.0, 200.0), ("Shape height", 5.0, 200.0)]
+                .into_iter()
+                .enumerate()
+        {
+            let was = area.get(k).copied().unwrap_or(0.0) * 100.0;
+            let mut v = was;
+            let r = super::named_slider(ui, name, &mut v, lo..=hi, "%");
+            let mut new = area;
+            if let Some(a) = new.get_mut(k) {
+                *a = v / 100.0;
+            }
+            self.look_change(&r, (v - was).abs() > 0.4, json!({ "maskArea": new }), set);
+        }
+    }
+
+    /// A change of an item's look from a slider: a drag is one undo step. (A slider rounds what
+    /// it's given: only a move is a change.)
+    fn look_change(&mut self, r: &egui::Response, moved: bool, p: serde_json::Value, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        if r.drag_started() {
+            self.session.begin("Change");
+        }
+        if r.changed() && moved {
+            set(self, p, r.dragged());
+        }
+        if r.drag_stopped() {
             self.session.commit();
         }
     }
@@ -806,6 +1327,76 @@ impl VideoView {
 
     // ---- on the picture ----
 
+    /// The way the chosen item goes on the picture (screen points), when it has two keyframes or
+    /// more: the line (a curve, along a path) through its keyframes' places, and those places.
+    fn chosen_path(&self, pic: Rect) -> Option<(Vec<Pos2>, Vec<Pos2>)> {
+        let (layer, id) = self.item?;
+        let item = self.session.timeline.item(layer, id)?;
+        if item.keys.len() < 2 {
+            return None;
+        }
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let f = pic.width() / vw.max(1.0);
+        let on = |p: layers::Placement| pic.min + vec2(p.x * vw * f, p.y * vh * f);
+        let (a, b) = (item.keys.first()?.at, item.keys.last()?.at);
+        let steps = 64u64;
+        let curve = (0..=steps).map(|k| on(item.place_at(item.at.saturating_add(a + (b - a) * k / steps)))).collect();
+        let points = item.keys.iter().map(|k| on(k.place)).collect();
+        Some((curve, points))
+    }
+
+    /// The pointer's redrawn path the playhead is in, on the picture shown in `pic` (screen points):
+    /// which it is, its way and its points; and how a point of the picture goes back to the
+    /// screen's own pixels (an offset and a scale).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn pointer_path_on_picture(&self, pic: Rect) -> Option<(usize, Vec<Pos2>, Vec<Pos2>, (Pos2, Vec2))> {
+        let tl = &self.session.timeline;
+        let i = tl.find(StreamKind::Screen)?;
+        let src = tl.source_time(i, self.playhead)?;
+        let n = tl.pointer_paths.iter().position(|p| p.from <= src && src <= p.to)?;
+        let path = tl.pointer_paths.get(n)?;
+        let s = self.rec.stream(tl.tracks.get(i)?.stream)?;
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let f = pic.width() / vw.max(1.0);
+        let on = |x: f32, y: f32| {
+            let (px, py) = screengrabcraft_media::compose::screen_point(tl, (s.width, s.height), self.playhead, (x, y), (vw, vh), self.composer.zoom);
+            pic.min + vec2(px * f, py * f)
+        };
+        let steps = 64u64;
+        let way = (0..=steps)
+            .filter_map(|k| screengrabcraft_media::pointer::path_at(&tl.pointer_paths, path.from + (path.to - path.from) * k / steps))
+            .map(|(x, y)| on(x, y))
+            .collect();
+        let points = path.points.iter().map(|q| on(q.x, q.y)).collect();
+        // The mapping is a scale and a shift: two points of the screen say both.
+        let (a, b) = (on(0.0, 0.0), on(1000.0, 1000.0));
+        let scale = vec2(((b.x - a.x) / 1000.0).max(1.0e-4), ((b.y - a.y) / 1000.0).max(1.0e-4));
+        Some((n, way, points, (a, scale)))
+    }
+
+    /// Where the chosen item's pinned corners are on the picture (screen points), and where they'd
+    /// be unpinned (its box's corners), when it's pinned: top left, top right, bottom right, bottom
+    /// left.
+    fn pin_corners(&self, pic: Rect) -> Option<([Pos2; 4], [Pos2; 4])> {
+        let (layer, id) = self.item?;
+        let item = self.session.timeline.item(layer, id)?.placed_at(self.playhead).into_owned();
+        if !item.look.pinned {
+            return None;
+        }
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let r = layer_draw::item_rect(&item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
+        let f = pic.width() / vw.max(1.0);
+        let box_ = [pos2(r.x, r.y), pos2(r.x + r.w, r.y), pos2(r.x + r.w, r.y + r.h), pos2(r.x, r.y + r.h)];
+        let base = box_.map(|p| pic.min + vec2(p.x * f, p.y * f));
+        let pin = item.look.clone().checked().pin;
+        let mut moved = base;
+        for (k, m) in moved.iter_mut().enumerate() {
+            let [dx, dy] = pin.get(k).copied().unwrap_or([0.0; 2]);
+            *m += vec2(dx * vw * f, dy * vh * f);
+        }
+        Some((moved, base))
+    }
+
     /// Where something chosen is on the picture shown in `pic` (screen points): the item chosen,
     /// or the camera.
     fn chosen_rect(&self, pic: Rect) -> Option<Rect> {
@@ -815,8 +1406,8 @@ impl VideoView {
             Rect::from_min_size(pic.min + vec2(r.x * f, r.y * f), vec2(r.w * f, r.h * f))
         };
         if let Some((layer, id)) = self.item {
-            let item = self.session.timeline.item(layer, id)?;
-            let r = layer_draw::item_rect(item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
+            let item = self.session.timeline.item(layer, id)?.placed_at(self.playhead);
+            let r = layer_draw::item_rect(&item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
             return Some(to_screen(r));
         }
         if self.camera_chosen {
@@ -850,7 +1441,7 @@ impl VideoView {
             .filter(|l| l.kind == layers::LayerKind::Picture && !l.hidden)
             .filter_map(|l| {
                 let i = l.items.iter().find(|i| i.at <= t && t < i.end())?;
-                Some((l.id, i.id, layer_draw::item_rect(i, tl, self.library.as_ref(), vw, vh)?))
+                Some((l.id, i.id, layer_draw::item_rect(&i.placed_at(t), tl, self.library.as_ref(), vw, vh)?))
             })
             .collect()
     }
@@ -866,11 +1457,36 @@ impl VideoView {
         let video_at = |p: Pos2| ((p - pic.min) / f).to_pos2();
         let corners = |r: Rect| [r.left_top(), r.right_top(), r.left_bottom(), r.right_bottom()];
         let chosen = self.chosen_rect(pic);
-        if let Some(r) = chosen {
+        // The way it goes, through its keyframes' places.
+        if let Some((line, points)) = self.chosen_path(pic) {
+            let way = Stroke::new(2.0, Color32::from_rgb(0xFF, 0xD5, 0x4F));
+            ui.painter().add(egui::Shape::dashed_line(&line, way, 6.0, 4.0));
+            for p in points {
+                ui.painter().circle(p, 4.5, Color32::from_rgb(0xFF, 0xD5, 0x4F), Stroke::new(1.0, Color32::BLACK));
+            }
+        }
+        // The pointer's redrawn path the playhead is in: its way, and its points to drag.
+        let pointer_path = self.pointer_path_on_picture(pic);
+        if let Some((_, way, points, _)) = &pointer_path {
+            let colour = Color32::from_rgb(0x4F, 0xC3, 0xF7);
+            ui.painter().add(egui::Shape::dashed_line(way, Stroke::new(2.0, colour), 6.0, 4.0));
+            for p in points {
+                ui.painter().circle(*p, 5.5, colour, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
+        let pins = self.pin_corners(pic);
+        if let Some(r) = chosen.filter(|_| pins.is_none()) {
             ui.painter().rect_stroke(r, 0.0, Stroke::new(1.5, t.accent), StrokeKind::Outside);
             for c in corners(r) {
                 ui.painter().rect_filled(Rect::from_center_size(c, vec2(9.0, 9.0)), 2.0, Color32::WHITE);
                 ui.painter().rect_stroke(Rect::from_center_size(c, vec2(9.0, 9.0)), 2.0, Stroke::new(1.0, t.accent), StrokeKind::Outside);
+            }
+        }
+        // A pinned picture: its four corners, round, to drag anywhere.
+        if let Some((moved, _)) = pins {
+            ui.painter().add(egui::Shape::closed_line(moved.to_vec(), Stroke::new(1.0, t.accent)));
+            for c in moved {
+                ui.painter().circle(c, 6.0, Color32::WHITE, Stroke::new(1.5, t.accent));
             }
         }
         if let Some(p) = resp.hover_pos()
@@ -914,13 +1530,28 @@ impl VideoView {
         if resp.drag_started()
             && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
         {
+            // A point of the pointer's redrawn path moves that point.
+            let way_point = pointer_path.as_ref().and_then(|(n, _, points, _)| Some((*n, points.iter().position(|c| c.distance(p) <= HANDLE)?)));
+            if let Some((path, point)) = way_point {
+                self.session.begin("Move the Pointer");
+                self.canvas_drag = Some(CanvasDrag::PointerPoint { path, point });
+            }
+            // A pinned picture's corner moves that corner.
+            let pin_corner = pins.and_then(|(moved, _)| moved.iter().position(|c| c.distance(p) <= HANDLE)).filter(|_| way_point.is_none());
+            if let (Some(corner), Some((layer, item))) = (pin_corner, self.item) {
+                self.session.begin("Pin Corner");
+                self.canvas_drag = Some(CanvasDrag::Pin { layer, item, corner });
+            }
             // A corner of what's chosen resizes it; inside it, or on another, moves.
             let mut target = match chosen {
-                Some(r) if corners(r).iter().any(|c| c.distance(p) <= HANDLE) => Some((true, r)),
+                _ if pin_corner.is_some() || way_point.is_some() => None,
+                Some(r) if pins.is_none() && corners(r).iter().any(|c| c.distance(p) <= HANDLE) => Some((true, r)),
                 Some(r) if r.contains(p) => Some((false, r)),
                 _ => None,
             };
             if target.is_none()
+                && pin_corner.is_none()
+                && way_point.is_none()
                 && let Some(sel) = pick(self, p)
             {
                 self.item = sel;
@@ -932,7 +1563,7 @@ impl VideoView {
                 let grab = video_at(p) - centre;
                 let dist = grab.length().max(4.0);
                 if let Some((layer, item)) = self.item {
-                    let place = self.session.timeline.item(layer, item).map(|i| i.place).unwrap_or_default();
+                    let place = self.session.timeline.item(layer, item).map(|i| i.place_at(self.playhead)).unwrap_or_default();
                     let w = place.w;
                     // Moved by as far as the pointer goes, from where it is (a broadcast graphic's
                     // place is how far it is from where it was designed, not its middle).
@@ -968,21 +1599,60 @@ impl VideoView {
             };
             let mut lines = (None, None);
             match d {
+                CanvasDrag::PointerPoint { path, point } => {
+                    // The point under the pointer, in the screen's own pixels.
+                    if let Some((_, _, _, (origin, scale))) = self.pointer_path_on_picture(pic) {
+                        let (x, y) = ((p.x - origin.x) / scale.x, (p.y - origin.y) / scale.y);
+                        let _ = self.session.drag("video.pointerPoint", &json!({"path": path, "point": point, "x": x, "y": y}));
+                    }
+                }
+                CanvasDrag::Pin { layer, item, corner } => {
+                    // That corner moved from where its box has it to the pointer.
+                    if let Some((_, base)) = self.pin_corners(pic)
+                        && let Some(b) = base.get(corner)
+                        && let Some(it) = self.session.timeline.item(layer, item)
+                    {
+                        let mut pin = it.look.pin;
+                        if let Some(c) = pin.get_mut(corner) {
+                            *c = [(p.x - b.x) / f / vw, (p.y - b.y) / f / vh];
+                        }
+                        let _ = self.session.drag("video.setItem", &json!({"layer": layer, "item": item, "pin": pin}));
+                    }
+                }
                 CanvasDrag::Item { layer, item, grab, resize } => {
+                    // With keyframes, it's the keyframe at the playhead that's moved (made there
+                    // if there's none).
+                    let key_at = self.session.timeline.item(layer, item).filter(|i| !i.keys.is_empty()).map(|i| self.playhead.clamp(i.at, i.end()));
+                    let place = |s: &mut VideoView, mut params: serde_json::Value| {
+                        let cmd = match (key_at, params.as_object_mut()) {
+                            (Some(at), Some(o)) => {
+                                o.insert("at".into(), json!(at));
+                                "video.keyframe"
+                            }
+                            _ => "video.setItem",
+                        };
+                        let _ = s.session.drag(cmd, &params);
+                    };
+                    let frozen = self.session.timeline.item(layer, item).is_some_and(|i| matches!(i.what, What::Freeze { .. }));
                     let params = match resize {
+                        // A frozen region: the corner where the pointer is, its middle staying put.
+                        Some(_) if frozen => {
+                            let centre = self.chosen_rect(pic).map(|r| video_at(r.center())).unwrap_or(v);
+                            json!({"layer": layer, "item": item, "w": 2.0 * (v.x - centre.x).abs() / vw, "h": 2.0 * (v.y - centre.y).abs() / vh})
+                        }
                         Some((w0, d0)) => {
                             let centre = self.chosen_rect(pic).map(|r| video_at(r.center())).unwrap_or(v);
                             json!({"layer": layer, "item": item, "w": w0 * ((v - centre).length() / d0)})
                         }
                         None => json!({"layer": layer, "item": item, "x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh}),
                     };
-                    let _ = self.session.drag("video.setItem", &params);
+                    place(self, params);
                     if resize.is_none() {
                         let (x, y) = catch(self);
                         if x.is_some() || y.is_some() {
                             let (dx, dy) = (x.map_or(0.0, |c| c.0) / f, y.map_or(0.0, |c| c.0) / f);
                             let params = json!({"layer": layer, "item": item, "x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh});
-                            let _ = self.session.drag("video.setItem", &params);
+                            place(self, params);
                             lines = (x.map(|c| c.1), y.map(|c| c.1));
                         }
                     }
@@ -1022,6 +1692,7 @@ impl VideoView {
 /// An item's colour on the timeline.
 pub fn item_colour(item: &Item, media: &[layers::MediaItem]) -> Color32 {
     match &item.what {
+        What::Media { .. } if item.sound_only => Color32::from_rgb(0x2F, 0x80, 0xED),
         What::Media { id } => match media.iter().find(|m| m.id == *id).map(|m| m.kind) {
             Some(MediaKind::Sound) => Color32::from_rgb(0x2F, 0x80, 0xED),
             Some(MediaKind::Video) => Color32::from_rgb(0x6E, 0x5A, 0xD6),
@@ -1030,6 +1701,7 @@ pub fn item_colour(item: &Item, media: &[layers::MediaItem]) -> Color32 {
         What::Text { .. } => Color32::from_rgb(0xD9, 0x7B, 0x29),
         What::Transition { .. } => Color32::from_rgb(0x8A, 0x8A, 0x96),
         What::Zoom => Color32::from_rgb(0x3B, 0x8E, 0xD0),
+        What::Freeze { .. } => Color32::from_rgb(0x5B, 0xA8, 0xC8),
     }
 }
 
@@ -1091,5 +1763,10 @@ impl VideoView {
     /// A template's card picture, as drawn (for tests and the README's pictures).
     pub fn template_card_picture(key: &str) -> Option<Raster> {
         template_thumbnail(&layers::template(key)?)
+    }
+
+    /// A transition's card picture (for tests: each a different picture).
+    pub fn blend_card_picture(kind: screengrabcraft_media::timeline::Blend) -> Option<Raster> {
+        super::transitions::card_picture(kind)
     }
 }

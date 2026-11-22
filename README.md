@@ -95,6 +95,14 @@ and opens in the video editor, where you cut and edit it, then Export Video make
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
 sources are in Settings › Recording.
 
+On Windows a Video Production recording also keeps **the shortcuts you press** while it records,
+so the video editor can show them as keys on the video: only a key pressed with Ctrl, Alt or the
+Windows key, and keys that don't type (Enter, Esc, Tab, Backspace, Delete, the arrows, Home, End,
+Page Up and Down, F1 to F24). **Letters, digits, symbols and spaces you type are never kept**, nor
+anything typed with AltGr, so a password typed while recording isn't in the recording. The keys
+are only watched while recording, kept in the recording file and nowhere else, and never logged.
+Settings › Recording turns it off.
+
 ![The Recorder: the screen, the camera with its picture, the microphone and the computer's sound with their levels, each switched on, and the red Record button](docs/images/recorder.png)
 
 ## Editing a video
@@ -120,17 +128,159 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
   clip's ends to trim it, or the clip to slide it along its track.
 - **S** splits at the playhead: the selected clip's track, or every track.
+- **Speed**: with a stretch chosen or a clip selected, the panel at the right (or Edit, or the
+  ruler's right button) plays it from a quarter as fast to eight times as fast, on every track so
+  they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
+  that isn't as recorded says its speed on the timeline.
+- **J, K and L**: L plays on, K pauses, J plays backwards; press J or L again to play that way
+  2, 4 or 8 times as fast (playing on, voices keep their pitch; backwards its sound is turned
+  round, and faster backwards it plays silent). **Play backwards**: a clip's right button (or Play backwards in its panel) plays it from its end to
+  its start, the picture and the sound turned round, with the clips grouped with it.
+- **Hold a frame**: H (or Edit, or the ruler's right button) holds the picture at the playhead
+  still for a while (2 s; the menus offer 1 to 5): every track waits, the sound is silent
+  meanwhile, and what follows moves along. Its panel holds it longer or shorter (or drag its end),
+  or takes the hold out again.
+- **Fades and noise**: click a sound clip and its panel fades its sound in at its start and out at
+  its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
+  track itself, on this computer; voices stay). The track's right button turns the noise off and
+  on too.
+- **Groups, locks and colours**: a clip's right button groups it with the other tracks' clips over
+  the same time (they then move together) and gives it a colour. **Shift-drag** a clip to push
+  every later clip of its track along with it. The padlock in a track's header **locks** it (its
+  clips stay as they are; cuts of the whole video still keep it in time), and **S** plays a sound
+  track alone.
+- **Volume line and levels**: double-click a sound clip's wave (or use the track's right button) to
+  put a point of its volume line there, and drag points up and down or along: the sound goes
+  straight from one to the next, and the points stay with the sound through every edit. The Sound
+  Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
+  as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
+  sound, music and media go down while the microphone is heard, and back up after.
+- **Motion along a path**: with two keyframes or more, an item's Motion has Along a curved path:
+  it goes through their places on a smooth curve without stopping at them. While it's chosen,
+  its way shows on the picture as a dashed line with a dot at each keyframe.
+- **Corner pin**: a picture's or a video's panel has Corner Pin. Its four round handles are then
+  dragged anywhere on the picture, and it's drawn in perspective between them (a screen seen at an
+  angle, a poster on a wall).
+- **Words that write themselves on**: a title's, a lower third's or a callout's Entrance (or Exit)
+  can be Write on: its words appear letter by letter from the first, as if written (and are rubbed
+  off the same way going). Anything without words is wiped on from its left.
+- **Freeze a region**: Edit › Freeze a Region (or the screen track's right button, with a stretch
+  chosen) holds a rectangle of the screen as it was while the rest plays on: a clock, a message
+  that popped up. Drag it and its corners on the picture; its panel sizes it too.
+- **Replace media, copy effects**: an item's right button (or its panel's Effects) has Replace
+  With, to show another file of the Media bin in its place, keeping its time, place, look, motion
+  and animations. Copy Effects and Paste Effects put one item's look, entrance, exit and motion on
+  another, or one clip's colours and crop (or its fades) and the transition into it on another.
+- **Join pieces back together**: a clip's right button joins it with the next one when that goes
+  on from where it stops (pieces of a split, not moved apart); a track's right button joins all
+  its pieces, and the ruler's every track's.
+- **Line up by sound**: a sound clip's or a sound item's right button (or the item's panel) has
+  Line Up by Sound With, listing the other sounds: it moves so the two sound in step, for the same
+  voice recorded twice (by the computer and by another recorder). They're compared on this
+  computer, at every shift within 5 seconds.
+- **A video's sound apart, and mono**: a video put on a layer has Separate the Sound in its panel
+  (or its right button): its sound goes onto a sound layer of its own at the same moment and the
+  video goes silent, so each can be moved, trimmed or deleted on its own. **Mix to Mono** (a sound
+  track's right button or its clip's panel, a sound layer's right button or its item's panel) mixes
+  its two sides into one, heard the same from both speakers.
+- **Markers**: M (or Edit, or the ruler's right button) marks the moment at the playhead with a
+  flag on the ruler. The Markers section of the panel names them, goes to them and deletes them;
+  they move with cuts and speed changes, and Export Video makes them the MP4's chapters, which
+  video players list.
+- **Export more than the video**: with a stretch chosen, Export Video can make **just that
+  stretch** (its captions and chapters with it). File › **Export Sound** makes just the sound, as
+  heard: a WAV, or a smaller M4A (AAC, made by Windows' own encoder, so on Windows only). Export
+  Video's **See-through video** makes a MOV of PNG pictures, clear wherever there's nothing (hide
+  the screen's track to keep just the camera without its background, titles and callouts), to put
+  over another video; it has no sound. File › **Make Videos of Several Recordings** makes each
+  recording chosen into a video as it was edited, beside it, with one setting for all. File ›
+  **Save the Frame as a Picture** (Ctrl+Shift+S, or the ruler's right button) saves the picture at
+  the playhead, at the recording's own size, in the captures folder and opens it in the picture
+  editor.
+- **A watermark**: Export Video's window puts words, or a picture from the Media Bin, on every
+  frame, in the corner you choose, as see-through and as large as you like. The preview shows it
+  too, and it stays with the edits.
+- **Subtitles brought in**: File › **Import Subtitles** reads a SubRip (`.srt`) or WebVTT
+  (`.vtt`) file timed on the video as it is now and makes it the video's captions; from then on
+  each line follows the track it's on, like the captions written down here.
+- **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
+  it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
+  yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
+  what's round it twice as large. With a stretch chosen, Hide It in the Chosen Stretch (or the
+  screen track's right button) hides it there, clicks and all; a dashed line on the screen's row
+  shows where, and it stays hidden over what the screen showed there through later edits. Its
+  Pointer list draws another in its place: a white or black arrow, a hand, a dot or a ring. Edit
+  Its Path in the Chosen Stretch puts points along its way there on the picture (while the
+  playhead is in the stretch): drag them where it should have gone, and it glides through them;
+  Straighten makes it go straight from the first to the last.
+- **The camera's background taken away**, so the screen shows round you (the camera's panel,
+  Background): **Remove a colour** for a green screen (choose the colour and how far from it
+  still goes; its green glow on you is taken out), or **Remove it** with no green screen: the
+  background model (the one Remove Background uses, on this computer) looks at four of the
+  camera's pictures and learns what the room behind you looks like, then every picture keeps
+  what differs from it. Keep the camera still; Learn It Again if the light changed. What it
+  learnt is kept in the recording file. **Behind you** then says what shows where it was taken
+  away: the screen, your room blurred, or a picture you brought into the Media bin.
+- **Keys pressed**: in a recording that kept the shortcuts pressed (see above), the Keys Pressed
+  section of the panel shows each as keys on the video for a moment after it's pressed, where the
+  edits put that moment: at the bottom (above the captions), the top or a corner, any size, light
+  or dark keys.
 - **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
   starts where another ends pans straight from one to the other. Only the screen and the pointer
-  are zoomed; the camera, titles and captions stay where they are.
+  are zoomed; the camera, titles and captions stay where they are. **Zoom on the Clicks** (at the
+  top of that section, or the Edit menu) makes a zoom for each run of clicks the recording kept:
+  in a little before the first, out a while after the last, panning between ones close together.
+  They're ordinary zooms, to move, change or delete.
+- **Pictures in turn**: the Media bin's Put the Pictures in Turn places every picture there one
+  after another from the playhead, a few seconds each (as many as asked), each as large as fits
+  the video, fading from one to the next. Hide the screen's track for a video of just them, and
+  talk over them with Narration.
+- **A video of pictures alone**: File › New Video from Pictures (or A Video of Pictures on the
+  start page) asks for pictures and makes a new video of just them: a blank screen as long as they
+  take (1920 × 1080, saved in your captures folder like any recording), each picture four seconds,
+  one after another. Talk over it with Record Narration, then make the video as any other.
+- **Narration**: the side panel's Record Narration turns the microphone on (the one Video
+  Production records with, or another from its list) and plays the video from the playhead
+  without its sound while you speak. Pause (Space), Stop Narration or the video's end ends it: the
+  take is saved as a WAV beside the recording and goes on a sound layer of its own, Narration, from
+  where it began. The microphone is on only while it records.
+- **Motion blur**: the side panel's Motion Blur (or a zoom's panel) blurs what moves along its way:
+  items sliding, growing or moving by their keyframes, and zooms going in, out or panning. Each
+  such moment is drawn five times over the shutter and blended, so it takes longer to make.
+- **Transitions between clips**: where two clips of a track meet, one can turn into the other (a
+  cross-fade, through black, a wipe four ways, a push or a circle), from the clip's panel, its
+  right button, or the Library's Between Clips section dropped on the cut. It plays across the
+  cut, 0.5 to 3 s; where sound clips meet it's a cross-fade of their sound.
+- **Turned and framed**: an item's panel turns it (Turn); a picture's or a video's crops its
+  sides, puts a border of any colour round it, rounds its corners and gives it a soft shadow
+  (Frame). A screen or camera clip's panel makes it lighter or darker, changes its contrast and
+  colour (down to grey), and crops its edges (what's left fills the picture, its shape kept).
+- **Looks, masks and blends**: a screen or camera clip's panel gives it a ready-made look (warm,
+  cool, vivid, faded, dramatic, black and white, sepia, night) or a tint of any colour. An item's
+  panel (Mask and Blend) shows it only inside a shape (a rectangle, rounded rectangle, oval,
+  diamond, star or heart), or cuts the shape out of it, and lays it on what's under it as
+  multiply, screen, overlay, darken or lighten.
+- **Screen frame and devices**: the side panel's Screen Frame makes the recording's screen smaller
+  on a background colour, rounds its corners and gives it a border and a shadow, and can draw a
+  plain laptop, phone or browser window round it. A picture or a video on a layer can have one
+  round it too (its panel, Device round it). The devices are simple shapes drawn in code.
+- **Keyframes**: an item's panel adds a keyframe at the playhead (Motion); move the playhead on and
+  move, resize or fade the item (on the picture or in the panel) and it goes there smoothly. A
+  zoom's keyframes pan it along. The timeline shows each as a diamond on the item.
 - **Text** (T) puts words on the video at the playhead, ready to type over. The **Library** at
   the left has titles, lower thirds, news graphics, callouts, arrows, a countdown, an end card, a
   checklist, a click and a **blur** that hides what's under it (a password, an address), and
   transitions, to drag onto the timeline; and a bin for your own pictures, videos and sound. Each
   card shows the item as it will be on the video, where and as large; hold the pointer on one and
   it plays, larger.
+- **Templates and themes of your own**: the Library's Yours section keeps what's on the layers
+  (or just the item chosen) under a name, look and all, kept in the settings folder; its card
+  drops it on another recording, each item where it was from the template's start. Themes gives
+  the titles, lower thirds and callouts colours and a face (the program's sans, slanted, or fixed
+  width): a few come with it, Save as Yours keeps your own, Apply to This Video restyles what's
+  there, and what's added from the Library comes in it. A text item's panel changes its face too.
 - Each track and layer has a switch to **hide or mute** it, and arrows to **move it up or down**
   (a layer higher up is in front); **double-click its name to rename it** (or use the right
   button). Each sound track has a volume slider; the camera's corner, size and shape (square,
@@ -141,7 +291,14 @@ the picture editor to the video editor. Its timeline has a row for each track:
   or a double click) and the name is the track's or the layer's, in the transcript, on the
   timeline and in Export Transcript. A click on a line takes the playhead there; while the video
   plays, the line playing is marked and kept in view. Copy puts the whole transcript on the
-  clipboard.
+  clipboard. **Put a line right**: double-click it to change its words (and split it at the
+  cursor); its right button splits it, joins it to the speaker's next line, moves its start or end
+  to the playhead, or deletes it. The lines put right are what the picture, Export Video and the
+  subtitles show; All Captions as Heard takes them back. **Cut words out of the video**: a line's
+  right button, Cut Words from the Video, shows its words: click those to take out and press
+  Delete, and where they're said goes from every track. **Take Out Filler Words** (in the pane,
+  or Edit) cuts every um, uh and er the transcript has. Each word's time is worked out from its
+  line's by its length, so check the cut by playing it (undo puts it back).
 - Undo and redo everything. The edits are saved into the recording file a moment after each
   change (the recording itself is never changed), and File › Revert to Recording brings every
   track back whole.
@@ -153,7 +310,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
   burns them into the MP4, and an `.srt` and a `.txt` are saved beside the recording (and beside
   each MP4 made, as it was edited). When you use speakers rather than headphones, the others
   heard again by your microphone aren't written down twice. Turn them off with Captions in the
-  Recorder; File › Make Captions makes them for a recording that has none.
+  Recorder; File › Make Captions makes them for a recording that has none. View › **Light Up Each
+  Word as It's Said** lights each word in turn on the picture and in the video made (when each
+  word is said is worked out from its line's time by its length).
 
 ## Editing
 

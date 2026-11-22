@@ -16,7 +16,8 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::{CaptureMode, EditorSettings, ImageFormat, PROJECT_EXT, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 use screengrabcraft_ui::services::{
-    DialogResult, Filter, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport, VideoFormat, VideoJob,
+    DialogResult, Filter, Kept, NarrationTake, OpenedFile, ReadText, RecentItem, SaveJob, Saved, Services, SoundOut, TextLine, VideoExport,
+    VideoFormat, VideoJob,
 };
 
 /// Files larger than this are not opened.
@@ -290,6 +291,14 @@ impl Services for DesktopServices {
         Ok(free_path(&dir, &name, format.extension()).to_string_lossy().to_string())
     }
 
+    fn new_recording_path(&self, source: &str) -> Result<String, String> {
+        let s = store::load_settings();
+        let dir = paths::captures_dir(&s);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
+        Ok(free_path(&dir, &name, REC).to_string_lossy().to_string())
+    }
+
     fn trash(&self, path: &str) -> Result<(), String> {
         let p = PathBuf::from(path);
         if std::fs::symlink_metadata(&p).is_err() {
@@ -375,6 +384,22 @@ impl Services for DesktopServices {
         self.settings_file.save(settings);
     }
 
+    fn can_keep(&self) -> bool {
+        !paths::no_prefs()
+    }
+
+    fn kept(&self, kind: Kept) -> Vec<(String, Vec<u8>)> {
+        store::kept(kind.folder())
+    }
+
+    fn keep(&self, kind: Kept, name: &str, bytes: &[u8]) -> Result<(), String> {
+        store::keep(kind.folder(), name, bytes)
+    }
+
+    fn forget(&self, kind: Kept, name: &str) -> Result<(), String> {
+        store::forget(kind.folder(), name)
+    }
+
     fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
         let args = [path.to_string()];
         let opened = if video { launch::open_video_editor(&args) } else { launch::open_editor(&args) };
@@ -411,6 +436,24 @@ impl Services for DesktopServices {
 
     fn export_video(&self, job: VideoJob) -> Result<VideoExport, String> {
         crate::video::export(job, self.ctx.clone())
+    }
+
+    fn request_pictures_video(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("pictures-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new().set_title("New Video from Pictures").set_directory(&start).add_filter("Pictures", PICTURES).pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => {
+                    DialogResult::PicturesVideo(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect())
+                }
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
     }
 
     fn request_import(&self) {
@@ -456,14 +499,35 @@ impl Services for DesktopServices {
         Ok(job)
     }
 
-    fn play_sound(&self, recording: Arc<Recording>, timeline: Timeline, media: Arc<dyn MediaStore>, from_us: u64) -> Option<Box<dyn SoundOut>> {
-        match crate::video::Sound::start(recording, timeline, media, from_us) {
+    fn play_sound(
+        &self,
+        recording: Arc<Recording>,
+        timeline: Timeline,
+        media: Arc<dyn MediaStore>,
+        from_us: u64,
+        rate: i32,
+    ) -> Option<Box<dyn SoundOut>> {
+        match crate::video::Sound::start(recording, timeline, media, from_us, rate) {
             Ok(s) => Some(Box::new(s)),
             Err(e) => {
                 log::warn!("playing the sound: {e}");
                 None
             }
         }
+    }
+
+    fn can_narrate(&self) -> bool {
+        cfg!(any(target_os = "windows", target_os = "macos", target_os = "linux"))
+    }
+
+    fn microphones(&self) -> Vec<String> {
+        screengrabcraft_capture::audio::microphones()
+    }
+
+    fn record_narration(&self, mic: Option<&str>, beside: &str) -> Result<Box<dyn NarrationTake>, String> {
+        // None: the one Video Production records with, as the Recorder has it.
+        let mic = mic.map(str::to_string).or_else(|| store::load_settings().production.microphone_name);
+        Ok(Box::new(crate::narration::start(mic, Path::new(beside))?))
     }
 
     fn open_with_system(&self, path: &str) {
@@ -539,6 +603,63 @@ impl Services for DesktopServices {
             let answer = match picked {
                 Some(files) if !files.is_empty() => DialogResult::Transcribe(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
                 _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn request_batch(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("batch-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Make Videos of Several Recordings")
+                    .set_directory(&start)
+                    .add_filter("Video recordings", &[REC])
+                    .pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Batch(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn request_subtitles(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("subtitles-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Import Subtitles")
+                    .set_directory(&start)
+                    .add_filter("Subtitles", &["srt", "vtt"])
+                    .add_filter("All files", &["*"])
+                    .pick_file(),
+            );
+            let answer = match picked {
+                Some(f) => {
+                    let path = f.path().to_path_buf();
+                    let too_large = std::fs::metadata(&path).map(|m| m.len() > screengrabcraft_ui::services::MAX_SUBTITLES).unwrap_or(true);
+                    match std::fs::read(&path) {
+                        Ok(bytes) if !too_large => {
+                            DialogResult::Subtitles(vec![OpenedFile { name: f.file_name(), path: Some(path.to_string_lossy().to_string()), bytes }])
+                        }
+                        Ok(_) => {
+                            log::warn!("subtitles not brought in: {} is too large", f.file_name());
+                            DialogResult::Cancelled
+                        }
+                        Err(e) => {
+                            log::warn!("subtitles not read: {e}");
+                            DialogResult::Cancelled
+                        }
+                    }
+                }
+                None => DialogResult::Cancelled,
             };
             let _ = tx.send(answer);
             ctx.request_repaint();

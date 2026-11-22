@@ -32,6 +32,9 @@ pub struct OpenedFile {
     pub bytes: Vec<u8>,
 }
 
+/// The largest subtitle file read (bytes).
+pub const MAX_SUBTITLES: u64 = 16 * 1024 * 1024;
+
 /// What a file dialog came back with.
 #[derive(Clone, Debug)]
 pub enum DialogResult {
@@ -42,6 +45,12 @@ pub enum DialogResult {
     Import(Vec<String>),
     /// Video or sound files to transcribe (paths).
     Transcribe(Vec<String>),
+    /// A subtitle file (`.srt`, `.vtt`) to bring into the video editor as captions, read.
+    Subtitles(Vec<OpenedFile>),
+    /// Video recordings to make videos of, together (paths).
+    Batch(Vec<String>),
+    /// Pictures to make a new video of, one after another (paths).
+    PicturesVideo(Vec<String>),
     Cancelled,
 }
 
@@ -84,14 +93,38 @@ pub enum VideoFormat {
     Mp4Av1,
     /// An animated GIF: no sound, smaller pictures; for short clips.
     Gif,
+    /// A see-through video: a QuickTime movie of PNG pictures, clear wherever there's nothing
+    /// (the screen hidden, the camera's background taken away); no sound. For putting over
+    /// another video in a video editor.
+    Mov,
+    /// Just the sound, as M4A (AAC): small, every player opens it (Windows' own encoder makes it).
+    M4a,
+    /// Just the sound, as WAV: as heard, not compressed.
+    Wav,
 }
 
 impl VideoFormat {
+    /// Every kind there is, as the Export window lists them (those this computer can't make are
+    /// greyed out there).
+    pub const ALL: [VideoFormat; 6] = [VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov, VideoFormat::M4a, VideoFormat::Wav];
+
     pub fn label(self) -> &'static str {
         match self {
             VideoFormat::Mp4 => "MP4 video: plays everywhere (H.264)",
             VideoFormat::Mp4Av1 => "MP4 video: smaller, newer players only (AV1)",
             VideoFormat::Gif => "Animated GIF: no sound, for short clips",
+            VideoFormat::Mov => "See-through video: MOV of PNG pictures, no sound",
+            VideoFormat::M4a => "Just the sound: M4A (AAC, small)",
+            VideoFormat::Wav => "Just the sound: WAV (as heard, not compressed)",
+        }
+    }
+
+    /// Why this computer can't make it (shown on it, greyed out).
+    pub fn why_not(self) -> &'static str {
+        match self {
+            VideoFormat::Mp4 => "H.264 videos are made by Windows' own encoder: on Windows only (AV1 plays in newer players)",
+            VideoFormat::M4a => "M4A sound is made by Windows' own encoder: on Windows only (WAV is made everywhere)",
+            _ => "Not made here",
         }
     }
 
@@ -99,6 +132,9 @@ impl VideoFormat {
         match self {
             VideoFormat::Mp4 | VideoFormat::Mp4Av1 => "mp4",
             VideoFormat::Gif => "gif",
+            VideoFormat::Mov => "mov",
+            VideoFormat::M4a => "m4a",
+            VideoFormat::Wav => "wav",
         }
     }
 
@@ -107,12 +143,20 @@ impl VideoFormat {
         match self {
             VideoFormat::Mp4 | VideoFormat::Mp4Av1 => ("MP4 video", &["mp4"]),
             VideoFormat::Gif => ("Animated GIF", &["gif"]),
+            VideoFormat::Mov => ("QuickTime movie", &["mov"]),
+            VideoFormat::M4a => ("M4A sound", &["m4a"]),
+            VideoFormat::Wav => ("WAV sound", &["wav"]),
         }
     }
 
     /// Whether it has a sound track (and so whether subtitles beside it make sense).
     pub fn has_sound(self) -> bool {
-        self != VideoFormat::Gif
+        !matches!(self, VideoFormat::Gif | VideoFormat::Mov)
+    }
+
+    /// Whether it has pictures (and so whether captions can be put on them).
+    pub fn has_picture(self) -> bool {
+        !matches!(self, VideoFormat::M4a | VideoFormat::Wav)
     }
 }
 
@@ -138,6 +182,41 @@ pub struct VideoJob {
     pub subtitles: bool,
     /// The media bin's pictures and sound, for the layers' items.
     pub media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
+}
+
+/// What the owner keeps to use again, each kind in a folder of its own in the settings folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Kept {
+    /// The video editor's templates of the owner's: the layers' items kept under a name.
+    VideoTemplates,
+    /// The video editor's themes of the owner's: colours and a face for the titles.
+    VideoThemes,
+}
+
+impl Kept {
+    /// Its folder, in the settings folder.
+    pub fn folder(self) -> &'static str {
+        match self {
+            Kept::VideoTemplates => "video-templates",
+            Kept::VideoThemes => "video-themes",
+        }
+    }
+}
+
+/// Why nothing is kept here.
+pub const NOT_KEPT: &str = "Templates and themes of your own are kept by ScreenGrabCraft Editor on the desktop";
+
+/// Why narration can't be recorded here.
+pub const NO_NARRATION: &str = "Narration is recorded by ScreenGrabCraft Editor on the desktop, where it can use a microphone";
+
+/// A narration being recorded: the microphone on until it's finished (dropping it turns it off
+/// and keeps nothing).
+pub trait NarrationTake: Send {
+    /// How loud it is just now, 0 to 1 (for a meter).
+    fn level(&self) -> f32;
+    /// Turns the microphone off; the take written to a file of its own (a WAV beside the
+    /// recording): where, and how long it is (µs).
+    fn finish(self: Box<Self>) -> Result<(String, u64), String>;
 }
 
 /// Sound the host is playing; dropping it stops it.
@@ -201,6 +280,12 @@ pub trait Services {
         None
     }
 
+    /// A new file in the captures folder for a video recording made here (a video of pictures),
+    /// named the way captures are (`source` is what it's of, for the name).
+    fn new_recording_path(&self, _source: &str) -> Result<String, String> {
+        Err("new videos are made by ScreenGrabCraft Editor on the desktop".to_string())
+    }
+
     /// A new file in the captures folder for a picture that has none yet, named the way
     /// captures are (`source` is what the picture is of, for the name).
     fn new_picture_path(&self, _source: &str) -> Result<String, String> {
@@ -250,6 +335,26 @@ pub trait Services {
 
     fn save_settings(&self, _settings: &EditorSettings) {}
 
+    /// Whether the owner's templates and themes are kept here (in the settings folder).
+    fn can_keep(&self) -> bool {
+        false
+    }
+
+    /// The files of a kind kept (a name each, and what's in it), in the order of their names.
+    fn kept(&self, _kind: Kept) -> Vec<(String, Vec<u8>)> {
+        Vec::new()
+    }
+
+    /// Keeps a file of a kind under a name; one kept under that name before is replaced.
+    fn keep(&self, _kind: Kept, _name: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err(NOT_KEPT.to_string())
+    }
+
+    /// Lets go of the file of a kind kept under a name.
+    fn forget(&self, _kind: Kept, _name: &str) -> Result<(), String> {
+        Err(NOT_KEPT.to_string())
+    }
+
     /// Now, in local time, for naming files.
     fn now(&self) -> Stamp {
         Stamp::default()
@@ -293,16 +398,35 @@ pub trait Services {
         Err("videos are made by the editor on the desktop".to_string())
     }
 
-    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, until it's
-    /// dropped.
+    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, `rate` times
+    /// as fast as recorded (1, 2, 4 or 8; faster at its own pitch), or at -1 backwards (the sound
+    /// turned round), until it's dropped.
     fn play_sound(
         &self,
         _recording: std::sync::Arc<Recording>,
         _timeline: Timeline,
         _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
         _from_us: u64,
+        _rate: i32,
     ) -> Option<Box<dyn SoundOut>> {
         None
+    }
+
+    /// Whether narration can be recorded here (there are microphones to ask for).
+    fn can_narrate(&self) -> bool {
+        false
+    }
+
+    /// The microphones narration can be recorded with, by name. Listing them turns none on.
+    fn microphones(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Turns a microphone on (by name; none: the one Video Production records with, as the
+    /// Recorder has it, else the system's default) to record narration for the recording at
+    /// `beside`: the take is written beside it when it's finished.
+    fn record_narration(&self, _mic: Option<&str>, _beside: &str) -> Result<Box<dyn NarrationTake>, String> {
+        Err(NO_NARRATION.to_string())
     }
 
     /// Opens a file in the program the system uses for it (a video in its player).
@@ -344,9 +468,22 @@ pub trait Services {
         false
     }
 
+    /// Asks for pictures to make a new video of; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::PicturesVideo`].
+    fn request_pictures_video(&self) {}
+
+    /// Asks for video recordings to make videos of, together; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::Batch`].
+    fn request_batch(&self) {}
+
     /// Asks for video or sound files to transcribe; the answer comes through
     /// [`Services::poll_dialog`] as [`DialogResult::Transcribe`].
     fn request_transcribe(&self) {}
+
+    /// Asks for a subtitle file (`.srt` or `.vtt`) to bring in as the video's captions; the
+    /// answer comes through [`Services::poll_dialog`] as [`DialogResult::Subtitles`], the file
+    /// read (at most [`MAX_SUBTITLES`] bytes).
+    fn request_subtitles(&self) {}
 
     /// The model Remove Background runs (on a thread of the editor's own; reading its file is
     /// left to the model's first use), or why there is none here.

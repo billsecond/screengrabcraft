@@ -60,6 +60,8 @@ pub struct Mp4Writer<W: Write + Seek> {
     mdat_at: u64,
     video: Option<(VideoTrack, Track)>,
     audio: Option<(AudioTrack, Track)>,
+    /// The chapters written in the index (see [`chapters_box`]).
+    chapters: Vec<(u64, String)>,
 }
 
 fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
@@ -128,7 +130,14 @@ impl<W: Write + Seek> Mp4Writer<W> {
         let mdat_at = ftyp.len() as u64;
         // A 64-bit size, filled in at the end.
         out.write_all(&Body::default().u32(1).bytes(b"mdat").u64(0).0)?;
-        Ok(Mp4Writer { out, pos: mdat_at + 16, mdat_at, video: video.map(|v| (v, Track::default())), audio: audio.map(|a| (a, Track::default())) })
+        Ok(Mp4Writer {
+            out,
+            pos: mdat_at + 16,
+            mdat_at,
+            video: video.map(|v| (v, Track::default())),
+            audio: audio.map(|a| (a, Track::default())),
+            chapters: Vec::new(),
+        })
     }
 
     fn chunk(out: &mut W, pos: &mut u64, track: &mut Track, samples: &[Sample]) -> io::Result<()> {
@@ -175,6 +184,11 @@ impl<W: Write + Seek> Mp4Writer<W> {
     }
 
     /// Writes the index and hands the output back.
+    /// The video's chapters: each one's start (µs) and name, in order.
+    pub fn set_chapters(&mut self, chapters: Vec<(u64, String)>) {
+        self.chapters = chapters;
+    }
+
     pub fn finish(mut self) -> io::Result<W> {
         let mdat_size = self.pos - self.mdat_at;
         self.out.seek(SeekFrom::Start(self.mdat_at + 8))?;
@@ -209,7 +223,8 @@ impl<W: Write + Seek> Mp4Writer<W> {
             0,
             &Body::default().u64(0).u64(0).u32(MOVIE_TIMESCALE).u64(longest).u32(0x0001_0000).u16(0x0100).zeros(10).matrix().zeros(24).u32(id).0,
         );
-        bx(b"moov", &[mvhd, traks].concat())
+        let chapters = if self.chapters.is_empty() { Vec::new() } else { chapters_box(&self.chapters) };
+        bx(b"moov", &[mvhd, traks, chapters].concat())
     }
 }
 
@@ -337,6 +352,272 @@ fn audio_trak(id: u32, a: &AudioTrack, t: &Track, duration: u64) -> Vec<u8> {
     bx(b"trak", &[tkhd(id, duration, true, 0, 0), bx(b"edts", &elst), mdia].concat())
 }
 
+/// The most chapters a video keeps (the chapter list counts them in a byte).
+pub const MAX_CHAPTERS: usize = 255;
+
+/// The chapter list most players read (`chpl`, in a `udta` box in the `moov`): each chapter's
+/// start (µs) and name, at most [`MAX_CHAPTERS`], names cut to 255 bytes.
+pub fn chapters_box(chapters: &[(u64, String)]) -> Vec<u8> {
+    bx(b"udta", &chpl(chapters))
+}
+
+fn chpl(chapters: &[(u64, String)]) -> Vec<u8> {
+    let list: Vec<&(u64, String)> = chapters.iter().take(MAX_CHAPTERS).collect();
+    let mut body = Body::default().u32(0).u8(list.len() as u8);
+    for (at, name) in list {
+        let mut end = name.len().min(255);
+        while !name.is_char_boundary(end) {
+            end -= 1;
+        }
+        let title = name.get(..end).unwrap_or_default();
+        // In tenths of a microsecond.
+        body = body.u64(at.saturating_mul(10)).u8(title.len() as u8).bytes(title.as_bytes());
+    }
+    full(b"chpl", 1, 0, &body.0)
+}
+
+/// A box in a file: its kind, where it starts, where its body starts, where it ends.
+#[derive(Clone, Copy)]
+struct Found {
+    kind: [u8; 4],
+    start: usize,
+    body: usize,
+    end: usize,
+}
+
+/// The boxes one after another in `b` (as far as they make sense).
+fn boxes(b: &[u8]) -> Vec<Found> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while out.len() < 10_000 {
+        let Some(head) = b.get(at..at + 8) else { break };
+        let size = u64::from(u32::from_be_bytes([head[0], head[1], head[2], head[3]]));
+        let kind = [head[4], head[5], head[6], head[7]];
+        let (body, size) = match size {
+            0 => (at + 8, (b.len() - at) as u64),
+            1 => match b.get(at + 8..at + 16).and_then(|v| v.try_into().ok()) {
+                Some(v) => (at + 16, u64::from_be_bytes(v)),
+                None => break,
+            },
+            s => (at + 8, s),
+        };
+        let Some(end) = usize::try_from(size).ok().and_then(|s| at.checked_add(s)) else { break };
+        if end < body || end > b.len() {
+            break;
+        }
+        out.push(Found { kind, start: at, body, end });
+        at = end;
+    }
+    out
+}
+
+/// A box's bytes with this body (a 32-bit size if it fits).
+fn sized(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    match u32::try_from(body.len() + 8) {
+        Ok(n) => [&n.to_be_bytes()[..], kind, body].concat(),
+        Err(_) => [&1u32.to_be_bytes()[..], kind, &((body.len() + 16) as u64).to_be_bytes()[..], body].concat(),
+    }
+}
+
+/// Where the chunks of each track start (`stco`, `co64`), moved by `delta` bytes: the `moov` got
+/// longer before the media. False when an offset no longer fits.
+fn shift_offsets(moov: &mut [u8], delta: u64) -> bool {
+    let mut ok = true;
+    for path in boxes(moov).into_iter().filter(|b| &b.kind == b"trak") {
+        let trak = path;
+        for mdia in boxes(moov.get(trak.body..trak.end).unwrap_or_default()).into_iter().filter(|b| &b.kind == b"mdia") {
+            let base = trak.body + mdia.body;
+            let inner: Vec<Found> = boxes(moov.get(base..trak.body + mdia.end).unwrap_or_default());
+            for minf in inner.into_iter().filter(|b| &b.kind == b"minf") {
+                let base2 = base + minf.body;
+                let stbls: Vec<Found> = boxes(moov.get(base2..base + minf.end).unwrap_or_default());
+                for stbl in stbls.into_iter().filter(|b| &b.kind == b"stbl") {
+                    let base3 = base2 + stbl.body;
+                    let tables: Vec<Found> = boxes(moov.get(base3..base2 + stbl.end).unwrap_or_default());
+                    for t in tables {
+                        let (from, to) = (base3 + t.body, base3 + t.end);
+                        let wide = match &t.kind {
+                            b"stco" => false,
+                            b"co64" => true,
+                            _ => continue,
+                        };
+                        let Some(table) = moov.get_mut(from..to) else { continue };
+                        let n = table.get(4..8).and_then(|v| v.try_into().ok()).map_or(0, u32::from_be_bytes) as usize;
+                        let step = if wide { 8 } else { 4 };
+                        for k in 0..n {
+                            let at = 8 + k * step;
+                            let Some(slot) = table.get_mut(at..at + step) else { break };
+                            if wide {
+                                let v = slot.try_into().map(u64::from_be_bytes).unwrap_or(0).checked_add(delta);
+                                match v {
+                                    Some(v) => slot.copy_from_slice(&v.to_be_bytes()),
+                                    None => ok = false,
+                                }
+                            } else {
+                                let v = slot.try_into().map(u32::from_be_bytes).map(u64::from).unwrap_or(0).saturating_add(delta);
+                                match u32::try_from(v) {
+                                    Ok(v) => slot.copy_from_slice(&v.to_be_bytes()),
+                                    Err(_) => ok = false,
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok
+}
+
+/// An MP4 file (made by another writer) in memory with these chapters put in (see
+/// [`moov_with_chapters`]). None when the file isn't one this can change.
+pub fn add_chapters(file: &[u8], chapters: &[(u64, String)]) -> Option<Vec<u8>> {
+    if chapters.is_empty() {
+        return Some(file.to_vec());
+    }
+    let top = boxes(file);
+    let moov = *top.iter().find(|b| &b.kind == b"moov")?;
+    let media_after = top.iter().any(|b| &b.kind == b"mdat" && b.start > moov.start);
+    let new_moov = moov_with_chapters(file.get(moov.start..moov.end)?, chapters, media_after)?;
+    let mut out = Vec::with_capacity(file.len() + new_moov.len());
+    out.extend_from_slice(file.get(..moov.start)?);
+    out.extend(new_moov);
+    out.extend_from_slice(file.get(moov.end..)?);
+    Some(out)
+}
+
+/// An MP4 file on the disk with these chapters put in, its media never read: the boxes' heads
+/// are read and the `moov` changed. A `moov` after the media is written again at the end and the
+/// old one made a `free` box (so the file is whole at every moment); one before the media means
+/// the whole file is written again beside it, then put in its place. False (the file as it was)
+/// when it isn't one this can change.
+pub fn add_chapters_to_file(path: &std::path::Path, chapters: &[(u64, String)]) -> io::Result<bool> {
+    use std::io::Read;
+    if chapters.is_empty() {
+        return Ok(true);
+    }
+    let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
+    let len = f.metadata()?.len();
+    // The boxes at the top, from their heads: (start, end, kind).
+    let mut top: Vec<(u64, u64, [u8; 4])> = Vec::new();
+    let mut at = 0u64;
+    while at.saturating_add(8) <= len && top.len() < 10_000 {
+        f.seek(SeekFrom::Start(at))?;
+        let mut head = [0u8; 8];
+        f.read_exact(&mut head)?;
+        let kind = [head[4], head[5], head[6], head[7]];
+        let size = match u32::from_be_bytes([head[0], head[1], head[2], head[3]]) {
+            0 => len - at,
+            1 => {
+                let mut wide = [0u8; 8];
+                f.read_exact(&mut wide)?;
+                u64::from_be_bytes(wide)
+            }
+            s => u64::from(s),
+        };
+        let end = at.saturating_add(size);
+        if size < 8 || end > len {
+            break;
+        }
+        top.push((at, end, kind));
+        at = end;
+    }
+    let Some(&(ms, me, _)) = top.iter().find(|b| &b.2 == b"moov") else { return Ok(false) };
+    // A `moov` of more than 64 MB isn't one this changes.
+    let Some(moov_len) = usize::try_from(me - ms).ok().filter(|n| *n <= 64 << 20) else { return Ok(false) };
+    let media_after = top.iter().any(|b| &b.2 == b"mdat" && b.0 > ms);
+    let mut moov = vec![0u8; moov_len];
+    f.seek(SeekFrom::Start(ms))?;
+    f.read_exact(&mut moov)?;
+    let Some(new) = moov_with_chapters(&moov, chapters, media_after) else { return Ok(false) };
+    if !media_after {
+        // The new one at the end, then the old one let go of.
+        f.seek(SeekFrom::Start(len))?;
+        f.write_all(&new)?;
+        f.sync_all()?;
+        f.seek(SeekFrom::Start(ms + 4))?;
+        f.write_all(b"free")?;
+        f.sync_all()?;
+        return Ok(true);
+    }
+    let beside = path.with_extension("chapters.part");
+    let made = (|| -> io::Result<()> {
+        let mut out = std::fs::File::create(&beside)?;
+        f.seek(SeekFrom::Start(0))?;
+        io::copy(&mut (&mut f).take(ms), &mut out)?;
+        out.write_all(&new)?;
+        f.seek(SeekFrom::Start(me))?;
+        io::copy(&mut f, &mut out)?;
+        out.sync_all()
+    })();
+    drop(f);
+    if let Err(e) = made {
+        let _ = std::fs::remove_file(&beside);
+        return Err(e);
+    }
+    std::fs::rename(&beside, path)?;
+    Ok(true)
+}
+
+/// A `moov` box (all of it) with these chapters put in its `udta` (made if it has none).
+/// `media_after`: the media comes after it in the file, so starts later by as much as it grew,
+/// and the chunk offsets in it move to match. None when it can't be changed.
+pub fn moov_with_chapters(moov_box: &[u8], chapters: &[(u64, String)], media_after: bool) -> Option<Vec<u8>> {
+    let moov = *boxes(moov_box).first().filter(|b| &b.kind == b"moov")?;
+    let old = moov_box.get(moov.body..moov.end)?;
+    let list = chpl(chapters);
+    let mut body = Vec::with_capacity(old.len() + list.len() + 8);
+    match boxes(old).into_iter().find(|b| &b.kind == b"udta") {
+        Some(u) => {
+            // Into the one it has, after what's in it.
+            body.extend_from_slice(old.get(..u.start)?);
+            let mut inner = old.get(u.body..u.end)?.to_vec();
+            inner.extend_from_slice(&list);
+            body.extend(sized(b"udta", &inner));
+            body.extend_from_slice(old.get(u.end..)?);
+        }
+        None => {
+            body.extend_from_slice(old);
+            body.extend(bx(b"udta", &list));
+        }
+    }
+    let new_moov = sized(b"moov", &body);
+    let delta = (new_moov.len() as u64).checked_sub((moov.end - moov.start) as u64)?;
+    let mut new_moov = new_moov;
+    if media_after {
+        // The media starts later by as much: its offsets in the tables move.
+        let head = new_moov.len() - body.len();
+        if !shift_offsets(new_moov.get_mut(head..)?, delta) {
+            return None;
+        }
+    }
+    Some(new_moov)
+}
+
+/// The chapters an MP4 file holds (`moov` › `udta` › `chpl`): each one's start (µs) and name.
+pub fn chapters_of(file: &[u8]) -> Vec<(u64, String)> {
+    let mut out = Vec::new();
+    let Some(moov) = boxes(file).into_iter().find(|b| &b.kind == b"moov") else { return out };
+    let moov_body = file.get(moov.body..moov.end).unwrap_or_default();
+    for udta in boxes(moov_body).into_iter().filter(|b| &b.kind == b"udta") {
+        let inner = moov_body.get(udta.body..udta.end).unwrap_or_default();
+        for c in boxes(inner).into_iter().filter(|b| &b.kind == b"chpl") {
+            let b = inner.get(c.body..c.end).unwrap_or_default();
+            // Version and flags, a word, the count.
+            let n = b.get(8).copied().unwrap_or(0) as usize;
+            let mut at = 9;
+            for _ in 0..n {
+                let Some(start) = b.get(at..at + 8).and_then(|v| v.try_into().ok()).map(u64::from_be_bytes) else { break };
+                let len = b.get(at + 8).copied().unwrap_or(0) as usize;
+                let Some(title) = b.get(at + 9..at + 9 + len) else { break };
+                out.push((start / 10, String::from_utf8_lossy(title).to_string()));
+                at += 9 + len;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
@@ -399,5 +680,82 @@ mod tests {
     fn writing_to_a_track_the_file_lacks_is_an_error() {
         let mut w = Mp4Writer::new(Cursor::new(Vec::new()), None, Some(AudioTrack { channels: 1, pre_skip: 0 })).unwrap();
         assert!(w.write_video(&[Sample { data: vec![0], duration: 1, sync: true }]).is_err());
+    }
+
+    fn chapters() -> Vec<(u64, String)> {
+        vec![(0, "Start".to_string()), (2_500_000, "The login page: ünïcode".to_string()), (61_000_000, "é".repeat(200))]
+    }
+
+    /// A file as another writer might make it: its index first, then the media, which the index
+    /// says starts where `MEDIA` is.
+    fn index_first() -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isom");
+        let moov = |offset: u32| {
+            let stco = full(b"stco", 0, 0, &Body::default().u32(1).u32(offset).0);
+            let stbl = bx(b"stbl", &stco);
+            bx(b"moov", &bx(b"trak", &bx(b"mdia", &bx(b"minf", &stbl))))
+        };
+        let at = (ftyp.len() + moov(0).len() + 8) as u32;
+        [ftyp, moov(at), bx(b"mdat", b"MEDIA")].concat()
+    }
+
+    /// Where the media is, as the file's index says (its first `stco`), and what's there.
+    fn media_said(file: &[u8]) -> Vec<u8> {
+        let p = find(file, b"stco").unwrap();
+        let at = u32::from_be_bytes(file[p + 12..p + 16].try_into().unwrap()) as usize;
+        file[at..at + 5].to_vec()
+    }
+
+    #[test]
+    fn chapters_go_in_the_index_and_into_another_writers_file() {
+        // Ours: in the index at the end; names cut to 255 bytes, whole letters.
+        let mut w =
+            Mp4Writer::new(Cursor::new(Vec::new()), Some(VideoTrack { width: 64, height: 48, timescale: 30, av1c: vec![0x81, 0, 0, 0] }), None)
+                .unwrap();
+        w.write_video(&[Sample { data: vec![1, 2, 3], duration: 1, sync: true }]).unwrap();
+        w.set_chapters(chapters());
+        let ours = w.finish().unwrap().into_inner();
+        let back = chapters_of(&ours);
+        assert_eq!(back[..2], chapters()[..2]);
+        assert_eq!((back[2].0, back[2].1.len(), back[2].1.chars().count()), (61_000_000, 254, 127));
+        assert_eq!(top(&ours).iter().map(|b| b.2).sum::<u64>(), ours.len() as u64);
+        // Another writer's, index first: the chapters go in and the media is still where it says.
+        let theirs = index_first();
+        assert_eq!(media_said(&theirs), b"MEDIA");
+        let with = add_chapters(&theirs, &chapters()).unwrap();
+        assert_eq!(chapters_of(&with).len(), 3);
+        assert_eq!(media_said(&with), b"MEDIA");
+        // Junk: none, never a panic.
+        for junk in [&b""[..], b"\0\0\0\x08moov", b"\0\0\0\x01moov\xff\xff\xff\xff\xff\xff\xff\xff", &[0xFF; 40]] {
+            let _ = add_chapters(junk, &chapters());
+            assert!(chapters_of(junk).is_empty());
+        }
+    }
+
+    #[test]
+    fn chapters_go_into_a_file_on_the_disk_whichever_way_round_it_is() {
+        let dir = std::env::temp_dir().join(format!("sgc-chapters-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Index first: written again beside it.
+        let first = dir.join("first.mp4");
+        std::fs::write(&first, index_first()).unwrap();
+        assert!(add_chapters_to_file(&first, &chapters()).unwrap());
+        let b = std::fs::read(&first).unwrap();
+        assert_eq!((chapters_of(&b).len(), media_said(&b)), (3, b"MEDIA".to_vec()));
+        // Index last (ours, without chapters): a new index at the end, the old one let go.
+        let mut w = Mp4Writer::new(Cursor::new(Vec::new()), None, Some(AudioTrack { channels: 1, pre_skip: 0 })).unwrap();
+        w.write_audio(&[Sample { data: b"SOUND".to_vec(), duration: 960, sync: true }]).unwrap();
+        let last = dir.join("last.mp4");
+        std::fs::write(&last, w.finish().unwrap().into_inner()).unwrap();
+        assert!(add_chapters_to_file(&last, &chapters()).unwrap());
+        let b = std::fs::read(&last).unwrap();
+        assert_eq!(top(&b).iter().map(|x| x.0.as_str()).collect::<Vec<_>>(), ["ftyp", "mdat", "free", "moov"]);
+        assert_eq!(chapters_of(&b).len(), 3);
+        // Not an MP4: left as it was.
+        let junk = dir.join("junk.mp4");
+        std::fs::write(&junk, b"not a video").unwrap();
+        assert!(!add_chapters_to_file(&junk, &chapters()).unwrap());
+        assert_eq!(std::fs::read(&junk).unwrap(), b"not a video");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

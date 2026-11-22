@@ -329,6 +329,7 @@ impl Exporter {
             let end = ((k as u64 + 1) * self.per).min(frames);
             self.send(k, end, &rec, &timeline)?;
         }
+        let chapters = timeline.chapters();
         self.latest = Some((rec, timeline));
         self.jobs = None;
         while self.written < self.sent {
@@ -338,7 +339,9 @@ impl Exporter {
             self.collect_one()?;
             progress.store((self.written * 1000 / stretches.max(1)) as u32, Ordering::SeqCst);
         }
-        let mp4 = self.mp4.take().ok_or_else(|| MediaError::Encode("the video is already finished".to_string()))?;
+        let mut mp4 = self.mp4.take().ok_or_else(|| MediaError::Encode("the video is already finished".to_string()))?;
+        // The timeline's markers, as chapters.
+        mp4.set_chapters(chapters);
         let file = mp4.finish()?;
         file.into_inner().map_err(|e| MediaError::Io(e.into_error()))?.sync_all()?;
         std::fs::rename(&self.part, &self.out)?;
@@ -444,7 +447,11 @@ pub fn has_sound(timeline: &Timeline) -> bool {
         What::Media { id } => timeline.media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture),
         _ => false,
     });
-    tracks || layers
+    // The pointer's clicks heard, on the screen's clips.
+    let clicks = timeline.pointer.show
+        && timeline.pointer.click_sound
+        && timeline.tracks.iter().any(|t| t.kind == crate::recording::StreamKind::Screen && !t.muted && !t.clips.is_empty());
+    tracks || layers || clicks
 }
 
 /// [`export_with_captions`], with the media bin's pictures and sound for the layers' items.
@@ -492,6 +499,112 @@ pub fn export_with(
         let _ = watcher.join();
         r
     })
+}
+
+/// The longest WAV made: its sizes are 32-bit (about six hours of 48 kHz stereo).
+const WAV_MAX_BYTES: u64 = u32::MAX as u64 - 64;
+
+/// The header of a WAV file of `samples` 16-bit stereo samples at 48 kHz.
+pub fn wav_header(samples: u64) -> [u8; 44] {
+    let data = u32::try_from(samples.saturating_mul(4)).unwrap_or(u32::MAX - 64);
+    let mut h = [0u8; 44];
+    let mut put = |at: usize, b: &[u8]| {
+        if let Some(d) = h.get_mut(at..at + b.len()) {
+            d.copy_from_slice(b);
+        }
+    };
+    put(0, b"RIFF");
+    put(4, &data.saturating_add(36).to_le_bytes());
+    put(8, b"WAVEfmt ");
+    put(16, &16u32.to_le_bytes());
+    put(20, &1u16.to_le_bytes()); // PCM
+    put(22, &2u16.to_le_bytes()); // stereo
+    put(24, &(compose::RATE as u32).to_le_bytes());
+    put(28, &(compose::RATE as u32 * 4).to_le_bytes());
+    put(32, &4u16.to_le_bytes());
+    put(34, &16u16.to_le_bytes());
+    put(36, b"data");
+    put(40, &data.to_le_bytes());
+    h
+}
+
+/// Just the sound of the recording as edited, as a WAV file: 16-bit stereo at 48 kHz, as it is
+/// heard, not compressed (every program opens it). Written beside `out` first, then put in
+/// place; `progress` goes from 0 to 1000; setting `cancel` stops it and leaves nothing behind.
+pub fn export_wav(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
+    use std::io::Write as _;
+    let length = timeline.length();
+    if length == 0 {
+        return Err(MediaError::Encode("there's nothing left to make a sound file of".to_string()));
+    }
+    let samples = compose::to_samples(length);
+    if samples.saturating_mul(4) > WAV_MAX_BYTES {
+        return Err(MediaError::Encode("it's too long for a WAV file (about six hours at most): choose M4A, or a stretch of it".to_string()));
+    }
+    let part = out.with_extension("wav.part");
+    let written = (|| -> Result<(), MediaError> {
+        let mut f = BufWriter::new(File::create(&part)?);
+        f.write_all(&wav_header(samples))?;
+        let mut at = 0u64;
+        let block = compose::RATE;
+        while at < samples {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(MediaError::Encode("cancelled".to_string()));
+            }
+            let n = block.min(samples - at);
+            let mixed = compose::mix_with(&rec, timeline, media.as_ref(), at, n as usize);
+            let mut bytes = Vec::with_capacity(mixed.len() * 2);
+            for v in &mixed {
+                bytes.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes());
+            }
+            f.write_all(&bytes)?;
+            at += n;
+            progress.store((at.saturating_mul(1000) / samples.max(1)).min(999) as u32, Ordering::SeqCst);
+        }
+        let file = f.into_inner().map_err(|e| MediaError::Io(e.into_error()))?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    std::fs::rename(&part, out)?;
+    progress.store(1000, Ordering::SeqCst);
+    Ok(Exported { width: 0, height: 0, frames: 0, bytes: std::fs::metadata(out)?.len(), duration_us: length })
+}
+
+/// Whether an M4A (AAC sound) can be made on this computer: by Windows' own encoder.
+pub fn m4a_available() -> bool {
+    cfg!(target_os = "windows")
+}
+
+/// Just the sound of the recording as edited, as an M4A (AAC, smaller than a WAV), with the
+/// markers as its chapters: by Windows' own encoder, so on Windows only (see [`m4a_available`]).
+pub fn export_m4a(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
+    #[cfg(target_os = "windows")]
+    {
+        crate::h264::export_m4a(rec, timeline, media, out, progress, cancel)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (rec, timeline, media, out, progress, cancel);
+        Err(MediaError::Encode("M4A sound is made by Windows' own encoder: choose WAV here".to_string()))
+    }
 }
 
 /// An animated GIF is made no larger than this, at this many pictures a second: a bigger or
@@ -548,6 +661,68 @@ pub fn export_gif(
         Ok(())
     });
     if let Some(e) = stopped.or(written.err()) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    std::fs::rename(&part, out)?;
+    progress.store(1000, Ordering::SeqCst);
+    Ok(Exported { width: w, height: h, frames, bytes: std::fs::metadata(out)?.len(), duration_us: length })
+}
+
+/// A see-through video of the recording as edited: a QuickTime movie of PNG pictures (see
+/// [`crate::mov`]), see-through wherever there's nothing (the screen hidden, the camera's
+/// background taken away, round the titles and callouts), no sound. Captions (in timeline time)
+/// are burned in if given. Written beside `out` first, then put in place; `progress` goes from 0
+/// to 1000; setting `cancel` stops it and leaves nothing behind.
+#[allow(clippy::too_many_arguments)]
+pub fn export_mov(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    s: ExportSettings,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
+    let length = timeline.length();
+    if length == 0 {
+        return Err(MediaError::Encode("there's nothing left to make a video of".to_string()));
+    }
+    let (w, h) = video_size(&rec, &s);
+    let fps = u64::from(s.fps.clamp(1, 60));
+    let frames = length.saturating_mul(fps).div_ceil(1_000_000);
+    let part = out.with_extension("mov.part");
+    let mut mov = crate::mov::MovWriter::new(BufWriter::new(File::create(&part)?), w, h, fps as u32)?;
+    let mut composer = Composer::new(rec, timeline, w, h);
+    composer.see_through = true;
+    composer.set_captions(captions);
+    composer.set_media(media);
+    let mut stopped = None;
+    for f in 0..frames {
+        if cancel.load(Ordering::SeqCst) {
+            stopped = Some(MediaError::Encode("cancelled".to_string()));
+            break;
+        }
+        let pic = composer.frame(timeline, f.saturating_mul(1_000_000) / fps);
+        let png = match screengrabcraft_render::encode(&pic, screengrabcraft_model::ImageFormat::Png, 100) {
+            Ok(p) => p,
+            Err(e) => {
+                stopped = Some(MediaError::Encode(e.to_string()));
+                break;
+            }
+        };
+        if let Err(e) = mov.push(&png) {
+            stopped = Some(MediaError::Io(e));
+            break;
+        }
+        progress.store((f.saturating_mul(1000) / frames.max(1)).min(999) as u32, Ordering::SeqCst);
+    }
+    let written = mov.finish().and_then(|file| {
+        let file = file.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()
+    });
+    if let Some(e) = stopped.or(written.err().map(MediaError::Io)) {
         let _ = std::fs::remove_file(&part);
         return Err(e);
     }
@@ -616,6 +791,8 @@ mod tests {
         let rec = recording(5);
         let mut tl = Timeline::new(&rec);
         tl.cut(1_000_000, 2_000_000).unwrap();
+        tl.add_marker(500_000, Some("Intro")).unwrap();
+        tl.add_marker(3_000_000, Some("Outro")).unwrap();
         let dir = dir("export");
         let out = dir.join("video.mp4");
         let progress = AtomicU32::new(0);
@@ -626,6 +803,8 @@ mod tests {
         assert_eq!(progress.load(Ordering::SeqCst), 1000);
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(top_boxes(&bytes), ["ftyp", "mdat", "moov"]);
+        let chapters = vec![(0, "Start".to_string()), (500_000, "Intro".to_string()), (3_000_000, "Outro".to_string())];
+        assert_eq!(crate::mp4::chapters_of(&bytes), chapters, "the markers are its chapters");
         assert!(!out.with_extension("mp4.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -680,6 +859,7 @@ mod tests {
         let rec = recording(5);
         let mut tl = Timeline::new(&rec);
         tl.cut(1_000_000, 2_000_000).unwrap();
+        tl.add_marker(2_000_000, Some("Second half")).unwrap();
         let dir = dir("h264");
         let out = dir.join("video.mp4");
         let progress = AtomicU32::new(0);
@@ -692,8 +872,45 @@ mod tests {
         assert!(top.iter().any(|b| b == "ftyp") && top.iter().any(|b| b == "moov") && top.iter().any(|b| b == "mdat"), "{top:?}");
         let has = |tag: &[u8]| bytes.windows(4).any(|w| w == tag);
         assert!(has(b"avc1") && has(b"mp4a"), "H.264 pictures and AAC sound");
+        assert_eq!(crate::mp4::chapters_of(&bytes), vec![(0, "Start".to_string()), (2_000_000, "Second half".to_string())], "chapters put in");
         assert!(!has(b"av01") && !has(b"Opus"));
         assert!(!out.with_extension("mp4.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_see_through_movie_is_made_of_png_pictures_clear_where_nothing_is() {
+        let rec = recording(3);
+        let mut tl = Timeline::new(&rec);
+        // The screen hidden, a title over nothing.
+        tl.set_muted(0, true).unwrap();
+        tl.place(crate::layers::template("title-box").unwrap().item, None, 0).unwrap();
+        let dir = dir("mov");
+        let out = dir.join("title.mov");
+        let progress = AtomicU32::new(0);
+        let s = ExportSettings { fps: 5, ..ExportSettings::default() };
+        let done = export_mov(rec.clone(), &tl, None, Arc::new(crate::layer_draw::NoMedia), &out, s, &progress, &AtomicBool::new(false)).unwrap();
+        assert_eq!((done.width, done.height, done.frames), (96, 60, 20), "to the end of the title");
+        assert_eq!(progress.load(Ordering::SeqCst), 1000);
+        assert!(!out.with_extension("mov.part").exists());
+        let bytes = std::fs::read(&out).unwrap();
+        let top: Vec<[u8; 4]> = crate::mov::boxes(&bytes).iter().map(|b| b.0).collect();
+        assert_eq!(top, vec![*b"ftyp", *b"mdat", *b"moov"]);
+        // A picture from the middle: clear round the title, the title solid.
+        let (_, at, _) = crate::mov::boxes(&bytes)[1];
+        let first = bytes.get(at..).unwrap();
+        assert!(first.starts_with(&[0x89, b'P', b'N', b'G']));
+        let pngs: Vec<usize> =
+            (0..bytes.len().saturating_sub(8)).filter(|i| bytes[*i..].starts_with(&[0x89, b'P', b'N', b'G', 13, 10, 26, 10])).collect();
+        assert_eq!(pngs.len(), 20);
+        let mid = screengrabcraft_render::decode(&bytes[pngs[8]..]).unwrap();
+        let clear = mid.pixels().chunks(4).filter(|p| p[3] == 0).count();
+        let solid = mid.pixels().chunks(4).filter(|p| p[3] == 255).count();
+        assert!(clear > 1000 && solid > 50, "{clear} {solid}");
+        // Cancelled: nothing left behind.
+        let gone = dir.join("gone.mov");
+        assert!(export_mov(rec, &tl, None, Arc::new(crate::layer_draw::NoMedia), &gone, s, &AtomicU32::new(0), &AtomicBool::new(true)).is_err());
+        assert!(!gone.exists() && !gone.with_extension("mov.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -736,6 +953,56 @@ mod tests {
             .is_err()
         );
         assert!(!gone.exists() && !gone.with_extension("gif.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn just_the_sound_is_a_wav_of_the_edited_mix_and_cancelling_leaves_nothing() {
+        let rec = recording(3);
+        let mut tl = Timeline::new(&rec);
+        tl.cut(0, 1_000_000).unwrap();
+        let dir = dir("wav");
+        let out = dir.join("sound.wav");
+        let progress = AtomicU32::new(0);
+        let none: Arc<dyn MediaStore> = Arc::new(crate::layer_draw::NoMedia);
+        let done = export_wav(rec.clone(), &tl, none.clone(), &out, &progress, &AtomicBool::new(false)).unwrap();
+        assert_eq!((done.duration_us, progress.load(Ordering::SeqCst)), (2_000_000, 1000));
+        let bytes = std::fs::read(&out).unwrap();
+        assert_eq!(&bytes[..4], b"RIFF");
+        assert_eq!(&bytes[8..16], b"WAVEfmt ");
+        assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), 48_000);
+        let data = u32::from_le_bytes(bytes[40..44].try_into().unwrap()) as usize;
+        assert_eq!((data, bytes.len()), (96_000 * 4, 44 + 96_000 * 4), "two seconds of stereo");
+        // What's in it is the edited mix: the tone as it was a second in.
+        let mix = compose::mix(&rec, &tl, 1000, 1);
+        let first = i16::from_le_bytes(bytes[44 + 4000..44 + 4002].try_into().unwrap());
+        assert!((f32::from(first) / 32767.0 - mix[0]).abs() < 1e-3, "{first} {mix:?}");
+        assert!(!out.with_extension("wav.part").exists());
+        // Cancelled: nothing; nothing left to hear: an error.
+        let gone = dir.join("gone.wav");
+        assert!(export_wav(rec.clone(), &tl, none.clone(), &gone, &AtomicU32::new(0), &AtomicBool::new(true)).is_err());
+        assert!(!gone.exists() && !gone.with_extension("wav.part").exists());
+        tl.cut(0, 9_000_000).unwrap();
+        assert!(export_wav(rec, &tl, none, &gone, &AtomicU32::new(0), &AtomicBool::new(false)).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Windows' own AAC encoder: an M4A of just the sound.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn on_windows_just_the_sound_is_an_m4a_made_with_its_own_encoder() {
+        let rec = recording(3);
+        let tl = Timeline::new(&rec);
+        let dir = dir("m4a");
+        let out = dir.join("sound.m4a");
+        let progress = AtomicU32::new(0);
+        let done = export_m4a(rec, &tl, Arc::new(crate::layer_draw::NoMedia), &out, &progress, &AtomicBool::new(false)).unwrap();
+        assert_eq!((done.duration_us, progress.load(Ordering::SeqCst)), (3_000_000, 1000));
+        let bytes = std::fs::read(&out).unwrap();
+        let has = |tag: &[u8]| bytes.windows(4).any(|w| w == tag);
+        assert!(has(b"ftyp") && has(b"moov") && has(b"mp4a"), "AAC sound in an MP4 box");
+        assert!(!has(b"avc1"), "no pictures");
+        assert!(!out.with_extension("m4a.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

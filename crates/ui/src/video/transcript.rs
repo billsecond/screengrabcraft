@@ -4,13 +4,56 @@
 //! there; the line playing is marked, and followed while the video plays. Each speaker's name is
 //! the name of the track (or the layer) it was heard on, and is renamed here or in its header.
 
-use egui::{Color32, Rect, RichText, Sense, Ui, vec2};
+//!
+//! The recording's own lines are put right here too: a double click on a line puts its words in a
+//! box to change (and to split at the cursor); its right button splits it, joins it to the
+//! speaker's next line, moves its start or end to the playhead, or deletes it. Every change is a
+//! `video.caption*` command, so it's undone like any edit and saved with the edits.
+//!
+//! Words are cut out of the video from here too: Cut Words from the Video (a line's right
+//! button) shows its words to choose, and Take Out Filler Words cuts every um, uh and er the
+//! transcript has (`video.cutWords`, `video.cutFillers`). The speech model times lines only, so a
+//! word's time is worked out from its line's, by its length.
+
+use egui::{Color32, Key, Rect, RichText, Sense, Ui, vec2};
 use screengrabcraft_media::captions::{self, Cue, Speaker, Who};
+use serde_json::json;
 
 use super::{Rename, VideoView, clock, kind_colour};
 use crate::editor::Editor;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
+
+/// A line's words being put right in the transcript pane.
+pub(crate) struct CaptionEdit {
+    /// Which of the recording's captions it is (its place among them).
+    pub source: usize,
+    pub words: String,
+    /// The box has had the keys (its words chosen, to type over).
+    pub started: bool,
+    /// Where the cursor is in the words (characters): Split at the Cursor cuts there.
+    pub cursor: Option<usize>,
+}
+
+/// Words of a line being chosen in the transcript pane, to cut out of the video.
+pub(crate) struct WordCut {
+    /// Which of the recording's captions it is (its place among them).
+    pub source: usize,
+    /// The places of the words chosen.
+    pub chosen: std::collections::BTreeSet<usize>,
+}
+
+/// What was asked of a line of the recording's captions in the pane.
+enum LineAct {
+    Edit(usize),
+    CutWords(usize),
+    Split(usize),
+    Join(usize),
+    /// Its start (true) or its end moved to the playhead; who said it, for whose sound it's on.
+    Move(usize, Who, bool),
+    Delete(usize),
+    AllAsHeard,
+}
 
 /// The pane's width.
 pub const TRANSCRIPT_W: f32 = 300.0;
@@ -74,10 +117,217 @@ impl VideoView {
                 for who in speakers {
                     self.speaker_row(ed, ui, who);
                 }
+                if self.line_sources.iter().any(Option::is_some) {
+                    ui.add_space(4.0);
+                    if ui
+                        .button("Take Out Filler Words")
+                        .on_hover_text("Cuts um, uh, er and the like out of the video wherever the transcript has them")
+                        .clicked()
+                    {
+                        let ctx = ui.ctx().clone();
+                        self.take_out_fillers(ed, &ctx);
+                    }
+                }
                 ui.add_space(6.0);
                 ui.separator();
+                self.caption_editor(ed, ui);
+                self.word_cutter(ed, ui);
                 self.transcript_lines(ed, ui, &lines);
             });
+    }
+
+    /// The words of the line being put right, in a box above the lines: Enter (or Done) keeps
+    /// them, Esc (or Cancel) lets them go, Split at the Cursor cuts the line in two there.
+    fn caption_editor(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let Some(mut e) = self.caption_edit.take() else { return };
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        // Esc lets it go (seen before the box, which takes the key, has its turn).
+        if e.started && ctx.input(|i| i.key_pressed(Key::Escape)) {
+            return;
+        }
+        ui.label(RichText::new("Put the line right").size(12.0).color(t.muted));
+        let out = egui::TextEdit::multiline(&mut e.words).desired_rows(2).desired_width(f32::INFINITY).return_key(None).show(ui);
+        if !e.started {
+            out.response.request_focus();
+            let mut state = out.state.clone();
+            let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(e.words.chars().count()));
+            state.cursor.set_char_range(Some(all));
+            state.store(&ctx, out.response.id);
+            e.started = true;
+        }
+        if let Some(r) = out.cursor_range {
+            e.cursor = Some(r.primary.index.into());
+        }
+        let enter = out.response.has_focus() && ctx.input(|i| i.key_pressed(Key::Enter));
+        let (mut split, mut done, mut cancel) = (false, false, false);
+        ui.horizontal(|ui| {
+            split = ui.button("Split at the Cursor").on_hover_text("Two lines: the words before the cursor, and after it").clicked();
+            done = ui.button("Done").on_hover_text("Keep the words (Enter)").clicked();
+            cancel = ui.button("Cancel").on_hover_text("As they were (Esc)").clicked();
+        });
+        ui.add_space(6.0);
+        ui.separator();
+        if cancel {
+            return;
+        }
+        if enter || done || split {
+            self.run(ed, &ctx, "video.captionText", json!({"line": e.source, "text": e.words}));
+            if split {
+                // Where the cursor is in the words as they're kept (spaces tidied the same way).
+                let before: String = e.words.chars().take(e.cursor.unwrap_or(0)).collect();
+                let at = captions::clean_text(&before).chars().count();
+                self.run(ed, &ctx, "video.captionSplit", json!({"line": e.source, "at": at}));
+            }
+            return;
+        }
+        self.caption_edit = Some(e);
+    }
+
+    /// The words of a line, to choose those to cut out of the video, above the lines: a click
+    /// chooses a word (or lets it go), Cut from the Video (or Delete) takes them out, Esc (or
+    /// Cancel) leaves them.
+    fn word_cutter(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let Some(mut w) = self.word_cut.take() else { return };
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let said = captions::as_corrected(self.captions.as_ref(), &self.session.timeline);
+        let Some(cue) = said.as_ref().and_then(|s| s.cues.get(w.source)).cloned() else { return };
+        let words = captions::words(&cue);
+        ui.label(RichText::new("Cut words out of the video: click the words to take out").size(12.0).color(t.muted));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(2.0, 4.0);
+            for (i, word) in words.iter().enumerate() {
+                let on = w.chosen.contains(&i);
+                if ui.selectable_label(on, &word.text).on_hover_text(format!("Said at about {}", clock(word.start))).clicked() {
+                    if on {
+                        w.chosen.remove(&i);
+                    } else {
+                        w.chosen.insert(i);
+                    }
+                }
+            }
+        });
+        let (mut cut, mut fillers, mut cancel) = (false, false, false);
+        ui.horizontal(|ui| {
+            cut = ui
+                .add_enabled(!w.chosen.is_empty(), egui::Button::new("Cut from the Video"))
+                .on_hover_text("Where they're said is taken out of every track, and they go from the line (Delete)")
+                .clicked();
+            fillers = ui.button("Filler Words").on_hover_text("Choose its um, uh, er and the like").clicked();
+            cancel = ui.button("Cancel").on_hover_text("Nothing is cut (Esc)").clicked();
+        });
+        ui.label(RichText::new("A word's time is worked out from its line's, by its length.").size(11.0).color(t.muted));
+        ui.add_space(6.0);
+        ui.separator();
+        if cancel {
+            return;
+        }
+        if fillers {
+            let list: Vec<String> = captions::FILLERS.iter().map(|s| s.to_string()).collect();
+            w.chosen.extend(words.iter().enumerate().filter(|(_, x)| list.contains(&captions::bare(&x.text))).map(|(i, _)| i));
+        }
+        self.word_cut = Some(w);
+        if cut {
+            self.cut_chosen_words(ed, &ctx);
+        }
+    }
+
+    /// The words chosen in the transcript cut out of the video; the playhead goes where they were.
+    pub(super) fn cut_chosen_words(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let Some(w) = self.word_cut.take() else { return };
+        self.pause();
+        let words: Vec<usize> = w.chosen.into_iter().collect();
+        let r = self.session.execute("video.cutWords", &json!({"line": w.source, "words": words}));
+        self.after_word_cut(ed, ctx, r, "word");
+    }
+
+    /// Every filler word (um, uh, er…) the transcript has cut out of the video.
+    pub(super) fn take_out_fillers(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        self.word_cut = None;
+        self.caption_edit = None;
+        self.pause();
+        let r = self.session.execute("video.cutFillers", &json!({}));
+        self.after_word_cut(ed, ctx, r, "filler word");
+    }
+
+    /// Said after words were cut: how many, and how much shorter the video is; the playhead where
+    /// the first was.
+    fn after_word_cut(&mut self, ed: &mut Editor, ctx: &egui::Context, r: screengrabcraft_engine::Result<serde_json::Value>, what: &str) {
+        match r {
+            Ok(v) => {
+                let n = v.get("words").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let cut = v.get("cut").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                if let Some(at) = v.get("at").and_then(serde_json::Value::as_u64) {
+                    self.playhead = at.min(self.length());
+                }
+                self.range = None;
+                let s = if n == 1 { "" } else { "s" };
+                ed.toast(ctx, format!("{n} {what}{s} cut out of the video ({:.1} s)", cut as f64 / 1e6));
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
+        self.fix_selection();
+    }
+
+    /// A subtitle file picked in File › Import Subtitles: its lines made the recording's
+    /// captions (they were timed on the video as it is now), and the transcript shown.
+    pub fn import_subtitles(&mut self, ed: &mut Editor, ctx: &egui::Context, files: Vec<crate::services::OpenedFile>) {
+        let Some(f) = files.into_iter().next() else { return };
+        if f.bytes.len() as u64 > crate::services::MAX_SUBTITLES {
+            ed.error(ctx, format!("{} is too large to be subtitles", f.name));
+            return;
+        }
+        let text = subtitle_text(&f.bytes);
+        self.caption_edit = None;
+        self.word_cut = None;
+        match self.session.execute("video.importCaptions", &json!({"text": text})) {
+            Ok(v) => {
+                let n = v.get("lines").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let left = v.get("left").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                let s = if n == 1 { "" } else { "s" };
+                let more = if left > 0 { format!("; {left} fell where nothing is heard and were left out") } else { String::new() };
+                ed.toast(ctx, format!("{n} caption line{s} brought in from {}{more}", f.name));
+                self.transcript_open = true;
+            }
+            Err(e) => ed.error(ctx, format!("{}: {e}", f.name)),
+        }
+    }
+
+    /// A line of the recording's captions, to put right: its words in the box above the lines.
+    fn edit_caption(&mut self, source: usize) {
+        let said = captions::as_corrected(self.captions.as_ref(), &self.session.timeline);
+        if let Some(c) = said.as_ref().and_then(|s| s.cues.get(source)) {
+            self.caption_edit = Some(CaptionEdit { source, words: c.text.clone(), started: false, cursor: None });
+        }
+    }
+
+    /// Does what was asked of a line in the pane.
+    fn line_act(&mut self, ed: &mut Editor, ctx: &egui::Context, act: LineAct) {
+        // Whatever was being typed is let go (a new line's words take its place).
+        self.caption_edit = None;
+        self.word_cut = None;
+        match act {
+            LineAct::Edit(k) => self.edit_caption(k),
+            LineAct::CutWords(k) => self.word_cut = Some(WordCut { source: k, chosen: Default::default() }),
+            LineAct::Split(k) => self.run(ed, ctx, "video.captionSplit", json!({"line": k})),
+            LineAct::Join(k) => self.run(ed, ctx, "video.captionJoin", json!({"line": k})),
+            LineAct::Delete(k) => self.run(ed, ctx, "video.captionText", json!({"line": k, "text": ""})),
+            LineAct::AllAsHeard => self.run(ed, ctx, "video.captionsHeard", json!({})),
+            LineAct::Move(k, who, start) => {
+                // The playhead's moment in the recording, on the sound the line was heard on.
+                let tl = &self.session.timeline;
+                let at = match who {
+                    Who::Speaker(s) => tl.find(s.source()).and_then(|i| tl.source_time(i, self.playhead)),
+                    Who::Layer(_) => None,
+                };
+                let key = if start { "start" } else { "end" };
+                match at {
+                    Some(t) => self.run(ed, ctx, "video.captionTimes", json!({"line": k, key: t})),
+                    None => ed.error(ctx, "The playhead isn't on that speaker's sound: move it onto a clip of their track first".to_string()),
+                }
+            }
+        }
     }
 
     /// A speaker: their mark, their name (renamed with the pencil, or a double click), and where
@@ -180,6 +430,10 @@ impl VideoView {
             self.transcript_follow = now;
         }
         let mut go = None;
+        let mut act = None;
+        let sources = self.line_sources.clone();
+        let editing = self.caption_edit.as_ref().map(|e| e.source).or(self.word_cut.as_ref().map(|w| w.source));
+        let corrected = self.session.timeline.corrected.is_some();
         scroll.show_viewport(ui, |ui, view| {
             ui.set_height(total);
             let origin = ui.max_rect().min;
@@ -197,7 +451,10 @@ impl VideoView {
                 let name = names.iter().find(|(n, _)| n == who).map(|(_, s)| s.as_str()).unwrap_or("");
                 let resp = ui.interact(rect, ui.id().with(("transcript-line", k)), Sense::click());
                 resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("{} {name}: {}", clock(c.start), c.text)));
-                let fill = if now == Some(k) {
+                let source = sources.get(k).copied().flatten();
+                let fill = if source.is_some() && source == editing {
+                    t.accent.gamma_multiply(0.4)
+                } else if now == Some(k) {
                     t.accent.gamma_multiply(0.22)
                 } else if resp.hovered() {
                     t.hover
@@ -216,9 +473,44 @@ impl VideoView {
                 );
                 let words = p.layout(c.text.clone(), words_font.clone(), t.text, words_w);
                 p.galley(rect.min + vec2(PAD, PAD + HEAD), words, t.text);
-                if resp.on_hover_text("Go there").clicked() {
+                let Some(source) = source else {
+                    if resp.on_hover_text("Go there").clicked() {
+                        go = Some(c.start);
+                    }
+                    continue;
+                };
+                // The recording's own lines: put right with a double click or the right button.
+                let resp = resp.on_hover_text("Go there; double-click to put its words right, right-click for more");
+                if resp.double_clicked() {
+                    act = Some(LineAct::Edit(source));
+                } else if resp.clicked() {
                     go = Some(c.start);
                 }
+                resp.context_menu(|ui| {
+                    let mut pick = |ui: &mut Ui, label: &str, tip: &str, what: LineAct| {
+                        if ui.button(label).on_hover_text(tip).clicked() {
+                            act = Some(what);
+                            ui.close();
+                        }
+                    };
+                    pick(ui, "Put the Words Right…", "Change its words (or double-click the line)", LineAct::Edit(source));
+                    pick(
+                        ui,
+                        "Cut Words from the Video…",
+                        "Choose words of the line: where they're said is taken out of the video",
+                        LineAct::CutWords(source),
+                    );
+                    pick(ui, "Split in Two", "Two lines, between the words nearest its middle", LineAct::Split(source));
+                    pick(ui, "Join with the Next Line", "With the same speaker's next line", LineAct::Join(source));
+                    ui.separator();
+                    pick(ui, "Start at the Playhead", "The line starts where the playhead is", LineAct::Move(source, *who, true));
+                    pick(ui, "End at the Playhead", "The line ends where the playhead is", LineAct::Move(source, *who, false));
+                    ui.separator();
+                    pick(ui, "Delete the Line", "Its words go from the captions (the sound stays)", LineAct::Delete(source));
+                    if corrected {
+                        pick(ui, "All Captions as Heard", "Every line put right goes back to how it was heard", LineAct::AllAsHeard);
+                    }
+                });
             }
         });
         self.transcript_heights = Some((self.lines_rev, width, heights));
@@ -226,5 +518,27 @@ impl VideoView {
             let now = ctx.input(|i| i.time);
             self.seek(ed, at, now);
         }
+        if let Some(a) = act {
+            self.line_act(ed, &ctx, a);
+        }
+    }
+}
+
+/// A subtitle file's words: UTF-8 (anything that isn't, put right), or UTF-16 with its mark.
+pub(crate) fn subtitle_text(bytes: &[u8]) -> String {
+    let units = |little: bool| -> String {
+        let words = bytes
+            .get(2..)
+            .unwrap_or_default()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|p| if little { u16::from_le_bytes(*p) } else { u16::from_be_bytes(*p) });
+        char::decode_utf16(words).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)).collect()
+    };
+    match bytes {
+        [0xFF, 0xFE, ..] => units(true),
+        [0xFE, 0xFF, ..] => units(false),
+        _ => String::from_utf8_lossy(bytes).into_owned(),
     }
 }

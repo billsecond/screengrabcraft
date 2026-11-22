@@ -69,11 +69,18 @@ pub struct Layer {
     /// 0 to 2 (sound).
     pub volume: f32,
     pub items: Vec<Item>,
+    /// Its sound's two sides mixed into one, heard the same from both speakers (sound).
+    #[serde(skip_serializing_if = "is_off")]
+    pub mono: bool,
+}
+
+fn is_off(v: &bool) -> bool {
+    !*v
 }
 
 impl Default for Layer {
     fn default() -> Layer {
-        Layer { id: 0, name: String::new(), kind: LayerKind::Picture, hidden: false, volume: 1.0, items: Vec::new() }
+        Layer { id: 0, name: String::new(), kind: LayerKind::Picture, hidden: false, volume: 1.0, items: Vec::new(), mono: false }
     }
 }
 
@@ -91,10 +98,14 @@ pub enum AnimKind {
     SlideUp,
     /// Growing from (or shrinking to) nothing.
     Pop,
+    /// Words written on letter by letter, line by line, as if by a pen (or rubbed off the same
+    /// way); anything else wiped on from its left (or off to its right).
+    Write,
 }
 
 impl AnimKind {
-    pub const ALL: [AnimKind; 6] = [AnimKind::None, AnimKind::Fade, AnimKind::SlideLeft, AnimKind::SlideRight, AnimKind::SlideUp, AnimKind::Pop];
+    pub const ALL: [AnimKind; 7] =
+        [AnimKind::None, AnimKind::Fade, AnimKind::SlideLeft, AnimKind::SlideRight, AnimKind::SlideUp, AnimKind::Pop, AnimKind::Write];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -104,6 +115,7 @@ impl AnimKind {
             AnimKind::SlideRight => "Slide from the right",
             AnimKind::SlideUp => "Slide up",
             AnimKind::Pop => "Pop",
+            AnimKind::Write => "Write on",
         }
     }
 }
@@ -266,6 +278,44 @@ impl TextStyle {
     }
 }
 
+/// The face a text item's words are in: the program's own fonts (see `screengrabcraft_render::text`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextFont {
+    /// The sans serif, regular and bold, as each graphic sets it.
+    #[default]
+    Sans,
+    /// The sans serif slanted.
+    Slanted,
+    /// The fixed-width face (each letter as wide as the next), for a typed or technical look.
+    Mono,
+}
+
+impl TextFont {
+    pub const ALL: [TextFont; 3] = [TextFont::Sans, TextFont::Slanted, TextFont::Mono];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TextFont::Sans => "Sans",
+            TextFont::Slanted => "Sans, slanted",
+            TextFont::Mono => "Fixed width",
+        }
+    }
+
+    pub fn is_sans(&self) -> bool {
+        *self == TextFont::Sans
+    }
+
+    /// How the graphics name it (their font names say the weight too).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            TextFont::Sans => "",
+            TextFont::Slanted => "-Italic",
+            TextFont::Mono => "-Mono",
+        }
+    }
+}
+
 /// A screen transition: what it does to the picture over its time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -302,6 +352,9 @@ pub enum What {
         /// Its main colour (the bar, the line, the tag), as `#rrggbb`.
         #[serde(default)]
         color: String,
+        /// The face its words are in.
+        #[serde(default, skip_serializing_if = "TextFont::is_sans")]
+        font: TextFont,
     },
     Transition {
         kind: TransitionKind,
@@ -309,6 +362,17 @@ pub enum What {
     /// Zooms the screen into part of it for as long as it lasts, its frame where its place says
     /// (see [`crate::zoom`]).
     Zoom,
+    /// A rectangle of the screen held as it was at the item's start, for as long as it lasts, while
+    /// the rest plays on: its middle where its place says, as wide as its place's width and `h`
+    /// high (shares of the screen).
+    Freeze {
+        #[serde(default = "freeze_h")]
+        h: f32,
+    },
+}
+
+fn freeze_h() -> f32 {
+    0.3
 }
 
 impl Default for What {
@@ -330,6 +394,270 @@ pub struct Item {
     pub place: Placement,
     pub intro: Anim,
     pub outro: Anim,
+    /// Its motion: where it is, how large and how see-through at moments of it, in order (µs
+    /// into it); eased from one to the next. None: it stays at `place`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub keys: Vec<Key>,
+    /// How it's framed: turned, and (a picture or a video) cut down, bordered, rounded, shadowed.
+    #[serde(skip_serializing_if = "ItemLook::is_plain")]
+    pub look: ItemLook,
+    /// A video whose sound isn't heard with it (taken apart onto a sound layer, or just silent).
+    #[serde(skip_serializing_if = "is_off")]
+    pub silent: bool,
+    /// Only its media's sound: a video's sound apart from its picture, on a sound layer.
+    #[serde(skip_serializing_if = "is_off")]
+    pub sound_only: bool,
+    /// Its keyframes a path it moves along: through their places on a smooth curve, not stopping
+    /// at them, easing out of the first and into the last.
+    #[serde(skip_serializing_if = "is_off")]
+    pub path: bool,
+}
+
+/// How an item is framed on the picture: turned about its middle, and, a picture or a video, cut
+/// down at its sides, with a border, rounded corners and a shadow under it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItemLook {
+    /// Degrees, clockwise (-180 to 180).
+    pub rotate: f32,
+    /// What's cut off each side of its picture, shares of it: left, top, right, bottom (0 to
+    /// 0.45 each).
+    pub crop: [f32; 4],
+    /// A border round it as wide as this share of its width (0 none, to 0.1)...
+    pub border: f32,
+    /// ...of this colour (`#rrggbb`).
+    pub border_colour: String,
+    /// Its corners rounded: the radius as a share of its shorter side (0 to 0.5).
+    pub radius: f32,
+    /// A soft shadow under it.
+    pub shadow: bool,
+    /// How it's laid on what's under it.
+    #[serde(skip_serializing_if = "is_normal")]
+    pub blend: BlendMode,
+    /// Shown only inside a shape, or with a shape cut out of it.
+    #[serde(skip_serializing_if = "Mask::is_none")]
+    pub mask: Mask,
+    /// A device drawn round it (a picture or a video).
+    #[serde(skip_serializing_if = "no_device")]
+    pub device: crate::frame::Device,
+    /// Pinned onto a slanted surface: drawn in perspective between its four corners, each moved
+    /// from where its box has it by `pin` (a picture or a video).
+    #[serde(skip_serializing_if = "is_off")]
+    pub pinned: bool,
+    /// How far each corner is moved, shares of the video's width and height: top left, top
+    /// right, bottom right, bottom left.
+    #[serde(skip_serializing_if = "no_pin")]
+    pub pin: [[f32; 2]; 4],
+}
+
+fn no_pin(p: &[[f32; 2]; 4]) -> bool {
+    p.iter().flatten().all(|v| *v == 0.0)
+}
+
+fn is_normal(b: &BlendMode) -> bool {
+    *b == BlendMode::Normal
+}
+
+fn no_device(d: &crate::frame::Device) -> bool {
+    *d == crate::frame::Device::None
+}
+
+impl Default for ItemLook {
+    fn default() -> ItemLook {
+        ItemLook {
+            rotate: 0.0,
+            crop: [0.0; 4],
+            border: 0.0,
+            border_colour: "#ffffff".to_string(),
+            radius: 0.0,
+            shadow: false,
+            blend: BlendMode::Normal,
+            mask: Mask::default(),
+            device: crate::frame::Device::None,
+            pinned: false,
+            pin: [[0.0; 2]; 4],
+        }
+    }
+}
+
+impl ItemLook {
+    /// Nothing changed: drawn as it is.
+    pub fn is_plain(&self) -> bool {
+        let none = |v: f32| v.abs() < 1.0e-4 || !v.is_finite();
+        none(self.rotate)
+            && self.crop.iter().all(|c| none(*c))
+            && none(self.border)
+            && none(self.radius)
+            && !self.shadow
+            && self.blend == BlendMode::Normal
+            && self.mask.is_none()
+            && self.device == crate::frame::Device::None
+            && !self.pinned
+    }
+
+    /// Drawn on a picture of its own first: masked, or laid on what's under it other than as it is.
+    pub fn is_layered(&self) -> bool {
+        self.blend != BlendMode::Normal || !self.mask.is_none()
+    }
+
+    /// Every value in its range (a hostile file's NaNs made sensible).
+    pub fn checked(self) -> ItemLook {
+        let f = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
+        let colour = color(&self.border_colour, [0xff, 0xff, 0xff]);
+        ItemLook {
+            rotate: f(self.rotate, -180.0, 180.0),
+            crop: self.crop.map(|c| f(c, 0.0, 0.45)),
+            border: f(self.border, 0.0, 0.1),
+            border_colour: format!("#{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2]),
+            radius: f(self.radius, 0.0, 0.5),
+            shadow: self.shadow,
+            blend: self.blend,
+            mask: self.mask.checked(),
+            device: self.device,
+            pinned: self.pinned,
+            pin: self.pin.map(|c| c.map(|v| f(v, -1.0, 1.0))),
+        }
+    }
+}
+
+/// How an item's picture is laid on what's under it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlendMode {
+    /// As it is: it covers what's under it.
+    #[default]
+    Normal,
+    /// Its colours times those under it: white goes, dark darkens (a shadow, a stamp on paper).
+    Multiply,
+    /// The opposite: black goes, light lightens (light leaks, glows, flares).
+    Screen,
+    /// Multiply on the dark under it, screen on the light: more contrast (a texture).
+    Overlay,
+    /// The darker of it and what's under it.
+    Darken,
+    /// The lighter of it and what's under it.
+    Lighten,
+}
+
+impl BlendMode {
+    pub const ALL: [BlendMode; 6] =
+        [BlendMode::Normal, BlendMode::Multiply, BlendMode::Screen, BlendMode::Overlay, BlendMode::Darken, BlendMode::Lighten];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "Normal",
+            BlendMode::Multiply => "Multiply",
+            BlendMode::Screen => "Screen",
+            BlendMode::Overlay => "Overlay",
+            BlendMode::Darken => "Darken",
+            BlendMode::Lighten => "Lighten",
+        }
+    }
+}
+
+/// The shape of an item's mask.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MaskShape {
+    /// No mask: all of it is shown.
+    #[default]
+    None,
+    Rectangle,
+    /// A rectangle with round corners.
+    Rounded,
+    /// An oval (a circle on a square).
+    Ellipse,
+    Diamond,
+    /// A five-pointed star.
+    Star,
+    Heart,
+}
+
+impl MaskShape {
+    pub const ALL: [MaskShape; 7] =
+        [MaskShape::None, MaskShape::Rectangle, MaskShape::Rounded, MaskShape::Ellipse, MaskShape::Diamond, MaskShape::Star, MaskShape::Heart];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            MaskShape::None => "None",
+            MaskShape::Rectangle => "Rectangle",
+            MaskShape::Rounded => "Rounded rectangle",
+            MaskShape::Ellipse => "Oval",
+            MaskShape::Diamond => "Diamond",
+            MaskShape::Star => "Star",
+            MaskShape::Heart => "Heart",
+        }
+    }
+}
+
+/// An item shown only inside a shape (or, cut, everywhere but inside it). The shape's middle and
+/// size are shares of the item's own box, so it moves, grows and turns with it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Mask {
+    pub shape: MaskShape,
+    /// Its middle, across and down the item (0 to 1 is inside it).
+    pub x: f32,
+    pub y: f32,
+    /// Its width and height, shares of the item's.
+    pub w: f32,
+    pub h: f32,
+    /// The shape cut out of the item, instead of only it shown.
+    pub cut: bool,
+}
+
+impl Default for Mask {
+    fn default() -> Mask {
+        Mask { shape: MaskShape::None, x: 0.5, y: 0.5, w: 1.0, h: 1.0, cut: false }
+    }
+}
+
+impl Mask {
+    pub fn is_none(&self) -> bool {
+        self.shape == MaskShape::None
+    }
+
+    /// Every number in its range.
+    pub fn checked(self) -> Mask {
+        let f = |v: f32, lo: f32, hi: f32, d: f32| if v.is_finite() { v.clamp(lo, hi) } else { d };
+        Mask {
+            shape: self.shape,
+            x: f(self.x, -0.5, 1.5, 0.5),
+            y: f(self.y, -0.5, 1.5, 0.5),
+            w: f(self.w, 0.05, 2.0, 1.0),
+            h: f(self.h, 0.05, 2.0, 1.0),
+            cut: self.cut,
+        }
+    }
+}
+
+/// A moment of an item's motion (a keyframe): its place then, `at` µs into it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Key {
+    pub at: u64,
+    pub place: Placement,
+}
+
+/// The most keyframes an item keeps.
+pub const MAX_KEYS: usize = 200;
+
+/// An item's effects, copied to put on another: its look (turned, framed, masked, blended, a
+/// device round it), how it comes and goes, and its motion.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItemEffects {
+    pub look: ItemLook,
+    pub intro: Anim,
+    pub outro: Anim,
+    pub keys: Vec<Key>,
+}
+
+impl Item {
+    /// Its effects, to put on another item.
+    pub fn effects(&self) -> ItemEffects {
+        ItemEffects { look: self.look.clone(), intro: self.intro, outro: self.outro, keys: self.keys.clone() }
+    }
 }
 
 impl Default for Item {
@@ -343,8 +671,19 @@ impl Default for Item {
             place: Placement::default(),
             intro: Anim::default(),
             outro: Anim::default(),
+            keys: Vec::new(),
+            look: ItemLook::default(),
+            silent: false,
+            sound_only: false,
+            path: false,
         }
     }
+}
+
+/// `a` to `b`, `f` of the way (0 to 1).
+fn between(a: Placement, b: Placement, f: f32) -> Placement {
+    let l = |x: f32, y: f32| x + (y - x) * f;
+    Placement { x: l(a.x, b.x), y: l(a.y, b.y), w: l(a.w, b.w), opacity: l(a.opacity, b.opacity) }
 }
 
 impl Item {
@@ -352,12 +691,87 @@ impl Item {
         self.at.saturating_add(self.len)
     }
 
+    /// Where it is at timeline time `t`: its place, or with keyframes, eased from the one
+    /// before to the one after (before the first, the first's; after the last, the last's). Along
+    /// a path, it goes through the keyframes' places on a smooth curve without stopping at them,
+    /// easing out of the first and into the last.
+    pub fn place_at(&self, t: u64) -> Placement {
+        let d = t.saturating_sub(self.at);
+        let k = self.keys.partition_point(|k| k.at <= d);
+        match (k.checked_sub(1).and_then(|p| self.keys.get(p)), self.keys.get(k)) {
+            (None, None) => self.place,
+            (Some(a), None) => a.place,
+            (None, Some(b)) => b.place,
+            (Some(a), Some(b)) => {
+                let f = ((d - a.at) as f32 / b.at.saturating_sub(a.at).max(1) as f32).clamp(0.0, 1.0);
+                if !self.path {
+                    // Slow away from one and into the next.
+                    return between(a.place, b.place, f * f * (3.0 - 2.0 * f)).clamped();
+                }
+                let last = self.keys.len() - 1;
+                // Eased out of the first and into the last; steady through the rest.
+                let f = match (k - 1 == 0, k == last) {
+                    (true, true) => f * f * (3.0 - 2.0 * f),
+                    (true, false) => f * f,
+                    (false, true) => 1.0 - (1.0 - f) * (1.0 - f),
+                    (false, false) => f,
+                };
+                let at = |i: usize| self.keys.get(i.min(last)).map_or(a.place, |k| k.place);
+                let (p0, p3) = (at((k - 1).saturating_sub(1)), at(k + 1));
+                let curve = |v0: f32, v1: f32, v2: f32, v3: f32| {
+                    // Through v1 and v2, leaving and arriving as the points either side say.
+                    let (f2, f3) = (f * f, f * f * f);
+                    0.5 * (2.0 * v1 + (v2 - v0) * f + (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * f2 + (3.0 * v1 - v0 - 3.0 * v2 + v3) * f3)
+                };
+                let mut p = between(a.place, b.place, f);
+                p.x = curve(p0.x, a.place.x, b.place.x, p3.x);
+                p.y = curve(p0.y, a.place.y, b.place.y, p3.y);
+                p.clamped()
+            }
+        }
+    }
+
+    /// Itself as it is at `t`: with keyframes, a copy placed where they put it then.
+    pub fn placed_at(&self, t: u64) -> std::borrow::Cow<'_, Item> {
+        if self.keys.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        std::borrow::Cow::Owned(Item { place: self.place_at(t), keys: Vec::new(), ..self.clone() })
+    }
+
+    /// Its keyframes as they are for a part of it starting `skip` µs into it: those before that
+    /// go, with one at its start where they had it then.
+    fn keys_from(&self, skip: u64) -> Vec<Key> {
+        if self.keys.is_empty() || skip == 0 {
+            return self.keys.clone();
+        }
+        let mut out: Vec<Key> = self.keys.iter().filter(|k| k.at >= skip).map(|k| Key { at: k.at - skip, ..*k }).collect();
+        if out.first().is_none_or(|k| k.at > 0) {
+            out.insert(0, Key { at: 0, place: self.place_at(self.at.saturating_add(skip)) });
+        }
+        out
+    }
+
     /// The kind of layer it goes on.
     pub fn layer_kind(&self, media: &[MediaItem]) -> LayerKind {
         match &self.what {
-            What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Sound) => LayerKind::Sound,
+            What::Media { id }
+                if media.iter().any(|m| m.id == *id && (m.kind == MediaKind::Sound || (self.sound_only && m.kind == MediaKind::Video))) =>
+            {
+                LayerKind::Sound
+            }
             _ => LayerKind::Picture,
         }
+    }
+
+    /// Whether its media's sound is heard with it: a sound, or a video's (unless it's silent).
+    pub fn plays_sound(&self, media: &[MediaItem]) -> bool {
+        let What::Media { id } = &self.what else { return false };
+        media.iter().find(|m| m.id == *id).is_some_and(|m| match m.kind {
+            MediaKind::Picture => false,
+            MediaKind::Sound => true,
+            MediaKind::Video => !self.silent,
+        })
     }
 
     /// How far in it is at timeline time `t`: (how much it has come in, 0 to 1; how much it has
@@ -374,11 +788,15 @@ impl Item {
     /// Its name on the timeline.
     pub fn label(&self, media: &[MediaItem]) -> String {
         match &self.what {
+            What::Media { id } if self.sound_only => {
+                media.iter().find(|m| m.id == *id).map(|m| format!("{} (its sound)", m.name)).unwrap_or_else(|| "Missing media".to_string())
+            }
             What::Media { id } => media.iter().find(|m| m.id == *id).map(|m| m.name.clone()).unwrap_or_else(|| "Missing media".to_string()),
             What::Text { style, title, .. } if style.has_words() && !title.trim().is_empty() => title.clone(),
             What::Text { style, .. } => style_name(*style).to_string(),
             What::Transition { kind } => transition_name(*kind).to_string(),
             What::Zoom => "Zoom".to_string(),
+            What::Freeze { .. } => "Frozen region".to_string(),
         }
     }
 }
@@ -502,7 +920,7 @@ pub struct Template {
 fn text(style: TextStyle, title: &str, subtitle: &str, color: &str, place: Placement, len: u64, intro: AnimKind) -> Item {
     Item {
         len,
-        what: What::Text { style, title: title.to_string(), subtitle: subtitle.to_string(), color: color.to_string() },
+        what: What::Text { style, title: title.to_string(), subtitle: subtitle.to_string(), color: color.to_string(), font: TextFont::Sans },
         place,
         intro: Anim { kind: intro, len: 450_000 },
         outro: Anim { kind: if intro == AnimKind::None { AnimKind::None } else { AnimKind::Fade }, len: 350_000 },
@@ -632,6 +1050,26 @@ pub fn library() -> Vec<Template> {
 /// A ready-made item by its key.
 pub fn template(key: &str) -> Option<Template> {
     library().into_iter().find(|t| t.key == key)
+}
+
+/// A frozen region's height as it's kept: a share of the screen, 0.02 to 1.
+pub fn freeze_height(h: f32) -> f32 {
+    if h.is_finite() { h.clamp(0.02, 1.0) } else { freeze_h() }
+}
+
+/// A frozen region: the rectangle `w × h` (shares of the screen) round `(x, y)` held as the screen
+/// was at its start, for `len` µs, while the rest plays on.
+pub fn freeze_item(x: f32, y: f32, w: f32, h: f32, len: u64) -> Item {
+    let none = Anim { kind: AnimKind::None, len: 0 };
+    let n = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+    Item {
+        len,
+        what: What::Freeze { h: freeze_height(h) },
+        place: Placement { x: n(x, 0.0, 1.0, 0.5), y: n(y, 0.0, 1.0, 0.5), w: n(w, 0.02, 1.0, 0.3), opacity: 1.0 },
+        intro: none,
+        outro: none,
+        ..Item::default()
+    }
 }
 
 /// The colour of `#rrggbb`, or `or`.
@@ -833,7 +1271,64 @@ impl Timeline {
             None => u64::MAX / 8,
         };
         let end = end.clamp(start + MIN_CLIP_US, ceiling.min(most_end).max(start + MIN_CLIP_US));
-        *i = Item { at: start, len: end - start, from, ..i.clone() };
+        // Its keyframes stay where they were on the timeline.
+        let keys = if start >= i.at {
+            i.keys_from(start - i.at)
+        } else {
+            i.keys.iter().map(|k| Key { at: k.at.saturating_add(i.at - start), ..*k }).collect()
+        };
+        *i = Item { at: start, len: end - start, from, keys, ..i.clone() };
+        Ok(())
+    }
+
+    /// A keyframe of an item at timeline time `at` (in it): where it is then, changed by
+    /// `change`; one already there is changed. Its place among the keyframes.
+    pub fn set_key(&mut self, layer: u32, item: u32, at: u64, change: impl FnOnce(&mut Placement)) -> Result<usize, EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        if at < i.at || at > i.end() {
+            return Err(bad("a keyframe goes in the item's own time: move the playhead onto it"));
+        }
+        let d = at - i.at;
+        // One within a moment of it is the one changed.
+        let near = i.keys.iter().position(|k| k.at.abs_diff(d) < MIN_CLIP_US);
+        let key_at = near.and_then(|n| i.keys.get(n)).map_or(d, |k| k.at);
+        let mut place = match near.and_then(|n| i.keys.get(n)) {
+            Some(k) => k.place,
+            None => i.place_at(at),
+        };
+        change(&mut place);
+        let place = place.clamped();
+        match near.and_then(|n| i.keys.get_mut(n)) {
+            Some(k) => k.place = place,
+            None => {
+                if i.keys.len() >= MAX_KEYS {
+                    return Err(bad(&format!("an item has at most {MAX_KEYS} keyframes")));
+                }
+                i.keys.push(Key { at: d, place });
+                i.keys.sort_by_key(|k| k.at);
+            }
+        }
+        // The first keyframe made: its place is what it had.
+        i.place = i.keys.first().map_or(i.place, |k| k.place);
+        Ok(i.keys.iter().position(|k| k.at == key_at).unwrap_or(0))
+    }
+
+    /// Takes keyframe `key` of an item away (`None`: all of them). With none left it stays
+    /// where the last one taken away had it.
+    pub fn remove_key(&mut self, layer: u32, item: u32, key: Option<usize>) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        let gone = match key {
+            Some(k) if k < i.keys.len() => vec![i.keys.remove(k)],
+            Some(_) => return Err(bad("there's no such keyframe")),
+            None => std::mem::take(&mut i.keys),
+        };
+        if i.keys.is_empty()
+            && let Some(last) = gone.last()
+        {
+            i.place = last.place;
+        }
         Ok(())
     }
 
@@ -854,16 +1349,33 @@ impl Timeline {
     pub fn set_item(&mut self, layer: u32, item: u32, change: impl FnOnce(&mut Item)) -> Result<(), EditError> {
         let l = self.layer_mut(layer)?;
         let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
-        let (id, at, len, from) = (i.id, i.at, i.len, i.from);
+        let (id, at, len, from, was) = (i.id, i.at, i.len, i.from, i.place);
         change(i);
         // Its place on the timeline is the trims' and moves' to change.
         i.id = id;
         (i.at, i.len, i.from) = (at, len, from);
         i.place = i.place.clamped();
+        // With keyframes, its whole motion moves (and grows, and fades) as its place did.
+        let now = i.place;
+        if now != was {
+            let ratio = |a: f32, b: f32| if b > 1.0e-4 { a / b } else { 1.0 };
+            for k in &mut i.keys {
+                k.place = Placement {
+                    x: k.place.x + now.x - was.x,
+                    y: k.place.y + now.y - was.y,
+                    w: k.place.w * ratio(now.w, was.w),
+                    opacity: k.place.opacity * ratio(now.opacity, was.opacity),
+                }
+                .clamped();
+            }
+        }
         if let What::Text { title, subtitle, color, .. } = &mut i.what {
             *title = clip_text(title, MAX_TEXT);
             *subtitle = clip_text(subtitle, MAX_TEXT);
             *color = clip_text(color, 9);
+        }
+        if let What::Freeze { h } = &mut i.what {
+            *h = freeze_height(*h);
         }
         Ok(())
     }
@@ -886,6 +1398,94 @@ impl Timeline {
         Ok(())
     }
 
+    /// An item's media swapped for another of the bin's, its effects kept: where it is and how
+    /// long, its place, look, motion and animations. The new media must go on the same kind of
+    /// layer. A sound or a video plays from where the old one did if it's that long (else from
+    /// its start), and no longer than it is.
+    pub fn replace_media(&mut self, layer: u32, item: u32, media: u32) -> Result<(), EditError> {
+        let m = self.media.iter().find(|m| m.id == media).cloned().ok_or_else(|| bad("that media isn't in the bin"))?;
+        let kind = self.layer(layer).map(|l| l.kind).ok_or_else(|| bad("there's no such layer"))?;
+        let it = self.item(layer, item).cloned().ok_or_else(|| bad("there's no such item"))?;
+        if !matches!(it.what, What::Media { .. }) {
+            return Err(bad("only a picture, a sound or a video is replaced by other media"));
+        }
+        let mut new = Item { what: What::Media { id: media }, ..it };
+        new.sound_only = new.sound_only && m.kind == MediaKind::Video;
+        new.silent = new.silent && m.kind == MediaKind::Video;
+        if new.layer_kind(&self.media) != kind {
+            return Err(bad("that media goes on another kind of layer"));
+        }
+        if m.kind == MediaKind::Picture {
+            new.from = 0;
+        } else if m.duration > 0 {
+            if new.from.saturating_add(MIN_CLIP_US) > m.duration {
+                new.from = 0;
+            }
+            new.len = new.len.min(m.duration.saturating_sub(new.from)).max(MIN_CLIP_US);
+        }
+        let l = self.layer_mut(layer)?;
+        if let Some(slot) = l.items.iter_mut().find(|i| i.id == item) {
+            *slot = new;
+        }
+        Ok(())
+    }
+
+    /// Another item's effects put on an item: its look (turned, framed, masked, blended, a device
+    /// round it), how it comes and goes, and its motion (keyframes past its end left out; none: it
+    /// stays where it is). Its words, media and place on the timeline stay its own.
+    pub fn paste_item_effects(&mut self, layer: u32, item: u32, fx: ItemEffects) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        let i = l.items.iter_mut().find(|i| i.id == item).ok_or_else(|| bad("there's no such item"))?;
+        i.look = fx.look.checked();
+        i.intro = Anim { kind: fx.intro.kind, len: fx.intro.len.min(10_000_000) };
+        i.outro = Anim { kind: fx.outro.kind, len: fx.outro.len.min(10_000_000) };
+        let mut keys: Vec<Key> =
+            fx.keys.into_iter().take(MAX_KEYS).filter(|k| k.at <= i.len).map(|k| Key { at: k.at, place: k.place.clamped() }).collect();
+        keys.sort_by_key(|k| k.at);
+        keys.dedup_by_key(|k| k.at);
+        if let Some(k) = keys.first() {
+            i.place = k.place;
+        }
+        i.keys = keys;
+        Ok(())
+    }
+
+    /// A sound layer's two sides mixed into one (or kept apart again).
+    pub fn set_layer_mono(&mut self, layer: u32, mono: bool) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        if l.kind != LayerKind::Sound {
+            return Err(bad("only a sound layer is mixed to mono"));
+        }
+        l.mono = mono;
+        Ok(())
+    }
+
+    /// A video item's sound taken apart from its picture: the same stretch of its sound put on a
+    /// sound layer at the same moment (the first with room there, else a new one), and the video
+    /// left silent. From then on they're apart: each is moved, trimmed and deleted on its own. The
+    /// sound's layer and item.
+    pub fn separate_sound(&mut self, layer: u32, item: u32) -> Result<(u32, u32), EditError> {
+        let it = self.item(layer, item).cloned().ok_or_else(|| bad("there's no such item"))?;
+        let video = matches!(&it.what, What::Media { id } if self.media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+        if !video || it.sound_only {
+            return Err(bad("only a video has a sound to take apart from its picture"));
+        }
+        if it.silent {
+            return Err(bad("its sound is apart already (or it's silent): turn its sound on again first"));
+        }
+        let sound =
+            Item { id: 0, sound_only: true, silent: false, keys: Vec::new(), look: ItemLook::default(), place: Placement::default(), ..it.clone() };
+        let room = self
+            .layers
+            .iter()
+            .filter(|l| l.kind == LayerKind::Sound)
+            .find(|l| free_start(&l.items, it.at, it.len, None) == Some(it.at))
+            .map(|l| l.id);
+        let placed = self.place(sound, room, it.at)?;
+        self.set_item(layer, item, |i| i.silent = true)?;
+        Ok(placed)
+    }
+
     /// Takes `from..to` out of every layer too (as a cut does the recording's tracks).
     pub(crate) fn cut_layers(&mut self, from: u64, to: u64) {
         let gap = to - from;
@@ -900,7 +1500,9 @@ impl Timeline {
                 if i.end() > to {
                     let skip = to.saturating_sub(i.at);
                     let from_media = if plays { i.from + skip } else { i.from };
-                    let mut after = Item { at: i.at.max(to) - gap, from: from_media, len: i.len - skip, ..i.clone() };
+                    // Its motion goes on from where it was after the stretch cut.
+                    let keys = i.keys_from(skip);
+                    let mut after = Item { at: i.at.max(to) - gap, from: from_media, len: i.len - skip, keys, ..i.clone() };
                     // Both halves of one item: the second gets a number of its own below.
                     if i.at < from {
                         after.id = 0;
@@ -923,6 +1525,90 @@ impl Timeline {
         }
     }
 
+    /// Pushes the layers' items from `at` on along by `len` (a frame held there): those after it
+    /// move; one over it that shows something (words, a picture) stays on through the gap, and a
+    /// sound or a video is split, its rest going on after it.
+    pub(crate) fn insert_time_layers(&mut self, at: u64, len: u64) {
+        let media = self.media.clone();
+        for l in &mut self.layers {
+            let mut out = Vec::with_capacity(l.items.len() + 1);
+            for i in &l.items {
+                if i.at >= at {
+                    out.push(Item { at: i.at.saturating_add(len), ..i.clone() });
+                } else if i.end() > at {
+                    let plays = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture));
+                    let first = at - i.at;
+                    if plays {
+                        out.push(Item { len: first, ..i.clone() });
+                        // The rest, a number of its own below.
+                        let keys = i.keys_from(first);
+                        out.push(Item {
+                            id: 0,
+                            at: at.saturating_add(len),
+                            from: i.from.saturating_add(first),
+                            len: i.len - first,
+                            keys,
+                            ..i.clone()
+                        });
+                    } else {
+                        // It waits through the gap, its motion with it.
+                        let keys = i.keys.iter().map(|k| if k.at > first { Key { at: k.at.saturating_add(len), ..*k } } else { *k }).collect();
+                        out.push(Item { len: i.len.saturating_add(len), keys, ..i.clone() });
+                    }
+                } else {
+                    out.push(i.clone());
+                }
+            }
+            out.retain(|i| i.len >= MIN_CLIP_US);
+            l.items = out;
+        }
+        let mut next = self.next_id();
+        for l in &mut self.layers {
+            for i in &mut l.items {
+                if i.id == 0 {
+                    i.id = next;
+                    next = next.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Moves every layer's items as a speed change moved the tracks (`map`: where a moment of the
+    /// timeline goes; it never goes back): an item in the stretch is sped up or slowed down with
+    /// it, one after it moves along. A sound or video item still plays its own at its own speed,
+    /// so made longer it ends where its media does.
+    pub(crate) fn retime_layers(&mut self, map: &dyn Fn(u64) -> u64) {
+        let media = self.media.clone();
+        for l in &mut self.layers {
+            let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
+            for mut i in std::mem::take(&mut l.items) {
+                let (a, b) = (map(i.at), map(i.end()));
+                let mut len = b.saturating_sub(a).max(MIN_CLIP_US);
+                if len > i.len
+                    && let What::Media { id } = &i.what
+                    && let Some(m) = media.iter().find(|m| m.id == *id && m.kind != MediaKind::Picture && m.duration > 0)
+                {
+                    len = len.min(m.duration.saturating_sub(i.from)).max(i.len);
+                }
+                // Its keyframes where the moments they were at went.
+                let start = i.at;
+                for k in &mut i.keys {
+                    k.at = map(start.saturating_add(k.at)).saturating_sub(a);
+                }
+                i.at = a;
+                i.len = len;
+                // Apart: an item made as short as an item can be may reach the next.
+                if let Some(p) = kept.last()
+                    && p.end() > i.at
+                {
+                    i.at = p.end();
+                }
+                kept.push(i);
+            }
+            l.items = kept;
+        }
+    }
+
     /// The end of the last item of any layer.
     pub(crate) fn layers_length(&self) -> u64 {
         self.layers.iter().flat_map(|l| l.items.iter()).map(Item::end).max().unwrap_or(0)
@@ -931,66 +1617,86 @@ impl Timeline {
     /// Layers, items and media read from a file, made safe: too many dropped, numbers in range,
     /// items in order and apart, items of media that isn't there dropped, ids unique.
     pub(crate) fn check_layers(&mut self) {
-        self.media.truncate(MAX_MEDIA);
-        let mut seen = std::collections::BTreeSet::new();
-        self.media.retain(|m| seen.insert(m.id));
-        for m in &mut self.media {
-            m.name = clip_text(&m.name, 120);
-            m.duration = m.duration.min(u64::MAX / 8);
+        check_parts(&mut self.media, &mut self.layers);
+    }
+}
+
+/// [`Timeline::check_layers`] for a bin and layers of their own (a template's).
+pub(crate) fn check_parts(bin: &mut Vec<MediaItem>, layers: &mut Vec<Layer>) {
+    bin.truncate(MAX_MEDIA);
+    let mut seen = std::collections::BTreeSet::new();
+    bin.retain(|m| seen.insert(m.id));
+    for m in bin.iter_mut() {
+        m.name = clip_text(&m.name, 120);
+        m.duration = m.duration.min(u64::MAX / 8);
+    }
+    let media = bin.clone();
+    layers.truncate(MAX_LAYERS);
+    let mut items = 0usize;
+    for l in layers.iter_mut() {
+        l.volume = if l.volume.is_finite() { l.volume.clamp(0.0, 2.0) } else { 1.0 };
+        l.name = clip_text(&l.name, 60);
+        l.items.retain(|i| match &i.what {
+            What::Media { id } => media.iter().any(|m| m.id == *id),
+            _ => true,
+        });
+        l.mono = l.mono && l.kind == LayerKind::Sound;
+        for i in &mut l.items {
+            // Only a video's sound is apart from its picture.
+            let video = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+            i.sound_only = i.sound_only && video;
+            i.at = i.at.min(u64::MAX / 8);
+            i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
+            i.from = i.from.min(u64::MAX / 8);
+            i.place = i.place.clamped();
+            i.look = std::mem::take(&mut i.look).checked();
+            i.keys.truncate(MAX_KEYS);
+            for k in &mut i.keys {
+                k.at = k.at.min(u64::MAX / 8);
+                k.place = k.place.clamped();
+            }
+            i.keys.sort_by_key(|k| k.at);
+            i.keys.dedup_by_key(|k| k.at);
+            i.intro.len = i.intro.len.min(10_000_000);
+            i.outro.len = i.outro.len.min(10_000_000);
+            if let What::Text { title, subtitle, color, .. } = &mut i.what {
+                *title = clip_text(title, MAX_TEXT);
+                *subtitle = clip_text(subtitle, MAX_TEXT);
+                *color = clip_text(color, 9);
+            }
+            if let What::Freeze { h } = &mut i.what {
+                *h = freeze_height(*h);
+            }
         }
-        let media = self.media.clone();
-        self.layers.truncate(MAX_LAYERS);
-        let mut items = 0usize;
-        for l in &mut self.layers {
-            l.volume = if l.volume.is_finite() { l.volume.clamp(0.0, 2.0) } else { 1.0 };
-            l.name = clip_text(&l.name, 60);
-            l.items.retain(|i| match &i.what {
-                What::Media { id } => media.iter().any(|m| m.id == *id),
-                _ => true,
-            });
-            for i in &mut l.items {
-                i.at = i.at.min(u64::MAX / 8);
-                i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
-                i.from = i.from.min(u64::MAX / 8);
-                i.place = i.place.clamped();
-                i.intro.len = i.intro.len.min(10_000_000);
-                i.outro.len = i.outro.len.min(10_000_000);
-                if let What::Text { title, subtitle, color, .. } = &mut i.what {
-                    *title = clip_text(title, MAX_TEXT);
-                    *subtitle = clip_text(subtitle, MAX_TEXT);
-                    *color = clip_text(color, 9);
-                }
+        l.items.sort_by_key(|i| i.at);
+        let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
+        for i in std::mem::take(&mut l.items) {
+            if items < MAX_ITEMS && kept.last().is_none_or(|p| p.end() <= i.at) {
+                items += 1;
+                kept.push(i);
             }
-            l.items.sort_by_key(|i| i.at);
-            let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
-            for i in std::mem::take(&mut l.items) {
-                if items < MAX_ITEMS && kept.last().is_none_or(|p| p.end() <= i.at) {
-                    items += 1;
-                    kept.push(i);
-                }
-            }
-            l.items = kept;
         }
-        // Every layer and item a number of its own.
-        let mut used = std::collections::BTreeSet::new();
-        for m in &self.media {
-            used.insert(m.id);
+        l.items = kept;
+    }
+    // Every layer and item a number of its own.
+    let mut used = std::collections::BTreeSet::new();
+    for m in bin.iter() {
+        used.insert(m.id);
+    }
+    let mut next = used.iter().max().copied().unwrap_or(0).saturating_add(1);
+    let mut fresh = |id: &mut u32, used: &mut std::collections::BTreeSet<u32>| {
+        if *id == 0 || !used.insert(*id) {
+            while used.contains(&next) {
+                next = next.saturating_add(1);
+            }
+            *id = next;
+            used.insert(next);
         }
-        let mut next = used.iter().max().copied().unwrap_or(0).saturating_add(1);
-        let mut fresh = |id: &mut u32, used: &mut std::collections::BTreeSet<u32>| {
-            if *id == 0 || !used.insert(*id) {
-                while used.contains(&next) {
-                    next = next.saturating_add(1);
-                }
-                *id = next;
-                used.insert(next);
-            }
-        };
-        for l in &mut self.layers {
-            fresh(&mut l.id, &mut used);
-            for i in &mut l.items {
-                fresh(&mut i.id, &mut used);
-            }
+    };
+    for l in layers.iter_mut() {
+        fresh(&mut l.id, &mut used);
+        for i in &mut l.items {
+            fresh(&mut i.id, &mut used);
         }
     }
 }
@@ -1013,14 +1719,28 @@ mod tests {
                 kind: StreamKind::Screen,
                 muted: false,
                 volume: 1.0,
-                clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }],
+                clips: vec![Clip::new(0, 0, 20_000_000)],
                 name: None,
+                denoise: 0.0,
+                points: Vec::new(),
+                locked: false,
+                solo: false,
+                mono: false,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            corrected: None,
+            markers: Vec::new(),
+            keys: Default::default(),
+            ducking: Default::default(),
+            watermark: Default::default(),
+            frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
         }
     }
 
@@ -1150,5 +1870,91 @@ mod tests {
         assert_eq!(i.anim_at(4_500_000).1, 0.5);
         let still = Item { intro: Anim { kind: AnimKind::None, len: 0 }, ..i };
         assert_eq!(still.anim_at(1_000_000).0, 1.0);
+    }
+
+    fn at(x: f32) -> Placement {
+        Placement { x, ..Placement::default() }
+    }
+
+    #[test]
+    fn along_a_path_an_item_curves_through_its_points_without_stopping() {
+        // Three points: left, top middle, right, a second apart.
+        let key = |at: u64, x: f32, y: f32| Key { at, place: Placement { x, y, ..Placement::default() } };
+        let mut it = Item { len: 3_000_000, keys: vec![key(0, 0.1, 0.8), key(1_000_000, 0.5, 0.2), key(2_000_000, 0.9, 0.8)], ..Item::default() };
+        it.path = true;
+        // On the way to the top it bends outwards: where it's a third of the way across (x 0.37),
+        // it's well above the straight line (y 0.4 there), and it passes through the point.
+        let near = (0..=100u64).map(|k| it.place_at(k * 10_000)).min_by(|a, b| (a.x - 0.37).abs().total_cmp(&(b.x - 0.37).abs())).unwrap();
+        assert!(near.y < 0.37, "{near:?}");
+        assert!((it.place_at(1_000_000).y - 0.2).abs() < 1e-5 && (it.place_at(1_000_000).x - 0.5).abs() < 1e-5);
+        // It doesn't stop at the middle point: it's moving just before and after it.
+        let (b, a) = (it.place_at(950_000), it.place_at(1_050_000));
+        assert!(a.x - b.x > 0.02, "{} {}", b.x, a.x);
+        // Without the path it stops there (eased in and out).
+        it.path = false;
+        let (b, a) = (it.place_at(990_000), it.place_at(1_010_000));
+        assert!(a.x - b.x < 0.001);
+        // It starts and ends where its first and last points are.
+        it.path = true;
+        assert_eq!((it.place_at(0).x, it.place_at(3_000_000).x), (0.1, 0.9));
+    }
+
+    #[test]
+    fn keyframes_move_an_item_eased_from_one_to_the_next_and_follow_the_edits() {
+        let mut t = timeline();
+        let (l, i) = t.place(Item { len: 4_000_000, ..lower() }, None, 2_000_000).unwrap();
+        assert!(t.set_key(l, i, 1_000_000, |_| {}).is_err(), "a keyframe goes in the item's own time");
+        // From the left at 2 s to the right at 4 s; a key set again near one changes that one.
+        assert_eq!(t.set_key(l, i, 2_000_000, |p| p.x = 0.1).unwrap(), 0);
+        assert_eq!(t.set_key(l, i, 4_000_000, |p| p.x = 0.9).unwrap(), 1);
+        assert_eq!(t.set_key(l, i, 4_005_000, |p| p.opacity = 0.5).unwrap(), 1);
+        let it = t.item(l, i).unwrap().clone();
+        assert_eq!(it.keys.len(), 2);
+        assert_eq!(it.place_at(1_000_000).x, 0.1, "before the first: the first's");
+        assert!((it.place_at(3_000_000).x - 0.5).abs() < 1e-4, "halfway, half way");
+        assert!(it.place_at(2_500_000).x < 0.3, "eased: slow away from the first");
+        let end = it.place_at(5_500_000);
+        assert_eq!((end.x, end.opacity), (0.9, 0.5));
+        // Trimmed at its start, the motion stays where it was on the timeline.
+        t.trim_item(l, i, 3_000_000, 6_000_000).unwrap();
+        let it = t.item(l, i).unwrap().clone();
+        assert!((it.place_at(3_000_000).x - 0.5).abs() < 1e-4);
+        assert!((it.place_at(4_000_000).x - 0.9).abs() < 1e-4);
+        // Twice as fast from 3 s on: the last keyframe comes at 3.5 s.
+        t.set_speed(3_000_000, 6_000_000, 200, None).unwrap();
+        let it = t.item(l, i).unwrap().clone();
+        assert!((it.place_at(3_500_000).x - 0.9).abs() < 1e-4, "{:?}", it.keys);
+        // Moved with setItem, the whole motion moves; taken away, it stays where the last was.
+        t.set_item(l, i, |it| it.place.x += 0.05).unwrap();
+        assert!((t.item(l, i).unwrap().place_at(3_500_000).x - 0.95).abs() < 1e-4);
+        t.remove_key(l, i, Some(0)).unwrap();
+        assert!(t.remove_key(l, i, Some(5)).is_err());
+        t.remove_key(l, i, None).unwrap();
+        let it = t.item(l, i).unwrap();
+        assert!(it.keys.is_empty() && (it.place.x - 0.95).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_cut_through_an_animated_item_keeps_each_part_moving_as_it_did() {
+        let mut t = timeline();
+        let (l, i) = t
+            .place(Item { len: 4_000_000, keys: vec![Key { at: 0, place: at(0.0) }, Key { at: 4_000_000, place: at(1.0) }], ..lower() }, None, 0)
+            .unwrap();
+        t.cut(1_000_000, 2_000_000).unwrap();
+        let items = &t.layer(l).unwrap().items;
+        assert_eq!(items.len(), 2);
+        let after = items.iter().find(|x| x.id != i).unwrap();
+        assert_eq!(after.at, 1_000_000);
+        // Where it was at 2 s before the cut, it is at 1 s after it; it still ends on the right.
+        assert!((after.place_at(1_000_000).x - t.item(l, i).unwrap().place_at(2_000_000).x).abs() < 0.3);
+        assert!((after.place_at(3_000_000).x - 1.0).abs() < 1e-4);
+        // Junk keyframes from a file are made safe.
+        let mut junk = t.clone();
+        if let Some(it) = junk.layers[0].items.get_mut(0) {
+            it.keys = vec![Key { at: u64::MAX, place: Placement { x: f32::NAN, ..at(0.0) } }; MAX_KEYS + 9];
+        }
+        junk.check_layers();
+        let it = &junk.layers[0].items[0];
+        assert!(it.keys.len() == 1 && it.keys[0].place.x.is_finite());
     }
 }

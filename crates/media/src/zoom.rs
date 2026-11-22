@@ -92,10 +92,11 @@ pub fn view_at(timeline: &Timeline, t: u64) -> View {
     // The zoom that began last of those under the playhead.
     let Some(i) = zs.iter().rposition(|z| z.at <= t && t < z.end()) else { return View::WHOLE };
     let Some(z) = zs.get(i) else { return View::WHOLE };
-    let target = frame(z);
+    // Where its keyframes have it then (a zoom with them pans along them).
+    let target = frame(&z.placed_at(t));
     // Touching (or under) the one before, it pans from there; touching the next, it stays in
     // until that one takes over.
-    let before = i.checked_sub(1).and_then(|p| zs.get(p)).filter(|p| p.end() >= z.at).map(|p| frame(p));
+    let before = i.checked_sub(1).and_then(|p| zs.get(p)).filter(|p| p.end() >= z.at).map(|p| frame(&p.placed_at(p.end())));
     let after = zs.get(i + 1).is_some_and(|n| n.at <= z.end());
     let (into, left) = (t.saturating_sub(z.at), z.end().saturating_sub(t));
     let len_in = ease_len(z, z.intro.kind, z.intro.len);
@@ -112,6 +113,100 @@ pub fn view_at(timeline: &Timeline, t: u64) -> View {
 /// Whether any zoom is on the timeline.
 pub fn any(timeline: &Timeline) -> bool {
     !zooms(timeline).is_empty()
+}
+
+/// A click of the recording: when (in its own time) and where (shares of the screen).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClickAt {
+    pub t: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// How long before its first click a zoom that follows the clicks starts going in.
+pub const LEAD_US: u64 = 800_000;
+/// How long after its last click it stays in.
+pub const LINGER_US: u64 = 1_800_000;
+/// Clicks further apart than this are zoomed on apart.
+pub const APART_US: u64 = 2_500_000;
+/// The shortest zoom made.
+pub const SHORTEST_US: u64 = 2_400_000;
+/// Zooms closer together than this are joined (the picture pans from one to the next).
+const JOIN_US: u64 = 1_200_000;
+/// The most zooms made at once.
+pub const MAX_FOLLOW: usize = 300;
+
+/// Zooms that follow the clicks: ordinary zoom items (each to be placed on a layer, edited or
+/// deleted like any), one for each run of clicks near each other in time and place, going in a
+/// little before the first and out a while after the last, their frame `share` of the screen
+/// about the clicks' middle. Clicks the edits leave out make none, nor do those where a zoom is
+/// already. Those close together touch, so the picture pans from one to the next.
+pub fn follow_clicks(timeline: &Timeline, clicks: &[ClickAt], share_of: f32) -> Vec<Item> {
+    let s = share(share_of);
+    // Where each click is on the timeline (a clip played twice shows it twice), in order.
+    let Some(track) = timeline.find(crate::recording::StreamKind::Screen).and_then(|i| timeline.tracks.get(i)) else { return Vec::new() };
+    let mut on: Vec<(u64, f32, f32)> = Vec::new();
+    for c in track.clips.iter().filter(|c| !c.hold) {
+        for k in clicks.iter().take(100_000) {
+            if !(k.x.is_finite() && k.y.is_finite()) {
+                continue;
+            }
+            if let Some(at) = c.time_of(k.t) {
+                on.push((at, k.x.clamp(0.0, 1.0), k.y.clamp(0.0, 1.0)));
+            }
+        }
+    }
+    on.sort_by_key(|c| c.0);
+    // Runs of clicks: near in time, and inside one frame.
+    let mut runs: Vec<Vec<(u64, f32, f32)>> = Vec::new();
+    for c in on {
+        let joins = runs.last().is_some_and(|run| {
+            let (n, sx, sy) = run.iter().fold((0.0f32, 0.0f32, 0.0f32), |(n, x, y), p| (n + 1.0, x + p.1, y + p.2));
+            let (mx, my) = (sx / n.max(1.0), sy / n.max(1.0));
+            run.last().is_some_and(|l| c.0.saturating_sub(l.0) <= APART_US) && (c.1 - mx).abs() < s * 0.4 && (c.2 - my).abs() < s * 0.4
+        });
+        match runs.last_mut() {
+            Some(run) if joins => run.push(c),
+            _ => runs.push(vec![c]),
+        }
+    }
+    let end = timeline.length();
+    let taken: Vec<(u64, u64)> = zooms(timeline).iter().map(|z| (z.at, z.end())).collect();
+    let mut out: Vec<Item> = Vec::new();
+    for run in runs {
+        let (Some(first), Some(last)) = (run.first(), run.last()) else { continue };
+        let n = run.len() as f32;
+        let (x, y) = (run.iter().map(|p| p.1).sum::<f32>() / n, run.iter().map(|p| p.2).sum::<f32>() / n);
+        let mut at = first.0.saturating_sub(LEAD_US);
+        let stop = last.0.saturating_add(LINGER_US).max(at.saturating_add(SHORTEST_US)).min(end);
+        if taken.iter().any(|(a, b)| *a < stop && at < *b) {
+            continue;
+        }
+        if let Some(prev) = out.last_mut()
+            && at < prev.end().saturating_add(JOIN_US)
+        {
+            // Near (or over) the one before: they touch, the picture panning from it to this.
+            let meet = at.max(prev.at.saturating_add(SHORTEST_US / 2));
+            prev.len = meet - prev.at;
+            at = meet;
+        }
+        if stop < at.saturating_add(SHORTEST_US / 2) {
+            continue;
+        }
+        out.push(Item {
+            at,
+            len: stop - at,
+            what: What::Zoom,
+            place: crate::layers::Placement { x, y, w: s, opacity: 1.0 },
+            intro: crate::layers::Anim { kind: AnimKind::Fade, len: EASE_US },
+            outro: crate::layers::Anim { kind: AnimKind::Fade, len: EASE_US },
+            ..Item::default()
+        });
+        if out.len() >= MAX_FOLLOW {
+            break;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -133,6 +228,15 @@ mod tests {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            corrected: None,
+            markers: Vec::new(),
+            keys: Default::default(),
+            ducking: Default::default(),
+            watermark: Default::default(),
+            frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
         };
         tl.layers.push(Layer { id: 1, name: "Zoom".to_string(), items, ..Layer::default() });
         tl
@@ -189,5 +293,83 @@ mod tests {
         }
         assert_eq!(view_at(&tl, 500_000), View::WHOLE);
         assert!(!any(&tl));
+    }
+}
+
+#[cfg(test)]
+mod follow_tests {
+    use super::*;
+    use crate::timeline::{Clip, Track};
+
+    fn screen(clips: Vec<Clip>) -> Timeline {
+        let mut tl = Timeline {
+            tracks: vec![Track {
+                stream: 0,
+                kind: crate::recording::StreamKind::Screen,
+                muted: false,
+                volume: 1.0,
+                clips,
+                name: None,
+                denoise: 0.0,
+                points: Vec::new(),
+                locked: false,
+                solo: false,
+                mono: false,
+            }],
+            camera: Default::default(),
+            captions: Default::default(),
+            layers: Vec::new(),
+            media: Vec::new(),
+            pointer: Default::default(),
+            corrected: None,
+            markers: Vec::new(),
+            keys: Default::default(),
+            ducking: Default::default(),
+            watermark: Default::default(),
+            frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
+        };
+        tl.layers.clear();
+        tl
+    }
+
+    fn click(t: u64, x: f32, y: f32) -> ClickAt {
+        ClickAt { t, x, y }
+    }
+
+    #[test]
+    fn zooms_follow_runs_of_clicks_touch_when_near_and_skip_what_the_edits_leave_out() {
+        let tl = screen(vec![Clip::new(0, 0, 30_000_000)]);
+        let clicks = [
+            // Two clicks together at the top left; one at the bottom right soon after; one alone later.
+            click(3_000_000, 0.2, 0.2),
+            click(4_000_000, 0.22, 0.18),
+            click(6_000_000, 0.8, 0.8),
+            click(20_000_000, 0.5, 0.5),
+        ];
+        let z = follow_clicks(&tl, &clicks, 0.5);
+        assert_eq!(z.len(), 3, "{z:?}");
+        let (a, b, c) = (&z[0], &z[1], &z[2]);
+        assert!(matches!(a.what, What::Zoom) && (a.place.w - 0.5).abs() < 1e-6);
+        assert_eq!(a.at, 3_000_000 - LEAD_US, "in a little before the first click");
+        assert!((a.place.x - 0.21).abs() < 1e-4 && (a.place.y - 0.19).abs() < 1e-4, "about the clicks' middle");
+        assert_eq!(a.end(), b.at, "near the next: they touch, so it pans");
+        assert!(b.place.x > 0.7);
+        assert_eq!(c.at, 20_000_000 - LEAD_US);
+        assert_eq!(c.end(), 20_000_000 + LINGER_US);
+        // The zooms play in turn: in at the first, panned to the second, out after the third.
+        let mut tl2 = tl.clone();
+        tl2.layers.push(crate::layers::Layer { id: 1, items: z.clone(), ..Default::default() });
+        assert!(view_at(&tl2, 3_500_000).w < 1.0 && view_at(&tl2, 15_000_000).is_whole());
+        // Where a zoom is already, none is made; a click cut out of the video makes none.
+        let again = follow_clicks(&tl2, &clicks, 0.5);
+        assert!(again.is_empty(), "{again:?}");
+        let cut = screen(vec![Clip::new(0, 0, 10_000_000)]);
+        assert_eq!(follow_clicks(&cut, &clicks, 0.5).len(), 2);
+        // Junk: none, and nothing made of a click that isn't a number.
+        assert!(follow_clicks(&tl, &[click(1, f32::NAN, 0.5)], f32::NAN).is_empty());
+        assert!(follow_clicks(&screen(Vec::new()), &clicks, 0.5).is_empty());
     }
 }

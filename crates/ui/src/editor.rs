@@ -1142,6 +1142,22 @@ impl Editor {
                 }
             }
             DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
+            // Into the video editor, as its captions.
+            DialogResult::Subtitles(files) => {
+                if let Some(mut v) = self.video.take() {
+                    v.import_subtitles(self, ctx, files);
+                    self.video = Some(v);
+                }
+            }
+            // Made into videos together, from the video editor.
+            DialogResult::Batch(paths) => {
+                if let Some(mut v) = self.video.take() {
+                    v.open_batch(self, ctx, &paths);
+                    self.video = Some(v);
+                }
+            }
+            // A new video of them, opened here.
+            DialogResult::PicturesVideo(paths) => crate::video::new_video_from_pictures(self, ctx, &paths),
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {
