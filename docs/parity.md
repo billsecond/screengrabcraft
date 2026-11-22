@@ -305,7 +305,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
 29. A pointer of another look drawn in its place; the pointer's path redrawn through points dragged on the picture (#121).
 30. The camera's background blurred or replaced by a picture; captions lit up word by word (word times estimated) (#122).
-31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once.
+31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once (#123).
 
 **Still to build, in this order**
 
