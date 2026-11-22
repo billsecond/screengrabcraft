@@ -4186,3 +4186,109 @@ fn scroll_library_to(h: &mut Harness<'_, Editor>, label: &str) {
         h.run_steps(3);
     }
 }
+
+/// A host with made-up microphones: a take "records" nothing real (no microphone is ever turned
+/// on in a test), and finishing it gives a made-up file of the length asked for.
+#[derive(Clone, Default)]
+struct NarrationHost {
+    /// How many times the microphones were listed.
+    listed: std::sync::Arc<std::sync::Mutex<usize>>,
+    /// Each take started, with the microphone asked for.
+    takes: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+}
+
+struct MadeUpTake;
+
+impl crate::services::NarrationTake for MadeUpTake {
+    fn level(&self) -> f32 {
+        0.4
+    }
+    fn finish(self: Box<Self>) -> Result<(String, u64), String> {
+        Ok(("C:/Captures/Production narration.wav".to_string(), 1_500_000))
+    }
+}
+
+impl crate::services::Services for NarrationHost {
+    fn can_narrate(&self) -> bool {
+        true
+    }
+    fn microphones(&self) -> Vec<String> {
+        *self.listed.lock().unwrap() += 1;
+        vec!["Desk microphone".to_string(), "Headset".to_string()]
+    }
+    fn record_narration(&self, mic: Option<&str>, beside: &str) -> Result<Box<dyn crate::services::NarrationTake>, String> {
+        assert_eq!(beside, "C:/Captures/Production.sgvideo");
+        self.takes.lock().unwrap().push(mic.map(str::to_string));
+        Ok(Box::new(MadeUpTake))
+    }
+    fn load_media(&self, _path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let voice: Vec<i16> = (0..72_000).flat_map(|i| [((i as f32 * 0.05).sin() * 9_000.0) as i16; 2]).collect();
+        let loaded = Loaded { kind: MediaKind::Sound, duration: 1_500_000, width: 0, height: 0, content: Content::Sound(voice) };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+}
+
+#[test]
+fn narration_is_recorded_over_the_video_and_lands_on_a_sound_layer_at_the_playhead() {
+    let host = NarrationHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    let path = Some("C:/Captures/Production.sgvideo".to_string());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.1).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    scroll_side_panel_to(&mut h, "Record Narration");
+    assert_eq!(*host.listed.lock().unwrap(), 0, "the microphones aren't even listed until asked for");
+    // Another microphone than Video Production's.
+    h.get_by_value("As Video Production records").click();
+    h.run_steps(2);
+    assert_eq!(*host.listed.lock().unwrap(), 1);
+    h.get_by_label("Headset").click();
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.get_by_label("Record Narration").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.narrating() && v.is_playing());
+        assert!(v.playhead > 1_000_000, "the video plays while you speak");
+    }
+    assert_eq!(host.takes.lock().unwrap().as_slice(), [Some("Headset".to_string())]);
+    shot(&mut h, "video-narrating");
+    // Space ends it: the take on a sound layer of its own from where the playhead was.
+    h.key_press(egui::Key::Space);
+    h.run_steps(4);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(!v.narrating() && !v.is_playing());
+        let l = v.session.timeline.layers.iter().find(|l| l.name == "Narration").expect("a Narration layer");
+        assert_eq!((l.items[0].at, l.items[0].len), (1_000_000, 1_500_000));
+        assert_eq!(v.session.timeline.media[0].path, "C:/Captures/Production narration.wav");
+        assert_eq!(v.session.undo_label(), Some("Record Narration"));
+    }
+    shot(&mut h, "video-narration-added");
+    // Started near the end, it ends with the video by itself.
+    h.state_mut().video.as_mut().unwrap().playhead = 3_800_000;
+    scroll_side_panel_to(&mut h, "Record Narration");
+    h.get_by_label("Record Narration").click();
+    h.run_steps(8);
+    let v = h.state().video.as_ref().unwrap();
+    assert!(!v.narrating());
+    assert_eq!(v.session.timeline.layers.iter().filter(|l| l.name.starts_with("Narration")).count(), 2);
+    assert_eq!(host.takes.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn without_microphones_narration_is_greyed_out_and_says_why() {
+    let mut h = harness();
+    scroll_side_panel_to(&mut h, "Record Narration");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Record Narration")).is_disabled());
+}

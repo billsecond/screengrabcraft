@@ -15,6 +15,8 @@ screengrabcraft-render = { workspace = true }
 screengrabcraft-media = { workspace = true }
 screengrabcraft-ui = { workspace = true }
 screengrabcraft-desktop = { workspace = true }
+# Narration recorded over a video: the microphone, as the Recorder records it.
+screengrabcraft-capture = { workspace = true }
 # `persistence`: the window opens where, as big and as maximized as it was left (only that is kept).
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11", "persistence"] }
 egui = { workspace = true }

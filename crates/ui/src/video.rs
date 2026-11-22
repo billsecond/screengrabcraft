@@ -39,6 +39,7 @@ mod camera_key;
 mod clips;
 mod export_window;
 mod library;
+mod narration;
 mod screen_frame;
 mod sound;
 pub(crate) mod transcript;
@@ -343,6 +344,10 @@ pub struct VideoView {
     pub(crate) copied_effects: Option<Value>,
     /// The owner's templates and themes, and the theme in use.
     pub(crate) yours: yours::Yours,
+    /// Narration being recorded over the video.
+    pub(crate) narrating: Option<narration::Narrating>,
+    /// The microphones the host has for narration, and the one chosen.
+    pub(crate) mics: narration::Mics,
 }
 
 /// A small button with a triangle pointing up (or down) for what `key` names (a track or a layer:
@@ -632,6 +637,8 @@ impl VideoView {
             learning: None,
             copied_effects: None,
             yours: Default::default(),
+            narrating: None,
+            mics: Default::default(),
             type_words: false,
         }
     }
@@ -976,6 +983,10 @@ impl VideoView {
     fn play_at_rate(&mut self, ed: &Editor, now: f64, rate: i32) {
         // The sound that was playing stops first.
         self.playing = None;
+        // Narrating: the video plays on from where it was, or not at all (the take ends there).
+        if self.narrating.is_some() {
+            return;
+        }
         let sound = if rate >= 1 || rate == -1 {
             ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead, rate)
         } else {
@@ -1330,6 +1341,7 @@ impl VideoView {
                 }
             }
         }
+        self.tick_narration(ed, ctx);
         if self.session.revision() != self.seen {
             self.seen = self.session.revision();
             self.changed_at = now;
@@ -1353,6 +1365,13 @@ impl VideoView {
         let cmd = |k: Key| KeyboardShortcut::new(Modifiers::COMMAND, k);
         let pressed = |s: KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(&s));
         let plain = |k: Key| ctx.input_mut(|i| i.consume_key(Modifiers::NONE, k));
+        // Narrating: Space, K or Esc ends it; nothing else plays or seeks meanwhile.
+        if self.narrating.is_some() {
+            if plain(Key::Space) || plain(Key::K) || plain(Key::Escape) {
+                self.stop_narration(ed, ctx);
+            }
+            return;
+        }
         if plain(Key::F11) || plain(Key::F) {
             self.set_full_screen(!self.full_screen, now);
         }
@@ -2075,6 +2094,8 @@ impl VideoView {
                     }
                     section(ui, "Motion Blur", &mut first);
                     self.motion_blur_section(ed, ui);
+                    section(ui, "Narration", &mut first);
+                    self.narration_section(ed, ui);
                     if self.session.timeline.tracks.iter().any(|x| !x.kind.is_video()) {
                         section(ui, "Sound Mix", &mut first);
                         self.mix_section(ed, ui);

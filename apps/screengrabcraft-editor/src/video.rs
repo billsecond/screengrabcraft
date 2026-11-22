@@ -21,7 +21,7 @@ use screengrabcraft_model::{Color, Raster};
 use screengrabcraft_ui::services::{SoundOut, VideoExport, VideoFormat, VideoJob};
 
 /// `path`, or `name (2).ext` and on beside it if that is taken.
-fn free(path: &Path) -> PathBuf {
+pub(crate) fn free(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
     }
