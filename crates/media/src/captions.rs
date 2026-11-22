@@ -125,16 +125,17 @@ impl Captions {
             for cue in self.cues.iter().filter(|c| c.speaker == speaker) {
                 let whole = cue.end - cue.start;
                 for clip in &track.clips {
-                    let (from, to) = (cue.start.max(clip.from), cue.end.min(clip.from.saturating_add(clip.len)));
+                    let (from, to) = (cue.start.max(clip.from), cue.end.min(clip.from.saturating_add(clip.source_len())));
                     if to <= from {
                         continue;
                     }
-                    let piece = to - from;
-                    if piece < MIN_PIECE_US.min(whole) {
+                    if to - from < MIN_PIECE_US.min(whole) {
                         continue;
                     }
-                    let start = clip.at.saturating_add(from - clip.from);
-                    out.push(Cue { start, end: start.saturating_add(piece), speaker, text: cue.text.clone() });
+                    // Sped up or slowed down with its clip.
+                    let start = clip.at.saturating_add(clip.played(from - clip.from));
+                    let end = clip.at.saturating_add(clip.played(to - clip.from)).min(clip.end()).max(start.saturating_add(1));
+                    out.push(Cue { start, end, speaker, text: cue.text.clone() });
                 }
             }
         }
@@ -374,8 +375,7 @@ mod tests {
     }
 
     fn timeline() -> Timeline {
-        let track =
-            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }], name: None };
+        let track = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 20_000_000)], name: None };
         Timeline {
             tracks: vec![track(0, StreamKind::Screen), track(1, StreamKind::SystemSound), track(2, StreamKind::Microphone)],
             camera: CameraLayout::default(),

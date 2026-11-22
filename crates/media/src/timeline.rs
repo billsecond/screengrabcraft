@@ -22,6 +22,26 @@ pub enum EditError {
     Invalid(String),
 }
 
+/// How fast a clip plays, in hundredths of as recorded: 100 as recorded, 200 twice as fast.
+pub const NORMAL_SPEED: u16 = 100;
+/// The slowest a clip plays (a tenth of as recorded).
+pub const MIN_SPEED: u16 = 10;
+/// The fastest a clip plays (ten times as recorded).
+pub const MAX_SPEED: u16 = 1000;
+
+fn normal_speed() -> u16 {
+    NORMAL_SPEED
+}
+
+fn is_normal_speed(s: &u16) -> bool {
+    *s == NORMAL_SPEED
+}
+
+/// `v × num / den`, without overflowing.
+fn scale(v: u64, num: u64, den: u64) -> u64 {
+    u64::try_from(u128::from(v) * u128::from(num) / u128::from(den.max(1))).unwrap_or(u64::MAX)
+}
+
 /// A stretch of a track's recording, placed on the timeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Clip {
@@ -29,12 +49,53 @@ pub struct Clip {
     pub at: u64,
     /// Where it starts in the recording.
     pub from: u64,
+    /// How long it plays on the timeline.
     pub len: u64,
+    /// How fast it plays, in hundredths ([`NORMAL_SPEED`] as recorded); edits saved before clips
+    /// had speeds play as recorded.
+    #[serde(default = "normal_speed", skip_serializing_if = "is_normal_speed")]
+    pub speed: u16,
+}
+
+impl Default for Clip {
+    fn default() -> Clip {
+        Clip::new(0, 0, 0)
+    }
 }
 
 impl Clip {
+    /// A clip playing as recorded.
+    pub const fn new(at: u64, from: u64, len: u64) -> Clip {
+        Clip { at, from, len, speed: NORMAL_SPEED }
+    }
+
     pub fn end(&self) -> u64 {
         self.at.saturating_add(self.len)
+    }
+
+    /// Its speed in hundredths, kept in range.
+    fn pace(&self) -> u64 {
+        u64::from(self.speed.clamp(MIN_SPEED, MAX_SPEED))
+    }
+
+    /// Its speed: 1 as recorded, 2 twice as fast.
+    pub fn rate(&self) -> f64 {
+        self.pace() as f64 / 100.0
+    }
+
+    /// Where in the recording it is `d` µs after its start on the timeline.
+    pub fn source_at(&self, d: u64) -> u64 {
+        self.from.saturating_add(scale(d, self.pace(), 100))
+    }
+
+    /// How much of the recording it plays (µs).
+    pub fn source_len(&self) -> u64 {
+        scale(self.len, self.pace(), 100)
+    }
+
+    /// How long `src` µs of the recording take to play at its speed.
+    pub fn played(&self, src: u64) -> u64 {
+        scale(src, 100, self.pace())
     }
 }
 
@@ -164,7 +225,7 @@ impl Timeline {
             .iter()
             .map(|s| {
                 let len = rec.stream_duration(s.id);
-                let clips = if len >= MIN_CLIP_US { vec![Clip { at: 0, from: 0, len }] } else { Vec::new() };
+                let clips = if len >= MIN_CLIP_US { vec![Clip::new(0, 0, len)] } else { Vec::new() };
                 Track { stream: s.id, kind: s.kind, muted: false, volume: 1.0, clips, name: None }
             })
             .collect();
@@ -206,9 +267,11 @@ impl Timeline {
                 .clips
                 .iter()
                 .filter_map(|c| {
+                    let speed = c.speed.clamp(MIN_SPEED, MAX_SPEED);
                     let from = c.from.min(source);
-                    let len = c.len.min(source - from);
-                    (len >= MIN_CLIP_US).then_some(Clip { at: c.at.min(u64::MAX / 4), from, len })
+                    let most = Clip { speed, ..Clip::new(0, from, 0) }.played(source - from);
+                    let len = c.len.min(most);
+                    (len >= MIN_CLIP_US).then_some(Clip { at: c.at.min(u64::MAX / 4), from, len, speed })
                 })
                 .take(10_000)
                 .collect();
@@ -258,7 +321,7 @@ impl Timeline {
     pub fn source_time(&self, i: usize, t: u64) -> Option<u64> {
         let track = self.tracks.get(i)?;
         let c = track.clips.iter().find(|c| c.at <= t && t < c.end())?;
-        Some(c.from + (t - c.at))
+        Some(c.source_at(t - c.at))
     }
 
     /// The clip of track `i` playing at `t`.
@@ -278,11 +341,11 @@ impl Timeline {
                 // The part before the cut, and the part after it moved back.
                 if c.at < from {
                     let len = c.len.min(from - c.at);
-                    out.push(Clip { at: c.at, from: c.from, len });
+                    out.push(Clip { len, ..*c });
                 }
                 if c.end() > to {
                     let skip = to.saturating_sub(c.at);
-                    out.push(Clip { at: c.at.max(to) - gap, from: c.from + skip, len: c.len - skip });
+                    out.push(Clip { at: c.at.max(to) - gap, from: c.source_at(skip), len: c.len - skip, speed: c.speed });
                 }
             }
             out.retain(|c| c.len >= MIN_CLIP_US);
@@ -315,11 +378,11 @@ impl Timeline {
                 }
                 // The part before the stretch, and the part after it, where it was.
                 if c.at < from {
-                    out.push(Clip { at: c.at, from: c.from, len: from - c.at });
+                    out.push(Clip { len: from - c.at, ..*c });
                 }
                 if c.end() > to {
                     let skip = to - c.at;
-                    out.push(Clip { at: to, from: c.from.saturating_add(skip), len: c.len - skip });
+                    out.push(Clip { at: to, from: c.source_at(skip), len: c.len - skip, speed: c.speed });
                 }
             }
             out.retain(|c| c.len >= MIN_CLIP_US);
@@ -344,7 +407,7 @@ impl Timeline {
                 let c = t.clips[k];
                 let first = at - c.at;
                 t.clips[k].len = first;
-                t.clips.insert(k + 1, Clip { at, from: c.from + first, len: c.len - first });
+                t.clips.insert(k + 1, Clip { at, from: c.source_at(first), len: c.len - first, speed: c.speed });
                 made += 1;
             }
         }
@@ -371,9 +434,11 @@ impl Timeline {
     /// trimmed), up to the clip before and the start of the recording.
     pub fn trim_start(&mut self, track: usize, clip: usize, to: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
-        let floor = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0).max(c.at.saturating_sub(c.from));
-        let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US));
-        let moved = Clip { at: to, from: (c.from + to).saturating_sub(c.at), len: c.end() - to };
+        // Not before the clip before, nor before where the recording's start would play.
+        let floor = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0).max(c.at.saturating_sub(c.played(c.from)));
+        let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
+        let from = if to >= c.at { c.source_at(to - c.at) } else { c.from.saturating_sub(scale(c.at - to, c.pace(), 100)) };
+        let moved = Clip { at: to, from, len: c.end().saturating_sub(to), speed: c.speed };
         if let Some(slot) = clips.get_mut(clip) {
             *slot = moved;
         }
@@ -385,7 +450,7 @@ impl Timeline {
     pub fn trim_end(&mut self, track: usize, clip: usize, to: u64, source: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
         let next = clips.get(clip + 1).map(|n| n.at).unwrap_or(u64::MAX);
-        let ceiling = next.min(c.at + source.saturating_sub(c.from));
+        let ceiling = next.min(c.at.saturating_add(c.played(source.saturating_sub(c.from))));
         let to = to.clamp(c.at + MIN_CLIP_US, ceiling.max(c.at + MIN_CLIP_US));
         if let Some(slot) = clips.get_mut(clip) {
             slot.len = to - c.at;
@@ -405,6 +470,89 @@ impl Timeline {
             slot.at = to.clamp(floor, ceiling);
         }
         Ok(())
+    }
+
+    /// Plays `from..to` of the timeline at `speed` (hundredths of as recorded, see
+    /// [`NORMAL_SPEED`]) on one track, or every track and the layers with them; what comes after
+    /// moves up (or along) to follow on. A part of the stretch already faster or slower than its
+    /// first clip stays so by as much, so tracks in step stay in step. Returns where the stretch
+    /// now ends.
+    pub fn set_speed(&mut self, from: u64, to: u64, speed: u16, track: Option<usize>) -> Result<u64, EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch to speed up or slow down is empty".to_string()));
+        }
+        let speed = u64::from(speed.clamp(MIN_SPEED, MAX_SPEED));
+        let which: Vec<usize> = match track {
+            Some(i) => {
+                self.track(i)?;
+                vec![i]
+            }
+            None => (0..self.tracks.len()).collect(),
+        };
+        // The speed the stretch plays at now: that of its first clip.
+        let was = which
+            .iter()
+            .filter_map(|&i| self.tracks.get(i))
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.at < to && c.end() > from)
+            .min_by_key(|c| c.at)
+            .map(Clip::pace)
+            .ok_or_else(|| EditError::Invalid("there's nothing to speed up or slow down there".to_string()))?;
+        let len = to - from;
+        let new_len = scale(len, was, speed).max(1);
+        // Where a moment of the timeline goes: before the stretch it stays, in it it's sped up or
+        // slowed down, after it it moves by as much as the stretch's length changed.
+        let map = |t: u64| -> u64 {
+            if t <= from {
+                t
+            } else if t >= to {
+                (t - len).saturating_add(new_len)
+            } else {
+                from.saturating_add(scale(t - from, was, speed))
+            }
+        };
+        for i in which {
+            let t = self.track_mut(i)?;
+            let mut out = Vec::with_capacity(t.clips.len() + 2);
+            for c in &t.clips {
+                if c.end() <= from {
+                    out.push(*c);
+                    continue;
+                }
+                if c.at >= to {
+                    out.push(Clip { at: map(c.at), ..*c });
+                    continue;
+                }
+                if c.at < from {
+                    out.push(Clip { len: from - c.at, ..*c });
+                }
+                // The part in the stretch, at its new speed.
+                let (a, b) = (c.at.max(from), c.end().min(to));
+                let pace = scale(c.pace(), speed, was).clamp(u64::from(MIN_SPEED), u64::from(MAX_SPEED));
+                let (na, nb) = (map(a), map(b));
+                out.push(Clip { at: na, from: c.source_at(a - c.at), len: nb.saturating_sub(na), speed: u16::try_from(pace).unwrap_or(MAX_SPEED) });
+                if c.end() > to {
+                    let skip = to - c.at;
+                    out.push(Clip { at: map(to), from: c.source_at(skip), len: c.end() - to, speed: c.speed });
+                }
+            }
+            // Apart (rounding may leave a microsecond over), and no slivers.
+            let mut kept: Vec<Clip> = Vec::with_capacity(out.len());
+            for c in out {
+                if let Some(l) = kept.last_mut()
+                    && l.end() > c.at
+                {
+                    l.len = c.at.saturating_sub(l.at);
+                }
+                kept.push(c);
+            }
+            kept.retain(|c| c.len >= MIN_CLIP_US);
+            t.clips = kept;
+        }
+        if track.is_none() {
+            self.retime_layers(&map);
+        }
+        Ok(map(to))
     }
 
     pub fn set_muted(&mut self, track: usize, muted: bool) -> Result<(), EditError> {
@@ -443,8 +591,7 @@ mod tests {
     use super::*;
 
     fn two_tracks() -> Timeline {
-        let full =
-            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }], name: None };
+        let full = |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 10_000_000)], name: None };
         Timeline {
             tracks: vec![full(0, StreamKind::Screen), full(1, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -461,7 +608,7 @@ mod tests {
         t.cut(2_000_000, 5_000_000).unwrap();
         assert_eq!(t.length(), 7_000_000);
         for track in &t.tracks {
-            assert_eq!(track.clips, vec![Clip { at: 0, from: 0, len: 2_000_000 }, Clip { at: 2_000_000, from: 5_000_000, len: 5_000_000 }]);
+            assert_eq!(track.clips, vec![Clip::new(0, 0, 2_000_000), Clip::new(2_000_000, 5_000_000, 5_000_000)]);
         }
         // What plays at 3 s now is what was recorded at 6 s, on both tracks.
         assert_eq!(t.source_time(0, 3_000_000), Some(6_000_000));
@@ -501,10 +648,10 @@ mod tests {
         let mut t = two_tracks();
         // From the microphone only: the screen plays on, and the sound after it is still in time.
         t.lift(2_000_000, 5_000_000, Some(1)).unwrap();
-        assert_eq!(t.tracks[1].clips, vec![Clip { at: 0, from: 0, len: 2_000_000 }, Clip { at: 5_000_000, from: 5_000_000, len: 5_000_000 }]);
+        assert_eq!(t.tracks[1].clips, vec![Clip::new(0, 0, 2_000_000), Clip::new(5_000_000, 5_000_000, 5_000_000)]);
         assert_eq!(t.source_time(1, 3_000_000), None);
         assert_eq!(t.source_time(1, 6_000_000), Some(6_000_000));
-        assert_eq!(t.tracks[0].clips, vec![Clip { at: 0, from: 0, len: 10_000_000 }]);
+        assert_eq!(t.tracks[0].clips, vec![Clip::new(0, 0, 10_000_000)]);
         assert_eq!(t.length(), 10_000_000);
         // From every track, off the end, over the gap already there: nothing left after 8 s.
         t.lift(8_000_000, u64::MAX, None).unwrap();
@@ -538,7 +685,7 @@ mod tests {
         t.trim_end(0, 0, 9_000_000, 10_000_000).unwrap();
         assert_eq!(t.tracks[0].clips[0].end(), 5_000_000, "stops at the next clip");
         t.trim_start(0, 1, 6_000_000).unwrap();
-        assert_eq!(t.tracks[0].clips[1], Clip { at: 6_000_000, from: 6_000_000, len: 4_000_000 });
+        assert_eq!(t.tracks[0].clips[1], Clip::new(6_000_000, 6_000_000, 4_000_000));
         t.trim_start(0, 1, 0).unwrap();
         assert_eq!(t.tracks[0].clips[1].at, 5_000_000, "stops at the clip before");
         t.trim_end(0, 1, 99_000_000, 10_000_000).unwrap();
@@ -564,6 +711,123 @@ mod tests {
         assert!(t.set_volume(0, f32::NAN).is_err());
         t.set_volume(1, 9.0).unwrap();
         assert_eq!(t.tracks[1].volume, 2.0);
+    }
+
+    #[test]
+    fn speeding_up_a_stretch_moves_what_follows_up_and_keeps_the_tracks_in_step() {
+        let mut t = two_tracks();
+        // 2 s to 6 s twice as fast: it takes 2 s, the rest comes 2 s sooner.
+        assert_eq!(t.set_speed(2_000_000, 6_000_000, 200, None).unwrap(), 4_000_000);
+        assert_eq!(t.length(), 8_000_000);
+        for track in &t.tracks {
+            assert_eq!(
+                track.clips,
+                vec![
+                    Clip::new(0, 0, 2_000_000),
+                    Clip { speed: 200, ..Clip::new(2_000_000, 2_000_000, 2_000_000) },
+                    Clip::new(4_000_000, 6_000_000, 4_000_000)
+                ]
+            );
+        }
+        // At 3 s the video shows (and plays) what was recorded at 4 s, on both tracks.
+        assert_eq!(t.source_time(0, 3_000_000), Some(4_000_000));
+        assert_eq!(t.source_time(1, 3_000_000), Some(4_000_000));
+        assert_eq!(t.source_time(1, 5_000_000), Some(7_000_000));
+        // Split in the fast part: the second half starts where the recording has got to.
+        t.split(3_000_000, None).unwrap();
+        assert_eq!(t.tracks[0].clips[2], Clip { speed: 200, ..Clip::new(3_000_000, 4_000_000, 1_000_000) });
+        // Back as recorded: as long as it was, nothing lost.
+        assert_eq!(t.set_speed(2_000_000, 4_000_000, 100, None).unwrap(), 6_000_000);
+        assert_eq!(t.length(), 10_000_000);
+        assert_eq!(t.source_time(0, 5_500_000), Some(5_500_000));
+        assert_eq!(t.source_time(1, 9_000_000), Some(9_000_000));
+    }
+
+    #[test]
+    fn slowing_down_makes_the_video_longer_and_trims_follow_the_speed() {
+        let mut t = two_tracks();
+        assert_eq!(t.set_speed(0, 10_000_000, 50, None).unwrap(), 20_000_000);
+        assert_eq!(t.length(), 20_000_000);
+        assert_eq!(t.source_time(0, 10_000_000), Some(5_000_000));
+        // Trimmed by 2 s on the timeline is 1 s of the recording; trimmed out, it stops where the
+        // recording does (20 s at half speed).
+        t.trim_end(0, 0, 18_000_000, 10_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[0].source_len(), 9_000_000);
+        t.trim_end(0, 0, 99_000_000, 10_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[0].end(), 20_000_000);
+        t.trim_start(0, 0, 4_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[0], Clip { speed: 50, ..Clip::new(4_000_000, 2_000_000, 16_000_000) });
+        t.trim_start(0, 0, 0).unwrap();
+        assert_eq!(t.tracks[0].clips[0], Clip { speed: 50, ..Clip::new(0, 0, 20_000_000) });
+    }
+
+    #[test]
+    fn one_track_alone_and_parts_already_faster_stay_so() {
+        let mut t = two_tracks();
+        // The microphone alone, 2 s to 6 s twice as fast: its sound after comes 2 s sooner, the
+        // screen doesn't move.
+        t.set_speed(2_000_000, 6_000_000, 200, Some(1)).unwrap();
+        assert_eq!(t.tracks[0].clips, vec![Clip::new(0, 0, 10_000_000)]);
+        assert_eq!(t.tracks[1].clips.last().map(Clip::end), Some(8_000_000));
+        // Then the whole video at half speed: the screen as the reference; the microphone's fast
+        // part is now as recorded, twice the half.
+        t.set_speed(0, 10_000_000, 50, None).unwrap();
+        assert_eq!(t.tracks[0].clips[0].speed, 50);
+        assert_eq!(t.tracks[1].clips.iter().map(|c| c.speed).collect::<Vec<_>>(), vec![50, 100, 50]);
+        assert_eq!(t.tracks[1].clips.last().map(Clip::end), Some(16_000_000));
+        // Nothing there, an empty stretch and a missing track are errors and change nothing.
+        let before = t.clone();
+        assert!(t.set_speed(30_000_000, 40_000_000, 200, None).is_err());
+        assert!(t.set_speed(5, 5, 200, None).is_err());
+        assert!(t.set_speed(0, 5, 200, Some(7)).is_err());
+        assert_eq!(t, before);
+        // Out of range speeds are kept in range.
+        let mut t = two_tracks();
+        t.set_speed(0, 10_000_000, 0, None).unwrap();
+        assert_eq!(t.tracks[0].clips[0].speed, MIN_SPEED);
+        assert_eq!(t.length(), 100_000_000);
+    }
+
+    #[test]
+    fn items_on_the_layers_go_with_a_speed_change() {
+        use crate::layers::Item;
+        let mut t = two_tracks();
+        let (layer, inside) = t.place(Item { len: 2_000_000, ..Item::default() }, None, 3_000_000).unwrap();
+        let (_, after) = t.place(Item { len: 1_000_000, ..Item::default() }, Some(layer), 7_000_000).unwrap();
+        t.set_speed(2_000_000, 6_000_000, 200, None).unwrap();
+        let at = |id| t.item(layer, id).map(|i| (i.at, i.len)).unwrap();
+        assert_eq!(at(inside), (2_500_000, 1_000_000), "sped up with the stretch");
+        assert_eq!(at(after), (5_000_000, 1_000_000), "moved up with what follows");
+        // One track alone leaves the layers be.
+        t.set_speed(0, 1_000_000, 50, Some(0)).unwrap();
+        assert_eq!(t.item(layer, after).map(|i| i.at), Some(5_000_000));
+    }
+
+    #[test]
+    fn edits_saved_before_speeds_play_as_recorded_and_junk_speeds_are_kept_in_range() {
+        let old = r#"{"tracks":[{"stream":0,"kind":"screen","clips":[{"at":0,"from":0,"len":4000000}]}]}"#;
+        let t: Timeline = serde_json::from_str(old).unwrap();
+        assert_eq!(t.tracks[0].clips[0].speed, NORMAL_SPEED);
+        // Written again, a clip as recorded says nothing of its speed; a faster one does.
+        assert!(!serde_json::to_string(&t).unwrap().contains("speed"));
+        let fast = Clip { speed: 250, ..Clip::new(0, 0, 1) };
+        assert!(serde_json::to_string(&fast).unwrap().contains("\"speed\":250"));
+        // Speeds out of range from a file are kept in range, and nothing plays past the recording.
+        let rec = {
+            use crate::recording::{Header, RecordingWriter, StreamInfo};
+            let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 8, height: 8, channels: 0 }];
+            let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+            for f in 0..40u64 {
+                w.video_frame(0, f * 100_000, &screengrabcraft_model::Raster::filled(8, 8, screengrabcraft_model::Color::BLACK).unwrap()).unwrap();
+            }
+            Recording::open(Box::new(w.finish(4_000_000).unwrap())).unwrap()
+        };
+        let junk = r#"{"tracks":[{"stream":0,"kind":"screen","clips":[{"at":0,"from":0,"len":9000000,"speed":0},{"at":9000000,"from":0,"len":9000000,"speed":65535}]}]}"#;
+        let t = serde_json::from_str::<Timeline>(junk).unwrap().checked(&rec);
+        let clips = &t.tracks[0].clips;
+        assert_eq!((clips[0].speed, clips[1].speed), (MIN_SPEED, MAX_SPEED));
+        assert_eq!(clips[0].len, 9_000_000, "4 s at a tenth of the speed is 40 s");
+        assert_eq!(clips[1].len, 400_000, "4 s at ten times is 0.4 s");
     }
 
     #[test]

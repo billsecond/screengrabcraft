@@ -25,6 +25,7 @@ pub mod opus;
 pub mod pointer;
 pub mod recording;
 pub mod stock;
+pub mod stretch;
 pub mod timeline;
 pub mod yuv;
 pub mod zoom;

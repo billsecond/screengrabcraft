@@ -446,6 +446,12 @@ pub fn clock(us: u64) -> String {
     format!("{}:{:02}.{}", tenths / 600, (tenths / 10) % 60, tenths % 10)
 }
 
+/// A clip's speed (hundredths of as recorded) as people say it: `2×`, `0.5×`, `1.25×`.
+pub fn speed_label(speed: u16) -> String {
+    let words = format!("{:.2}", f64::from(speed) / 100.0);
+    format!("{}×", words.trim_end_matches('0').trim_end_matches('.'))
+}
+
 /// Each sound track's peaks per 10 ms, for drawing its wave.
 pub(crate) type Waves = BTreeMap<u8, Vec<(i16, i16)>>;
 
@@ -944,6 +950,74 @@ impl VideoView {
         self.run(ed, ctx, "video.lift", p);
     }
 
+    /// What a speed is set on: the chosen stretch, else the selected clip's time.
+    fn speed_stretch(&self) -> Option<(u64, u64)> {
+        self.range.or_else(|| {
+            let (t, c) = self.selected?;
+            let clip = self.session.timeline.tracks.get(t)?.clips.get(c)?;
+            Some((clip.at, clip.end()))
+        })
+    }
+
+    /// The speed a stretch plays at now (hundredths): its first clip's on any track.
+    fn speed_of(&self, (a, b): (u64, u64)) -> Option<u16> {
+        self.session.timeline.tracks.iter().flat_map(|t| t.clips.iter()).filter(|c| c.at < b && c.end() > a).min_by_key(|c| c.at).map(|c| c.speed)
+    }
+
+    /// Plays the chosen stretch (or the selected clip's time) faster or slower on every track, so
+    /// they stay together; a chosen stretch stays chosen as long as it now is.
+    pub fn set_speed(&mut self, ed: &mut Editor, ctx: &egui::Context, speed: f64) {
+        let Some((a, b)) = self.speed_stretch() else { return };
+        self.pause();
+        match self.session.execute("video.speed", &json!({"from": a, "to": b, "speed": speed})) {
+            Ok(v) => {
+                let end = v.get("to").and_then(Value::as_u64).unwrap_or(b);
+                if self.range.is_some() {
+                    self.range = (end > a).then_some((a, end));
+                }
+                if !(a..=end).contains(&self.playhead) {
+                    self.playhead = self.playhead.min(self.length());
+                }
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
+        self.fix_selection();
+    }
+
+    /// The speeds offered, as the buttons say them.
+    const SPEEDS: [(f64, &'static str); 8] =
+        [(0.25, "0.25×"), (0.5, "0.5×"), (0.75, "0.75×"), (1.0, "1×"), (1.5, "1.5×"), (2.0, "2×"), (4.0, "4×"), (8.0, "8×")];
+
+    /// A button for each speed, the one it plays at now lit.
+    fn speed_buttons(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let Some(stretch) = self.speed_stretch() else { return };
+        let now = self.speed_of(stretch);
+        let ctx = ui.ctx().clone();
+        let w = ((ui.available_width() - 18.0) / 4.0).floor();
+        let mut chosen = None;
+        egui::Grid::new("video_speeds").spacing([6.0, 6.0]).show(ui, |ui| {
+            for (i, (speed, label)) in Self::SPEEDS.into_iter().enumerate() {
+                let on = now == Some((speed * 100.0).round() as u16);
+                let tip = if speed < 1.0 {
+                    format!("Slower: {label} as recorded")
+                } else if speed > 1.0 {
+                    format!("Faster: {label} as recorded")
+                } else {
+                    "As recorded".to_string()
+                };
+                if ui.add(egui::Button::new(label).selected(on).min_size(vec2(w, 26.0))).on_hover_text(tip).clicked() {
+                    chosen = Some(speed);
+                }
+                if i % 4 == 3 {
+                    ui.end_row();
+                }
+            }
+        });
+        if let Some(s) = chosen {
+            self.set_speed(ed, &ctx, s);
+        }
+    }
+
     /// Splits one track (or every track) at a moment, the playhead going there.
     fn split_at(&mut self, ed: &mut Editor, ctx: &egui::Context, at: u64, track: Option<usize>, now: f64) {
         self.seek(ed, at, now);
@@ -1251,6 +1325,7 @@ impl VideoView {
                         self.delete(ed, &ctx);
                         ui.close();
                     }
+                    self.speed_menu(ed, ui, &ctx);
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Select All").shortcut_text("Ctrl+A"))
@@ -1468,7 +1543,7 @@ impl VideoView {
             let track = self.session.timeline.tracks.get(ti)?;
             let c = track.clips.get(ci)?;
             let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
-            Some((name, c.at, c.len, c.end()))
+            Some((name, c.at, c.len, c.end(), c.speed))
         });
         let stretch = self.range;
         let ctx = ui.ctx().clone();
@@ -1484,10 +1559,15 @@ impl VideoView {
                         ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(((wide - 6.0) / 2.0).floor(), 28.0)))
                     };
                     let mut first = true;
-                    if let Some((name, at, len, end)) = clip {
+                    if let Some((name, at, len, end, speed)) = clip {
                         // What's chosen, said, with what's most often done to it.
                         ui.label(RichText::new(format!("{name} clip")).size(16.0).color(t.text));
-                        note(ui, format!("Starts at {}, {} long.", clock(at), clock(len)));
+                        let pace = if speed == screengrabcraft_media::timeline::NORMAL_SPEED {
+                            String::new()
+                        } else {
+                            format!(", playing at {}", speed_label(speed))
+                        };
+                        note(ui, format!("Starts at {}, {} long{pace}.", clock(at), clock(len)));
                         ui.add_space(8.0);
                         let on_it = self.playhead > at && self.playhead < end;
                         let (mut split, mut delete) = (false, false);
@@ -1507,6 +1587,10 @@ impl VideoView {
                         if delete {
                             self.delete(ed, &ctx);
                         }
+                        section(ui, "Speed", &mut false);
+                        self.speed_buttons(ed, ui);
+                        ui.add_space(4.0);
+                        note(ui, "Every track plays this stretch at the speed, so they stay together; voices keep their pitch.".to_string());
                         first = false;
                     } else if let Some((a, b)) = stretch {
                         ui.label(RichText::new("Chosen stretch").size(16.0).color(t.text));
@@ -1523,6 +1607,12 @@ impl VideoView {
                         }
                         if let_go {
                             self.range = None;
+                        }
+                        if self.range.is_some() {
+                            section(ui, "Speed", &mut false);
+                            self.speed_buttons(ed, ui);
+                            ui.add_space(4.0);
+                            note(ui, "Plays the stretch faster or slower; what follows moves up to follow on. Voices keep their pitch.".to_string());
                         }
                         first = false;
                     } else {
@@ -2287,6 +2377,7 @@ impl VideoView {
                     self.cut_stretch(ed, ctx);
                     ui.close();
                 }
+                self.speed_menu(ed, ui, ctx);
                 ui.separator();
                 self.choosing_items(ui, at);
                 ui.separator();
@@ -2387,6 +2478,7 @@ impl VideoView {
                     self.remove_stretch(ed, ctx, None);
                     ui.close();
                 }
+                self.speed_menu(ed, ui, ctx);
                 ui.separator();
                 self.choosing_items(ui, at);
                 ui.separator();
@@ -2411,6 +2503,28 @@ impl VideoView {
                 }
             }
         }
+    }
+
+    /// A menu of speeds for the chosen stretch (or the selected clip's time), the one it plays at
+    /// now ticked; greyed out with nothing chosen.
+    fn speed_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context) {
+        let stretch = self.speed_stretch();
+        let now = stretch.and_then(|s| self.speed_of(s));
+        let what = if self.range.is_some() { "Speed of the Selection" } else { "Speed of the Clip" };
+        ui.add_enabled_ui(stretch.is_some(), |ui| {
+            ui.menu_button(what, |ui| {
+                for (speed, label) in Self::SPEEDS {
+                    let on = now == Some((speed * 100.0).round() as u16);
+                    let words = if label == "1×" { format!("Play at {label} (as recorded)") } else { format!("Play at {label}") };
+                    if ui.add(egui::Button::new(words).selected(on)).clicked() {
+                        self.set_speed(ed, ctx, speed);
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_disabled_hover_text("Choose a stretch or a clip first");
+        });
     }
 
     /// The menu's ways of choosing a stretch from a moment.
@@ -2591,7 +2705,7 @@ impl VideoView {
                             let (x0, x1) = (r.min.x.max(lane.min.x) as i32, r.max.x.min(lane.max.x) as i32);
                             for x in x0..x1 {
                                 let (a, b) = (us_of(x as f32), us_of(x as f32 + 1.0));
-                                let src = |us: u64| (clip.from + us.saturating_sub(clip.at)) * 48 / 1000 / WAVE_STEP;
+                                let src = |us: u64| clip.source_at(us.saturating_sub(clip.at)).saturating_mul(48) / 1000 / WAVE_STEP;
                                 let (i0, i1) = (src(a) as usize, (src(b) as usize).max(src(a) as usize + 1));
                                 let (lo, hi) = peaks
                                     .get(i0..i1.min(peaks.len()))
@@ -2611,6 +2725,16 @@ impl VideoView {
                                 egui::FontId::proportional(12.0),
                                 t.text,
                             );
+                        }
+                        // Faster or slower than recorded: its speed in its top right corner.
+                        if clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED && r.width() > 34.0 {
+                            let font = egui::FontId::proportional(11.0);
+                            let words = speed_label(clip.speed);
+                            let size = painter.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size();
+                            let right = r.max.x.min(lane.max.x);
+                            let tag = Rect::from_min_size(pos2((right - size.x - 10.0).max(r.min.x + 2.0), r.min.y + 3.0), size + vec2(6.0, 2.0));
+                            painter.rect_filled(tag, 3.0, colour);
+                            painter.text(tag.center(), egui::Align2::CENTER_CENTER, words, font, Color32::WHITE);
                         }
                         if self.selected == Some((i, c)) {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);

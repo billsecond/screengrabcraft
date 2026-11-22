@@ -224,6 +224,21 @@ fn move_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// A stretch played faster or slower: on every track (and the layers), or one.
+fn speed(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::timeline::{MAX_SPEED, MIN_SPEED};
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    let x = p
+        .get("speed")
+        .and_then(Value::as_f64)
+        .filter(|f| f.is_finite() && *f > 0.0)
+        .ok_or_else(|| EngineError::Params("`speed` must be a number above 0: 2 is twice as fast, 0.5 half as fast".to_string()))?;
+    let hundredths = (x * 100.0).round().clamp(f64::from(MIN_SPEED), f64::from(MAX_SPEED)) as u16;
+    let track = if p.get("track").is_some_and(|t| !t.is_null()) { Some(index(p, "track")?) } else { None };
+    let end = s.timeline.set_speed(from, to, hundredths, track).map_err(edit_err)?;
+    Ok(json!({"from": from, "to": end, "speed": f64::from(hundredths) / 100.0, "length": s.timeline.length()}))
+}
+
 fn mute(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let muted = p.get("muted").and_then(Value::as_bool).ok_or_else(|| EngineError::Params("`muted` must be true or false".to_string()))?;
     s.timeline.set_muted(index(p, "track")?, muted).map_err(edit_err)?;
@@ -498,6 +513,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand { id: "video.trimStart", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_start },
     VideoCommand { id: "video.trimEnd", label: "Trim", params: r#"{"track": n, "clip": n, "to": µs}"#, run: trim_end },
     VideoCommand { id: "video.moveClip", label: "Move Clip", params: r#"{"track": n, "clip": n, "to": µs}"#, run: move_clip },
+    VideoCommand {
+        id: "video.speed",
+        label: "Speed",
+        params: r#"{"from": µs, "to": µs, "speed": 0.1..10, "track"?: n}: plays the stretch faster or slower (2 twice as fast, 0.5 half, 1 as recorded) on every track, or one; what follows moves up to follow on, voices keep their pitch. Says where the stretch now ends"#,
+        run: speed,
+    },
     VideoCommand { id: "video.mute", label: "Mute", params: r#"{"track": n, "muted": bool}"#, run: mute },
     VideoCommand { id: "video.volume", label: "Volume", params: r#"{"track": n, "volume": 0..2}"#, run: volume },
     VideoCommand {
@@ -667,6 +688,25 @@ mod tests {
         s.drag("video.moveClip", &json!({"track": 1, "clip": 1, "to": 3_000_000})).unwrap();
         s.cancel();
         assert_eq!(s.timeline.tracks[1].clips[1].at, 2_000_000);
+    }
+
+    #[test]
+    fn a_stretch_sped_up_is_one_undo_step_and_says_where_it_ends() {
+        let mut s = session();
+        let r = s.execute("video.speed", &json!({"from": 1_000_000, "to": 3_000_000, "speed": 2})).unwrap();
+        assert_eq!((r["to"].as_u64(), r["length"].as_u64(), r["speed"].as_f64()), (Some(2_000_000), Some(4_000_000), Some(2.0)));
+        assert_eq!(s.undo_label(), Some("Speed"));
+        assert_eq!(s.timeline.source_time(1, 1_500_000), Some(2_000_000), "the sound with the picture");
+        // Slower than the slowest is the slowest; one track alone.
+        let r = s.execute("video.speed", &json!({"from": 0, "to": 1_000_000, "speed": 0.01, "track": 0})).unwrap();
+        assert_eq!(r["speed"].as_f64(), Some(0.1));
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.length(), 5_000_000);
+        for bad in [json!({"from": 0, "to": 1}), json!({"from": 0, "to": 9, "speed": 0}), json!({"from": 0, "to": 9, "speed": "fast"})] {
+            assert!(s.execute("video.speed", &bad).is_err(), "{bad}");
+        }
+        assert!(!s.edited());
     }
 
     #[test]

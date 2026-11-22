@@ -448,6 +448,21 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
             continue;
         }
         let stereo = rec.stream(t.stream).is_some_and(|s| s.channels >= 2);
+        // `n` stereo samples of the track as recorded from sample `from` (-1 to 1).
+        let read = |from: u64, n: usize| -> Vec<[f32; 2]> {
+            let src = rec.sound(t.stream, from, n);
+            (0..n)
+                .map(|k| {
+                    let (l, r) = if stereo {
+                        (src.get(k * 2).copied().unwrap_or(0), src.get(k * 2 + 1).copied().unwrap_or(0))
+                    } else {
+                        let v = src.get(k).copied().unwrap_or(0);
+                        (v, v)
+                    };
+                    [f32::from(l) / 32768.0, f32::from(r) / 32768.0]
+                })
+                .collect()
+        };
         for c in &t.clips {
             let (at, from, len) = (to_samples(c.at), to_samples(c.from), to_samples(c.len));
             let (a, b) = (first.max(at), end.min(at.saturating_add(len)));
@@ -455,19 +470,25 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 continue;
             }
             let n = (b - a) as usize;
-            let src = rec.sound(t.stream, from + (a - at), n);
-            let gain = t.volume / 32768.0;
-            let base = (a - first) as usize * 2;
-            for k in 0..n {
-                let (l, r) = if stereo {
-                    (src.get(k * 2).copied().unwrap_or(0), src.get(k * 2 + 1).copied().unwrap_or(0))
-                } else {
-                    let v = src.get(k).copied().unwrap_or(0);
-                    (v, v)
+            let sound = if c.speed == crate::timeline::NORMAL_SPEED {
+                read(from + (a - at), n)
+            } else {
+                // Faster or slower, at its own pitch.
+                let clip = |start: i64, n: usize| -> Vec<[f32; 2]> {
+                    // Before the recording's start: silence.
+                    let abs = i64::try_from(from).unwrap_or(i64::MAX).saturating_add(start);
+                    let skip = usize::try_from(abs.saturating_neg().max(0)).unwrap_or(n).min(n);
+                    let mut s = vec![[0.0; 2]; skip];
+                    s.extend(read(u64::try_from(abs.max(0)).unwrap_or(0), n - skip));
+                    s
                 };
+                crate::stretch::stretched(&clip, c.rate(), a - at, n)
+            };
+            let base = (a - first) as usize * 2;
+            for (k, [l, r]) in sound.iter().enumerate() {
                 if let Some(o) = out.get_mut(base + k * 2..base + k * 2 + 2) {
-                    o[0] += f32::from(l) * gain;
-                    o[1] += f32::from(r) * gain;
+                    o[0] += l * t.volume;
+                    o[1] += r * t.volume;
                 }
             }
         }

@@ -647,7 +647,7 @@ mod tests {
                 kind: StreamKind::Screen,
                 muted: false,
                 volume: 1.0,
-                clips: vec![Clip { at: 0, from: 0, len: 10_000_000 }],
+                clips: vec![Clip::new(0, 0, 10_000_000)],
                 name: None,
             }],
             camera: CameraLayout::default(),

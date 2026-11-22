@@ -1508,6 +1508,55 @@ fn a_chosen_clip_is_named_in_the_panel_with_what_is_done_to_it() {
 }
 
 #[test]
+fn a_chosen_stretch_is_sped_up_from_the_panel_and_a_clip_slowed_down_from_the_menu() {
+    let mut h = harness();
+    // 1 s to 3 s chosen, made twice as fast: the video is a second shorter, the stretch stays
+    // chosen as long as it now is, every track in step.
+    h.state_mut().video.as_mut().unwrap().range = Some((1_000_000, 3_000_000));
+    h.run_steps(3);
+    h.get_by_label("2×").click();
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    assert_eq!(length(&h), 3_000_000);
+    assert_eq!(v.range, Some((1_000_000, 2_000_000)));
+    for track in 0..3 {
+        assert_eq!(v.session.timeline.source_time(track, 1_500_000), Some(2_000_000), "track {track}");
+    }
+    assert_eq!(v.session.undo_label(), Some("Speed"));
+    // The picture follows: at 1.5 s the box is where it was at 2 s of the recording (x = 120).
+    let mut c = screengrabcraft_media::compose::Composer::new(v.rec.clone(), &v.session.timeline, 320, 180);
+    let pic = c.frame(&v.session.timeline, 1_500_000);
+    assert!(pic.pixel(165, 60).is_some_and(|p| p.b > 150 && p.r < 120), "{:?}", pic.pixel(165, 60));
+    // And the sound: it's heard, faster, not silent.
+    let sound = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 60_000, 9600);
+    assert!(sound.iter().any(|s| s.abs() > 0.1));
+    let fast = v.session.timeline.tracks[0].clips.iter().position(|c| c.speed == 200).unwrap();
+    shot(&mut h, "video-speed-stretch");
+    // Its clip on the screen track, chosen with the right button (at 1.5 s, the timeline still
+    // fitted to 4 s): the panel says how fast it plays.
+    h.state_mut().video.as_mut().unwrap().range = None;
+    h.run_steps(2);
+    let (lane, top) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.375, top + 20.0));
+    assert_eq!(h.state().video.as_ref().unwrap().selected, Some((0, fast)));
+    assert!(h.query_by_label_contains("playing at 2×").is_some());
+    // Speed of the Clip > 0.5×: that second takes four now.
+    h.get_by_label_contains("Speed of the Clip").hover();
+    h.run_steps(2);
+    h.get_by_label("Play at 0.5×").click();
+    h.run_steps(3);
+    assert_eq!(length(&h), 6_000_000);
+    shot(&mut h, "video-speed-clip");
+    // Undone twice: as recorded.
+    for _ in 0..2 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+    }
+    assert_eq!(length(&h), 4_000_000);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks.iter().flat_map(|t| &t.clips).all(|c| c.speed == 100));
+}
+
+#[test]
 fn add_text_puts_words_at_the_playhead_ready_to_be_typed_over() {
     let mut h = harness();
     let half = length(&h) / 2;

@@ -923,6 +923,37 @@ impl Timeline {
         }
     }
 
+    /// Moves every layer's items as a speed change moved the tracks (`map`: where a moment of the
+    /// timeline goes; it never goes back): an item in the stretch is sped up or slowed down with
+    /// it, one after it moves along. A sound or video item still plays its own at its own speed,
+    /// so made longer it ends where its media does.
+    pub(crate) fn retime_layers(&mut self, map: &dyn Fn(u64) -> u64) {
+        let media = self.media.clone();
+        for l in &mut self.layers {
+            let mut kept: Vec<Item> = Vec::with_capacity(l.items.len());
+            for mut i in std::mem::take(&mut l.items) {
+                let (a, b) = (map(i.at), map(i.end()));
+                let mut len = b.saturating_sub(a).max(MIN_CLIP_US);
+                if len > i.len
+                    && let What::Media { id } = &i.what
+                    && let Some(m) = media.iter().find(|m| m.id == *id && m.kind != MediaKind::Picture && m.duration > 0)
+                {
+                    len = len.min(m.duration.saturating_sub(i.from)).max(i.len);
+                }
+                i.at = a;
+                i.len = len;
+                // Apart: an item made as short as an item can be may reach the next.
+                if let Some(p) = kept.last()
+                    && p.end() > i.at
+                {
+                    i.at = p.end();
+                }
+                kept.push(i);
+            }
+            l.items = kept;
+        }
+    }
+
     /// The end of the last item of any layer.
     pub(crate) fn layers_length(&self) -> u64 {
         self.layers.iter().flat_map(|l| l.items.iter()).map(Item::end).max().unwrap_or(0)
@@ -1013,7 +1044,7 @@ mod tests {
                 kind: StreamKind::Screen,
                 muted: false,
                 volume: 1.0,
-                clips: vec![Clip { at: 0, from: 0, len: 20_000_000 }],
+                clips: vec![Clip::new(0, 0, 20_000_000)],
                 name: None,
             }],
             camera: CameraLayout::default(),

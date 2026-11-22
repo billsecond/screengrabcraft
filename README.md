@@ -120,6 +120,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - Click a clip to select it: Delete removes just that clip (silence, or no camera, there). Drag a
   clip's ends to trim it, or the clip to slide it along its track.
 - **S** splits at the playhead: the selected clip's track, or every track.
+- **Speed**: with a stretch chosen or a clip selected, the panel at the right (or Edit, or the
+  ruler's right button) plays it from a quarter as fast to eight times as fast, on every track so
+  they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
+  that isn't as recorded says its speed on the timeline.
 - **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that
