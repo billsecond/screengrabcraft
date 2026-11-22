@@ -303,6 +303,10 @@ pub struct Timeline {
     /// Moments marked on the timeline, in order: the chapters of the video made.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub markers: Vec<Marker>,
+    /// How the shortcuts pressed while recording are shown on the video (if the recording kept
+    /// them).
+    #[serde(default)]
+    pub keys: crate::keys::Look,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -342,6 +346,7 @@ impl Timeline {
             pointer: Default::default(),
             corrected: None,
             markers: Vec::new(),
+            keys: Default::default(),
         }
     }
 
@@ -422,6 +427,7 @@ impl Timeline {
             pointer: self.pointer.checked(),
             corrected: self.corrected.map(|c| crate::captions::Captions { cues: c, model: String::new() }.checked(rec.duration_us).cues),
             markers: Vec::new(),
+            keys: self.keys.checked(),
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -963,6 +969,7 @@ mod tests {
             pointer: Default::default(),
             corrected: None,
             markers: Vec::new(),
+            keys: Default::default(),
         }
     }
 

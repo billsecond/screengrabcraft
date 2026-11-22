@@ -135,6 +135,7 @@ mod tests {
             pointer: Default::default(),
             corrected: None,
             markers: Vec::new(),
+            keys: Default::default(),
         };
         tl.layers.push(Layer { id: 1, name: "Zoom".to_string(), items, ..Layer::default() });
         tl
