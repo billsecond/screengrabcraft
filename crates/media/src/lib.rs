@@ -17,6 +17,7 @@ pub mod denoise;
 pub mod export;
 #[cfg(target_os = "windows")]
 mod h264;
+pub mod keys;
 pub mod layer_draw;
 pub mod layers;
 pub mod media_store;

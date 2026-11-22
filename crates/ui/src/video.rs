@@ -1827,6 +1827,10 @@ impl VideoView {
                         section(ui, "Pointer", &mut first);
                         self.pointer_section(ed, ui);
                     }
+                    if self.session.timeline.find(StreamKind::Screen).is_some() {
+                        section(ui, "Keys Pressed", &mut first);
+                        self.keys_section(ed, ui);
+                    }
                     section(ui, "Editing", &mut first);
                     crate::widgets::tips(
                         ui,
@@ -1956,6 +1960,69 @@ impl VideoView {
                 if ui.checkbox(&mut v, label).on_hover_text(tip).changed() {
                     self.run(ed, &ctx, "video.pointer", json!({ key: v }));
                 }
+            }
+        });
+    }
+
+    /// The shortcuts pressed while recording: shown on the video or not, where, how large, light
+    /// or dark keys.
+    fn keys_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        use screengrabcraft_media::keys::Place;
+        let ctx = ui.ctx().clone();
+        let t = Tokens::get(ui.ctx());
+        let n = self.rec.keys.len();
+        if n == 0 {
+            ui.label(
+                RichText::new(
+                    "No shortcuts were kept in this recording. Video Production keeps them while it records (Settings, Recording; on Windows).",
+                )
+                .size(12.0)
+                .color(t.muted),
+            );
+            return;
+        }
+        let look = self.session.timeline.keys;
+        let mut show = look.show;
+        let said = if n == 1 { "1 shortcut was pressed".to_string() } else { format!("{n} shortcuts were pressed") };
+        if ui
+            .checkbox(&mut show, "Show the keys pressed")
+            .on_hover_text(format!("{said} while recording: each is shown as keys for a moment"))
+            .changed()
+        {
+            self.run(ed, &ctx, "video.keys", json!({"show": show}));
+        }
+        ui.add_enabled_ui(look.show, |ui| {
+            ui.add_space(6.0);
+            ui.label(RichText::new("Where").size(12.0).color(t.muted));
+            let mut place = look.place;
+            egui::ComboBox::from_id_salt("keys-place").width(ui.available_width()).selected_text(place.label()).show_ui(ui, |ui| {
+                for p in Place::ALL {
+                    ui.selectable_value(&mut place, p, p.label());
+                }
+            });
+            if place != look.place {
+                self.run(ed, &ctx, "video.keys", json!({"place": place}));
+            }
+            ui.add_space(6.0);
+            let mut size = look.size * 100.0;
+            let r = named_slider(ui, "Size", &mut size, 50.0..=250.0, "%").on_hover_text("How large the keys are drawn");
+            if r.drag_started() {
+                self.session.begin("Keys Pressed");
+            }
+            if r.changed() {
+                let p = json!({"size": size / 100.0});
+                if r.dragged() {
+                    let _ = self.session.drag("video.keys", &p);
+                } else {
+                    self.run(ed, &ctx, "video.keys", p);
+                }
+            }
+            if r.drag_stopped() {
+                self.session.commit();
+            }
+            let mut light = look.light;
+            if ui.checkbox(&mut light, "Light keys").on_hover_text("White keys with dark words, else dark keys with white words").changed() {
+                self.run(ed, &ctx, "video.keys", json!({"light": light}));
             }
         });
     }

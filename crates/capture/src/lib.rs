@@ -42,6 +42,7 @@ pub mod camera;
 pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
+pub mod keys;
 pub mod mouse;
 
 /// How long a device's thread is waited for when it's stopped.

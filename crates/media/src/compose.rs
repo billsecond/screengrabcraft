@@ -126,8 +126,14 @@ impl Composer {
                 fill_camera(&mut out, &cam);
             }
         }
-        // The layers over it (media, titles, overlays, transitions), the captions over them.
+        // The layers over it (media, titles, overlays, transitions), the shortcuts pressed, the
+        // captions over them.
         crate::layer_draw::draw_layers(&mut out, timeline, self.media.as_ref(), t, &mut self.texts, &mut self.pictures);
+        if timeline.keys.show
+            && let Some((keys, alpha)) = crate::keys::showing(&self.rec.keys, timeline, t)
+        {
+            crate::keys::draw(&mut out, keys, timeline.keys, alpha);
+        }
         if let Some(cues) = &self.captions {
             draw_captions(&mut out, &captions::showing(cues, t));
         }

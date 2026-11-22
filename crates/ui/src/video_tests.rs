@@ -1346,6 +1346,59 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
     assert!(h.query_by_label("Show the mouse pointer").is_none());
 }
 
+/// A grey screen for 4 s, with Ctrl+S pressed at 1 s and Enter at 3 s.
+fn recording_with_keys() -> Vec<u8> {
+    let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 }];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    for t in 0..40u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::rgb(0x80, 0x80, 0x80)).unwrap()).unwrap();
+    }
+    for (t, keys) in [(1_000_000, "Ctrl+S"), (3_000_000, "Enter")] {
+        w.key_press(&screengrabcraft_media::keys::Press { t, keys: keys.to_string() }).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+#[test]
+fn the_shortcuts_pressed_while_recording_are_shown_as_keys_from_their_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Keys.sgvideo".into(), path: None, bytes: recording_with_keys() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let grey = |h: &mut Harness<'_, Editor>, at: u64| count(&h.state_mut().video.as_mut().unwrap().frame_at(at), [0x80, 0x80, 0x80]);
+    let whole = 320 * 180;
+    assert_eq!(grey(&mut h, 1_200_000), whole, "not shown until asked for");
+    h.get_by_label("Show the keys pressed").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.keys.show);
+    // Just after Ctrl+S the keys are on the picture; a second and a half later they've gone.
+    assert!(grey(&mut h, 1_200_000) < whole - 300);
+    assert_eq!(grey(&mut h, 2_700_000), whole);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_200_000;
+    }
+    h.run_steps(2);
+    shot(&mut h, "video-keys");
+    // Moved to the top: the bottom half is grey again.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.keys", &serde_json::json!({"place": "top"})).unwrap();
+    }
+    let pic = h.state_mut().video.as_mut().unwrap().frame_at(1_200_000);
+    let bottom = pic.pixels().chunks(4).skip(320 * 90).filter(|p| p[0] != 0x80).count();
+    assert_eq!(bottom, 0);
+    // A recording that kept none says so.
+    let h = harness();
+    assert!(h.query_by_label("Show the keys pressed").is_none());
+    assert!(h.query_by_label_contains("No shortcuts were kept").is_some());
+}
+
 #[test]
 fn the_pointer_is_spotlit_magnified_highlighted_and_its_clicks_heard_from_its_panel() {
     let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());

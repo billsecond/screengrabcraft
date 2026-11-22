@@ -658,6 +658,7 @@ mod tests {
             pointer: Default::default(),
             corrected: None,
             markers: Vec::new(),
+            keys: Default::default(),
         }
     }
 

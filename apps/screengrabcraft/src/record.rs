@@ -588,6 +588,81 @@ enum Item {
     Sound(u8, SoundBlock),
     Pointer(pointer::Sample),
     PointerShape(Box<pointer::Shape>),
+    Key(screengrabcraft_media::keys::Press),
+}
+
+/// How often the keys are looked at while recording: often enough that no shortcut is missed.
+const KEYS_EVERY: Duration = Duration::from_millis(12);
+/// The most shortcuts waiting to be written.
+const KEYS_WAITING: usize = 10_000;
+
+/// The shortcuts pressed while a Video Production recording runs (only shortcuts, never what's
+/// typed: see `screengrabcraft_capture::keys`), watched on a thread of their own, kept in the
+/// recording and nowhere else (nothing of them is logged).
+struct KeysFeed {
+    seen: Arc<Mutex<Vec<(Duration, String)>>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl KeysFeed {
+    /// Starts watching the keys; none where the system can't say which are down.
+    fn start(started: Instant) -> Option<KeysFeed> {
+        if !screengrabcraft_capture::keys::available() {
+            return None;
+        }
+        let seen: Arc<Mutex<Vec<(Duration, String)>>> = Arc::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (out, halt) = (seen.clone(), stop.clone());
+        let thread = std::thread::Builder::new()
+            .name("keys".into())
+            .spawn(move || {
+                let mut watch = screengrabcraft_capture::keys::Watch::default();
+                while !halt.load(Ordering::SeqCst) {
+                    if let Some(held) = screengrabcraft_capture::keys::held() {
+                        let made = watch.step(&held);
+                        if !made.is_empty()
+                            && let Ok(mut v) = out.lock()
+                        {
+                            let at = started.elapsed();
+                            for keys in made {
+                                if v.len() < KEYS_WAITING {
+                                    v.push((at, keys));
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(KEYS_EVERY);
+                }
+            })
+            .ok()?;
+        Some(KeysFeed { seen, stop, thread: Some(thread) })
+    }
+
+    /// What was pressed since the last look, handed to the writer (what came while paused left
+    /// out).
+    fn pass_on(&mut self, tx: &std::sync::mpsc::Sender<Item>, pauses: &Pauses) {
+        let seen = self.seen.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+        for (at, keys) in seen {
+            if let Some(pts) = pauses.place(at) {
+                let _ = tx.send(Item::Key(screengrabcraft_media::keys::Press { t: pts.as_micros() as u64, keys }));
+            }
+        }
+    }
+
+    fn end(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+impl Drop for KeysFeed {
+    /// However the recording ends, the watcher does.
+    fn drop(&mut self) {
+        self.end();
+    }
 }
 
 /// How often the pointer is looked at while recording: often enough that no click is missed.
@@ -926,6 +1001,7 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
                     Item::Sound(stream, b) => writer.audio(stream, b.first, &b.samples),
                     Item::Pointer(s) => writer.pointer(&s),
                     Item::PointerShape(s) => writer.pointer_shape(&s),
+                    Item::Key(p) => writer.key_press(&p),
                 };
                 r.map_err(|e| e.to_string())?;
             }
@@ -946,9 +1022,12 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let mut pauses = Pauses::default();
     // The mouse pointer, kept apart from the pictures (drawn on the video after).
     let mut pointer_feed = screen.as_ref().and_then(|src| PointerFeed::start(&plan.screen, src.size, started));
+    // The shortcuts pressed, to show on the video (Video Production, when asked for).
+    let mut keys_feed = (plan.kind == Kind::Production && plan.options.keys && screen.is_some()).then(|| KeysFeed::start(started)).flatten();
     let (frames, live) = std::thread::scope(|scope| {
         let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
-        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses, pointer_feed.as_mut());
+        let feeds = Feeds { pointer: pointer_feed.as_mut(), keys: keys_feed.as_mut() };
+        let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses, feeds);
         feeding.store(false, Ordering::SeqCst);
         let live = feeder.and_then(|h| h.join().ok()).flatten();
         (frames, live)
@@ -960,6 +1039,10 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     if let Some(p) = &mut pointer_feed {
         p.end();
         p.pass_on(&tx, &pauses);
+    }
+    if let Some(k) = &mut keys_feed {
+        k.end();
+        k.pass_on(&tx, &pauses);
     }
     // What the devices still hold, then they're let go (the camera's light goes off).
     if let Some(a) = d.system {
@@ -1142,6 +1225,12 @@ impl ScreenSource {
     }
 }
 
+/// What's watched beside the screen while recording: the pointer, and the shortcuts pressed.
+struct Feeds<'a> {
+    pointer: Option<&'a mut PointerFeed>,
+    keys: Option<&'a mut KeysFeed>,
+}
+
 /// The screen on a steady beat (if it's recorded), with the devices' sound and pictures passed on
 /// as they come, the pause switch followed (`pauses`). The number of screen pictures taken, or
 /// why there were none.
@@ -1155,7 +1244,7 @@ fn record_screen(
     started: Instant,
     mut screen: Option<&mut ScreenSource>,
     pauses: &mut Pauses,
-    mut pointer_feed: Option<&mut PointerFeed>,
+    mut feeds: Feeds<'_>,
 ) -> Result<u32, String> {
     let tick = Duration::from_secs_f64(1.0 / f64::from(plan.fps.clamp(5, 30)));
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
@@ -1177,8 +1266,11 @@ fn record_screen(
         pauses.follow(s.paused.load(Ordering::SeqCst), at);
         // While paused the screen isn't taken; the devices go on, and what they send is left out.
         let place = pauses.place(at);
-        if let Some(p) = pointer_feed.as_deref_mut() {
+        if let Some(p) = feeds.pointer.as_deref_mut() {
             p.pass_on(tx, pauses);
+        }
+        if let Some(k) = feeds.keys.as_deref_mut() {
+            k.pass_on(tx, pauses);
         }
         if let Some(pts) = place
             && let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab)
@@ -1491,6 +1583,29 @@ mod tests {
     }
 
     #[test]
+    fn shortcuts_pressed_while_paused_are_left_out_and_the_rest_move_back() {
+        let ms = Duration::from_millis;
+        let mut p = Pauses::default();
+        p.follow(true, ms(1000));
+        p.follow(false, ms(3000));
+        let seen: Arc<Mutex<Vec<(Duration, String)>>> = Arc::default();
+        seen.lock().unwrap().extend([(ms(500), "Ctrl+C".to_string()), (ms(2000), "Enter".to_string()), (ms(3500), "Ctrl+V".to_string())]);
+        let mut feed = KeysFeed { seen, stop: Arc::default(), thread: None };
+        let (tx, rx) = std::sync::mpsc::channel();
+        feed.pass_on(&tx, &p);
+        drop(tx);
+        let got: Vec<(u64, String)> = rx
+            .into_iter()
+            .filter_map(|i| match i {
+                Item::Key(k) => Some((k.t, k.keys)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(got, vec![(500_000, "Ctrl+C".to_string()), (1_500_000, "Ctrl+V".to_string())]);
+        assert!(feed.seen.lock().unwrap().is_empty(), "handed over once");
+    }
+
+    #[test]
     fn what_comes_while_paused_is_left_out_and_the_rest_moves_back() {
         let ms = Duration::from_millis;
         let mut p = Pauses::default();
@@ -1534,6 +1649,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            keys: false,
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1572,6 +1688,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            keys: false,
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1683,6 +1800,7 @@ mod tests {
                 camera: true,
                 camera_index: None,
                 captions: false,
+                keys: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -1814,6 +1932,7 @@ mod tests {
                 camera: false,
                 camera_index: None,
                 captions: false,
+                keys: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -1869,6 +1988,7 @@ mod tests {
                 camera: false,
                 camera_index: None,
                 captions: false,
+                keys: false,
             },
             out: out.clone(),
             max_size: (1920, 1080),

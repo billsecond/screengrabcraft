@@ -446,6 +446,35 @@ fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// How the shortcuts pressed while recording are shown on the video.
+fn keys(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    use screengrabcraft_media::keys::Place;
+    if !p.is_object() {
+        return Err(EngineError::Params("how the keys look is given as an object".to_string()));
+    }
+    let flag = |key: &str| -> Result<Option<bool>> {
+        match p.get(key) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{key}` must be true or false"))),
+        }
+    };
+    let (show, light, size) = (flag("show")?, flag("light")?, number(p, "size")?);
+    let place = match p.get("place") {
+        None => None,
+        Some(v) => Some(
+            serde_json::from_value::<Place>(v.clone())
+                .map_err(|_| EngineError::Params("`place` is topLeft, top, topRight, bottomLeft, bottom or bottomRight".to_string()))?,
+        ),
+    };
+    let mut look = s.timeline.keys;
+    look.show = show.unwrap_or(look.show);
+    look.light = light.unwrap_or(look.light);
+    look.place = place.unwrap_or(look.place);
+    look.size = size.unwrap_or(look.size);
+    s.timeline.keys = look.checked();
+    Ok(json!({}))
+}
+
 /// A layer: its id, or `"new"` (or nothing) for a new one.
 fn layer_or_new(p: &Value, key: &str) -> Result<Option<u32>> {
     match p.get(key) {
@@ -685,6 +714,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Pointer",
         params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool, "highlight"?: bool, "spotlight"?: bool, "magnify"?: bool, "clickSound"?: bool}: the mouse pointer on the video: rings at its clicks, a yellow disc under it, the picture dimmed but round it, a lens showing what's round it twice as large, a click heard at each click"#,
         run: pointer,
+    },
+    VideoCommand {
+        id: "video.keys",
+        label: "Keys Pressed",
+        params: r#"{"show"?: bool, "place"?: "topLeft"|"top"|"topRight"|"bottomLeft"|"bottom"|"bottomRight", "size"?: 0.5..2.5, "light"?: bool}: the shortcuts pressed while recording, shown on the video as keys for a moment after each press"#,
+        run: keys,
     },
     VideoCommand { id: "video.revert", label: "Revert to Recording", params: "{}: every track whole again", run: revert },
     VideoCommand {
@@ -1038,6 +1073,23 @@ mod tests {
         s.execute("video.volume", &json!({"track": 1, "volume": 1.5})).unwrap();
         assert!(s.timeline.tracks[1].muted);
         s.execute("video.revert", &json!({})).unwrap();
+        assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_keys_look_is_set_kept_in_range_and_undone() {
+        use screengrabcraft_media::keys::Place;
+        let mut s = session();
+        assert!(!s.timeline.keys.show, "off until asked for");
+        s.execute("video.keys", &json!({"show": true, "place": "topRight", "size": 9, "light": true})).unwrap();
+        let k = s.timeline.keys;
+        assert_eq!((k.show, k.place, k.size, k.light), (true, Place::TopRight, 2.5, true));
+        assert_eq!(s.undo_label(), Some("Keys Pressed"));
+        for bad in [json!({"place": "middle"}), json!({"show": "yes"}), json!({"size": "big"}), json!(7)] {
+            assert!(s.execute("video.keys", &bad).is_err(), "{bad}");
+        }
+        assert_eq!(s.timeline.keys, k, "a command that fails changes nothing");
+        s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
     }
 

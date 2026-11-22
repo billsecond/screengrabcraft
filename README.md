@@ -95,6 +95,14 @@ and opens in the video editor, where you cut and edit it, then Export Video make
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
 sources are in Settings › Recording.
 
+On Windows a Video Production recording also keeps **the shortcuts you press** while it records,
+so the video editor can show them as keys on the video: only a key pressed with Ctrl, Alt or the
+Windows key, and keys that don't type (Enter, Esc, Tab, Backspace, Delete, the arrows, Home, End,
+Page Up and Down, F1 to F24). **Letters, digits, symbols and spaces you type are never kept**, nor
+anything typed with AltGr, so a password typed while recording isn't in the recording. The keys
+are only watched while recording, kept in the recording file and nowhere else, and never logged.
+Settings › Recording turns it off.
+
 ![The Recorder: the screen, the camera with its picture, the microphone and the computer's sound with their levels, each switched on, and the red Record button](docs/images/recorder.png)
 
 ## Editing a video
@@ -146,6 +154,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
   what's round it twice as large.
+- **Keys pressed**: in a recording that kept the shortcuts pressed (see above), the Keys Pressed
+  section of the panel shows each as keys on the video for a moment after it's pressed, where the
+  edits put that moment: at the bottom (above the captions), the top or a corner, any size, light
+  or dark keys.
 - **Zoom and pan**: the Library's Zoom and Pan section zooms into part of the screen and back. While
   a zoom is chosen the picture shows all of the screen and the zoom's frame: drag the frame where it
   should zoom and its corners to zoom closer. It goes in and out smoothly or at once, and a zoom that

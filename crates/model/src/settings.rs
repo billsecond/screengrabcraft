@@ -495,6 +495,9 @@ pub struct VideoOptions {
     pub camera_index: Option<u32>,
     /// Video Production: captions of what's said, made on this computer after the recording.
     pub captions: bool,
+    /// Video Production: the shortcuts pressed while recording kept, to show them on the video
+    /// (never what's typed; Windows only for now).
+    pub keys: bool,
 }
 
 impl Default for VideoOptions {
@@ -508,6 +511,7 @@ impl Default for VideoOptions {
             camera: false,
             camera_index: None,
             captions: true,
+            keys: true,
         }
     }
 }
@@ -523,6 +527,7 @@ impl VideoOptions {
             camera: true,
             camera_index: None,
             captions: true,
+            keys: true,
         }
     }
 }
@@ -1285,6 +1290,7 @@ mod tests {
             camera: false,
             camera_index: None,
             captions: false,
+            keys: false,
         };
         let off = RecorderOptions { screen: false, ..RecorderOptions::default() };
         assert!(!off.records_anything(&none, true, true));

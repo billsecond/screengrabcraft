@@ -653,6 +653,18 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
         .color(t.muted),
     );
     ui.add_space(4.0);
+    let keys = screengrabcraft_capture::keys::available();
+    ui.add_enabled_ui(keys, |ui| ui.checkbox(&mut s.production.keys, "Keep the shortcuts pressed, to show them in the video"))
+        .inner
+        .on_disabled_hover_text("On Windows for now");
+    ui.label(
+        RichText::new(
+            "Only shortcuts: a key with Ctrl, Alt or the Windows key, and Enter, Esc, Tab, the arrows, F1 to F24. Letters, digits and symbols you type are never kept, so a password typed while recording isn't. The Video Editor's Keys section shows them.",
+        )
+        .size(12.0)
+        .color(t.muted),
+    );
+    ui.add_space(4.0);
     ui.label(
         RichText::new("Video Production opens the Recorder, where you choose the area (a region, a window, a whole screen, all screens or a fixed size), turn the screen and each of these on or off, and press Record. These are the same choices.")
             .size(12.0)

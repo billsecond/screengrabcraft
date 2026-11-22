@@ -18,6 +18,7 @@
 //! EDIT  JSON Timeline
 //! CAPS  JSON Captions: what was said, added once they are made
 //! PNTR  where the mouse pointer was at a moment; PSHP a pointer's picture (see `pointer`)
+//! KEYS  a shortcut pressed: when, its keys (see `keys`)
 //! DONE  JSON Finished
 //! ```
 //!
@@ -255,6 +256,12 @@ impl<W: Write> RecordingWriter<W> {
         Ok(())
     }
 
+    /// A shortcut pressed (see [`crate::keys`]).
+    pub fn key_press(&mut self, press: &crate::keys::Press) -> Result<(), RecordingError> {
+        self.written += chunk(&mut self.out, b"KEYS", &crate::keys::press_bytes(press))?;
+        Ok(())
+    }
+
     /// The edits so far (the last ones written count).
     pub fn edit(&mut self, timeline: &Timeline) -> Result<(), RecordingError> {
         let json = serde_json::to_vec(timeline).map_err(|e| RecordingError::Damaged(e.to_string()))?;
@@ -413,6 +420,8 @@ pub struct Recording {
     pub captions: Option<Captions>,
     /// Where the mouse pointer was, and its pictures (empty if it wasn't recorded).
     pub pointer: crate::pointer::Track,
+    /// The shortcuts pressed while recording, in order (empty if they weren't kept).
+    pub keys: Vec<crate::keys::Press>,
     /// Whether it was finished properly (else it stopped halfway and is what was saved).
     pub finished: bool,
     /// How long it is, in µs.
@@ -448,6 +457,7 @@ impl Recording {
         let mut captions = None;
         let mut finished = None;
         let (mut pointer_samples, mut pointer_shapes) = (Vec::new(), Vec::new());
+        let mut keys: Vec<crate::keys::Press> = Vec::new();
         while at + 12 <= len {
             let head = source.read_at(at, 12)?;
             let (Some(size), Some(crc)) = (u32_at(&head, 4), u32_at(&head, 8)) else { break };
@@ -515,6 +525,13 @@ impl Recording {
                         pointer_shapes.push(s);
                     }
                 }
+                b"KEYS" => {
+                    if keys.len() < crate::keys::MAX_PRESSES
+                        && let Some(p) = crate::keys::press_from(&peek)
+                    {
+                        keys.push(p);
+                    }
+                }
                 _ => {}
             }
             at = body_at + u64::from(size);
@@ -534,6 +551,8 @@ impl Recording {
         .min(MAX_DURATION_US);
         let captions = captions.map(|c: Captions| c.checked(duration_us));
         let pointer = crate::pointer::Track::new(pointer_samples, pointer_shapes);
+        keys.sort_by_key(|p| p.t);
+        keys.retain(|p| p.t <= duration_us);
         let mut rec = Recording {
             source,
             header,
@@ -542,6 +561,7 @@ impl Recording {
             timeline,
             captions,
             pointer,
+            keys,
             finished: finished.is_some(),
             duration_us,
             noise: Mutex::default(),
@@ -783,6 +803,22 @@ mod tests {
             let got = d.frame_at(&rec, u64::from(t) * 100_000 + 50_000).unwrap();
             assert_eq!(got.pixels(), picture(t).pixels(), "picture {t}");
         }
+    }
+
+    #[test]
+    fn the_shortcuts_pressed_come_back_in_order() {
+        use crate::keys::Press;
+        let mut w = RecordingWriter::new(Vec::new(), &header()).unwrap();
+        for t in 0..10u32 {
+            w.video_frame(0, u64::from(t) * 100_000, &picture(t)).unwrap();
+        }
+        for (t, k) in [(600_000, "Enter"), (200_000, "Ctrl+C"), (9_000_000, "Late")] {
+            w.key_press(&Press { t, keys: k.to_string() }).unwrap();
+        }
+        let rec = Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
+        let got: Vec<(u64, &str)> = rec.keys.iter().map(|p| (p.t, p.keys.as_str())).collect();
+        assert_eq!(got, vec![(200_000, "Ctrl+C"), (600_000, "Enter")], "in order, none past the end");
+        assert!(Recording::open(Box::new(record(3, true))).unwrap().keys.is_empty());
     }
 
     #[test]
