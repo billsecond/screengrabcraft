@@ -122,7 +122,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Group, align, flip annotations; select all of one kind** | Has | Edit menu and right-click: group (Ctrl+G), align, distribute, flip across or up and down, select all of the kinds selected; a group is selected, moved and turned as one |
 | **Rotate annotations** | Has | a round handle over a box or a group (Shift: 15° steps), or Rotate and Flip; lines, arrows and strokes turn by their points; blur, pixelate, spotlight and magnify stay square |
 | **Snap to guides** | Has | View › Rulers and Guides: rulers along the top and the left, guides dragged out of them (moved by dragging, taken away on their ruler or from their right-click menu), Guides at the Middle, Clear Guides; what is moved snaps its edges and middle to the guides and the picture's edges and middle (View › Snap to Guides); guides last while the picture is open |
-| Spell check | Missing | |
+| **Spell check** | Has | while a text or a callout is typed, words the English word list doesn't know (US and UK spellings both known) get a red wavy line; a right click on one offers corrections and Add to Dictionary (kept in the editor's settings); Edit › Check Spelling turns it off. The checker (symspell) and its word list (SymSpell's) are MIT, built in, so it works offline and in the browser; English only |
 | **Measure a distance** | Has | the Measure tool (I): a drag reads out the length, across, down and the angle; Keep This One on the Picture (or keep each) adds a dimension line with a bar at each end and its length on a label, grouped |
 | Picture grows when something is moved past its edge | Has | |
 | Canvas size and colour, see-through | Has | |
@@ -349,25 +349,24 @@ By how much someone using it every day would miss each one. Built ones move to a
 70. Rulers, guides and snapping; measuring a distance (#108).
 71. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
 72. TIFF opened and saved; a colour replaced by another (#114).
+73. Spell check while text and callouts are typed, with an MIT checker and word list.
 
 **Still to build**
 
 What is left either waits on a decision of the owner's or finishes something already built:
 
-1. Spell check in text annotations: built (#115), and kept out until the licence of the word
-   checker it uses is settled.
-2. HEIF pictures: there is a decoder with an open licence, but HEIF pictures are HEVC video
+1. HEIF pictures: there is a decoder with an open licence, but HEIF pictures are HEVC video
    pictures, which are under patents.
-3. HDR screens captured in their true colours.
-4. Faces found by Hide Personal Details: there is no face finder with a clear licence yet.
-5. The picture's own font matched when its text is edited in place.
-6. A whole web page captured from its address, and pictures from a phone: both need the network.
-7. Printing from any program into the editor: it needs a printer driver.
-8. Parts of a window (a button, a pane) snapped to: Windows finds them only through calls made
+2. HDR screens captured in their true colours.
+3. Faces found by Hide Personal Details: there is no face finder with a clear licence yet.
+4. The picture's own font matched when its text is edited in place.
+5. A whole web page captured from its address, and pictures from a phone: both need the network.
+6. Printing from any program into the editor: it needs a printer driver.
+7. Parts of a window (a button, a pane) snapped to: Windows finds them only through calls made
    with `unsafe`, which this project doesn't use.
-9. Drawing on the screen while recording, on macOS and Linux; desktop icons hidden while recording.
-10. Captures sorted by website: a capture of a browser can't see the page's address, only its title.
-11. Capture details on the picture: the program a window was taken from is in the captures'
+8. Drawing on the screen while recording, on macOS and Linux; desktop icons hidden while recording.
+9. Captures sorted by website: a capture of a browser can't see the page's address, only its title.
+10. Capture details on the picture: the program a window was taken from is in the captures'
     library now, but the details still ask for it to be typed.
-12. Captions lit up word by word, and words cut from the transcript: the speech model times whole
+11. Captions lit up word by word, and words cut from the transcript: the speech model times whole
     lines, so the times of the words are estimated.

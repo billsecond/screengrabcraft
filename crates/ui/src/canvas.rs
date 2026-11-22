@@ -413,6 +413,8 @@ impl Editor {
     /// with or without text, as a shape.
     pub(crate) fn stop_editing(&mut self) {
         let Some(id) = self.editing.take() else { return };
+        self.spell.menu = None;
+        self.spell.shown.clear();
         let empty = self.session.doc.get(id).is_none_or(|o| matches!(&o.shape, Shape::Text { text, .. } if text.trim().is_empty()));
         if empty {
             self.session.doc.remove(&[id]);
@@ -425,6 +427,7 @@ impl Editor {
     /// Stops typing for a while, keeping the annotation however empty: its box is being
     /// reshaped, and typing goes on after (see `resume_editing`).
     fn pause_editing(&mut self) {
+        self.spell.menu = None;
         if self.editing.take().is_some() {
             self.session.commit();
         }
@@ -1953,14 +1956,20 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
                 .margin(egui::Margin::ZERO)
                 .horizontal_align(align)
                 .background_color(Color32::TRANSPARENT);
-            ui.add(edit)
+            edit.show(ui)
         });
-    let resp = out.inner;
-    if !resp.has_focus() && !resp.lost_focus() {
+    let shown = out.inner;
+    let resp = shown.response.clone();
+    // While the spelling menu is open the typing goes on: a click on it takes the focus from the
+    // box for a moment, and Esc closes the menu, not the box.
+    let menu_open = ed.spell.menu.as_ref().is_some_and(|m| m.id == id);
+    if !resp.has_focus() && (menu_open || !resp.lost_focus()) {
         resp.request_focus();
     }
-    let changed = resp.changed();
-    let done = resp.lost_focus() || ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+    let escape = ui.ctx().input(|i| i.key_pressed(egui::Key::Escape));
+    let done = !menu_open && (resp.lost_focus() || escape);
+    let corrected = crate::spell::while_typing(ed, ui.ctx(), id, &shown, &mut buffer, escape);
+    let changed = resp.changed() || corrected;
     if changed {
         if let Some(obj) = ed.session.doc.get_mut(id) {
             if let Some(t) = obj.shape.text_mut() {

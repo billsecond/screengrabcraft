@@ -47,6 +47,9 @@ fontdb = "0.23"
 # A font file checked before it is handed to egui to show text being typed in it (egui reads fonts
 # with it, and stops on one it can't read).
 skrifa = "0.44"
+# Spelling checked while text is typed (MIT, github.com/reneklacan/symspell), against SymSpell's
+# English word list (assets/dictionaries, MIT).
+symspell = { version = "0.5", default-features = false }
 # Deflate for the PDF writer (the backend written in Rust).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # QR codes, on this computer: reading them in a picture (rqrr: MIT or Apache-2.0, and ISC) and
