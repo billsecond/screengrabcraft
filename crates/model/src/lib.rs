@@ -12,6 +12,7 @@ pub mod object;
 pub mod quick;
 pub mod raster;
 pub mod settings;
+pub mod text;
 
 pub use color::Color;
 pub use document::{Align, DocError, Document, Meta, Order};
@@ -26,6 +27,7 @@ pub use settings::{
     AfterCapture, CaptureMode, EditorSettings, FillTool, Hotkey, Hotkeys, ImageFormat, MonitorChoice, RecordArea, RecorderOptions, Settings, Stamp,
     Theme,
 };
+pub use text::{TextLine, TextWord};
 
 /// The program's name, as people see it.
 pub const APP_NAME: &str = "ScreenGrabCraft";

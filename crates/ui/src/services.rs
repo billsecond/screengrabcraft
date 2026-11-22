@@ -10,18 +10,11 @@ use screengrabcraft_render::matte::Matting;
 
 pub use crate::autosave::{SaveJob, Saved};
 
-/// A line of text read off a picture, and where it is on it (in the picture's pixels).
-#[derive(Clone, Debug, PartialEq)]
-pub struct TextLine {
-    pub text: String,
-    pub rect: screengrabcraft_model::Rect,
-}
-
-/// Reads the text in a picture (Grab Text). It runs on a thread of the editor's own.
-pub trait ReadText: Send + Sync {
-    /// The lines of text in `picture`, in reading order; none if it has no text.
-    fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String>;
-}
+/// Reads the text in a picture (Grab Text, Hide Personal Details). It runs on a thread of the
+/// editor's own.
+pub use screengrabcraft_engine::ReadText;
+/// A line of text read off a picture, where it is on it (in the picture's pixels), and its words.
+pub use screengrabcraft_model::{TextLine, TextWord};
 
 /// A file the owner picked to open (or dropped on the window).
 #[derive(Clone, Debug)]

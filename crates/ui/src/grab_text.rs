@@ -18,8 +18,49 @@ use crate::services::{ReadText, TextLine};
 /// What the editor keeps for this: the reader at work, and the text read.
 #[derive(Default)]
 pub struct State {
-    job: Option<Receiver<Result<Vec<TextLine>, String>>>,
+    job: Option<Reading>,
     shown: Option<Shown>,
+}
+
+/// The text of the picture as shown (or of the area selected) being read on a thread of its
+/// own: Grab Text's, and that of the other commands that work on the text in the picture.
+pub(crate) struct Reading {
+    rx: Receiver<Result<Vec<TextLine>, String>>,
+    /// The area read, when it was one (not all of the picture), in whole pixels.
+    pub area: Option<Rect>,
+}
+
+impl Reading {
+    /// Starts reading, with the host's reader (an error says why there is none).
+    pub(crate) fn start(ed: &Editor, ctx: &egui::Context) -> Result<Reading, String> {
+        let reader: Arc<dyn ReadText> = ed.services.text_reader()?;
+        let (pic, area) = picture(ed).ok_or_else(|| "the picture couldn't be drawn".to_string())?;
+        let (tx, rx) = channel();
+        let wake = ctx.clone();
+        std::thread::Builder::new()
+            .name("read-text".to_string())
+            .spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read(&pic)))
+                    .unwrap_or_else(|_| Err("the text reader failed unexpectedly".to_string()));
+                let _ = tx.send(result);
+                wake.request_repaint();
+            })
+            .map_err(|e| format!("couldn't start: {e}"))?;
+        Ok(Reading { rx, area })
+    }
+
+    /// The lines once read, where they are on the whole picture; none while it's still reading.
+    pub(crate) fn poll(&self) -> Option<Result<Vec<TextLine>, String>> {
+        let result = match self.rx.try_recv() {
+            Err(TryRecvError::Empty) => return None,
+            Ok(r) => r,
+            Err(TryRecvError::Disconnected) => Err("the text reader stopped without an answer".to_string()),
+        };
+        Some(result.map(|lines| match self.area {
+            Some(a) => lines.iter().map(|l| l.translated(screengrabcraft_model::Pt::new(a.x, a.y))).collect(),
+            None => lines,
+        }))
+    }
 }
 
 /// The text read, in the window (it can be put right before it's copied).
@@ -43,16 +84,7 @@ impl State {
 }
 
 /// The lines read, one to a line.
-pub fn joined(lines: &[TextLine]) -> String {
-    let mut s = String::new();
-    for l in lines {
-        if !s.is_empty() {
-            s.push('\n');
-        }
-        s.push_str(l.text.trim_end());
-    }
-    s
-}
+pub use screengrabcraft_model::text::joined;
 
 /// The Grab Text item (the Image menu and the right-click menu).
 pub(crate) fn item(ed: &mut Editor, ui: &mut Ui) {
@@ -70,8 +102,9 @@ pub(crate) fn item(ed: &mut Editor, ui: &mut Ui) {
     }
 }
 
-/// What Grab Text reads: the picture as shown (annotations drawn in), or the selected area of it.
-fn picture(ed: &Editor) -> Option<(Raster, bool)> {
+/// What is read: the picture as shown (annotations drawn in), or the selected area of it (and
+/// where that is, in whole pixels).
+fn picture(ed: &Editor) -> Option<(Raster, Option<Rect>)> {
     let whole = screengrabcraft_render::render(&ed.session.doc)?;
     match ed.area.and_then(|a| a.intersect(ed.session.doc.bounds())) {
         Some(a) => {
@@ -79,9 +112,9 @@ fn picture(ed: &Editor) -> Option<(Raster, bool)> {
             let (w, h) = (a.w.ceil().max(1.0) as u32, a.h.ceil().max(1.0) as u32);
             let w = w.min(whole.width().saturating_sub(x)).max(1);
             let h = h.min(whole.height().saturating_sub(y)).max(1);
-            Some((whole.crop(x, y, w, h)?, true))
+            Some((whole.crop(x, y, w, h)?, Some(Rect::new(x as f32, y as f32, w as f32, h as f32))))
         }
-        None => Some((whole, false)),
+        None => Some((whole, None)),
     }
 }
 
@@ -90,32 +123,12 @@ pub(crate) fn start(ed: &mut Editor, ctx: &egui::Context) {
     if ed.grab_text.busy() {
         return;
     }
-    let reader: Arc<dyn ReadText> = match ed.services.text_reader() {
-        Ok(r) => r,
-        Err(why) => {
-            ed.error(ctx, why);
-            return;
-        }
-    };
-    let Some((pic, of_area)) = picture(ed) else {
-        ed.error(ctx, "Grab Text: the picture couldn't be drawn");
-        return;
-    };
-    let (tx, rx) = channel();
-    let wake = ctx.clone();
-    let spawned = std::thread::Builder::new().name("grab-text".to_string()).spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| reader.read(&pic)))
-            .unwrap_or_else(|_| Err("the text reader failed unexpectedly".to_string()));
-        let _ = tx.send(result);
-        wake.request_repaint();
-    });
-    match spawned {
-        Ok(_) => {
-            ed.grab_text.job = Some(rx);
+    match Reading::start(ed, ctx) {
+        Ok(job) => {
+            ed.grab_text.job = Some(job);
             ed.grab_text.shown = None;
-            ed.grab_text_area = of_area;
         }
-        Err(e) => ed.error(ctx, format!("Grab Text couldn't start: {e}")),
+        Err(why) => ed.error(ctx, format!("Grab Text: {why}")),
     }
 }
 
@@ -138,18 +151,16 @@ pub(crate) fn show(ed: &mut Editor, ctx: &egui::Context) {
 }
 
 fn finish(ed: &mut Editor, ctx: &egui::Context) {
-    let result = match ed.grab_text.job.as_ref().map(Receiver::try_recv) {
-        None | Some(Err(TryRecvError::Empty)) => return,
-        Some(Ok(r)) => r,
-        Some(Err(TryRecvError::Disconnected)) => Err("the text reader stopped without an answer".to_string()),
-    };
+    let Some(job) = &ed.grab_text.job else { return };
+    let Some(result) = job.poll() else { return };
+    let of_area = job.area.is_some();
     ed.grab_text.job = None;
     match result {
         Ok(lines) if lines.iter().all(|l| l.text.trim().is_empty()) => {
-            let what = if ed.grab_text_area { "the area" } else { "the picture" };
+            let what = if of_area { "the area" } else { "the picture" };
             ed.toast(ctx, format!("No text was found in {what}"));
         }
-        Ok(lines) => ed.grab_text.shown = Some(Shown { text: joined(&lines), lines: lines.len(), of_area: ed.grab_text_area }),
+        Ok(lines) => ed.grab_text.shown = Some(Shown { text: joined(&lines), lines: lines.len(), of_area }),
         Err(e) => ed.error(ctx, format!("Grab Text: {e}")),
     }
 }
@@ -194,14 +205,6 @@ fn window(ed: &mut Editor, ctx: &egui::Context) {
     }
 }
 
-/// Where a line read off an area is on the whole picture.
-pub fn on_picture(line: &TextLine, area: Option<Rect>) -> Rect {
-    match area {
-        Some(a) => Rect::new(line.rect.x + a.x.floor(), line.rect.y + a.y.floor(), line.rect.w, line.rect.h),
-        None => line.rect,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -220,8 +223,8 @@ mod tests {
     impl ReadText for Fake {
         fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
             Ok(vec![
-                TextLine { text: "Order 4021".to_string(), rect: Rect::new(1.0, 2.0, 30.0, 8.0) },
-                TextLine { text: format!("{}x{}", picture.width(), picture.height()), rect: Rect::new(1.0, 12.0, 30.0, 8.0) },
+                TextLine::new("Order 4021", Rect::new(1.0, 2.0, 30.0, 8.0)),
+                TextLine::new(format!("{}x{}", picture.width(), picture.height()), Rect::new(1.0, 12.0, 30.0, 8.0)),
             ])
         }
     }
@@ -230,7 +233,7 @@ mod tests {
 
     impl ReadText for Blank {
         fn read(&self, _picture: &Raster) -> Result<Vec<TextLine>, String> {
-            Ok(vec![TextLine { text: "  ".to_string(), rect: Rect::new(0.0, 0.0, 1.0, 1.0) }])
+            Ok(vec![TextLine::new("  ", Rect::new(0.0, 0.0, 1.0, 1.0))])
         }
     }
 
@@ -292,8 +295,11 @@ mod tests {
         until_read(&mut h);
         h.run_steps(3);
         assert_eq!(h.state().grab_text.text(), Some("Order 4021\n50x40"));
-        let line = TextLine { text: "x".to_string(), rect: Rect::new(1.0, 2.0, 3.0, 4.0) };
-        assert_eq!(super::on_picture(&line, Some(Rect::new(10.0, 10.0, 50.0, 40.0))), Rect::new(11.0, 12.0, 3.0, 4.0));
+        // Read off the area, the lines are put where the area is on the picture.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(vec![TextLine::new("x", Rect::new(1.0, 2.0, 3.0, 4.0))])).unwrap();
+        let job = super::Reading { rx, area: Some(Rect::new(10.0, 10.0, 50.0, 40.0)) };
+        assert_eq!(job.poll().unwrap().unwrap()[0].rect, Rect::new(11.0, 12.0, 3.0, 4.0));
     }
 
     #[test]

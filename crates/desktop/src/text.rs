@@ -8,31 +8,9 @@
 //! than the recogniser takes is read in bands, each line kept from the band it is wholly in.
 
 use screengrabcraft_model::Raster;
-
-/// A line of text and where it is on the picture, in its pixels.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Line {
-    pub text: String,
-    pub x: f32,
-    pub y: f32,
-    pub w: f32,
-    pub h: f32,
-}
-
-/// The most lines a picture gives (a page of tiny print is still a page).
-pub const MAX_LINES: usize = 5000;
-
-/// The lines read, one to a line, in the order they are read.
-pub fn joined(lines: &[Line]) -> String {
-    let mut s = String::new();
-    for l in lines {
-        if !s.is_empty() {
-            s.push('\n');
-        }
-        s.push_str(l.text.trim_end());
-    }
-    s
-}
+pub use screengrabcraft_model::text::{MAX_LINES, joined};
+/// A line of text and where it is on the picture (in its pixels), with its words.
+pub use screengrabcraft_model::{TextLine as Line, TextWord as Word};
 
 /// Whether this computer can read text off a picture, or why not.
 pub fn ready() -> Result<(), String> {
@@ -44,16 +22,11 @@ pub fn ready() -> Result<(), String> {
 pub fn read(picture: &Raster) -> Result<Vec<Line>, String> {
     let (scale, pic) = enlarged(picture)?;
     let mut lines = imp::read(&pic)?;
+    lines.truncate(MAX_LINES);
     if scale > 1 {
         let f = scale as f32;
-        for l in &mut lines {
-            l.x /= f;
-            l.y /= f;
-            l.w /= f;
-            l.h /= f;
-        }
+        lines = lines.into_iter().map(|l| l.shrunk(f)).collect();
     }
-    lines.truncate(MAX_LINES);
     Ok(lines)
 }
 
@@ -131,12 +104,12 @@ fn keeps(all: &[(u32, u32)], i: usize, middle: f32) -> bool {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use screengrabcraft_model::Raster;
+    use screengrabcraft_model::{Pt, Raster, Rect};
     use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
     use windows::Media::Ocr::OcrEngine;
     use windows::Security::Cryptography::CryptographicBuffer;
 
-    use super::{Line, bands, bgra_on_white, keeps};
+    use super::{Line, Word, bands, bgra_on_white, keeps};
 
     fn err(e: windows::core::Error) -> String {
         e.message().to_string()
@@ -168,9 +141,10 @@ mod imp {
         for (i, &(top, bottom)) in all.iter().enumerate() {
             let Some(band) = fit.crop(0, top, fit.width(), bottom.saturating_sub(top)) else { continue };
             for l in read_band(&engine, &band)? {
-                let middle = top as f32 + l.y + l.h / 2.0;
+                let middle = top as f32 + l.rect.y + l.rect.h / 2.0;
                 if keeps(&all, i, middle) {
-                    lines.push(Line { text: l.text, x: l.x * sx, y: (l.y + top as f32) * sx, w: l.w * sx, h: l.h * sx });
+                    // Where it is on the picture: below the band's top, and as large as the picture.
+                    lines.push(l.translated(Pt::new(0.0, top as f32)).shrunk(1.0 / sx));
                 }
                 if lines.len() >= super::MAX_LINES {
                     return Ok(lines);
@@ -193,16 +167,21 @@ mod imp {
             }
             // The line's box: round all of its words.
             let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+            let mut words = Vec::new();
             for word in line.Words().map_err(err)? {
                 if let Ok(r) = word.BoundingRect() {
                     x0 = x0.min(r.X);
                     y0 = y0.min(r.Y);
                     x1 = x1.max(r.X + r.Width);
                     y1 = y1.max(r.Y + r.Height);
+                    if words.len() < screengrabcraft_model::text::MAX_WORDS {
+                        let text = word.Text().map(|t| t.to_string_lossy()).unwrap_or_default();
+                        words.push(Word { text, rect: Rect::new(r.X, r.Y, r.Width, r.Height) });
+                    }
                 }
             }
-            let (x, y, w, h) = if x1 >= x0 && y1 >= y0 { (x0, y0, x1 - x0, y1 - y0) } else { (0.0, 0.0, 0.0, 0.0) };
-            out.push(Line { text, x, y, w, h });
+            let rect = if x1 >= x0 && y1 >= y0 { Rect::new(x0, y0, x1 - x0, y1 - y0) } else { Rect::default() };
+            out.push(Line { text, rect, words });
         }
         Ok(out)
     }
@@ -228,13 +207,6 @@ mod imp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn lines_are_joined_one_to_a_line() {
-        let l = |t: &str| Line { text: t.to_string(), x: 0.0, y: 0.0, w: 1.0, h: 1.0 };
-        assert_eq!(joined(&[l("Hello world  "), l("Second")]), "Hello world\nSecond");
-        assert_eq!(joined(&[]), "");
-    }
 
     #[test]
     fn small_pictures_are_read_larger() {
@@ -278,7 +250,12 @@ mod tests {
         assert!(text.contains("invoice"), "read {text:?}");
         assert!(text.contains("4021"), "read {text:?}");
         let first = lines.first().unwrap();
-        assert!(first.x >= 0.0 && first.y >= 0.0 && first.x + first.w <= pic.width() as f32 + 2.0, "{first:?}");
+        let r = first.rect;
+        assert!(r.x >= 0.0 && r.y >= 0.0 && r.right() <= pic.width() as f32 + 2.0, "{first:?}");
+        // Its words, each inside the line's box.
+        assert!(first.words.len() >= 4, "{first:?}");
+        assert!(first.words.iter().all(|w| w.rect.x >= r.x - 0.5 && w.rect.right() <= r.right() + 0.5), "{first:?}");
+        assert!(first.words.iter().any(|w| w.text.contains("4021")), "{first:?}");
     }
 
     #[cfg(target_os = "windows")]
