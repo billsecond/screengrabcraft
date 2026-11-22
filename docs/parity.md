@@ -291,7 +291,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 16. Words cut out of the video from the transcript; filler words taken out (word times estimated) (#95).
 17. J, K and L playback keys; a clip played backwards, its sound too (#97).
 18. Subtitle files brought in as captions; a watermark on the video (#102).
-19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop.
+19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop (#106).
 
 **Still to build, in this order**
 
