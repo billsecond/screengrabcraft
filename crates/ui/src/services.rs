@@ -5,7 +5,7 @@
 use screengrabcraft_media::captions::{Captions, Cue};
 use screengrabcraft_media::recording::{Recording, Source};
 use screengrabcraft_media::timeline::Timeline;
-use screengrabcraft_model::{CaptureMode, EditorSettings, Raster, Stamp};
+use screengrabcraft_model::{CaptureMode, EditorSettings, Library, Raster, Stamp};
 use screengrabcraft_render::matte::Matting;
 
 pub use crate::autosave::{SaveJob, Saved};
@@ -51,6 +51,8 @@ pub enum DialogResult {
     Batch(Vec<String>),
     /// Pictures to make a new video of, one after another (paths).
     PicturesVideo(Vec<String>),
+    /// Pictures for Batch Changes (paths; they're read one at a time).
+    Pictures(Vec<String>),
     Cancelled,
 }
 
@@ -306,6 +308,54 @@ pub trait Services {
     /// The recent captures, newest first.
     fn recent(&self) -> Vec<RecentItem> {
         Vec::new()
+    }
+
+    /// Asks for pictures for Batch Changes; the answer comes through [`Services::poll_dialog`] as
+    /// [`DialogResult::Pictures`].
+    fn request_pictures(&self) {}
+
+    /// Whether there's a file at `path` (Batch Changes never writes over one).
+    fn file_exists(&self, _path: &str) -> bool {
+        false
+    }
+
+    /// Prints a picture (`name` is what it's called): the system shows its printing window.
+    fn print(&self, _picture: &Raster, _name: &str) -> Result<(), String> {
+        Err("Printing needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// Whether pictures can be printed here, or why not (Print is greyed out, saying so).
+    fn can_print(&self) -> Result<(), String> {
+        Err("Printing needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// Whether a capture can be handed to a program the owner chooses, or why not (Open With is
+    /// greyed out, saying so).
+    fn can_open_with(&self) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// The picture as shown (`name` is what it's called) handed to a program the owner chooses, in
+    /// the system's own window for choosing one.
+    fn open_picture_with(&self, _picture: &Raster, _name: &str) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// A capture's file handed to a program the owner chooses.
+    fn open_file_with(&self, _path: &str) -> Result<(), String> {
+        Err("Open With needs ScreenGrabCraft on the desktop".to_string())
+    }
+
+    /// What's known of these captures (their tags, whether each is a favourite, the program each
+    /// was taken from), under their paths as given.
+    fn library(&self, _paths: &[String]) -> Library {
+        Library::default()
+    }
+
+    /// Runs a library command (`library.tag`, `library.favorite`, …) on the library as the host
+    /// keeps it (the editor runs it on its own copy as well).
+    fn run_library(&self, _id: &str, _params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("tags and favourites are kept by ScreenGrabCraft on the desktop".to_string())
     }
 
     /// Today, locally, as `2026-11-07` (empty when the host can't tell).

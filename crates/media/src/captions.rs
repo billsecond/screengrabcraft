@@ -813,6 +813,7 @@ mod tests {
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
+            camera_full: Vec::new(),
         }
     }
 

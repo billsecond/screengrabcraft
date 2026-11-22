@@ -39,21 +39,28 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 |---|---|---|
 | Print Screen | Ctrl+Shift+C | **Region**: drag out an area, or click a window; adjust it with its handles; Enter keeps it |
 | — (set one in Settings) | — | **Region, adjust first**: drag out an area, or start from the last one, and adjust it with its handles until Enter (or a button of the bar) takes it |
+| — (set one in Settings) | — | **Freehand area**: draw round what to keep with the button held down; what's outside the outline is see-through |
 | Alt+Print Screen | Ctrl+Shift+W | **Window**: click a window |
 | Ctrl+Print Screen | Ctrl+Shift+F | **Full screen**: the monitor under the pointer |
 | — (set one in Settings; Ctrl+Shift+Print Screen is Windows' own) | — | **All screens** in one picture |
-| Alt+Shift+Print Screen | Ctrl+Shift+S | **Scrolling**: scroll a long page while ScreenGrabCraft joins it into one picture |
+| Alt+Shift+Print Screen | Ctrl+Shift+S | **Scrolling**: a long page joined into one picture; on Windows it scrolls the page by itself and stops at its end (elsewhere, or with that setting off, you scroll it) |
 | Ctrl+Alt+Print Screen | Ctrl+Shift+G | **Record GIF** of an area (press again, or click the tray icon, to stop) |
 | Ctrl+Alt+Shift+Print Screen | Ctrl+Shift+V | **Record Video**: a small MP4 of an area, with the computer's sound (press again to stop) |
 | — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
 | — (set one in Settings) | — | **Grab Text**: drag out an area (or click a window) and its text goes on the clipboard (Windows) |
+| — (set one in Settings) | — | **Picture from the Camera**: a still from Video Production's camera, at its own size (Windows, macOS) |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
 every capture, a delayed capture (3, 5 or 10 s), the editor and the captures folder. While choosing
 an area the screen is frozen as it was when the key was pressed (open menus and tooltips included),
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
-windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
+windows under the pointer to click (on Windows an open menu, drop-down or tooltip too, to keep just it),
+and the area's size. Arrows nudge the area; Shift+arrows resize it.
+Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4:3. Hold Alt
+(Option on a Mac) as you let go to keep that area and drag out another: the last one without Alt
+(or Enter) keeps them all in one picture, laid out as they were on the screen with the rest
+see-through (Backspace takes the last one out again).
 
 As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
@@ -63,11 +70,40 @@ or Save, for every capture; or use **Capture Region, Adjust First** (tray menu, 
 for just the captures you want to fine-tune. An open editor is hidden while you capture, which you can turn
 off too (the video editor never is: it stays as you left it).
 
+**Capture presets** (Settings › Capture presets) are captures of your own making: a region, a region
+held to a shape (16:9, square…) or of a set size placed with a click, a freehand area, a window, the screen, all
+screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); effects
+added as it's taken (a border, round corners, a torn edge, a shadow, grey); a folder and a file format
+of its own (its captures are in the editor's Recent strip and All captures with the rest, even after
+the preset changes folder); and a shortcut of its own. They're on the Capture page and in the tray menu (Capture
+Presets), and `screengrabcraft --preset <name>` takes one from a script or a desktop's own shortcut.
+
+**Captures on a timer** (the Capture page, or Captures on a Timer in the tray): one every so many
+seconds of the screen with the pointer, all screens or the last area, saved straight to the
+captures folder; one where nothing has changed since the last is skipped. Stop them from the tray.
+"One at" takes a single capture at a time of day.
+
+**How-to guides** (Record Steps, on the Capture page or in the tray): while it runs, each click takes
+a picture of the window clicked with a red ring where the click was (a small bar at the top counts
+the steps and stops it). Stop, and the guide window lists the numbered steps to put in order, take
+out and word, and saves the guide as a PDF, a word-processor document (`.docx`), slides (`.pptx`, a slide
+a step), a web page or Markdown (the last two with the pictures in a folder beside them). The guide
+itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
+opens it again).
+
+A recording (a GIF, a video, Video Production) starts after a **countdown** shown over the area, 3 seconds
+by default; Settings › Recording changes it or turns it off.
+
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
 or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes
 on; on Windows the screen frozen to choose the area, and what's said once it's kept, stay out of
 the video. The picture is saved and copied as usual, and opens in the editor once the recording
 stops, so nothing comes up over the screen being recorded.
+
+**Draw on the screen while you record** (Windows): press F8, or the pen on the recording's controls,
+and draw over the area with a pen, arrows, boxes or step numbers. They go into the recording and
+fade away after a few seconds; F8, Done or Esc stops drawing. (Not on a recording of every screen
+at once.)
 
 On Windows the editor is kept ready in the background (Settings, After a capture): it starts a
 little after the capture service, and closing its window hides it, so a capture opens in it at
@@ -89,11 +125,15 @@ in one video (made no larger than 3840 × 2160), or a **fixed size** placed with
 monitor and video sizes, landscape, portrait and square, as many as fit on your monitors, or your
 own. Turn each input on or off: the screen,
 the camera, the microphone (with a level meter once you turn it on or press Test) and the
-computer's sound. With the screen off the camera's picture is the video. Press the red **Record**;
+computer's sound. With the screen off the camera's picture is the video. Under the camera's picture,
+**Mirror** flips it left to right and **Border** puts a line of your colour round it (the video
+editor can change both after). While it records, the camera button on the controls (or F7, or the tray)
+puts the camera full screen with the screen in its corner, and back. Press the red **Record**;
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
 and opens in the video editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
-sources are in Settings › Recording.
+sources are in Settings › Recording. If ScreenGrabCraft or the computer goes down while it records, what was
+recorded is kept: the next start says so, and Edit opens it in the video editor.
 
 On Windows a Video Production recording also keeps **the shortcuts you press** while it records,
 so the video editor can show them as keys on the video: only a key pressed with Ctrl, Alt or the
@@ -284,7 +324,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - Each track and layer has a switch to **hide or mute** it, and arrows to **move it up or down**
   (a layer higher up is in front); **double-click its name to rename it** (or use the right
   button). Each sound track has a volume slider; the camera's corner, size and shape (square,
-  rounded, circle) are on the right.
+  rounded, circle), its border (how wide, its colour) and Mirror are on the right, with the
+  stretches the camera fills the picture: choose a stretch and Camera Full Screen for the Stretch,
+  or Remove one.
 - **Transcript** (the tool bar, or View) opens a pane at the right with everything said, line by
   line: when, who and what. Words from the microphone are **You**, from the computer's sound
   **Others**, and from a sound or video you added, its layer's name; rename any of them (the pencil,
@@ -331,6 +373,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
   area selected, read on this computer by Windows' own text reader and shown to copy (put anything
   right first). On macOS and Linux it isn't there yet.
+- **QR codes** (Image menu): **Read QR Codes** shows the words in the QR codes in the picture (or
+  the area selected), each to copy; a web address is shown, never opened. **Make a QR Code…** puts
+  a code of your words or web address on the picture, to move and size like any picture. Both on
+  this computer, everywhere.
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
@@ -370,9 +416,25 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
-  drag and drop, zoom and pan, the strip of recent captures.
+  drag and drop, zoom and pan, the strip of recent captures. Right-click a capture there and Pin to
+  the Front keeps it first in the strip (remembered with its tags in `library.json`).
+- **All captures** (in the strip): every capture by day, with a search through names, tags,
+  programs and window titles. A star makes a capture a favourite; its tag button (or a right click
+  in the strip) gives it tags. Filters show only the favourites, the captures taken from one
+  program, or those with one tag. The program and tags are kept in `library.json` in the settings
+  folder, never in the pictures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
   WebP, BMP, GIF or PDF.
+- **Print** (File › Print, Ctrl+P) through Windows' own printing window (greyed out elsewhere).
+- **Open With…** (the File menu for the picture as shown, or a capture's right-click menu in the
+  strip for its file): Windows' own window for choosing a program to open it in (greyed out
+  elsewhere).
+- **Batch Changes** (File menu, or Batch Change These in All captures): the same changes (resize,
+  border, shadow, torn edge, round corners, brightness and contrast, grayscale, invert, trim) made
+  to many pictures at once, each saved beside its picture under a name pattern (`{name} changed`).
+- **A PDF of several captures**: in All captures, PDF of These makes one PDF of the pictures shown
+  (or of those chosen with Ctrl+click), a page each, oldest first; or choose "One PDF, a page each"
+  as Batch Changes' format. Where it goes is asked.
 
 The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 
@@ -390,7 +452,8 @@ screengrabcraft-cli service status
 
 The capture service takes requests too, which is how a capture is bound to a key on a Wayland
 desktop (where programs can't take global shortcuts): `screengrabcraft --capture region`,
-`--capture adjust|window|screen|all|repeat|scrolling|gif|text`, `--delay 5`, `--settings`, `--quit`.
+`--capture adjust|window|screen|all|repeat|scrolling|gif|text`, a capture preset by its name or number
+(`--preset "Docs shot"` or `--capture preset:2`), `--delay 5`, `--settings`, `--quit`.
 
 ## Platforms
 

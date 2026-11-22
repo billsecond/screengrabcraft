@@ -42,6 +42,30 @@ pub fn captures_dir(settings: &Settings) -> PathBuf {
     pictures.join("ScreenGrabCraft")
 }
 
+/// The most folders the Recent strip and All captures look in.
+const FOLDERS_MAX: usize = 32;
+
+/// Every folder captures are kept in: the captures folder first, then the capture presets' own
+/// folders and those captures were kept in before ([`Settings::other_folders`]), each once.
+pub fn capture_folders(settings: &Settings) -> Vec<PathBuf> {
+    let mut out = vec![captures_dir(settings)];
+    let mut seen = vec![whole(&captures_dir(settings))];
+    let more = settings.presets.iter().filter_map(|p| p.folder.as_deref()).chain(settings.other_folders.iter().map(String::as_str));
+    for f in more.map(str::trim).filter(|f| !f.is_empty()) {
+        let p = PathBuf::from(f);
+        let w = whole(&p);
+        let w = w.trim_end_matches('/').to_string();
+        if out.len() >= FOLDERS_MAX {
+            break;
+        }
+        if !seen.iter().any(|s| s.trim_end_matches('/') == w) {
+            seen.push(w);
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// The log folder.
 pub fn log_dir() -> Option<PathBuf> {
     settings_dir().map(|d| d.join("logs"))
@@ -78,4 +102,34 @@ pub fn media_captions(path: &Path) -> Option<PathBuf> {
 /// folder): a number from 0 to 1000, or `error: ` and why it couldn't.
 pub fn captions_progress(path: &Path) -> PathBuf {
     std::env::temp_dir().join("ScreenGrabCraft").join("captions").join(format!("{}.progress", key(&whole(path))))
+}
+
+#[cfg(test)]
+mod tests {
+    use screengrabcraft_model::CapturePreset;
+
+    use super::*;
+
+    #[test]
+    fn captures_are_looked_for_in_the_captures_folder_then_the_presets_and_those_used_before() {
+        let base = std::env::temp_dir().join("sgc-folders");
+        let (main, own, before) = (base.join("Captures"), base.join("Bugs"), base.join("Old"));
+        let text = |p: &Path| p.to_string_lossy().to_string();
+        let s = Settings {
+            folder: Some(text(&main)),
+            presets: vec![
+                CapturePreset { folder: Some(text(&own)), ..CapturePreset::default() },
+                CapturePreset { folder: Some(format!("{}/", text(&main))), ..CapturePreset::default() },
+                CapturePreset::default(),
+            ],
+            other_folders: vec![text(&before), text(&own), "  ".into()],
+            ..Settings::default()
+        };
+        assert_eq!(capture_folders(&s), vec![main.clone(), own, before]);
+        // Without any: the captures folder alone.
+        assert_eq!(capture_folders(&Settings::default()), vec![captures_dir(&Settings::default())]);
+        // However many there are, a bounded number is looked in.
+        let many = Settings { other_folders: (0..100).map(|i| format!("{}/{i}", text(&base))).collect(), ..Settings::default() };
+        assert_eq!(capture_folders(&many).len(), FOLDERS_MAX);
+    }
 }

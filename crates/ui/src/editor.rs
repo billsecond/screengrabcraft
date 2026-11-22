@@ -245,8 +245,15 @@ pub struct Editor {
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
     pub(crate) recent: Vec<crate::services::RecentItem>,
     pub(crate) recent_at: f64,
-    /// What All captures is searching for.
-    pub(crate) capture_search: String,
+    /// What All captures shows: favourites, a program's, a tag's, what's searched for.
+    pub(crate) capture_filter: screengrabcraft_model::library::Filter,
+    /// The listed captures' tags, favourites and programs, as the host last said.
+    pub(crate) library: screengrabcraft_model::Library,
+    /// The capture whose tags are being changed in All captures, and the tag being typed.
+    pub(crate) tagging: Option<String>,
+    pub(crate) new_tag: String,
+    /// The captures chosen in All captures (Ctrl+click), for Batch Changes or a PDF.
+    pub(crate) chosen_captures: Vec<String>,
     pub services: Box<dyn Services>,
     /// Set when the window should close (the host closes it).
     pub quit_requested: bool,
@@ -261,6 +268,10 @@ pub struct Editor {
     pub(crate) grab_text: crate::grab_text::State,
     /// What Grab Text is reading is the selected area (not all of the picture).
     pub(crate) grab_text_area: bool,
+    /// QR codes read, or one being made, in their window.
+    pub(crate) qr: crate::qr::State,
+    /// Batch Changes, while its window is open.
+    pub(crate) batch: Option<crate::batch::Batch>,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -333,7 +344,11 @@ impl Editor {
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
             recent_at: f64::NEG_INFINITY,
-            capture_search: String::new(),
+            capture_filter: Default::default(),
+            library: Default::default(),
+            tagging: None,
+            new_tag: String::new(),
+            chosen_captures: Vec::new(),
             services,
             quit_requested: false,
             close_confirmed: false,
@@ -343,6 +358,8 @@ impl Editor {
             background: crate::background::State::default(),
             grab_text: crate::grab_text::State::default(),
             grab_text_area: false,
+            qr: crate::qr::State::default(),
+            batch: None,
         }
     }
 
@@ -902,6 +919,38 @@ impl Editor {
     }
 
     /// Copy Picture: the whole picture as shown, whatever is selected.
+    /// Print: the picture as shown, with its annotations, to the system's printing window.
+    pub fn print(&mut self, ctx: &egui::Context) {
+        if let Err(why) = self.services.can_print() {
+            self.error(ctx, why);
+            return;
+        }
+        let Some(picture) = self.flattened() else {
+            self.error(ctx, "The picture could not be drawn to print it");
+            return;
+        };
+        match self.services.print(&picture, &self.name) {
+            Ok(()) => self.toast(ctx, "Sent to the printer: choose the printer and the paper in its window"),
+            Err(e) => self.error(ctx, e),
+        }
+    }
+
+    /// Open With: the picture as shown, with its annotations, handed to a program the owner chooses
+    /// in the system's own window for choosing one.
+    pub fn open_with(&mut self, ctx: &egui::Context) {
+        if let Err(why) = self.services.can_open_with() {
+            self.error(ctx, why);
+            return;
+        }
+        let Some(picture) = self.flattened() else {
+            self.error(ctx, "The picture could not be drawn to open it elsewhere");
+            return;
+        };
+        if let Err(e) = self.services.open_picture_with(&picture, &self.name) {
+            self.error(ctx, e);
+        }
+    }
+
     pub fn copy_whole(&mut self, ctx: &egui::Context) {
         let Some(pic) = self.flattened() else { return };
         match self.services.copy_image(&pic) {
@@ -1158,6 +1207,7 @@ impl Editor {
             }
             // A new video of them, opened here.
             DialogResult::PicturesVideo(paths) => crate::video::new_video_from_pictures(self, ctx, &paths),
+            DialogResult::Pictures(paths) => self.open_batch(paths),
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {
@@ -1165,6 +1215,9 @@ impl Editor {
                     self.video = Some(v);
                 }
             }
+            // Where Batch Changes' one PDF goes: the batch starts.
+            DialogResult::SaveTo(path) if self.batch.as_ref().is_some_and(|b| b.asking) => self.batch_pdf_to(ctx, Some(path)),
+            DialogResult::Cancelled if self.batch.as_ref().is_some_and(|b| b.asking) => self.batch_pdf_to(ctx, None),
             DialogResult::SaveTo(path) => {
                 if std::mem::take(&mut self.saving_video) {
                     if let Some(v) = self.video.as_mut() {
@@ -1260,6 +1313,8 @@ impl Editor {
         let now = ctx.input(|i| i.time);
         if now - self.recent_at > 3.0 {
             self.recent = self.services.recent();
+            let paths: Vec<String> = self.recent.iter().map(|r| r.path.clone()).collect();
+            self.library = self.services.library(&paths);
             self.recent_at = now;
         }
         // The dot while changes are still to be written.
@@ -1310,7 +1365,9 @@ impl Editor {
         crate::dialogs::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
+        crate::batch::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
+        crate::qr::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
@@ -1322,6 +1379,8 @@ impl Editor {
             || (self.pending.is_some() && !self.autosaves())
             || self.background.busy()
             || self.grab_text.busy()
+            || self.qr.busy()
+            || self.batch.is_some()
         {
             return;
         }
@@ -1339,6 +1398,9 @@ impl Editor {
         }
         if pressed(cmd(Key::E)) {
             self.export(self.settings.export_format);
+        }
+        if pressed(cmd(Key::P)) {
+            self.print(ctx);
         }
         if pressed(cmd_shift(Key::N)) {
             let _ = self.services.new_capture(CaptureMode::Region);
@@ -1564,6 +1626,35 @@ impl Editor {
                         self.copy(&ctx);
                         ui.close();
                     }
+                    let can_print = self.services.can_print();
+                    let print = ui.add_enabled(can_print.is_ok(), egui::Button::new("Print…").shortcut_text("Ctrl+P"));
+                    let print = match &can_print {
+                        Ok(()) => print.on_hover_text("The picture as shown, with its annotations, to a printer"),
+                        Err(why) => print.on_disabled_hover_text(why),
+                    };
+                    if print.clicked() {
+                        self.print(&ctx);
+                        ui.close();
+                    }
+                    let can_open = self.services.can_open_with();
+                    let open_with = ui.add_enabled(can_open.is_ok(), egui::Button::new("Open With\u{2026}"));
+                    let open_with = match &can_open {
+                        Ok(()) => open_with.on_hover_text("The picture as shown, in a program you choose"),
+                        Err(why) => open_with.on_disabled_hover_text(why),
+                    };
+                    if open_with.clicked() {
+                        self.open_with(&ctx);
+                        ui.close();
+                    }
+                    if self.services.has_paths()
+                        && ui
+                            .button("Batch Changes…")
+                            .on_hover_text("The same changes (a size, effects, a format, a name) made to many pictures at once")
+                            .clicked()
+                    {
+                        self.open_batch(Vec::new());
+                        ui.close();
+                    }
                     if self.services.has_paths() {
                         ui.separator();
                         if ui.button("Show Captures Folder").clicked() {
@@ -1693,6 +1784,8 @@ impl Editor {
                     crate::background::menu(self, ui);
                     ui.separator();
                     crate::grab_text::item(self, ui);
+                    crate::qr::read_item(self, ui);
+                    crate::qr::make_item(self, ui);
                 });
                 ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {

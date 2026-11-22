@@ -13,8 +13,11 @@ use std::time::{Duration, Instant};
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
 use screengrabcraft_desktop::{clipboard, cloak, graphics, instance, launch, paths, store};
-use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, RecordArea, RecorderOptions, Settings};
-use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
+use screengrabcraft_model::{
+    AfterCapture, CaptureMode, CapturePreset, IRect, ImageFormat, PresetArea, Raster, RecordArea, RecorderOptions, Settings,
+};
+use screengrabcraft_render::area::keep_inside;
+use screengrabcraft_ui::overlay::{Action, AreaShape, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
 use crate::hotkeys::{Registered, Target};
 use crate::record::{self, Recording};
@@ -43,6 +46,17 @@ pub enum Msg {
     Saved(Result<Done, String>),
     /// Grab Text's answer: the text read off the area, or why there is none.
     TextRead(Result<String, String>),
+    /// A still from the camera, or why there is none.
+    CameraStill(Result<Raster, String>),
+    /// A recording a crash cut short, found when the service started: where it's kept.
+    CutShort(PathBuf),
+}
+
+/// The window a capture was taken from: its program and its title.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Window {
+    pub program: String,
+    pub title: String,
 }
 
 /// What became of a finished capture.
@@ -65,6 +79,9 @@ pub struct OverlayRun {
     pub seen: bool,
     /// Kept until the windows have been drawn, so a crash in opening them switches to OpenGL.
     pub opening: graphics::Opening,
+    /// Each window's title as the overlay shows it, and the program it belongs to (the captures'
+    /// library notes where a capture was taken from).
+    pub programs: Vec<(String, String)>,
 }
 
 pub struct Countdown {
@@ -72,6 +89,37 @@ pub struct Countdown {
     pub until: Instant,
     /// The monitor the number is shown on (desktop units and scale).
     pub on: Option<(IRect, f32)>,
+}
+
+/// The countdown before a recording starts: what to start, when, and the area it's shown over
+/// (desktop units, and its monitor's scale).
+pub struct RecordCountdown {
+    again: Again,
+    pub until: Instant,
+    pub on: Option<(IRect, f32)>,
+}
+
+/// After a recording's countdown, its window is given this long to leave the screen before the
+/// recording starts, so it isn't in it.
+const RECORD_GAP: Duration = Duration::from_millis(300);
+
+/// Whether a recording counts down `secs` first: a GIF or a video does (a scrolling capture
+/// doesn't), when there are seconds to count.
+fn counts_down(again: &Again, secs: u32) -> bool {
+    secs > 0 && !matches!(again, Again::Area { kind: record::Kind::Scrolling, .. })
+}
+
+/// A still from camera `index` (else the first camera), as a picture.
+fn camera_picture(index: Option<u32>) -> Result<Raster, String> {
+    let cams = screengrabcraft_capture::camera::cameras();
+    let i = match index {
+        Some(i) if cams.iter().any(|(n, _)| *n == i) => i,
+        _ => cams.first().map(|(n, _)| *n).ok_or("no camera was found")?,
+    };
+    let f = screengrabcraft_capture::camera::take_still(i)?;
+    screengrabcraft_render::decode(&f.jpeg)
+        .or_else(|_| screengrabcraft_render::decode(&screengrabcraft_capture::camera::with_huffman_tables(&f.jpeg)))
+        .map_err(|e| e.to_string())
 }
 
 pub struct Notice {
@@ -108,10 +156,17 @@ pub struct Service {
     /// Recorder (and the editor, if it steps aside) has left the screen. True once the editor has
     /// been asked aside.
     production_at: Option<(Instant, bool)>,
+    /// The capture preset the capture going on was started from: its area, and what happens to
+    /// the picture.
+    pub preset: Option<CapturePreset>,
     pub overlay: Option<OverlayRun>,
     pub countdown: Option<Countdown>,
     /// A countdown just ended: the capture starts once its window has gone.
     pub after_countdown: Option<(CaptureMode, Instant)>,
+    /// The countdown before a recording starts.
+    pub record_countdown: Option<RecordCountdown>,
+    /// A still is being taken from the camera.
+    camera_busy: bool,
     pub freezing: Option<CaptureMode>,
     /// A worker is on a picture: repeating the last area, or keeping a capture.
     keeping: bool,
@@ -123,7 +178,7 @@ pub struct Service {
     /// A picture chosen in the overlay, kept on the next frame, once the overlay (the frozen
     /// screen) has gone: copying it to the clipboard takes a moment, and the screen shouldn't
     /// stay frozen meanwhile.
-    chosen: Option<(Raster, String, Action)>,
+    chosen: Option<(Raster, String, Action, Option<Window>)>,
     /// When the capture now under way was asked for, for the log's timings.
     asked: Option<Instant>,
     /// Whether an editor is to be kept ready out of sight (the setting, on Windows), as last seen.
@@ -140,6 +195,10 @@ pub struct Service {
     restarting: Option<(Recording, Again)>,
     /// The recording's controls are put away in the tray (Minimize, or no room off the area).
     pub controls_hidden: bool,
+    /// The owner is drawing on the screen over the area being recorded.
+    pub drawing: bool,
+    /// The drawing window's picture of the latest frame, and that frame's number.
+    pub draw_texture: Option<(u64, egui::TextureHandle)>,
     /// Where the owner dragged the recording's controls to (its window's place, in points).
     pub controls_at: Option<egui::Pos2>,
     /// The controls being dragged: where on them the pointer took hold (pixels).
@@ -154,13 +213,17 @@ pub struct Service {
     pub updates: crate::update::Updates,
     /// Captions of Video Production recordings being made, one at a time, never while recording.
     pub captions: crate::captions::Captioner,
+    /// Captures on a timer and at a set time (`crate::timed`).
+    pub timed: crate::timed::Timed,
+    /// Step capture and its guide window (`crate::steps`).
+    pub steps: crate::steps::Steps,
 }
 
 impl Service {
     pub fn new(ctx: egui::Context, guard: instance::Guard, settings: Settings) -> Service {
         let (tx, rx) = channel();
         let mut keys = Registered::new();
-        keys.apply(&settings.hotkeys);
+        keys.apply(&settings.hotkeys, &settings.presets);
         let tray = Tray::new(&settings, &keys);
         // The tray, the menu and the shortcuts are answered here, and wake the window's loop.
         let (t, c) = (tx.clone(), ctx.clone());
@@ -193,6 +256,14 @@ impl Service {
         guard.set_waker(Box::new(move || wake.request_repaint()));
         // A service that went down during a capture left the editor hidden.
         editor_back();
+        // A recording it was making when it went down is kept, and the owner told.
+        let (t, c, captures) = (tx.clone(), ctx.clone(), paths::captures_dir(&settings));
+        let _ = std::thread::Builder::new().name("cut short".into()).spawn(move || {
+            if let Some(p) = record::cut_short(&captures) {
+                let _ = t.send(Msg::CutShort(p));
+                c.request_repaint();
+            }
+        });
         Service {
             settings,
             keys,
@@ -204,9 +275,12 @@ impl Service {
             home: None,
             recorder: None,
             production_at: None,
+            preset: None,
             overlay: None,
             countdown: None,
             after_countdown: None,
+            record_countdown: None,
+            camera_busy: false,
             freezing: None,
             keeping: false,
             keeping_held: false,
@@ -221,6 +295,8 @@ impl Service {
             again: None,
             restarting: None,
             controls_hidden: false,
+            drawing: false,
+            draw_texture: None,
             controls_at: None,
             controls_drag: None,
             screens: Vec::new(),
@@ -229,6 +305,8 @@ impl Service {
             quit: false,
             updates: crate::update::Updates::new(),
             captions: crate::captions::Captioner::default(),
+            timed: crate::timed::Timed::default(),
+            steps: crate::steps::Steps::default(),
         }
     }
 
@@ -238,6 +316,8 @@ impl Service {
             || self.freezing.is_some()
             || self.countdown.is_some()
             || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
+            || self.camera_busy
             || self.production_at.is_some()
             || self.recording.is_some()
             || self.restarting.is_some()
@@ -249,7 +329,7 @@ impl Service {
     pub fn apply_settings(&mut self) {
         self.settings = self.settings.clone().clamped();
         store::save_settings(&self.settings);
-        self.keys.apply(&self.settings.hotkeys);
+        self.keys.apply(&self.settings.hotkeys, &self.settings.presets);
         if let Some(t) = &mut self.tray {
             t.rebuild(&self.settings, &self.keys);
         }
@@ -288,8 +368,23 @@ impl Service {
     /// Starts a Video Production recording as the Recorder's choices say: the overlay first for an
     /// area chosen on the screen, else the recording at once. `aside` is true once the editor has
     /// been asked out of the picture.
+    /// The countdown before a recording was cancelled: nothing is recorded (Video Production goes
+    /// back to its Recorder).
+    pub fn cancel_record_countdown(&mut self) {
+        let Some(c) = self.record_countdown.take() else { return };
+        if matches!(c.again, Again::Video { mode: CaptureMode::Production, .. }) {
+            self.open_recorder();
+        }
+    }
+
     fn begin_production(&mut self, aside: bool) {
-        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.keeping {
+        if self.overlay.is_some()
+            || self.freezing.is_some()
+            || self.countdown.is_some()
+            || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
+            || self.keeping
+        {
             return;
         }
         if self.recording.is_some() {
@@ -320,7 +415,7 @@ impl Service {
         }
         let monitors = screengrabcraft_capture::monitors().unwrap_or_default();
         match record::production_screen(&r, &monitors, None) {
-            Ok((screen, place)) => self.start_again(Again::Video { mode: CaptureMode::Production, screen, desktop: place }),
+            Ok((screen, place)) => self.begin_recording(Again::Video { mode: CaptureMode::Production, screen, desktop: place }),
             Err(e) => self.notify("The recording could not start", e, None, None, true),
         }
     }
@@ -353,10 +448,22 @@ impl Service {
             match a.as_str() {
                 "--capture" => {
                     acted = true;
-                    match it.next().and_then(|m| CaptureMode::from_arg(m)) {
-                        Some(m) => self.start(m, 0),
-                        None => self.notify("Unknown capture", "Use region, window, screen, all, repeat, scrolling or gif.", None, None, true),
+                    let what = it.next().map(String::as_str).unwrap_or_default();
+                    match (what.get(..7).filter(|p| p.eq_ignore_ascii_case("preset:")), CaptureMode::from_arg(what)) {
+                        (Some(_), _) => self.run_preset_named(what.get(7..).unwrap_or_default()),
+                        (None, Some(m)) => self.start(m, 0),
+                        (None, None) => self.notify(
+                            "Unknown capture",
+                            "Use region, window, screen, all, repeat, scrolling, gif, or preset:<its name>.",
+                            None,
+                            None,
+                            true,
+                        ),
                     }
+                }
+                "--preset" => {
+                    acted = true;
+                    self.run_preset_named(it.next().map(String::as_str).unwrap_or_default());
                 }
                 "--delay" => {
                     acted = true;
@@ -370,6 +477,13 @@ impl Service {
                 "--check-updates" => {
                     acted = true;
                     crate::update::ask_from_tray(self);
+                }
+                "--guide" => {
+                    acted = true;
+                    match it.next() {
+                        Some(p) => crate::steps::open(self, std::path::Path::new(p)),
+                        None => log::warn!("--guide names no guide"),
+                    }
                 }
                 "--quit" => {
                     acted = true;
@@ -415,12 +529,19 @@ impl Service {
                 match item {
                     Some(Item::Capture(m)) => self.start(m, 0),
                     Some(Item::Delayed(s)) => self.start(CaptureMode::Region, s),
+                    Some(Item::Preset(i)) => self.run_preset(i),
                     Some(Item::StopRecording) => self.stop_recording(false),
                     Some(Item::PauseRecording) => self.toggle_pause(),
                     Some(Item::RestartRecording) => self.restart_recording(),
                     Some(Item::ToggleControls) => self.controls_hidden = !self.controls_hidden,
                     Some(Item::ToggleBorder) => self.toggle_border(),
+                    Some(Item::ToggleDrawing) => self.toggle_drawing(),
+                    Some(Item::ToggleCameraFull) => self.toggle_camera_full(),
                     Some(Item::DiscardRecording) => self.stop_recording(true),
+                    Some(Item::TimedCaptures) => self.open_home(),
+                    Some(Item::StopTimed) => crate::timed::stop(self),
+                    Some(Item::RecordSteps) => crate::steps::start(self),
+                    Some(Item::StopSteps) => crate::steps::stop(self, true),
                     Some(Item::Editor) => {
                         if let Err(e) = launch::open_editor(&[]) {
                             self.notify("The editor could not be started", e, None, None, true);
@@ -446,11 +567,14 @@ impl Service {
             Msg::Hotkey(id) => match self.keys.target(id) {
                 Some(Target::Pause) => self.toggle_pause(),
                 Some(Target::Stop) => self.stop_recording(false),
+                Some(Target::Draw) => self.toggle_drawing(),
+                Some(Target::CameraFull) => self.toggle_camera_full(),
                 Some(Target::Capture(CaptureMode::Gif)) if self.recording.is_some() => self.stop_recording(false),
                 Some(Target::Capture(CaptureMode::Scrolling | CaptureMode::Video | CaptureMode::Production)) if self.recording.is_some() => {
                     self.stop_recording(false)
                 }
                 Some(Target::Capture(m)) => self.start(m, 0),
+                Some(Target::Preset(i)) => self.run_preset(i),
                 Some(Target::Editor) => {
                     let _ = launch::open_editor(&[]);
                 }
@@ -464,6 +588,18 @@ impl Service {
                 }
             }
             Msg::Picture(pic, source) => self.finish(pic, &source, Action::Default),
+            Msg::CutShort(p) => {
+                log::info!("a recording cut short is kept: {}", file_name(&p));
+                let name = file_name(&p);
+                self.notify("A recording was cut short: what it got is kept", name, Some(p), None, false);
+            }
+            Msg::CameraStill(result) => {
+                self.camera_busy = false;
+                match result {
+                    Ok(pic) => self.finish(pic, "Camera", Action::Default),
+                    Err(e) => self.notify("No picture came from the camera", e, None, None, true),
+                }
+            }
             Msg::TextRead(result) => self.text_read(result),
             Msg::Saved(result) => {
                 self.keeping = false;
@@ -504,7 +640,55 @@ impl Service {
 
     /// Starts a capture of `mode`, after `delay` seconds.
     pub fn start(&mut self, mode: CaptureMode, delay: u32) {
-        if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.chosen.is_some() {
+        self.start_with(mode, delay, None);
+    }
+
+    /// Starts the capture preset at `i` in the settings' list (its delay counted down first).
+    pub fn run_preset(&mut self, i: usize) {
+        let Some(p) = self.settings.presets.get(i).cloned() else { return };
+        log::info!("capture preset {} ({})", i + 1, p.area.describe());
+        self.start_with(p.area.mode(), p.delay_secs, Some(p));
+    }
+
+    /// Starts the preset a script names (`--preset <name>`, `--capture preset:<name>`): by its name
+    /// or its number in the list. One that isn't there is said.
+    pub fn run_preset_named(&mut self, name: &str) {
+        match screengrabcraft_model::settings::preset_named(&self.settings.presets, name) {
+            Some(i) => self.run_preset(i),
+            None => {
+                let name: String = name.trim().chars().filter(|c| !c.is_control()).take(60).collect();
+                log::warn!("no capture preset is called {name:?}");
+                self.notify(
+                    "No such capture preset",
+                    format!("None is called “{name}”. Presets are named in Settings › Capture presets (or give its number)."),
+                    None,
+                    None,
+                    true,
+                );
+            }
+        }
+    }
+
+    /// The same from the service's own window, which goes first so it isn't in the picture.
+    pub fn run_preset_soon(&mut self, i: usize) {
+        let Some(p) = self.settings.presets.get(i).cloned() else { return };
+        if p.delay_secs > 0 {
+            self.start_with(p.area.mode(), p.delay_secs, Some(p));
+        } else {
+            self.after_countdown = Some((p.area.mode(), Instant::now() + Duration::from_millis(300)));
+            self.preset = Some(p);
+        }
+    }
+
+    /// Starts a capture of `mode` after `delay` seconds, from `preset` if it's one.
+    fn start_with(&mut self, mode: CaptureMode, delay: u32, preset: Option<CapturePreset>) {
+        if self.overlay.is_some()
+            || self.freezing.is_some()
+            || self.countdown.is_some()
+            || self.after_countdown.is_some()
+            || self.chosen.is_some()
+            || self.record_countdown.is_some()
+        {
             return;
         }
         // While recording, still pictures can be taken (the recording goes on); not another recording.
@@ -518,9 +702,15 @@ impl Service {
             );
             return;
         }
+        self.preset = preset;
         // Video Production starts at its Recorder, where the area and the inputs are chosen.
         if mode == CaptureMode::Production {
             self.open_recorder();
+            return;
+        }
+        // A still from the camera: no screen to choose from (after a wait, if one was asked for).
+        if mode == CaptureMode::Camera && delay == 0 {
+            self.camera_still();
             return;
         }
         if screengrabcraft_capture::permission() == screengrabcraft_capture::Permission::Denied {
@@ -537,7 +727,10 @@ impl Service {
         if mode == CaptureMode::Repeat {
             match self.settings.last_region {
                 Some(r) => self.repeat(r),
-                None => self.start(CaptureMode::Region, delay),
+                None => {
+                    let preset = self.preset.take();
+                    self.start_with(CaptureMode::Region, delay, preset);
+                }
             }
             return;
         }
@@ -641,24 +834,27 @@ impl Service {
                 }
             }
             _ => {
+                // A preset's area of a set size.
+                let fixed = match self.preset.as_ref().map(|p| p.area) {
+                    Some(PresetArea::Fixed { w, h }) => Some((w, h)),
+                    _ => None,
+                };
                 let purpose = match mode {
                     CaptureMode::Window => Purpose::Window,
                     CaptureMode::Gif => Purpose::Gif,
                     CaptureMode::Scrolling => Purpose::Scrolling,
                     CaptureMode::Video => Purpose::Video,
                     CaptureMode::Production => production_purpose(&self.settings.recorder),
-                    _ => Purpose::Picture,
+                    CaptureMode::Freehand => Purpose::Freehand,
+                    _ => fixed.map_or(Purpose::Picture, |(w, h)| Purpose::PictureFixed(w, h)),
                 };
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
                 let pointer = frozen.pointer;
                 let om = frozen.monitors.into_iter().map(|(m, picture)| OverlayMonitor { rect: m.rect, picture, name: m.name }).collect();
-                let ow = frozen
-                    .windows
-                    .into_iter()
-                    .map(|w| OverlayWindow { rect: w.rect, title: if w.title.is_empty() { w.app } else { w.title } })
-                    .collect();
+                let programs = frozen.windows.iter().map(|w| (shown_title(w), w.app.clone())).collect();
+                let ow = frozen.windows.into_iter().map(|w| OverlayWindow { rect: w.rect, title: shown_title(&w) }).collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
-                let after = &self.settings.after_capture;
+                let after = &self.after();
                 // Grab Text reads the area at once: there is nothing to choose on a bar.
                 overlay.preview = after.show_bar && mode != CaptureMode::Text;
                 if mode == CaptureMode::Adjust {
@@ -671,8 +867,12 @@ impl Service {
                 overlay.enter = enter_button(after);
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
+                // A preset's shape: every area dragged out is held to it.
+                if let Some(PresetArea::Shape { w, h }) = self.preset.as_ref().map(|p| p.area) {
+                    overlay.shape = Some((w, h));
+                }
                 let opening = graphics::Opening::start();
-                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening });
+                self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening, programs });
             }
         }
     }
@@ -697,7 +897,8 @@ impl Service {
     fn overlay_done(&mut self) {
         let Some(mut run) = self.overlay.take() else { return };
         run.opening.opened();
-        let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else {
+        let Outcome::Chosen { monitor, area, desktop, action, title, shape } = run.overlay.outcome().clone() else {
+            self.preset = None;
             // Choosing the area for Video Production was cancelled: back to the Recorder, as it was.
             if run.mode == CaptureMode::Production {
                 self.open_recorder();
@@ -708,10 +909,10 @@ impl Service {
         match run.mode {
             CaptureMode::Gif | CaptureMode::Scrolling => {
                 let kind = if run.mode == CaptureMode::Gif { record::Kind::Gif } else { record::Kind::Scrolling };
-                self.start_again(Again::Area { kind, monitor: m.id, area, desktop });
+                self.begin_recording(Again::Area { kind, monitor: m.id, area, desktop });
             }
             CaptureMode::Video | CaptureMode::Production => {
-                self.start_again(Again::Video { mode: run.mode, screen: record::Screen::Part { monitor: m.id, area }, desktop });
+                self.begin_recording(Again::Video { mode: run.mode, screen: record::Screen::Part { monitor: m.id, area }, desktop });
             }
             _ => {
                 let Some(mon) = run.overlay.monitors.get(monitor) else { return };
@@ -724,10 +925,25 @@ impl Service {
                     return;
                 }
                 let pic = self.with_pointer(&pic, &m, (mon.picture.width(), mon.picture.height()), origin, run.pointer);
-                self.settings.last_region = Some(desktop);
-                store::save_settings(&self.settings);
+                // Several areas, or a freehand one: what's outside them is see-through. The last
+                // area (for Repeat and Adjust First) stays a box, so it's left as it was.
+                let (pic, source) = match &shape {
+                    Some(s) => {
+                        (keep_inside(&pic, &s.moved(-area.x, -area.y)), if matches!(s, AreaShape::Freehand(_)) { "Freehand" } else { "Areas" })
+                    }
+                    None => {
+                        self.settings.last_region = Some(desktop);
+                        store::save_settings(&self.settings);
+                        (pic, "Region")
+                    }
+                };
+                // A window clicked: the program it belongs to, for the captures' library.
+                let window = title
+                    .as_ref()
+                    .and_then(|t| run.programs.iter().find(|(shown, _)| shown == t))
+                    .map(|(shown, app)| Window { program: app.clone(), title: shown.clone() });
                 // Kept on the next frame, when the frozen screen has gone.
-                self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action));
+                self.chosen = Some((pic, title.unwrap_or_else(|| source.to_string()), action, window));
                 self.ctx.request_repaint();
             }
         }
@@ -765,14 +981,40 @@ impl Service {
 
     /// Keeps a capture: saved, copied and/or opened in the editor, as the action and the
     /// settings say. The file work is done on a worker thread.
+    /// What happens to the capture going on: as its preset says, else the default.
+    fn after(&self) -> AfterCapture {
+        self.preset.as_ref().map_or(self.settings.after_capture, |p| p.after)
+    }
+
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
-        let (save, copy, edit) = what_to_keep(action, &self.settings.after_capture);
+        self.finish_from(pic, source, None, action);
+    }
+
+    /// [`Service::finish`] for a capture of a window (`window`), whose program the captures'
+    /// library notes.
+    pub fn finish_from(&mut self, pic: Raster, source: &str, window: Option<Window>, action: Action) {
+        let after = self.after();
+        // A preset's capture: its effects added now, kept in its own folder and format.
+        let preset = self.preset.take();
+        let pic = match &preset {
+            Some(p) => with_effects(pic, &p.effects),
+            None => pic,
+        };
+        let (save, copy, edit) = what_to_keep(action, &after);
         // While recording, nothing comes up over the screen being recorded: the capture is saved
         // (and copied, if it's to be), and opened in the editor once the recording is over.
         let (save, edit, held) = held_while_recording(save, edit, self.recording.is_some() || self.restarting.is_some());
         self.keeping_held = held;
         self.keeping = true;
-        let settings = self.settings.clone();
+        let settings = preset.as_ref().map_or_else(|| self.settings.clone(), |p| p.keep_with(&self.settings));
+        // A preset's own folder is remembered, so its captures are in the Recent strip and All
+        // captures even after the preset changes folder.
+        if save
+            && let Some(f) = preset.as_ref().and_then(|p| p.folder.as_deref())
+            && self.settings.note_folder(f)
+        {
+            store::save_settings(&self.settings);
+        }
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         // On Windows the picture goes to the clipboard on the worker, once the editor has it (a
@@ -781,7 +1023,7 @@ impl Service {
         let copy_later = copy && cfg!(target_os = "windows");
         let copied = copy && !copy_later && copy_to_clipboard(&pic);
         let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
-            let r = keep(&pic, &source, &settings, save, edit, copied, copy_later);
+            let r = keep(&pic, &source, window.as_ref(), &settings, save, edit, copied, copy_later);
             let _ = tx.send(Msg::Saved(r));
             ctx.request_repaint();
         });
@@ -791,11 +1033,52 @@ impl Service {
         }
     }
 
-    /// Starts a recording as `again` says (the first time, or again for Restart).
+    /// Starts a recording as `again` says, after its countdown (the settings' seconds, shown over
+    /// the area; a scrolling capture has none).
+    fn begin_recording(&mut self, again: Again) {
+        let secs = self.settings.record_countdown.min(screengrabcraft_model::settings::RECORD_COUNTDOWN_MAX);
+        if !counts_down(&again, secs) {
+            self.start_again(again);
+            return;
+        }
+        let desktop = match &again {
+            Again::Area { desktop, .. } | Again::Video { desktop, .. } => *desktop,
+        };
+        let (cx, cy) = (i64::from(desktop.x) + i64::from(desktop.w / 2), i64::from(desktop.y) + i64::from(desktop.h / 2));
+        let scale = screengrabcraft_capture::monitors().ok().and_then(|ms| ms.into_iter().find(|m| m.rect.contains(cx, cy)).map(|m| m.scale));
+        let until = Instant::now() + Duration::from_secs(u64::from(secs));
+        self.record_countdown = Some(RecordCountdown { again, until, on: Some((desktop, scale.unwrap_or(1.0))) });
+        self.ctx.request_repaint();
+    }
+
+    /// A still from Video Production's camera (else the first), on a worker thread: the camera
+    /// is started, given a moment to settle, and let go; [`Msg::CameraStill`] keeps the picture.
+    fn camera_still(&mut self) {
+        if self.camera_busy {
+            return;
+        }
+        self.camera_busy = true;
+        let index = self.settings.production.camera_index;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let spawned = std::thread::Builder::new().name("camera-still".into()).spawn(move || {
+            let r = std::panic::catch_unwind(|| camera_picture(index)).unwrap_or_else(|_| Err("the camera failed unexpectedly".to_string()));
+            let _ = tx.send(Msg::CameraStill(r));
+            ctx.request_repaint();
+        });
+        if let Err(e) = spawned {
+            self.camera_busy = false;
+            self.notify("No picture came from the camera", e.to_string(), None, None, true);
+        }
+    }
+
+    /// Starts a recording now, as `again` says (the first time once its countdown is over, or
+    /// again for Restart).
     fn start_again(&mut self, again: Again) {
         let started = match &again {
             Again::Area { kind, monitor, area, desktop } => {
-                record::start(*kind, *monitor, *area, *desktop, self.settings.gif_frame_rate, self.settings.gif_max_secs, self.ctx.clone())
+                let s = &self.settings;
+                let scroll = record::ScrollPlan { by_itself: s.scroll_by_itself, longest: s.scrolling_longest };
+                record::start(*kind, *monitor, *area, *desktop, s.gif_frame_rate, s.gif_max_secs, scroll, self.ctx.clone())
             }
             Again::Video { mode, screen, desktop } => self.start_video(*mode, screen.clone(), *desktop),
         };
@@ -831,6 +1114,7 @@ impl Service {
     /// tray shows the captures again.
     fn recording_over(&mut self) {
         self.recording = None;
+        self.drawing = false;
         if let Some(t) = &mut self.tray {
             t.set_recording(false);
             t.show_recording(None);
@@ -855,6 +1139,22 @@ impl Service {
     }
 
     /// The tray's recording menu as things are now.
+    /// The tray's menu says whether steps are being recorded.
+    pub fn sync_steps(&mut self) {
+        self.sync_timed();
+    }
+
+    /// The tray's menu says whether captures on a timer are running.
+    pub fn sync_timed(&mut self) {
+        let running = crate::tray::Running { timed: self.timed.running(), steps: self.steps.running() };
+        if let Some(t) = &mut self.tray
+            && t.running != running
+        {
+            t.running = running;
+            t.rebuild(&self.settings, &self.keys);
+        }
+    }
+
     fn sync_tray(&mut self) {
         let state = self.recording.as_ref().map(|r| crate::tray::RecordingState {
             paused: r.is_paused(),
@@ -863,6 +1163,12 @@ impl Service {
             border: self.settings.recording_border,
             pause_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Pause),
             stop_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Stop),
+            drawing: self.drawing,
+            can_draw: r.drawable && !r.stopping(),
+            draw_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Draw),
+            camera_full: r.camera_full.load(std::sync::atomic::Ordering::SeqCst),
+            can_swap: r.swappable(),
+            camera_full_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::CameraFull),
             shot_key: self.keys.label(&self.settings.hotkeys, CaptureMode::Region),
         });
         if let Some(t) = &mut self.tray {
@@ -876,6 +1182,52 @@ impl Service {
             let paused = r.is_paused();
             r.set_paused(!paused);
         }
+        self.sync_tray();
+    }
+
+    /// Drawing on the screen over the area being recorded, on or off. Where it can't be (not
+    /// Windows, every screen at once, no screen), the owner is told why.
+    pub fn toggle_drawing(&mut self) {
+        let Some((drawable, stopping, ink)) = self.recording.as_ref().map(|r| (r.drawable, r.stopping(), r.ink.clone())) else { return };
+        if !drawable {
+            let why = if cfg!(target_os = "windows") {
+                "It works on a recording of an area, a window or one screen."
+            } else {
+                "It works on Windows for now: elsewhere the drawing would be recorded twice."
+            };
+            self.notify("You can't draw on this recording", why, None, None, true);
+            return;
+        }
+        self.drawing = !self.drawing && !stopping;
+        if let Ok(mut ink) = ink.lock() {
+            ink.on = self.drawing;
+            if !self.drawing {
+                ink.latest = None;
+            }
+        }
+        log::info!("drawing on the screen: {}", if self.drawing { "on" } else { "off" });
+        self.sync_tray();
+    }
+
+    /// The camera full screen with the screen in its corner, or back, from now on in the
+    /// recording. Where there's no camera or no screen, the owner is told why.
+    pub fn toggle_camera_full(&mut self) {
+        let Some(r) = self.recording.as_ref() else { return };
+        if r.stopping() {
+            return;
+        }
+        if !r.swappable() {
+            let why = if r.can_swap {
+                "The camera couldn't be had for this recording."
+            } else {
+                "It works on a video of the screen with the camera on (the Recorder's Camera)."
+            };
+            self.notify("The camera can't fill this recording", why, None, None, true);
+            return;
+        }
+        let on = !r.camera_full.load(std::sync::atomic::Ordering::SeqCst);
+        r.camera_full.store(on, std::sync::atomic::Ordering::SeqCst);
+        log::info!("the camera full screen: {}", if on { "on" } else { "off" });
         self.sync_tray();
     }
 
@@ -1008,9 +1360,9 @@ impl Service {
         }
         // The overlay went at the end of the last frame: the picture chosen in it is kept now.
         if self.overlay.is_none()
-            && let Some((pic, source, action)) = self.chosen.take()
+            && let Some((pic, source, action, window)) = self.chosen.take()
         {
-            self.finish(pic, &source, action);
+            self.finish_from(pic, &source, window, action);
         }
         if let Some(c) = &self.countdown
             && Instant::now() >= c.until
@@ -1023,7 +1375,15 @@ impl Service {
             && Instant::now() >= at
         {
             self.after_countdown = None;
-            self.start(mode, 0);
+            // A preset's capture goes on as the preset says.
+            let preset = self.preset.take();
+            self.start_with(mode, 0, preset);
+        }
+        // A recording's countdown is over and its window has gone: it starts.
+        if self.record_countdown.as_ref().is_some_and(|c| Instant::now() >= c.until + RECORD_GAP)
+            && let Some(c) = self.record_countdown.take()
+        {
+            self.start_again(c.again);
         }
         if let Some((at, aside)) = self.production_at
             && Instant::now() >= at
@@ -1034,6 +1394,7 @@ impl Service {
         if self.overlay.as_ref().is_some_and(|o| *o.overlay.outcome() != Outcome::Pending) {
             self.overlay_done();
         }
+        crate::timed::tick(self, ctx);
         self.poll_recording();
         self.captions.tick(self.recording.is_some());
         if let Some(t) = &mut self.tray {
@@ -1049,6 +1410,7 @@ impl Service {
             && self.chosen.is_none()
             && self.recording.is_none()
             && self.production_at.is_none()
+            && self.record_countdown.is_none()
             && !self.keeping
         {
             self.editor_aside = false;
@@ -1069,8 +1431,9 @@ impl Service {
         // once it has been: Windows shows a window without activating it only the first time, so
         // showing it again would take the keyboard from the program the owner is typing in.
         let busy = self.home.is_some() || self.overlay.is_some() || self.countdown.is_some() || self.notice.is_some() || self.recording.is_some();
-        let busy = busy || self.restarting.is_some();
+        let busy = busy || self.restarting.is_some() || self.record_countdown.is_some();
         let busy = busy || self.recorder.is_some() || self.updates.notice_up();
+        let busy = busy || self.steps.busy();
         let need = busy || (KEEP_ANCHOR && self.root_shown);
         if need != self.root_shown {
             if need {
@@ -1089,6 +1452,7 @@ impl Service {
             || self.recording.is_some()
             || self.restarting.is_some()
             || self.after_countdown.is_some()
+            || self.record_countdown.is_some()
             || self.production_at.is_some()
             || self.freezing.is_some()
         {
@@ -1171,9 +1535,12 @@ impl Service {
                 ctx.request_repaint();
             }
         }
+        crate::steps::show(self, &ctx);
         crate::popups::countdown(self, &ctx);
+        crate::popups::record_countdown(self, &ctx);
         crate::popups::recording(self, &ctx);
         crate::popups::recording_frame(self, &ctx);
+        crate::popups::drawing(self, &ctx);
         crate::popups::notice(self, &ctx);
         crate::update::show(self, &ctx);
         crate::home::show(self, &ctx);
@@ -1184,6 +1551,10 @@ impl Service {
             for title in [OVERLAY_TITLE, crate::popups::COUNTDOWN_TITLE, crate::popups::NOTICE_TITLE] {
                 cloak::keep_out_of_captures(title);
             }
+        }
+        // The steps bar stays out of the steps' pictures.
+        if self.steps.running() {
+            cloak::keep_out_of_captures(crate::steps::BAR_TITLE);
         }
     }
 }
@@ -1236,6 +1607,11 @@ fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], ra
             b.with_position(pos2(m.rect.x as f32 / s, m.rect.y as f32 / s)).with_inner_size(vec2(m.rect.w as f32 / s, m.rect.h as f32 / s))
         }
     }
+}
+
+/// A window's title as the overlay shows it: its program's name when it has none.
+fn shown_title(w: &screengrabcraft_capture::WindowInfo) -> String {
+    if w.title.is_empty() { w.app.clone() } else { w.title.clone() }
 }
 
 fn file_name(p: &Path) -> String {
@@ -1343,8 +1719,21 @@ fn copy_to_clipboard(pic: &Raster) -> bool {
 /// The file work of keeping a capture (on a worker thread): written, handed to the editor, then
 /// copied to the clipboard if that's left to do (`copy_later`), whether the file could be
 /// written or not.
-fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied: bool, copy_later: bool) -> Result<Done, String> {
+fn keep(
+    pic: &Raster,
+    source: &str,
+    window: Option<&Window>,
+    s: &Settings,
+    save: bool,
+    edit: bool,
+    copied: bool,
+    copy_later: bool,
+) -> Result<Done, String> {
     let file = write_capture(pic, source, s, save, edit);
+    // A window's capture kept in the captures folder: the library notes its program and title.
+    if let (Ok((Some(saved), _)), Some(w)) = (&file, window) {
+        screengrabcraft_desktop::library::taken_from(saved, &w.program, &w.title);
+    }
     let mut edited = false;
     if edit && let Ok((_, Some(p))) = &file {
         let t = Instant::now();
@@ -1365,9 +1754,29 @@ fn keep(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool, copied
     Ok(Done { saved, copied, edited, thumb })
 }
 
+/// A preset's effects added to its capture, by the editor's own commands (as Batch Changes adds
+/// them); the capture as it was if they can't be.
+fn with_effects(pic: Raster, effects: &screengrabcraft_model::settings::PresetEffects) -> Raster {
+    let steps = effects.steps();
+    if steps.is_empty() {
+        return pic;
+    }
+    let t = Instant::now();
+    match screengrabcraft_engine::batch::apply(pic.clone(), &steps) {
+        Ok(done) => {
+            log::info!("capture: the preset's effects added in {} ms", t.elapsed().as_millis());
+            done
+        }
+        Err(e) => {
+            log::warn!("capture: the preset's effects couldn't be added: {e}");
+            pic
+        }
+    }
+}
+
 /// The capture written: where it was saved (if it was), and the file for the editor (if it goes
 /// there).
-fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+pub(crate) fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
     let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
     let format = if s.format == ImageFormat::Gif || s.format == ImageFormat::Pdf && edit { ImageFormat::Png } else { s.format };
     let mut saved = None;
@@ -1400,6 +1809,22 @@ fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_presets_effects_are_added_to_its_capture() {
+        use screengrabcraft_model::settings::PresetEffects;
+        let pic = Raster::filled(40, 30, screengrabcraft_model::Color::WHITE).unwrap();
+        let same = with_effects(pic.clone(), &PresetEffects::default());
+        assert!(same.same_pixels(&pic), "none: as it was, not even copied");
+        let red = screengrabcraft_model::Color::rgb(200, 0, 0);
+        let framed = with_effects(pic.clone(), &PresetEffects { border: 5, border_color: red, grayscale: true, ..PresetEffects::default() });
+        assert_eq!((framed.width(), framed.height()), (50, 40));
+        assert_eq!(framed.pixel(1, 1), Some(red), "the border after the grey, in its colour");
+        // With a shadow it grows more, and its corners are see-through where rounded.
+        let soft = with_effects(pic, &PresetEffects { round_corners: 8, shadow: true, ..PresetEffects::default() });
+        assert!(soft.width() > 40 && soft.height() > 30);
+        assert!(soft.pixel(0, 0).is_some_and(|c| c.a < 255));
+    }
 
     #[test]
     fn grab_texts_notice_shows_how_the_text_begins() {
@@ -1451,6 +1876,17 @@ mod tests {
         assert_eq!(enter_button(&a(false, true, true)), Action::Copy);
         assert_eq!(enter_button(&a(false, false, true)), Action::Save);
         assert_eq!(enter_button(&a(false, false, false)), Action::Edit);
+    }
+
+    #[test]
+    fn a_gif_or_a_video_counts_down_first_and_a_scrolling_capture_does_not() {
+        let area = IRect::new(10, 20, 300, 200);
+        let gif = Again::Area { kind: record::Kind::Gif, monitor: 1, area, desktop: area };
+        let scrolling = Again::Area { kind: record::Kind::Scrolling, monitor: 1, area, desktop: area };
+        let video = Again::Video { mode: CaptureMode::Production, screen: record::Screen::Part { monitor: 1, area }, desktop: area };
+        assert!(counts_down(&gif, 3) && counts_down(&video, 1));
+        assert!(!counts_down(&scrolling, 3), "a scrolling capture starts at once");
+        assert!(!counts_down(&gif, 0) && !counts_down(&video, 0), "turned off");
     }
 
     #[test]

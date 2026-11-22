@@ -26,7 +26,7 @@ use crate::services::OpenedFile;
 /// How long the document stays unchanged before it is written.
 pub const QUIET_SECS: f64 = 1.0;
 /// The quality a JPEG is written again at.
-const JPEG_QUALITY: u8 = 92;
+pub(crate) const JPEG_QUALITY: u8 = 92;
 
 /// Where the files go when deleted: what Windows and the others call it.
 pub const TRASH: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
@@ -436,6 +436,11 @@ impl Editor {
         if let Err(e) = self.services.trash(path) {
             self.error(ctx, format!("{name} couldn't be moved to the {TRASH}: {e}"));
             return;
+        }
+        // What the library knew of it goes with it.
+        let forget = serde_json::json!({"path": path});
+        if self.services.run_library("library.forget", &forget).is_ok() {
+            let _ = screengrabcraft_engine::library::run(&mut self.library, "library.forget", &forget);
         }
         let side = sibling_project(path);
         match self.services.trash(&side) {

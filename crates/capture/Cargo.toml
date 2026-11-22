@@ -52,10 +52,11 @@ default-features = false
 features = ["input-msmf"]
 
 # The camera thread made ready for Windows' media system (COM) itself: nokhwa does that only on
-# the first thread that asks, which in the capture service is the window's, listing the cameras.
+# the first thread that asks, which in the capture service is the window's, listing the cameras. Open
+# menus looked for (`menus.rs`), cloaked ones left out.
 [target.'cfg(target_os = "windows")'.dependencies.winsafe]
 version = "0.0.29"
-features = ["ole"]
+features = ["ole", "dwm"]
 
 # The pointer in video recordings: which of the system's pointers shows (its pictures read from
 # the pointer files Windows uses, named in the registry).

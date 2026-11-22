@@ -1,8 +1,9 @@
 //! The strip of recent captures along the bottom of the editor: click one to open it, or the
 //! bin on one under the pointer to move it to the Recycle Bin. The mouse wheel over it goes back
 //! through older captures (all of them, a thumbnail made only for those in view), and All
-//! captures shows every one bigger, newest first, by day, with a search. A video has a play
-//! mark on its thumbnail.
+//! captures shows every one bigger, newest first, by day, with a search, and filters for
+//! favourites, the program a capture was taken from and its tags ([`crate::tags`]). A video has a
+//! play mark on its thumbnail; a favourite, a star.
 //!
 //! Each editor lists its own: the Image Editor its pictures and projects, the Video Editor its
 //! recordings and the videos made of them.
@@ -51,9 +52,12 @@ pub fn listed_in(kind: crate::editor::EditorKind, path: &str) -> bool {
     is_video(path) == (kind == crate::editor::EditorKind::Video)
 }
 
-/// The captures this editor lists, newest first as the host gave them.
+/// The captures this editor lists: the pinned ones first, then the rest, each newest first as the
+/// host gave them.
 fn listed(ed: &Editor) -> Vec<RecentItem> {
-    ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).cloned().collect()
+    let mut items: Vec<RecentItem> = ed.recent.iter().filter(|r| listed_in(ed.kind, &r.path)).cloned().collect();
+    items.sort_by_key(|i| !ed.library.captures.get(&i.path).is_some_and(|c| c.pinned));
+    items
 }
 
 /// Whether a capture is a video (a recording or an MP4).
@@ -212,7 +216,11 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
                     thumbnail(ed, ui, item, rect);
                     let ring = if current { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.border) };
                     ui.painter().rect_stroke(rect, 5.0, ring, StrokeKind::Inside);
-                    let resp = resp.on_hover_text(&item.name);
+                    crate::tags::strip_star(ed, ui, rect, item);
+                    crate::tags::strip_pin(ed, ui, rect, item);
+                    let resp = resp.on_hover_text(crate::tags::tooltip(ed, item));
+                    // A right click: Favorites and tags.
+                    resp.context_menu(|ui| crate::tags::menu(ed, ui, item, &items));
                     // Over the thumbnail, so it takes the click, not the thumbnail.
                     let delete = pointed && delete_button(ui, rect, &item.name).clicked();
                     if delete {
@@ -239,19 +247,73 @@ fn all_captures(ed: &mut Editor, ui: &mut Ui, items: &[RecentItem]) {
     let resp = ui.button(format!("{all} ({shown})")).on_hover_text(format!("Every {what} in the captures folder, newest first, by day"));
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_width(ALL_WIDTH);
-        let search = egui::TextEdit::singleline(&mut ed.capture_search).hint_text("Search by name").desired_width(f32::INFINITY);
+        let search =
+            egui::TextEdit::singleline(&mut ed.capture_filter.search).hint_text("Search by name, tag or program").desired_width(f32::INFINITY);
         ui.add(search);
         ui.add_space(6.0);
-        let words: Vec<String> = ed.capture_search.to_lowercase().split_whitespace().map(str::to_string).collect();
-        let mut matching: Vec<&RecentItem> =
-            items.iter().take(MAX_SHOWN).filter(|i| words.iter().all(|w| i.name.to_lowercase().contains(w.as_str()))).collect();
+        let listed = items.get(..shown).unwrap_or(items);
+        crate::tags::filters(ed, ui, listed);
+        ui.add_space(6.0);
+        crate::tags::tag_row(ed, ui, listed);
+        let mut matching: Vec<&RecentItem> = listed.iter().filter(|i| ed.capture_filter.shows(&i.name, &ed.library.get(&i.path))).collect();
         if matching.is_empty() {
-            let none = if items.is_empty() { format!("No {what}s yet.") } else { format!("No {what} has that name.") };
+            let none = if items.is_empty() { format!("No {what}s yet.") } else { format!("No {what} is like that.") };
             ui.label(egui::RichText::new(none).color(t.muted));
             return;
         }
         // Newest first, whatever order they came in.
         matching.sort_by_key(|i| std::cmp::Reverse(i.modified));
+        // Those chosen (Ctrl+click) that are still listed, else the pictures shown: all changed
+        // at once, or made into one PDF.
+        ed.chosen_captures.retain(|p| listed.iter().any(|i| i.path == *p));
+        let mut pool: Vec<&RecentItem> =
+            if ed.chosen_captures.is_empty() { matching.clone() } else { listed.iter().filter(|i| ed.chosen_captures.contains(&i.path)).collect() };
+        pool.retain(|i| !is_video(&i.path));
+        pool.sort_by_key(|i| std::cmp::Reverse(i.modified));
+        let pictures: Vec<String> = pool.iter().map(|i| i.path.clone()).collect();
+        if !pictures.is_empty() {
+            let n = pictures.len();
+            let chosen = !ed.chosen_captures.is_empty();
+            let these = if chosen {
+                "Chosen"
+            } else if n == 1 {
+                "This"
+            } else {
+                "These"
+            };
+            let mut close = false;
+            ui.horizontal_wrapped(|ui| {
+                let which = if chosen { "picture chosen" } else { "picture shown" };
+                if ui
+                    .button(format!("Batch Change {these} ({n})\u{2026}"))
+                    .on_hover_text(format!("The same changes (a size, effects, a format, a name) made to every {which}"))
+                    .clicked()
+                {
+                    ed.open_batch(pictures.clone());
+                    close = true;
+                }
+                if ui
+                    .button(format!("PDF of {these} ({n})\u{2026}"))
+                    .on_hover_text(format!("One PDF, a page for every {which}, oldest first"))
+                    .clicked()
+                {
+                    // In the order they were taken.
+                    ed.open_batch_pdf(pictures.iter().rev().cloned().collect());
+                    close = true;
+                }
+                if chosen && ui.button("Choose None").on_hover_text("Go back to every picture shown").clicked() {
+                    ed.chosen_captures.clear();
+                }
+                let how = if cfg!(target_os = "macos") { "Cmd+click" } else { "Ctrl+click" };
+                ui.label(egui::RichText::new(format!("{how} to choose")).size(11.5).color(t.muted))
+                    .on_hover_text(format!("{how} captures to choose some: the buttons then take only those"));
+            });
+            if close {
+                ui.close();
+                return;
+            }
+            ui.add_space(4.0);
+        }
         let today = ed.services.today();
         egui::ScrollArea::vertical().max_height(560.0).auto_shrink([false, true]).show(ui, |ui| {
             let mut start = 0;
@@ -285,16 +347,55 @@ fn tile(ed: &mut Editor, ui: &mut Ui, item: &RecentItem) -> bool {
         return false;
     }
     let current = is_current(ed, &item.path);
+    let chosen = ed.chosen_captures.contains(&item.path);
     let pic = egui::Rect::from_min_size(rect.min, BIG);
-    let bg = if resp.hovered() { t.hover } else { t.panel };
+    let bg = if resp.hovered() {
+        t.hover
+    } else if chosen {
+        t.selected
+    } else {
+        t.panel
+    };
     ui.painter().rect_filled(pic, 5.0, bg);
     thumbnail(ed, ui, item, pic);
-    let ring = if current { Stroke::new(2.0, t.accent) } else { Stroke::new(1.0, t.border) };
+    let ring = if chosen {
+        Stroke::new(3.0, t.accent)
+    } else if current {
+        Stroke::new(2.0, t.accent)
+    } else {
+        Stroke::new(1.0, t.border)
+    };
     ui.painter().rect_stroke(pic, 5.0, ring, StrokeKind::Inside);
-    let caption =
-        if item.time.is_empty() { item.name.clone() } else { format!("{}  {}", item.time, if is_video(&item.path) { "Video" } else { "" }) };
+    if chosen {
+        // A tick in the lower right corner.
+        let c = pos2(pic.max.x - 16.0, pic.max.y - 16.0);
+        ui.painter().circle_filled(c, 11.0, t.accent);
+        icons::paint(ui.painter(), egui::Rect::from_center_size(c, vec2(16.0, 16.0)), Icon::Check, Color32::WHITE);
+    }
+    // The time, and the program it was taken from (or that it's a video).
+    let program = ed.library.get(&item.path).program;
+    let program = if program.chars().count() > 22 { format!("{}\u{2026}", program.chars().take(21).collect::<String>()) } else { program };
+    let kind = if is_video(&item.path) { "Video" } else { program.as_str() };
+    let caption = if item.time.is_empty() { item.name.clone() } else { format!("{}  {kind}", item.time) };
     ui.painter().text(pos2(pic.min.x + 2.0, pic.max.y + 3.0), egui::Align2::LEFT_TOP, caption.trim_end(), egui::FontId::proportional(12.0), t.muted);
-    let clicked = resp.on_hover_text(&item.name).clicked();
+    let pointed = ui.rect_contains_pointer(pic);
+    // Over the thumbnail, so they take the click, not the thumbnail.
+    if crate::tags::tile_buttons(ed, ui, pic, item, pointed) {
+        return false;
+    }
+    let clicked = resp.on_hover_text(crate::tags::tooltip(ed, item)).clicked();
+    // Ctrl+click (Cmd on a Mac) chooses it, or not, for Batch Changes or a PDF.
+    let choosing = ui.input(|i| {
+        i.modifiers.command || i.events.iter().any(|e| matches!(e, egui::Event::PointerButton { pressed: false, modifiers, .. } if modifiers.command))
+    });
+    if clicked && choosing {
+        if chosen {
+            ed.chosen_captures.retain(|p| *p != item.path);
+        } else {
+            ed.chosen_captures.push(item.path.clone());
+        }
+        return false;
+    }
     if clicked && !current {
         ed.open_path(&ctx, &item.path);
     }

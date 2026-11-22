@@ -129,6 +129,21 @@ impl Plate {
         let person = b.get(8 + n * 4..)?.to_vec();
         Some(Plate { width, height, rgb, seen, person })
     }
+
+    /// Flipped left to right, for a camera shown mirrored.
+    pub fn flipped(&self) -> Plate {
+        let w = (self.width as usize).max(1);
+        let flip = |v: &[u8], n: usize| -> Vec<u8> {
+            let mut out = Vec::with_capacity(v.len());
+            for row in v.chunks(w * n) {
+                for px in row.chunks(n).rev() {
+                    out.extend_from_slice(px);
+                }
+            }
+            out
+        };
+        Plate { width: self.width, height: self.height, rgb: flip(&self.rgb, 3), seen: flip(&self.seen, 1), person: flip(&self.person, 1) }
+    }
 }
 
 /// The plate's size for pictures of `w × h`.
@@ -315,5 +330,21 @@ mod tests {
         assert!(learn(&[]).is_none());
         // Any picture keyed against it never panics.
         assert_eq!(plate_key(&Raster::filled(1, 1, Color::BLACK).unwrap(), &plate).len(), 1);
+    }
+
+    #[test]
+    fn a_mirrored_camera_is_keyed_against_the_background_mirrored() {
+        // The room learnt as recorded; the camera shown mirrored (the person now at the left).
+        let plate = learn(&[room(20), room(220)]).unwrap();
+        let (now, _) = room(200);
+        let shown = screengrabcraft_render::effects::flip(&now, true).unwrap();
+        let keep = plate_key(&shown, &plate.flipped());
+        assert!(keep[150 * 320 + 80] > 230, "the person: {}", keep[150 * 320 + 80]);
+        assert!(keep[150 * 320 + 280] < 25, "the room: {}", keep[150 * 320 + 280]);
+        assert!(keep[20 * 320 + 80] < 25, "above them: {}", keep[20 * 320 + 80]);
+        // Flipped back it's as it was; a plate read from junk can't make it panic.
+        assert_eq!(plate.flipped().flipped(), plate);
+        let odd = Plate { width: 0, height: 3, rgb: vec![1; 7], seen: vec![2; 2], person: Vec::new() };
+        assert_eq!(odd.flipped().rgb.len(), 7);
     }
 }

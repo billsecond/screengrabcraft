@@ -67,6 +67,7 @@ fn own_thumbnail(t: &OwnTemplate) -> Option<Raster> {
         motion_blur: Default::default(),
         pointer_hidden: Vec::new(),
         pointer_paths: Vec::new(),
+        camera_full: Vec::new(),
     };
     tl.use_template(t, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, busiest(t), &mut Default::default(), &mut Default::default());

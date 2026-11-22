@@ -31,7 +31,7 @@ use screengrabcraft_engine::VideoSession;
 use screengrabcraft_media::captions::{self, Captions, Cue, Speaker};
 use screengrabcraft_media::compose::{self, Composer};
 use screengrabcraft_media::recording::{self, Recording, StreamKind};
-use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
+use screengrabcraft_media::timeline::{CameraShape, Corner, MAX_CAMERA_BORDER, Track};
 use serde_json::{Value, json};
 
 pub mod batch;
@@ -2508,10 +2508,96 @@ impl VideoView {
         if r.drag_stopped() {
             self.session.commit();
         }
+        ui.add_space(8.0);
+        // The border: how wide (none at 0) and its colour.
+        let mut border = cam.border * 100.0;
+        let r = named_slider(ui, "Border", &mut border, 0.0..=MAX_CAMERA_BORDER * 100.0, "%")
+            .on_hover_text("A line round the camera, as a share of its picture's height; 0 is none");
+        if r.drag_started() {
+            self.session.begin("Camera");
+        }
+        if r.changed() {
+            let p = json!({"border": border / 100.0});
+            if r.dragged() {
+                let _ = self.session.drag("video.camera", &p);
+            } else {
+                self.run(ed, &ctx, "video.camera", p)
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+        ui.horizontal(|ui| {
+            ui.label(small("Border colour"));
+            let c = cam.border_color;
+            let mut c32 = Color32::from_rgb(c.r, c.g, c.b);
+            let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, "The border's colour"));
+            if r.on_hover_text("The colour of the line round the camera").changed() {
+                let mut p = json!({"borderColor": format!("#{:02X}{:02X}{:02X}", c32.r(), c32.g(), c32.b())});
+                // A colour chosen with no border yet shows one.
+                if cam.border <= 0.0 {
+                    p["border"] = json!(0.03);
+                }
+                self.run(ed, &ctx, "video.camera", p);
+            }
+        });
+        ui.add_space(6.0);
+        let mut mirror = cam.mirror;
+        if ui.checkbox(&mut mirror, "Mirror").on_hover_text("The camera flipped left to right, as you see yourself in a mirror").changed() {
+            self.run(ed, &ctx, "video.camera", json!({"mirror": mirror}));
+        }
         ui.add_space(4.0);
         ui.label(small("Or drag the camera on the picture to put it anywhere."));
         ui.add_space(8.0);
         self.camera_background(ed, ui);
+        // The camera full screen for stretches, the screen in its place.
+        ui.add_space(10.0);
+        ui.label(small("Full screen"));
+        let chosen = self.range;
+        let wide = ui.available_width();
+        let r = ui
+            .add_enabled(chosen.is_some(), egui::Button::new("Camera Full Screen for the Stretch").min_size(vec2(wide, 28.0)))
+            .on_hover_text("The camera fills the picture for the chosen stretch, the screen small in its place")
+            .on_disabled_hover_text("Choose a stretch first: drag a handle out from the playhead on the ruler");
+        if r.clicked()
+            && let Some((a, b)) = chosen
+        {
+            self.run(ed, &ctx, "video.cameraFull", json!({"from": a, "to": b, "full": true}));
+        }
+        let (mut remove, mut go) = (None, None);
+        for k in 0..self.session.timeline.camera_full.len() {
+            let shown = self.session.timeline.camera_full_shown(k);
+            ui.horizontal(|ui| {
+                match shown {
+                    Some((a, b)) => {
+                        if ui.link(format!("{} to {}", clock(a), clock(b))).on_hover_text("Go there").clicked() {
+                            go = Some(a);
+                        }
+                    }
+                    None => {
+                        ui.label(small("Cut out of the video"));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Clear of the panel's scroll bar.
+                    ui.add_space(8.0);
+                    if ui.small_button("Remove").on_hover_text("The screen back with the camera in its corner here").clicked() {
+                        remove = Some(k);
+                    }
+                });
+            });
+        }
+        if let Some(k) = remove {
+            self.run(ed, &ctx, "video.cameraFull", json!({"stretch": k, "full": false}));
+        }
+        if let Some(at) = go {
+            let now = ui.input(|i| i.time);
+            self.seek(ed, at, now);
+        }
+        if self.session.timeline.camera_full.is_empty() {
+            ui.label(small("While recording, the camera button on the recording's controls (or its shortcut) does the same."));
+        }
         let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
         if hidden {
             ui.add_space(4.0);

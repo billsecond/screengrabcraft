@@ -8,7 +8,8 @@ use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, vec2};
 use screengrabcraft_desktop::{launch, paths, service};
 use screengrabcraft_model::settings::KEYS;
 use screengrabcraft_model::settings::VideoOptions;
-use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys, ImageFormat, Theme};
+use screengrabcraft_model::settings::{FIXED_MAX, FIXED_MIN, PRESET_BORDER_MAX, PRESET_RADIUS_MAX, PRESETS_MAX, PresetEffects, SHAPES};
+use screengrabcraft_model::{CaptureMode, CapturePreset, Hotkey, Hotkeys, ImageFormat, PresetArea, Theme};
 use screengrabcraft_ui::icons::{self, Icon};
 use screengrabcraft_ui::theme::Tokens;
 use screengrabcraft_ui::widgets::{self, FooterButton};
@@ -21,6 +22,7 @@ pub enum Tab {
     #[default]
     Capture,
     After,
+    Presets,
     Video,
     Shortcuts,
     General,
@@ -126,6 +128,7 @@ fn contents(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match home.tab {
             Tab::Capture => capture_tab(svc, home, ui, close),
             Tab::After => after_tab(svc, ui),
+            Tab::Presets => presets_tab(svc, ui, close),
             Tab::Video => video_tab(svc, home, ui),
             Tab::Shortcuts => shortcuts_tab(svc, ui),
             Tab::General => general_tab(svc, home, ui),
@@ -153,6 +156,7 @@ fn nav(ui: &mut Ui, tab: &mut Tab) {
             for (page, label) in [
                 (Tab::Capture, "Capture"),
                 (Tab::After, "After a capture"),
+                (Tab::Presets, "Capture presets"),
                 (Tab::Video, "Recording"),
                 (Tab::Shortcuts, "Shortcuts"),
                 (Tab::General, "General"),
@@ -199,6 +203,41 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     ui.heading("Capture");
     ui.add_space(8.0);
     let chosen = capture_buttons(ui, &mut home.delay, &|mode| svc.keys.label(&svc.settings.hotkeys, mode).unwrap_or_default());
+    if !svc.settings.presets.is_empty() {
+        ui.add_space(16.0);
+        if let Some(i) = preset_buttons(ui, &svc.settings.presets, &|p| svc.keys.preset_label(p)) {
+            // The window goes first, so it isn't in the picture.
+            *close = true;
+            svc.run_preset_soon(i);
+        }
+    }
+    ui.add_space(16.0);
+    ui.label(RichText::new("How-to Guide").strong());
+    ui.label(RichText::new("Each click takes a picture of the window clicked, with the click marked. Stop, and the steps are numbered, to put in order, word and save as a PDF, a web page or Markdown.").size(12.0).color(Tokens::get(ui.ctx()).muted));
+    if widgets::button(ui, "Record Steps").clicked() {
+        // The window goes first, so it isn't in the first step.
+        *close = true;
+        crate::steps::start(svc);
+    }
+    ui.add_space(16.0);
+    let waiting = svc.timed.at.map(|_| svc.settings.timed.at.clone());
+    let status = svc.timed.problem.clone().unwrap_or_else(|| svc.timed.status());
+    let (changed, action) = timed_section(ui, &mut svc.settings.timed, svc.timed.running(), &status, waiting.as_deref());
+    if changed {
+        svc.settings.timed = svc.settings.timed.clone().clamped();
+        screengrabcraft_desktop::store::save_settings(&svc.settings);
+    }
+    match action {
+        Some(TimerAction::Start) => crate::timed::start(svc),
+        Some(TimerAction::Stop) => crate::timed::stop(svc),
+        Some(TimerAction::Schedule) => {
+            if let Err(e) = crate::timed::schedule(svc) {
+                svc.notify("No capture was set", e, None, None, true);
+            }
+        }
+        Some(TimerAction::Unschedule) => svc.timed.at = None,
+        None => {}
+    }
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(6.0);
@@ -224,6 +263,7 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         } else if delay > 0 {
             svc.start(mode, delay);
         } else {
+            svc.preset = None;
             svc.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
         }
     }
@@ -237,12 +277,14 @@ fn capture_buttons(ui: &mut Ui, delay: &mut u32, shortcut: &dyn Fn(CaptureMode) 
     let pictures = [
         (CaptureMode::Region, Icon::Region, "Drag out an area, or click a window"),
         (CaptureMode::Adjust, Icon::Crop, "Drag out an area, then adjust it"),
+        (CaptureMode::Freehand, Icon::Freehand, "Draw round what to keep"),
         (CaptureMode::Window, Icon::Window, "Click a window"),
         (CaptureMode::Screen, Icon::Screen, "The screen under the pointer"),
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
         (CaptureMode::Scrolling, Icon::Scrolling, "A long page, as you scroll it"),
         (CaptureMode::Repeat, Icon::Repeat, "The same area as last time"),
         (CaptureMode::Text, Icon::Text, "Copy the text in an area"),
+        (CaptureMode::Camera, Icon::Camera, "A still from the camera"),
     ];
     let recordings = [
         (CaptureMode::Production, Icon::Edit, "With the camera and sound, to edit"),
@@ -395,13 +437,336 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     ui.checkbox(&mut s.magnifier, "Show the magnifier next to the pointer");
     ui.checkbox(&mut s.crosshair, "Show crosshair lines");
     ui.checkbox(&mut s.include_cursor, "Include the mouse pointer in captures");
+    ui.add_space(12.0);
+    scrolling_options(ui, &mut s, screengrabcraft_capture::scroll::supported());
     if s != svc.settings {
         svc.settings = s;
         svc.apply_settings();
     }
 }
 
+/// How a scrolling capture goes: by itself (where the system lets it, `can`), and how long its
+/// picture may get.
+fn scrolling_options(ui: &mut Ui, s: &mut screengrabcraft_model::Settings, can: bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new("Scrolling Capture").strong());
+    ui.add_enabled_ui(can, |ui| {
+        let mut on = s.scroll_by_itself && can;
+        if ui.checkbox(&mut on, "Scroll the page by itself").on_disabled_hover_text(screengrabcraft_capture::scroll::UNSUPPORTED).changed() {
+            s.scroll_by_itself = on;
+        }
+    });
+    let how = if can && s.scroll_by_itself {
+        "It turns the mouse wheel over the area and stops at the end of the page. Where the page doesn't move, you scroll it and press Done."
+    } else {
+        "You scroll the page yourself and press Done."
+    };
+    ui.label(RichText::new(how).size(12.0).color(t.muted));
+    ui.horizontal(|ui| {
+        ui.label("Longest picture");
+        let range = screengrabcraft_model::settings::SCROLLING_SHORTEST..=screengrabcraft_model::MAX_SIDE;
+        ui.add(egui::DragValue::new(&mut s.scrolling_longest).range(range).speed(100.0).suffix(" px"));
+    });
+}
+
+/// What the Capture page's timer section asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerAction {
+    Start,
+    Stop,
+    /// A capture at the time written.
+    Schedule,
+    /// Not that one after all.
+    Unschedule,
+}
+
+/// Captures on a timer and at a set time, on the Capture page: how often and of what, whether
+/// a capture that would look as the last one did is skipped, Start or Stop with how it's going
+/// (`status`), and one capture at a time of day (`waiting` is the time one waits for). Whether a
+/// setting changed, and what was pressed.
+fn timed_section(
+    ui: &mut Ui,
+    t: &mut screengrabcraft_model::TimedCaptures,
+    running: bool,
+    status: &str,
+    waiting: Option<&str>,
+) -> (bool, Option<TimerAction>) {
+    use screengrabcraft_model::timed::{MAX_EVERY, MIN_EVERY, TimedArea};
+    let tokens = Tokens::get(ui.ctx());
+    let mut changed = false;
+    let mut action = None;
+    ui.label(RichText::new("Captures on a Timer").strong());
+    ui.add_enabled_ui(!running, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("One every");
+            changed |= ui.add(egui::DragValue::new(&mut t.every_secs).range(MIN_EVERY..=MAX_EVERY).suffix(" s")).changed();
+            ui.label("of");
+            egui::ComboBox::from_id_salt("timed-area").selected_text(t.area.label()).show_ui(ui, |ui| {
+                for a in TimedArea::ALL {
+                    changed |= ui.selectable_value(&mut t.area, a, a.label()).changed();
+                }
+            });
+        });
+        changed |= ui.checkbox(&mut t.skip_unchanged, "Skip a capture when nothing has changed").changed();
+    });
+    ui.horizontal(|ui| {
+        if running {
+            if widgets::button(ui, "Stop").clicked() {
+                action = Some(TimerAction::Stop);
+            }
+            ui.label(RichText::new(status).color(tokens.muted));
+        } else if widgets::button(ui, "Start").on_hover_text("Each is saved to the captures folder, nothing coming up over the screen").clicked() {
+            action = Some(TimerAction::Start);
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("One at");
+        match waiting {
+            Some(at) => {
+                ui.label(RichText::new(format!("{at}, waiting")).color(tokens.muted));
+                if widgets::button(ui, "Cancel").clicked() {
+                    action = Some(TimerAction::Unschedule);
+                }
+            }
+            None => {
+                changed |= ui.add(egui::TextEdit::singleline(&mut t.at).hint_text("14:30").desired_width(56.0)).changed();
+                let ok = screengrabcraft_model::timed::parse_clock(&t.at).is_some();
+                if ui
+                    .add_enabled(ok, egui::Button::new("Take One Then"))
+                    .on_disabled_hover_text("Write the time as hours and minutes, as 14:30")
+                    .clicked()
+                {
+                    action = Some(TimerAction::Schedule);
+                }
+            }
+        }
+    });
+    (changed, action)
+}
+
+/// The capture presets as buttons, each with its shortcut (`key` says it, if it has one). The one
+/// pressed.
+fn preset_buttons(ui: &mut Ui, presets: &[CapturePreset], key: &dyn Fn(&CapturePreset) -> Option<String>) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new("Your presets").strong());
+    ui.label(RichText::new("Made on the Capture presets page.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    let mut pressed = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, p) in presets.iter().enumerate() {
+            let words = match key(p) {
+                Some(k) => format!("{}  ({k})", p.title(i + 1)),
+                None => p.title(i + 1),
+            };
+            if widgets::button(ui, &words).on_hover_text(p.area.describe()).clicked() {
+                pressed = Some(i);
+            }
+        }
+    });
+    pressed
+}
+
+fn presets_tab(svc: &mut Service, ui: &mut Ui, close: &mut bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Capture presets");
+    ui.label(
+        RichText::new(
+            "A capture of your own: what it takes, after how long, what happens to it, and a shortcut of its own. They're on the Capture page and in the tray menu too.",
+        )
+        .color(t.muted),
+    );
+    ui.add_space(10.0);
+    let mut presets = svc.settings.presets.clone();
+    let run = presets_editor(ui, &mut presets);
+    if presets != svc.settings.presets {
+        svc.settings.presets = presets;
+        svc.apply_settings();
+    }
+    ui.add_space(6.0);
+    let named: Vec<String> = svc.settings.presets.iter().enumerate().map(|(i, p)| p.title(i + 1)).collect();
+    for (a, b) in svc.settings.clashes() {
+        if named.contains(&a) || named.contains(&b) {
+            ui.label(RichText::new(format!("{a} and {b} have the same shortcut.")).color(t.danger));
+        }
+    }
+    if let Some(i) = run {
+        // The window goes first, so it isn't in the picture.
+        *close = true;
+        svc.run_preset_soon(i);
+    }
+}
+
+/// Each preset on a card of its own (its name, what it takes, the wait, what happens after, its
+/// shortcut, Capture and Remove), and a button that adds one. The preset whose Capture was pressed.
+fn presets_editor(ui: &mut Ui, presets: &mut Vec<CapturePreset>) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    let mut run = None;
+    let mut remove = None;
+    for (i, p) in presets.iter_mut().enumerate() {
+        egui::Frame::NONE
+            .fill(t.window)
+            .stroke(egui::Stroke::new(1.0, t.border))
+            .corner_radius(widgets::CONTROL_RADIUS)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.name)
+                            .id_salt(("preset-name", i))
+                            .desired_width(260.0)
+                            .hint_text(format!("Preset {}", i + 1)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::button(ui, "Remove").on_hover_text("Remove this preset").clicked() {
+                            remove = Some(i);
+                        }
+                        if widgets::primary_button(ui, "Capture").on_hover_text("Take this capture now").clicked() {
+                            run = Some(i);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::Grid::new(("preset", i)).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Area");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("preset-area", i)).width(190.0).selected_text(p.area.label()).show_ui(ui, |ui| {
+                            for kind in PresetArea::KINDS {
+                                if ui.selectable_label(p.area.same_kind(kind), kind.label()).clicked() && !p.area.same_kind(kind) {
+                                    p.area = kind;
+                                }
+                            }
+                        });
+                        match &mut p.area {
+                            PresetArea::Shape { w, h } => {
+                                egui::ComboBox::from_id_salt(("preset-shape", i)).width(80.0).selected_text(format!("{w}:{h}")).show_ui(ui, |ui| {
+                                    for (sw, sh) in SHAPES {
+                                        if ui.selectable_label((*w, *h) == (sw, sh), format!("{sw}:{sh}")).clicked() {
+                                            (*w, *h) = (sw, sh);
+                                        }
+                                    }
+                                });
+                            }
+                            PresetArea::Fixed { w, h } => {
+                                ui.add(egui::DragValue::new(w).range(FIXED_MIN..=FIXED_MAX).suffix(" px"));
+                                ui.label("×");
+                                ui.add(egui::DragValue::new(h).range(FIXED_MIN..=FIXED_MAX).suffix(" px"));
+                            }
+                            _ => {}
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Wait first");
+                    ui.add(egui::DragValue::new(&mut p.delay_secs).range(0..=60).suffix(" s"));
+                    ui.end_row();
+                    ui.label("Then");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut p.after.copy, "Copy it");
+                        ui.checkbox(&mut p.after.open_editor, "Open it in the Image Editor");
+                        ui.checkbox(&mut p.after.save, "Save it");
+                        if matches!(p.area.mode(), CaptureMode::Region | CaptureMode::Window | CaptureMode::Freehand) {
+                            ui.checkbox(&mut p.after.show_bar, "Stop first, with the bar");
+                        }
+                    });
+                    ui.end_row();
+                    preset_effects_row(ui, i, &mut p.effects);
+                    preset_file_rows(ui, i, p);
+                    hotkey_row_in(ui, "Shortcut", ("preset-key", i), &mut p.hotkey, None);
+                });
+            });
+        ui.add_space(8.0);
+    }
+    if let Some(i) = remove
+        && i < presets.len()
+    {
+        presets.remove(i);
+    }
+    let full = presets.len() >= PRESETS_MAX;
+    let add = ui.add_enabled_ui(!full, |ui| widgets::button(ui, "Add a preset")).inner;
+    if add.on_disabled_hover_text(format!("{PRESETS_MAX} presets at most")).clicked() {
+        presets.push(CapturePreset { name: format!("Preset {}", presets.len() + 1), ..CapturePreset::default() });
+    }
+    if presets.is_empty() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("For example: a 1280 × 720 area copied straight to the clipboard, or a window saved after 3 seconds.")
+                .size(12.0)
+                .color(t.muted),
+        );
+    }
+    run
+}
+
+/// A preset's effects, added to its picture as it's taken: a grid row.
+fn preset_effects_row(ui: &mut Ui, i: usize, fx: &mut PresetEffects) {
+    ui.label("Effects");
+    ui.horizontal_wrapped(|ui| {
+        let mut border = fx.border > 0;
+        if ui.checkbox(&mut border, "Border").changed() {
+            fx.border = if border { 4 } else { 0 };
+        }
+        if border {
+            ui.add(egui::DragValue::new(&mut fx.border).range(1..=PRESET_BORDER_MAX).suffix(" px"));
+            let c = fx.border_color;
+            let mut c32 = Color32::from_rgb(c.r, c.g, c.b);
+            let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, format!("Preset {} border colour", i + 1)));
+            if r.on_hover_text("The border's colour").changed() {
+                fx.border_color = screengrabcraft_model::Color::rgb(c32.r(), c32.g(), c32.b());
+            }
+        }
+        let mut round = fx.round_corners > 0;
+        if ui.checkbox(&mut round, "Round corners").changed() {
+            fx.round_corners = if round { 16 } else { 0 };
+        }
+        if round {
+            ui.add(egui::DragValue::new(&mut fx.round_corners).range(1..=PRESET_RADIUS_MAX).suffix(" px"));
+        }
+        ui.checkbox(&mut fx.torn_edge, "Torn edge").on_hover_text("The bottom edge torn off");
+        ui.checkbox(&mut fx.shadow, "Shadow");
+        ui.checkbox(&mut fx.grayscale, "Grey");
+    });
+    ui.end_row();
+}
+
+/// Where a preset's captures are saved and as what, when it saves them: grid rows.
+fn preset_file_rows(ui: &mut Ui, i: usize, p: &mut CapturePreset) {
+    let t = Tokens::get(ui.ctx());
+    ui.label("Saved in");
+    ui.horizontal(|ui| {
+        match p.folder.as_deref() {
+            Some(f) => ui.label(RichText::new(f).monospace().size(12.0)),
+            None => ui.label(RichText::new("The captures folder").color(t.muted)),
+        };
+        if widgets::button(ui, "Choose…").on_hover_text("A folder of this preset's own").clicked()
+            && let Some(dir) = rfd::FileDialog::new().pick_folder()
+        {
+            p.folder = Some(dir.to_string_lossy().to_string());
+        }
+        if p.folder.is_some() && widgets::button(ui, "Captures Folder").on_hover_text("Save them with the rest").clicked() {
+            p.folder = None;
+        }
+    });
+    ui.end_row();
+    ui.label("As");
+    let shown = p.format.map_or_else(|| "As in Settings".to_string(), |f| f.label().to_string());
+    egui::ComboBox::from_id_salt(("preset-format", i)).width(190.0).selected_text(shown).show_ui(ui, |ui| {
+        ui.selectable_value(&mut p.format, None, "As in Settings");
+        for f in ImageFormat::ALL {
+            ui.selectable_value(&mut p.format, Some(f), f.label());
+        }
+    });
+    ui.end_row();
+}
+
 fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
+    hotkey_row_in(ui, label, label, key, default)
+}
+
+/// A shortcut's row of a grid: its label, on or off, the keys held with it and the key; `salt` keeps
+/// its list of keys apart from another row's with the same label.
+fn hotkey_row_in(ui: &mut Ui, label: &str, salt: impl std::hash::Hash + std::fmt::Debug, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
     let mut changed = false;
     ui.label(label);
     ui.horizontal(|ui| {
@@ -415,7 +780,7 @@ fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Optio
             changed |= ui.toggle_value(&mut k.alt, if cfg!(target_os = "macos") { "Option" } else { "Alt" }).changed();
             changed |= ui.toggle_value(&mut k.shift, "Shift").changed();
             changed |= ui.toggle_value(&mut k.logo, logo_name()).changed();
-            egui::ComboBox::from_id_salt(("key", label)).width(110.0).selected_text(k.key.clone()).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("key", salt)).width(110.0).selected_text(k.key.clone()).show_ui(ui, |ui| {
                 for name in KEYS {
                     if ui.selectable_label(k.key == *name, *name).clicked() {
                         k.key = (*name).to_string();
@@ -468,14 +833,28 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             keys.stop = s;
             changed = true;
         }
+        let mut d = keys.draw.clone();
+        if hotkey_row(ui, "Draw on the Screen While Recording", &mut d, defaults.draw.clone()) {
+            keys.draw = d;
+            changed = true;
+        }
+        let mut f = keys.camera_full.clone();
+        if hotkey_row(ui, screengrabcraft_model::settings::CAMERA_FULL_LABEL, &mut f, defaults.camera_full.clone()) {
+            keys.camera_full = f;
+            changed = true;
+        }
     });
-    ui.label(RichText::new("Pause and Stop are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
+    ui.label(
+        RichText::new("Pause, Stop, Draw and the camera full screen are only taken from other programs while a recording runs.")
+            .size(12.0)
+            .color(t.muted),
+    );
     if changed {
         svc.settings.hotkeys = keys;
         svc.apply_settings();
     }
     ui.add_space(10.0);
-    for (a, b) in svc.settings.hotkeys.clashes() {
+    for (a, b) in svc.settings.clashes() {
         ui.label(RichText::new(format!("{a} and {b} have the same shortcut.")).color(t.danger));
     }
     for p in &svc.keys.problems {
@@ -627,12 +1006,33 @@ fn sources(ui: &mut Ui, id: &str, o: &mut VideoOptions, d: &Devices, camera: boo
     }
 }
 
+/// The countdown before a recording: on or off, and how many seconds (`secs`, 0 when off).
+fn countdown_row(ui: &mut Ui, secs: &mut u32) {
+    let t = Tokens::get(ui.ctx());
+    ui.horizontal(|ui| {
+        let mut on = *secs > 0;
+        if ui.checkbox(&mut on, "Count down before a recording starts").changed() {
+            *secs = if on { 3 } else { 0 };
+        }
+        if on {
+            ui.add(egui::DragValue::new(secs).range(1..=screengrabcraft_model::settings::RECORD_COUNTDOWN_MAX).suffix(" s"));
+        }
+    });
+    ui.label(
+        RichText::new("The seconds are shown over the area (a GIF, a video, Video Production), and gone before the recording starts.")
+            .size(12.0)
+            .color(t.muted),
+    );
+}
+
 fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let d = home.devices.get_or_insert_with(Devices::find);
     let mut s = svc.settings.clone();
     ui.heading("Recording");
     ui.add_space(8.0);
+    countdown_row(ui, &mut s.record_countdown);
+    ui.add_space(14.0);
     ui.label(RichText::new("Record Video").strong());
     ui.label(RichText::new("A small MP4 of an area, made as soon as you stop.").size(12.0).color(t.muted));
     ui.add_space(4.0);
@@ -713,7 +1113,7 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
 mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable as _;
-    use screengrabcraft_model::Theme;
+    use screengrabcraft_model::{AfterCapture, Theme};
 
     use super::*;
 
@@ -746,6 +1146,24 @@ mod tests {
         h.get_by_label("Quit ScreenGrabCraft").click();
         h.run_steps(1);
         assert_eq!(h.state().0, Some(Leave::Quit));
+    }
+
+    #[test]
+    fn the_countdown_before_a_recording_is_turned_off_and_on() {
+        let mut h = Harness::builder().with_size(vec2(560.0, 120.0)).build_ui_state(
+            |ui, secs: &mut u32| {
+                egui::CentralPanel::default().show(ui, |ui| countdown_row(ui, secs));
+            },
+            3u32,
+        );
+        h.run_steps(2);
+        let label = "Count down before a recording starts";
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(*h.state(), 0, "off");
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        assert_eq!(*h.state(), 3, "on again: three seconds");
     }
 
     #[test]
@@ -801,6 +1219,176 @@ mod tests {
             h.get_by_label("Capture After a Wait").click();
             h.run_steps(2);
             assert_eq!(h.state().1, Some((CaptureMode::Region, 5)));
+        }
+    }
+
+    /// The presets' page: one is added, made a picture of a set size copied straight away, given
+    /// a wait, and captured; another is removed.
+    #[test]
+    fn a_preset_is_added_set_up_captured_and_removed() {
+        let mut h = Harness::builder().with_size(vec2(680.0, 980.0)).build_ui_state(
+            |ui, (presets, run): &mut (Vec<CapturePreset>, Option<usize>)| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if let Some(i) = presets_editor(ui, presets) {
+                        *run = Some(i);
+                    }
+                });
+            },
+            (Vec::new(), None),
+        );
+        h.run_steps(2);
+        h.get_by_label_contains("For example");
+        h.get_by_label("Add a preset").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 1);
+        assert_eq!(h.state().0[0].name, "Preset 1");
+        // A picture of a set size, copied and nothing else.
+        h.get_by_value("Region").click();
+        h.run_steps(2);
+        h.get_by_label("Region of a set size").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0[0].area, PresetArea::Fixed { w: 1280, h: 720 });
+        for what in ["Open it in the Image Editor", "Save it"] {
+            h.get_by_label(what).click();
+            h.run_steps(1);
+        }
+        assert_eq!(h.state().0[0].after, AfterCapture { show_bar: false, open_editor: false, copy: true, save: false });
+        // A border and a shadow added as it's taken; saved as JPEG.
+        for what in ["Border", "Shadow"] {
+            h.get_by_label(what).click();
+            h.run_steps(2);
+        }
+        h.get_by_label("Preset 1 border colour");
+        assert_eq!(h.state().0[0].effects, PresetEffects { border: 4, shadow: true, ..PresetEffects::default() });
+        h.get_by_value("As in Settings").click();
+        h.run_steps(2);
+        h.get_by_label("JPEG").click();
+        h.run_steps(2);
+        assert_eq!((h.state().0[0].format, h.state().0[0].folder.as_deref()), (Some(ImageFormat::Jpeg), None));
+        h.get_by_label("Add a preset").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 2);
+        h.run_steps(3);
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/home-presets.png"));
+        }
+        // Capture the first; remove the second.
+        let captures = h.get_all_by_label("Capture").map(|n| n.rect()).collect::<Vec<_>>();
+        assert_eq!(captures.len(), 2);
+        h.get_all_by_label("Capture").next().unwrap().click();
+        h.run_steps(2);
+        assert_eq!(h.state().1, Some(0));
+        h.get_all_by_label("Remove").nth(1).unwrap().click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 1);
+        assert_eq!(h.state().0[0].area, PresetArea::Fixed { w: 1280, h: 720 }, "the first is left");
+    }
+
+    #[test]
+    fn the_capture_page_shows_the_presets_with_their_shortcuts() {
+        let presets = vec![
+            CapturePreset { name: "Docs shot".into(), area: PresetArea::Fixed { w: 800, h: 600 }, ..CapturePreset::default() },
+            CapturePreset { name: " ".into(), area: PresetArea::Window, ..CapturePreset::default() },
+        ];
+        let mut h = Harness::builder().with_size(vec2(560.0, 200.0)).build_ui_state(
+            move |ui, pressed: &mut Option<usize>| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let key = |p: &CapturePreset| (p.name == "Docs shot").then(|| "Ctrl+Alt+D".to_string());
+                    if let Some(i) = preset_buttons(ui, &presets, &key) {
+                        *pressed = Some(i);
+                    }
+                });
+            },
+            None,
+        );
+        h.run_steps(2);
+        h.get_by_label("Docs shot  (Ctrl+Alt+D)");
+        h.get_by_label("Preset 2").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(1));
+    }
+
+    /// The timer section with its settings, whether it runs, and what it last asked for.
+    type TimerState = (screengrabcraft_model::TimedCaptures, bool, Option<TimerAction>, Option<String>);
+
+    #[test]
+    fn the_timer_starts_and_stops_and_one_capture_waits_for_a_set_time() {
+        let mut h = Harness::builder().with_size(vec2(560.0, 220.0)).build_ui_state(
+            |ui, s: &mut TimerState| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let (_, action) = timed_section(ui, &mut s.0, s.1, "3 captures kept", s.3.as_deref());
+                    if action.is_some() {
+                        s.2 = action;
+                    }
+                });
+            },
+            (screengrabcraft_model::TimedCaptures::default(), false, None, None),
+        );
+        h.run_steps(2);
+        assert!(h.state().0.skip_unchanged, "unchanged ones are skipped by default");
+        assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Take One Then")).is_disabled(), "no time written yet");
+        h.get_by_label("Start").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Start));
+        h.state_mut().1 = true;
+        h.run_steps(2);
+        h.get_by_label("3 captures kept");
+        h.get_by_label("Stop").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Stop));
+        h.state_mut().0.at = "7:30".into();
+        h.run_steps(2);
+        h.get_by_label("Take One Then").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Schedule));
+        h.state_mut().3 = Some("7:30".into());
+        h.run_steps(2);
+        h.get_by_label("7:30, waiting");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/home-timer.png"));
+        }
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Unschedule));
+    }
+
+    /// Scrolling by itself is turned off and on where the system can do it, and greyed out with
+    /// the reason where it can't.
+    #[test]
+    fn scrolling_by_itself_is_a_setting_greyed_out_where_it_cant_be() {
+        for can in [true, false] {
+            let mut h = Harness::builder().with_size(vec2(560.0, 200.0)).build_ui_state(
+                move |ui, s: &mut screengrabcraft_model::Settings| {
+                    screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                    egui::CentralPanel::default().show(ui, |ui| scrolling_options(ui, s, can));
+                },
+                screengrabcraft_model::Settings::default(),
+            );
+            h.run_steps(2);
+            assert!(h.state().scroll_by_itself, "on by default");
+            let shown = h.get_by_label("Scroll the page by itself");
+            assert_eq!(egui_kittest::kittest::NodeT::accesskit_node(&shown).is_disabled(), !can);
+            if can {
+                h.get_by_label_contains("stops at the end of the page");
+                h.get_by_label("Scroll the page by itself").click();
+                h.run_steps(2);
+                assert!(!h.state().scroll_by_itself);
+                h.get_by_label("You scroll the page yourself and press Done.");
+            } else {
+                h.get_by_label("You scroll the page yourself and press Done.");
+            }
+            if let Ok(dir) = std::env::var("SGC_SHOTS")
+                && let Ok(img) = h.render()
+            {
+                let _ = img.save(format!("{dir}/home-scrolling-{can}.png"));
+            }
         }
     }
 

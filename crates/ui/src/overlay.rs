@@ -8,9 +8,16 @@
 //!
 //! One [`Overlay`] is shared by all the monitors' windows: [`Overlay::show_monitor`] draws one
 //! monitor's window and takes its input. Areas are in the pixels of a monitor's picture.
+//!
+//! Several areas of one screen make one capture: each dragged out with Alt (Option on a Mac)
+//! held is kept and another can be dragged out; the last one without it, or Enter, keeps them
+//! all, laid out as they were with the rest see-through. A freehand area ([`Purpose::Freehand`])
+//! is drawn round with the button held down, and what's outside it is see-through.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Pos2, Sense, Stroke, StrokeKind, TextureOptions, Ui, pos2, vec2};
 use screengrabcraft_model::{IRect, Raster, Rect};
+pub use screengrabcraft_render::area::AreaShape;
+use screengrabcraft_render::area::{MAX_BOXES, MAX_POINTS};
 
 use crate::icons::{self, Icon};
 use crate::widgets::{CONTROL_RADIUS, WINDOW_RADIUS, strong_font};
@@ -45,6 +52,11 @@ pub enum Purpose {
     /// A video of a set size, in the monitor's pixels: a frame of that size follows the pointer
     /// and a click places it (Video Production's Recorder). It is moved, not resized.
     VideoFixed(u32, u32),
+    /// A picture of a set size, in the monitor's pixels: placed like [`Purpose::VideoFixed`], kept
+    /// like a picture.
+    PictureFixed(u32, u32),
+    /// A picture of an area drawn round freehand: what's outside the outline is see-through.
+    Freehand,
 }
 
 impl Purpose {
@@ -61,10 +73,62 @@ impl Purpose {
     /// The fixed size of the frame, if it has one.
     fn fixed(self) -> Option<(u32, u32)> {
         match self {
-            Purpose::VideoFixed(w, h) => Some((w, h)),
+            Purpose::VideoFixed(w, h) | Purpose::PictureFixed(w, h) => Some((w, h)),
             _ => None,
         }
     }
+
+    /// Whether an area is dragged out (and so can be held to a shape).
+    fn drags_area(self) -> bool {
+        !self.clicks_window() && self.fixed().is_none() && self != Purpose::Freehand
+    }
+}
+
+/// The key held while dragging out an area to keep it and drag out another, as the hint says it.
+const MORE_KEY: &str = if cfg!(target_os = "macos") { "Option" } else { "Alt" };
+
+/// The shape held while an area is dragged out, by the keys held: Shift a square, Ctrl (Cmd on a
+/// Mac) 16:9, both 4:3.
+pub fn held_shape(m: egui::Modifiers) -> Option<(u32, u32)> {
+    match (m.command, m.shift) {
+        (true, true) => Some((4, 3)),
+        (true, false) => Some((16, 9)),
+        (false, true) => Some((1, 1)),
+        (false, false) => None,
+    }
+}
+
+/// A shape as the area's label says it: `16:9`, `square`.
+fn shape_name(w: u32, h: u32) -> String {
+    if w == h { "square".to_string() } else { format!("{w}:{h}") }
+}
+
+/// The keys that hold a shape, as the hint says them.
+const SHAPE_KEYS: &str =
+    if cfg!(target_os = "macos") { "Shift: square  ·  Cmd: 16:9  ·  Cmd+Shift: 4:3" } else { "Shift: square  ·  Ctrl: 16:9  ·  Ctrl+Shift: 4:3" };
+
+/// The area dragged from `start` to `p` held to `shape` (`w` wide for every `h` tall): as large as
+/// the drag's longer side asks, toward the pointer, made smaller (keeping its shape) to stay on a
+/// monitor of `mon` pixels. Whole pixels where the shape allows.
+pub fn shaped_area(start: (f32, f32), p: (f32, f32), shape: (u32, u32), mon: (f32, f32)) -> Rect {
+    let ratio = shape.0.max(1) as f32 / shape.1.max(1) as f32;
+    let (dx, dy) = (p.0 - start.0, p.1 - start.1);
+    let (dx, dy) = (if dx.is_finite() { dx } else { 0.0 }, if dy.is_finite() { dy } else { 0.0 });
+    let (mut w, mut h) = (dx.abs(), dy.abs());
+    if w >= h * ratio {
+        h = w / ratio;
+    } else {
+        w = h * ratio;
+    }
+    // The room there is toward the pointer.
+    let room_x = if dx >= 0.0 { mon.0 - start.0 } else { start.0 };
+    let room_y = if dy >= 0.0 { mon.1 - start.1 } else { start.1 };
+    let fit = (room_x.max(0.0) / w.max(f32::EPSILON)).min(room_y.max(0.0) / h.max(f32::EPSILON)).min(1.0);
+    let w = (w * fit).floor().max(0.0);
+    let h = (w / ratio).round().min(room_y.max(0.0).floor());
+    let x = if dx >= 0.0 { start.0 } else { start.0 - w };
+    let y = if dy >= 0.0 { start.1 } else { start.1 - h };
+    Rect::new(x, y, w, h)
 }
 
 /// A frame of `size` pixels centred on `p`, kept on a monitor of `mon` pixels: it's made smaller,
@@ -114,6 +178,9 @@ pub enum Outcome {
         action: Action,
         /// The window's title, when a window was clicked.
         title: Option<String>,
+        /// What of `area` is kept, in the monitor's picture's pixels, when it isn't all of it:
+        /// several areas (`area` the box round them), or a freehand outline.
+        shape: Option<AreaShape>,
     },
 }
 
@@ -137,6 +204,10 @@ pub struct Overlay {
     pub enter: Action,
     pub magnifier: bool,
     pub crosshair: bool,
+    /// The shape every area dragged out is held to (a preset's), else the keys held say.
+    pub shape: Option<(u32, u32)>,
+    /// The shape the area being dragged out (or last dragged out) is held to, for its label.
+    held: Option<(u32, u32)>,
     textures: Vec<Option<egui::TextureHandle>>,
     /// The monitor of the area, and the area in its pixels.
     sel: Option<(usize, Rect)>,
@@ -146,6 +217,16 @@ pub struct Overlay {
     pointer: Option<(usize, (f32, f32))>,
     outcome: Outcome,
     focused: Vec<bool>,
+    /// The areas kept so far for a capture of several (each dragged out with [`MORE_KEY`] held),
+    /// all on monitor `kept_on`.
+    kept: Vec<Rect>,
+    kept_on: usize,
+    /// The outline of a freehand area, being drawn or drawn (its monitor's pixels; the monitor is
+    /// the area's).
+    path: Vec<(f32, f32)>,
+    path_on: usize,
+    /// What's outside the drawn outline, dimmed, as a picture over the box round it.
+    path_shade: Option<egui::TextureHandle>,
 }
 
 const HANDLE: f32 = 9.0;
@@ -232,6 +313,28 @@ fn pixels(r: Rect, w: u32, h: u32) -> IRect {
     }
 }
 
+/// Dims all of `screen` but `holes`: in bands between the holes' tops and bottoms, the parts of
+/// each band outside every hole. Nothing is dimmed twice.
+fn dim_outside(painter: &egui::Painter, screen: egui::Rect, holes: &[egui::Rect], dim: Color32) {
+    let holes: Vec<egui::Rect> = holes.iter().map(|h| h.intersect(screen)).filter(|h| h.is_positive()).collect();
+    let mut ys: Vec<f32> = holes.iter().flat_map(|h| [h.min.y, h.max.y]).chain([screen.min.y, screen.max.y]).collect();
+    ys.sort_by(f32::total_cmp);
+    ys.dedup();
+    for band in ys.windows(2) {
+        let [y0, y1] = band else { continue };
+        let mid = (y0 + y1) / 2.0;
+        let mut spans: Vec<(f32, f32)> = holes.iter().filter(|h| h.min.y <= mid && h.max.y > mid).map(|h| (h.min.x, h.max.x)).collect();
+        spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut x = screen.min.x;
+        for (a, b) in spans.into_iter().chain([(screen.max.x, screen.max.x)]) {
+            if a > x {
+                painter.rect_filled(egui::Rect::from_min_max(pos2(x, *y0), pos2(a, *y1)), 0.0, dim);
+            }
+            x = x.max(b);
+        }
+    }
+}
+
 fn handles(r: Rect) -> [(f32, f32); 8] {
     let (cx, cy) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
     [(r.x, r.y), (cx, r.y), (r.right(), r.y), (r.right(), cy), (r.right(), r.bottom()), (cx, r.bottom()), (r.x, r.bottom()), (r.x, cy)]
@@ -263,6 +366,8 @@ impl Overlay {
             enter: Action::Default,
             magnifier: true,
             crosshair: true,
+            shape: None,
+            held: None,
             textures: (0..n).map(|_| None).collect(),
             sel: None,
             title: None,
@@ -270,6 +375,11 @@ impl Overlay {
             pointer: None,
             outcome: Outcome::Pending,
             focused: vec![false; n],
+            kept: Vec::new(),
+            kept_on: 0,
+            path: Vec::new(),
+            path_on: 0,
+            path_shade: None,
         }
     }
 
@@ -299,15 +409,81 @@ impl Overlay {
     }
 
     fn choose(&mut self, action: Action) {
-        let Some((mi, r)) = self.sel else { return };
+        // The area being adjusted, else (Enter after some were kept) the last one kept.
+        let Some((mi, r)) = self.sel.or_else(|| self.kept.last().map(|r| (self.kept_on, *r))) else { return };
         let Some(m) = self.monitors.get(mi) else { return };
-        let area = if self.purpose.fixed().is_some() {
-            fixed_pixels(r, m.picture.width(), m.picture.height())
+        let (pw, ph) = (m.picture.width(), m.picture.height());
+        let (area, shape) = if self.purpose == Purpose::Freehand {
+            (pixels(r, pw, ph), Some(AreaShape::Freehand(self.path.clone())))
+        } else if self.purpose.fixed().is_some() {
+            (fixed_pixels(r, pw, ph), None)
         } else {
-            pixels(r, m.picture.width(), m.picture.height())
+            // With the ones kept before it, on its monitor.
+            let mut boxes: Vec<IRect> = if self.kept_on == mi { self.kept.iter().map(|k| pixels(*k, pw, ph)).collect() } else { Vec::new() };
+            if self.sel.is_some() {
+                boxes.push(pixels(r, pw, ph));
+            }
+            match boxes.as_slice() {
+                [one] => (*one, None),
+                _ => {
+                    let shape = AreaShape::Boxes(boxes);
+                    (shape.bounds().unwrap_or_else(|| pixels(r, pw, ph)), Some(shape))
+                }
+            }
         };
         let desktop = px_to_desk(m, Rect::new(area.x as f32, area.y as f32, area.w as f32, area.h as f32));
-        self.outcome = Outcome::Chosen { monitor: mi, area, desktop, action, title: self.title.clone() };
+        let title = if shape.is_some() { None } else { self.title.clone() };
+        self.outcome = Outcome::Chosen { monitor: mi, area, desktop, action, title, shape };
+    }
+
+    /// Keeps area `r` of monitor `mi` for a capture of several, and gets ready for the next. The
+    /// ones kept on another monitor are let go: a capture of several is of one monitor.
+    fn keep_area(&mut self, mi: usize, r: Rect) {
+        if self.kept_on != mi {
+            self.kept.clear();
+        }
+        self.kept_on = mi;
+        if self.kept.len() < MAX_BOXES.saturating_sub(1) {
+            self.kept.push(r);
+        }
+        self.sel = None;
+        self.title = None;
+        self.phase = Phase::Choosing;
+    }
+
+    /// The areas kept so far on monitor `mi`.
+    fn kept_on(&self, mi: usize) -> &[Rect] {
+        if self.kept_on == mi { &self.kept } else { &[] }
+    }
+
+    /// The box round the freehand outline drawn on a monitor of `size` pixels, if it's an area
+    /// (three points or more, three pixels across or more).
+    fn path_bounds(&self, size: (f32, f32)) -> Option<Rect> {
+        if self.path.len() < 3 {
+            return None;
+        }
+        let b = AreaShape::Freehand(self.path.clone()).bounds()?;
+        let r = Rect::new(b.x as f32, b.y as f32, b.w as f32, b.h as f32).intersect(Rect::new(0.0, 0.0, size.0, size.1))?;
+        (r.w >= 3.0 && r.h >= 3.0).then_some(r)
+    }
+
+    /// The dimmed outside of the freehand outline over the box `bounds` round it, as a picture no
+    /// more than 512 pixels a side.
+    fn shade_texture(&mut self, ctx: &egui::Context, bounds: Rect) -> Option<egui::TextureId> {
+        if let Some(t) = &self.path_shade {
+            return Some(t.id());
+        }
+        let f = (512.0 / bounds.w.max(bounds.h).max(1.0)).min(1.0);
+        let (w, h) = (((bounds.w * f).ceil() as u32).max(1), ((bounds.h * f).ceil() as u32).max(1));
+        let (bx, by) = (bounds.x.floor() as i32, bounds.y.floor() as i32);
+        let shape = AreaShape::Freehand(self.path.clone()).moved(-bx, -by).scaled(f);
+        let cover = screengrabcraft_render::area::coverage(&shape, w, h)?;
+        let px: Vec<u8> = cover.iter().flat_map(|c| [0, 0, 0, ((255 - u16::from(*c)) * 110 / 255) as u8]).collect();
+        let image = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &px);
+        let tex = ctx.load_texture("overlay-freehand", image, TextureOptions::LINEAR);
+        let id = tex.id();
+        self.path_shade = Some(tex);
+        Some(id)
     }
 
     /// The frontmost window under a point of a monitor, in that monitor's pixels.
@@ -400,46 +576,74 @@ impl Overlay {
         } else {
             None
         };
-        match lit {
-            Some(r) => {
-                let rs = rect_screen(r);
-                for part in [
-                    egui::Rect::from_min_max(screen.min, pos2(screen.max.x, rs.min.y)),
-                    egui::Rect::from_min_max(pos2(screen.min.x, rs.max.y), screen.max),
-                    egui::Rect::from_min_max(pos2(screen.min.x, rs.min.y), pos2(rs.min.x, rs.max.y)),
-                    egui::Rect::from_min_max(pos2(rs.max.x, rs.min.y), pos2(screen.max.x, rs.max.y)),
-                ] {
-                    if part.is_positive() {
-                        painter.rect_filled(part, 0.0, dim);
+        // The areas kept for a capture of several, and the one lit now, are shown as they are;
+        // the rest is dimmed.
+        let kept: Vec<egui::Rect> = self.kept_on(mi).iter().map(|r| rect_screen(*r)).collect();
+        let holes: Vec<egui::Rect> = kept.iter().copied().chain(lit.map(rect_screen)).collect();
+        dim_outside(&painter, screen, &holes, dim);
+        for (i, rs) in kept.iter().enumerate() {
+            painter.rect_stroke(*rs, 0.0, Stroke::new(1.5, ACCENT), StrokeKind::Outside);
+            let badge = pos2(rs.min.x + 13.0, rs.min.y + 13.0);
+            painter.circle_filled(badge, 10.0, ACCENT);
+            painter.text(badge, Align2::CENTER_CENTER, (i + 1).to_string(), strong_font(&ctx, 12.0), Color32::from_rgb(0x06, 0x24, 0x24));
+        }
+        // A freehand outline: while it's drawn, and once it is, its outside dimmed in its box.
+        let freehand = self.purpose == Purpose::Freehand;
+        if freehand && self.path.len() >= 2 {
+            if let Some((m, r)) = self.sel
+                && self.phase == Phase::Adjusting
+                && m == mi
+                && let Some(shade) = self.shade_texture(&ctx, r)
+            {
+                painter.image(shade, rect_screen(r), egui::Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            if self.path_on == mi {
+                let pts: Vec<Pos2> = self.path.iter().map(|(x, y)| to_screen(*x, *y)).collect();
+                let line = Stroke::new(2.0, ACCENT);
+                if self.sel.is_some() {
+                    painter.add(egui::Shape::closed_line(pts, line));
+                } else {
+                    // The way back to where it started, as it will be closed.
+                    if let (Some(a), Some(b)) = (pts.first(), pts.last()) {
+                        painter.extend(egui::Shape::dashed_line(&[*b, *a], Stroke::new(1.5, ACCENT.gamma_multiply(0.7)), 6.0, 5.0));
                     }
-                }
-                let chosen = self.sel.is_some();
-                painter.rect_stroke(rs, 0.0, Stroke::new(if chosen { 1.5 } else { 3.0 }, ACCENT), StrokeKind::Outside);
-                // A fixed size has no handles: it's moved, not resized.
-                if chosen && self.purpose.fixed().is_none() && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. })
-                {
-                    for (x, y) in handles(r) {
-                        let hr = egui::Rect::from_center_size(to_screen(x, y), vec2(HANDLE, HANDLE));
-                        painter.rect_filled(hr, 2.0, Color32::WHITE);
-                        painter.rect_stroke(hr, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
-                    }
-                }
-                // The size, outside the top left corner (inside if there's no room).
-                let label = format!("{} × {}", r.w.round() as i64, r.h.round() as i64);
-                let galley = painter.layout_no_wrap(label, FontId::proportional(13.0), Color32::WHITE);
-                let mut at = rs.min + vec2(0.0, -galley.size().y - 10.0);
-                if at.y < screen.min.y + 4.0 {
-                    at = rs.min + vec2(6.0, 6.0);
-                }
-                let bg = egui::Rect::from_min_size(at, galley.size() + vec2(12.0, 6.0));
-                painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
-                painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
-                if chosen && self.phase == Phase::Adjusting {
-                    self.action_bar(ui, mi, rs, screen);
+                    painter.add(egui::Shape::line(pts, line));
                 }
             }
-            None => {
-                painter.rect_filled(screen, 0.0, dim);
+        }
+        if let Some(r) = lit {
+            let rs = rect_screen(r);
+            let chosen = self.sel.is_some();
+            if !freehand {
+                painter.rect_stroke(rs, 0.0, Stroke::new(if chosen { 1.5 } else { 3.0 }, ACCENT), StrokeKind::Outside);
+            }
+            // A fixed size has no handles: it's moved, not resized; nor has a freehand outline.
+            if chosen
+                && self.purpose.fixed().is_none()
+                && !freehand
+                && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. })
+            {
+                for (x, y) in handles(r) {
+                    let hr = egui::Rect::from_center_size(to_screen(x, y), vec2(HANDLE, HANDLE));
+                    painter.rect_filled(hr, 2.0, Color32::WHITE);
+                    painter.rect_stroke(hr, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
+                }
+            }
+            // The size, outside the top left corner (inside if there's no room).
+            let mut label = format!("{} × {}", r.w.round() as i64, r.h.round() as i64);
+            if let Some((w, h)) = self.held.filter(|_| self.title.is_none()) {
+                label = format!("{label}   {}", shape_name(w, h));
+            }
+            let galley = painter.layout_no_wrap(label, FontId::proportional(13.0), Color32::WHITE);
+            let mut at = rs.min + vec2(0.0, -galley.size().y - 10.0);
+            if at.y < screen.min.y + 4.0 {
+                at = rs.min + vec2(6.0, 6.0);
+            }
+            let bg = egui::Rect::from_min_size(at, galley.size() + vec2(12.0, 6.0));
+            painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
+            painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+            if chosen && self.phase == Phase::Adjusting {
+                self.action_bar(ui, mi, rs, screen);
             }
         }
 
@@ -473,7 +677,8 @@ impl Overlay {
             Phase::Moving { .. } => Some(CursorIcon::Grabbing),
             Phase::Adjusting => {
                 let (m, r) = self.sel?;
-                if m != mi || self.purpose.clicks_window() {
+                // A freehand area isn't moved or pulled: a drag draws another.
+                if m != mi || self.purpose.clicks_window() || self.purpose == Purpose::Freehand {
                     return Some(CursorIcon::Crosshair);
                 }
                 // A fixed size has no handles: it's moved, not resized.
@@ -489,7 +694,9 @@ impl Overlay {
     }
 
     fn hint(&self, painter: &egui::Painter, screen: egui::Rect) {
+        let several = !self.kept.is_empty() && self.purpose == Purpose::Picture;
         let text = match self.purpose {
+            Purpose::Picture if several => "Drag out the last area  ·  Enter: keep these  ·  Esc: cancel",
             Purpose::Picture => "Drag to capture an area  ·  Click a window  ·  Enter: the whole screen  ·  Esc: cancel",
             Purpose::Window => "Click the window to capture  ·  Esc: cancel",
             Purpose::Gif => "Drag out the area to record as a GIF  ·  Esc: cancel",
@@ -497,12 +704,36 @@ impl Overlay {
             Purpose::Video => "Drag out the area to record as a video  ·  Esc: cancel",
             Purpose::VideoWindow => "Click the window to record  ·  Esc: cancel",
             Purpose::VideoFixed(..) => "Click to place the frame to record  ·  Esc: cancel",
+            Purpose::PictureFixed(..) => "Click to place the area to capture  ·  Esc: cancel",
+            Purpose::Freehand => "Hold the button down and draw round what to capture  ·  Esc: cancel",
+        };
+        // Under it, the shape an area is held to, or the keys that hold one; and for a picture,
+        // the key that keeps an area and lets another be dragged out.
+        let shapes = match self.shape {
+            _ if several => {
+                let n = self.kept.len();
+                Some(format!("{n} area{} kept  ·  {MORE_KEY}: one more  ·  Backspace: take the last one out", if n == 1 { "" } else { "s" }))
+            }
+            _ if !self.purpose.drags_area() => None,
+            Some((w, h)) => Some(format!("Held to {}", shape_name(w, h))),
+            None => Some(SHAPE_KEYS.to_string()),
+        };
+        let shapes = match shapes {
+            Some(s) if self.purpose == Purpose::Picture && !several => Some(format!("{s}  ·  {MORE_KEY}: several areas")),
+            other => other,
         };
         let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(15.0), Color32::WHITE);
-        let at = pos2(screen.center().x - galley.size().x / 2.0, screen.min.y + 28.0);
-        let bg = egui::Rect::from_min_size(at - vec2(14.0, 8.0), galley.size() + vec2(28.0, 16.0));
+        let small = shapes.map(|s| painter.layout_no_wrap(s, FontId::proportional(12.5), Color32::from_gray(210)));
+        let extra = small.as_ref().map_or(0.0, |g| g.size().y + 4.0);
+        let wide = small.as_ref().map_or(galley.size().x, |g| g.size().x.max(galley.size().x));
+        let at = pos2(screen.center().x - wide / 2.0, screen.min.y + 28.0);
+        let bg = egui::Rect::from_min_size(at - vec2(14.0, 8.0), vec2(wide, galley.size().y + extra) + vec2(28.0, 16.0));
         painter.rect_filled(bg, 10.0, Color32::from_black_alpha(190));
-        painter.galley(at, galley, Color32::WHITE);
+        let below = at.y + galley.size().y + 4.0;
+        painter.galley(pos2(screen.center().x - galley.size().x / 2.0, at.y), galley, Color32::WHITE);
+        if let Some(g) = small {
+            painter.galley(pos2(screen.center().x - g.size().x / 2.0, below), g, Color32::from_gray(210));
+        }
     }
 
     fn loupe(&self, painter: &egui::Painter, tex: egui::TextureId, screen: egui::Rect, s: Pos2, p: (f32, f32), size: (f32, f32), mi: usize) {
@@ -560,7 +791,7 @@ impl Overlay {
             Purpose::Video | Purpose::VideoWindow | Purpose::VideoFixed(..) => {
                 vec![button(Icon::Gif, "Start recording", "Enter", Weight::Main, Some(Action::Start)), cancel]
             }
-            Purpose::Picture | Purpose::Window => {
+            Purpose::Picture | Purpose::Window | Purpose::PictureFixed(..) | Purpose::Freehand => {
                 let mut bar = Vec::with_capacity(5);
                 if enter == Action::Default {
                     bar.push(button(Icon::Edit, "Copy & Edit", "Enter", Weight::Main, Some(Action::Default)));
@@ -638,7 +869,8 @@ impl Overlay {
         }
         let enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
         if enter {
-            if self.sel.is_none() && self.purpose == Purpose::Picture {
+            // With areas kept, Enter keeps them (and the one being adjusted, if there is one).
+            if self.sel.is_none() && self.purpose == Purpose::Picture && self.kept.is_empty() {
                 let m = self.pointer.map(|(m, _)| m).unwrap_or(mi);
                 if let Some(mon) = self.monitors.get(m) {
                     self.sel = Some((m, whole(mon)));
@@ -658,6 +890,10 @@ impl Overlay {
             self.choose(Action::Default);
             return;
         }
+        // Backspace takes the last area kept out again.
+        if self.sel.is_none() && self.phase == Phase::Choosing && ctx.input(|i| i.key_pressed(egui::Key::Backspace)) {
+            self.kept.pop();
+        }
         if self.sel.is_some() && self.phase == Phase::Adjusting {
             // egui turns Ctrl+C into a Copy event rather than a key press.
             let copy = ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Copy)));
@@ -670,9 +906,11 @@ impl Overlay {
                 self.choose(Action::Save);
                 return;
             }
-            // Arrows move the area a pixel; with Shift they make it larger.
+            // Arrows move the area a pixel; with Shift they make it larger. (A freehand outline
+            // stays where it was drawn.)
             if let Some((m, r)) = self.sel.as_mut()
                 && *m == mi
+                && self.purpose != Purpose::Freehand
             {
                 let shift = ctx.input(|i| i.modifiers.shift);
                 for (key, dx, dy) in [
@@ -709,10 +947,19 @@ impl Overlay {
         {
             let p = to_px(start);
             let tol = HANDLE / scale.max(0.01);
-            self.phase = match (self.sel, self.purpose) {
-                (_, purpose) if purpose.clicks_window() => Phase::Choosing,
+            let more = ctx.input(|i| i.modifiers.alt) && self.purpose == Purpose::Picture;
+            self.phase = match (self.sel, self.purpose.fixed()) {
+                _ if self.purpose.clicks_window() => Phase::Choosing,
+                // A freehand outline starts again wherever the drag starts.
+                _ if self.purpose == Purpose::Freehand => {
+                    self.sel = None;
+                    self.path = vec![p];
+                    self.path_on = mi;
+                    self.path_shade = None;
+                    Phase::Dragging { start: p }
+                }
                 // A fixed frame is moved from wherever it's grabbed; grabbed outside, it comes to the pointer first.
-                (sel, Purpose::VideoFixed(w, h)) => {
+                (sel, Some((w, h))) => {
                     let inside = sel.is_some_and(|(m, r)| m == mi && r.contains(screengrabcraft_model::Pt::new(p.0, p.1)));
                     if !inside {
                         self.sel = Some((mi, fixed_frame((w, h), p, (pw, ph))));
@@ -725,6 +972,10 @@ impl Overlay {
                     } else if r.contains(screengrabcraft_model::Pt::new(p.0, p.1)) {
                         Phase::Moving { last: p }
                     } else {
+                        // A new area: with the key held, the one adjusted is kept with it.
+                        if more {
+                            self.keep_area(m, r);
+                        }
                         self.sel = None;
                         Phase::Dragging { start: p }
                     }
@@ -735,14 +986,29 @@ impl Overlay {
                 }
             };
             self.title = None;
+            if matches!(self.phase, Phase::Dragging { .. }) {
+                self.held = self.shape;
+            }
         }
         if resp.dragged()
             && let Some(now) = latest
         {
             let p = to_px(now);
             match self.phase {
+                Phase::Dragging { .. } if self.purpose == Purpose::Freehand => {
+                    // A point wherever the pointer has gone a pixel or more.
+                    let far = self.path.last().is_none_or(|(x, y)| (x - p.0).abs() >= 1.0 || (y - p.1).abs() >= 1.0);
+                    if far && self.path.len() < MAX_POINTS {
+                        self.path.push(p);
+                    }
+                }
                 Phase::Dragging { start } => {
-                    let r = Rect::from_points(screengrabcraft_model::Pt::new(start.0, start.1), screengrabcraft_model::Pt::new(p.0, p.1));
+                    // Held to a shape: the preset's, else the one the keys held say.
+                    self.held = self.shape.or_else(|| ctx.input(|i| held_shape(i.modifiers))).filter(|_| self.purpose.drags_area());
+                    let r = match self.held {
+                        Some(shape) => shaped_area(start, p, shape, (pw, ph)),
+                        None => Rect::from_points(screengrabcraft_model::Pt::new(start.0, start.1), screengrabcraft_model::Pt::new(p.0, p.1)),
+                    };
                     self.sel = r.intersect(monitor_rect).map(|r| (mi, r));
                 }
                 Phase::Moving { last } => {
@@ -755,7 +1021,8 @@ impl Overlay {
                 Phase::Resizing { handle } => {
                     if let Some((_, r)) = self.sel.as_mut() {
                         let h = screengrabcraft_model::Handle::BOX.get(handle).copied().unwrap_or(screengrabcraft_model::Handle::BottomRight);
-                        if let Some(nr) = h.drag_rect(*r, screengrabcraft_model::Pt::new(p.0, p.1), false).intersect(monitor_rect) {
+                        // An area held to a shape keeps it when pulled by a corner.
+                        if let Some(nr) = h.drag_rect(*r, screengrabcraft_model::Pt::new(p.0, p.1), self.held.is_some()).intersect(monitor_rect) {
                             *r = nr;
                         }
                     }
@@ -776,13 +1043,47 @@ impl Overlay {
             }
             if self.sel.is_some() {
                 self.phase = Phase::Adjusting;
+                // A picture of a set size is kept where it's placed, unless the bar is asked for.
+                if matches!(self.purpose, Purpose::PictureFixed(..)) && !self.preview {
+                    self.choose(Action::Default);
+                }
+            }
+            return;
+        }
+        if released && self.purpose == Purpose::Freehand {
+            if matches!(self.phase, Phase::Dragging { .. } | Phase::Choosing) {
+                // Drawn: the box round it is the area; a click or a scribble is nothing.
+                if let Some(end) = latest.map(to_px)
+                    && self.path.last() != Some(&end)
+                    && self.path.len() < MAX_POINTS
+                {
+                    self.path.push(end);
+                }
+                self.sel = self.path_bounds(size).map(|r| (mi, r));
+                self.path_shade = None;
+                if self.sel.is_none() {
+                    self.path.clear();
+                    self.phase = Phase::Choosing;
+                } else if self.preview {
+                    self.phase = Phase::Adjusting;
+                } else {
+                    self.choose(Action::Default);
+                }
             }
             return;
         }
         if released {
+            let more = ctx.input(|i| i.modifiers.alt) && self.purpose == Purpose::Picture;
             match self.phase {
                 Phase::Dragging { .. } | Phase::Choosing => {
                     let small = self.sel.is_none_or(|(_, r)| r.w < 3.0 || r.h < 3.0);
+                    // With areas kept (or one more to come), a click on no window is nothing.
+                    let several = more || !self.kept.is_empty();
+                    if small && several && press.or(latest).map(to_px).and_then(|p| self.window_at(mi, p)).is_none() {
+                        self.sel = None;
+                        self.phase = Phase::Choosing;
+                        return;
+                    }
                     if small {
                         // A click: the window under it, else the whole screen.
                         let at = press.or(latest).map(to_px);
@@ -806,6 +1107,11 @@ impl Overlay {
                     }
                     if self.sel.is_none() {
                         self.phase = Phase::Choosing;
+                        return;
+                    }
+                    // Kept, with another to come.
+                    if more && let Some((m, r)) = self.sel {
+                        self.keep_area(m, r);
                         return;
                     }
                     if self.preview || self.purpose.records() {
@@ -870,7 +1176,8 @@ mod tests {
                 area: IRect::new(20, 20, 80, 40),
                 desktop: IRect::new(-90, 10, 40, 20),
                 action: Action::Copy,
-                title: None
+                title: None,
+                shape: None
             }
         );
         assert_eq!(pixels(Rect::new(-5.0, 2.4, 1000.0, 10.0), 200, 100), IRect::new(0, 2, 200, 11));
@@ -1004,6 +1311,295 @@ mod tests {
         match h.state().outcome() {
             Outcome::Chosen { area, .. } => assert_eq!((area.w, area.h), (200, 100), "{area:?}"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_area_held_to_a_shape_follows_the_pointer_and_stays_on_the_monitor() {
+        let mon = (800.0, 600.0);
+        // Down and right: the longer side of the drag decides.
+        assert_eq!(shaped_area((100.0, 100.0), (420.0, 130.0), (16, 9), mon), Rect::new(100.0, 100.0, 320.0, 180.0));
+        assert_eq!(shaped_area((100.0, 100.0), (130.0, 300.0), (1, 1), mon), Rect::new(100.0, 100.0, 200.0, 200.0));
+        // Up and left, toward the pointer.
+        assert_eq!(shaped_area((500.0, 400.0), (100.0, 390.0), (4, 3), mon), Rect::new(100.0, 100.0, 400.0, 300.0));
+        // Past the monitor's edge: smaller, keeping its shape.
+        let r = shaped_area((600.0, 100.0), (900.0, 110.0), (4, 3), mon);
+        assert_eq!((r.x, r.y, r.w, r.h), (600.0, 100.0, 200.0, 150.0));
+        // Nonsense in, an area on the monitor out.
+        for (s, p, shape) in
+            [((0.0, 0.0), (f32::NAN, f32::INFINITY), (0, 0)), ((800.0, 600.0), (-1e9, -1e9), (u32::MAX, 1)), ((5.0, 5.0), (5.0, 5.0), (9, 16))]
+        {
+            let r = shaped_area(s, p, shape, mon);
+            assert!(r.w >= 0.0 && r.h >= 0.0 && r.x >= 0.0 && r.y >= 0.0 && r.right() <= 800.0 && r.bottom() <= 600.0, "{r:?}");
+        }
+        assert_eq!(held_shape(egui::Modifiers::SHIFT), Some((1, 1)));
+        assert_eq!(held_shape(egui::Modifiers::COMMAND), Some((16, 9)));
+        assert_eq!(held_shape(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT), Some((4, 3)));
+        assert_eq!(held_shape(egui::Modifiers::ALT), None);
+    }
+
+    /// Drags from `from` to `to` with `mods` held, a few steps at a time.
+    fn drag_with(h: &mut egui_kittest::Harness<'_, Overlay>, from: egui::Pos2, to: egui::Pos2, mods: egui::Modifiers) {
+        h.hover_at(from);
+        h.run_steps(1);
+        h.drag_at(from);
+        h.run_steps(1);
+        for i in 1..=4 {
+            h.event(egui::Event::ModifiersChanged(mods));
+            h.hover_at(from + (to - from) * (i as f32 / 4.0));
+            h.run_steps(1);
+        }
+        h.drop_at(to);
+        h.run_steps(2);
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run_steps(1);
+    }
+
+    #[test]
+    fn keys_held_while_dragging_hold_the_area_to_a_shape() {
+        for (mods, want) in [
+            (egui::Modifiers::NONE, (300, 60)),
+            (egui::Modifiers::SHIFT, (300, 300)),
+            (egui::Modifiers::COMMAND, (300, 169)),
+            (egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, (300, 225)),
+        ] {
+            let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture);
+            o.preview = false;
+            let mut h = harness(o);
+            h.run_steps(2);
+            drag_with(&mut h, egui::pos2(100.0, 100.0), egui::pos2(400.0, 160.0), mods);
+            match h.state().outcome() {
+                Outcome::Chosen { area, action, .. } => {
+                    assert_eq!(((area.w, area.h), *action), (want, Action::Default), "{mods:?}");
+                    assert_eq!((area.x, area.y), (100, 100));
+                }
+                other => panic!("{mods:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_presets_shape_holds_without_keys_and_the_hint_says_so() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture);
+        o.shape = Some((4, 3));
+        o.preview = true;
+        let mut h = harness(o);
+        h.run_steps(2);
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/overlay-held-hint.png"));
+        }
+        drag_with(&mut h, egui::pos2(400.0, 400.0), egui::pos2(300.0, 150.0), egui::Modifiers::NONE);
+        assert_eq!(h.state().sel.map(|(_, r)| (r.x, r.y, r.w, r.h)), Some((67.0, 150.0, 333.0, 250.0)), "toward the pointer, 4:3 of the longer side");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/overlay-held-area.png"));
+        }
+        // Pulled by a corner it keeps its shape.
+        h.hover_at(egui::pos2(400.0, 400.0));
+        h.run_steps(1);
+        h.drag_at(egui::pos2(400.0, 400.0));
+        h.run_steps(1);
+        h.hover_at(egui::pos2(500.0, 410.0));
+        h.run_steps(1);
+        h.drop_at(egui::pos2(500.0, 410.0));
+        h.run_steps(2);
+        let (_, r) = h.state().sel.unwrap();
+        assert!((r.w / r.h - 4.0 / 3.0).abs() < 0.02, "{r:?}");
+    }
+
+    #[test]
+    fn a_picture_of_a_set_size_is_kept_where_its_clicked() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::PictureFixed(320, 240));
+        o.preview = false;
+        let mut h = harness(o);
+        h.run_steps(2);
+        h.hover_at(egui::pos2(400.0, 300.0));
+        h.run_steps(2);
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/overlay-picture-fixed.png"));
+        }
+        click(&mut h, egui::pos2(790.0, 20.0));
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, .. } => assert_eq!((*area, *action), (IRect::new(480, 0, 320, 240), Action::Default)),
+            other => panic!("{other:?}"),
+        }
+        // With the bar it waits there, with the picture's buttons.
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::PictureFixed(320, 240)));
+        h.run_steps(2);
+        click(&mut h, egui::pos2(300.0, 300.0));
+        assert_eq!(*h.state().outcome(), Outcome::Pending);
+        h.get_by_label("Copy").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, .. } => assert_eq!((*area, *action), (IRect::new(140, 180, 320, 240), Action::Copy)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn shot(h: &mut egui_kittest::Harness<'_, Overlay>, name: &str) {
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/{name}.png"));
+        }
+    }
+
+    #[test]
+    fn areas_dragged_out_with_alt_held_are_kept_and_joined_with_the_last_one() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture);
+        o.preview = false;
+        let mut h = harness(o);
+        h.run_steps(2);
+        drag_with(&mut h, egui::pos2(100.0, 100.0), egui::pos2(200.0, 150.0), egui::Modifiers::ALT);
+        assert_eq!(*h.state().outcome(), Outcome::Pending, "kept, with another to come");
+        drag_with(&mut h, egui::pos2(300.0, 300.0), egui::pos2(400.0, 420.0), egui::Modifiers::ALT);
+        assert_eq!(h.state().kept.len(), 2);
+        shot(&mut h, "overlay-several-areas");
+        // Backspace takes the last one out; a click on nothing adds nothing.
+        h.key_press(egui::Key::Backspace);
+        h.run_steps(2);
+        assert_eq!(h.state().kept.len(), 1);
+        click(&mut h, egui::pos2(700.0, 500.0));
+        assert_eq!((h.state().kept.len(), h.state().outcome().clone()), (1, Outcome::Pending));
+        drag_with(&mut h, egui::pos2(300.0, 300.0), egui::pos2(400.0, 420.0), egui::Modifiers::ALT);
+        // The last one without the key: all three, in the box round them, as they were.
+        drag_with(&mut h, egui::pos2(500.0, 100.0), egui::pos2(600.0, 200.0), egui::Modifiers::NONE);
+        match h.state().outcome() {
+            Outcome::Chosen { area, desktop, action, title, shape, .. } => {
+                assert_eq!(
+                    (*area, *desktop, *action, title.clone()),
+                    (IRect::new(100, 100, 500, 320), IRect::new(100, 100, 500, 320), Action::Default, None)
+                );
+                assert_eq!(
+                    shape,
+                    &Some(AreaShape::Boxes(vec![IRect::new(100, 100, 100, 50), IRect::new(300, 300, 100, 120), IRect::new(500, 100, 100, 100)]))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_the_bar_the_last_area_is_adjusted_and_enter_keeps_the_ones_kept() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture));
+        h.run_steps(2);
+        drag_with(&mut h, egui::pos2(60.0, 80.0), egui::pos2(260.0, 200.0), egui::Modifiers::ALT);
+        drag_with(&mut h, egui::pos2(400.0, 260.0), egui::pos2(700.0, 400.0), egui::Modifiers::NONE);
+        // The last one waits on its bar, the first shown with it.
+        shot(&mut h, "overlay-several-areas-bar");
+        h.get_by_label("Copy").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, shape: Some(AreaShape::Boxes(b)), .. } => {
+                assert_eq!((*area, *action, b.len()), (IRect::new(60, 80, 640, 320), Action::Copy, 2));
+            }
+            other => panic!("{other:?}"),
+        }
+        // Enter with only areas kept keeps them, not the whole screen.
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture));
+        h.run_steps(2);
+        drag_with(&mut h, egui::pos2(60.0, 80.0), egui::pos2(260.0, 200.0), egui::Modifiers::ALT);
+        drag_with(&mut h, egui::pos2(400.0, 260.0), egui::pos2(700.0, 400.0), egui::Modifiers::ALT);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, shape: Some(AreaShape::Boxes(b)), .. } => assert_eq!((*area, b.len()), (IRect::new(60, 80, 640, 320), 2)),
+            other => panic!("{other:?}"),
+        }
+        // One area alone is a plain one.
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture));
+        h.run_steps(2);
+        drag_with(&mut h, egui::pos2(60.0, 80.0), egui::pos2(260.0, 200.0), egui::Modifiers::ALT);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, shape: None, .. } => assert_eq!(*area, IRect::new(60, 80, 200, 120)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Draws round a circle about `c`, `r` across, with the button held down.
+    fn draw_round(h: &mut egui_kittest::Harness<'_, Overlay>, c: egui::Pos2, r: f32) {
+        let at = |i: usize| c + egui::vec2((i as f32 * 0.25).cos() * r, (i as f32 * 0.25).sin() * r * 0.7);
+        h.hover_at(at(0));
+        h.run_steps(1);
+        h.drag_at(at(0));
+        h.run_steps(1);
+        for i in 1..=24 {
+            h.hover_at(at(i));
+            h.run_steps(1);
+        }
+        h.drop_at(at(24));
+        h.run_steps(2);
+    }
+
+    #[test]
+    fn a_freehand_area_is_drawn_round_and_kept_with_its_outline() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Freehand);
+        o.preview = false;
+        let mut h = harness(o);
+        h.run_steps(2);
+        shot(&mut h, "overlay-freehand-hint");
+        // A click is nothing.
+        click(&mut h, egui::pos2(300.0, 300.0));
+        assert_eq!(*h.state().outcome(), Outcome::Pending);
+        draw_round(&mut h, egui::pos2(400.0, 300.0), 150.0);
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, shape: Some(AreaShape::Freehand(pts)), .. } => {
+                assert_eq!(*action, Action::Default);
+                assert!(pts.len() >= 20, "{}", pts.len());
+                // The box round the outline.
+                assert!((area.x - 250).abs() <= 2 && (area.w as i32 - 300).abs() <= 3, "{area:?}");
+                assert!((area.y - 195).abs() <= 2 && (area.h as i32 - 210).abs() <= 3, "{area:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // With the bar it waits there, its outside dimmed, and is drawn again with a drag.
+        let mut h = harness(Overlay::new(vec![screen_800()], Vec::new(), Purpose::Freehand));
+        h.run_steps(2);
+        draw_round(&mut h, egui::pos2(300.0, 250.0), 120.0);
+        draw_round(&mut h, egui::pos2(400.0, 250.0), 150.0);
+        assert_eq!(*h.state().outcome(), Outcome::Pending);
+        shot(&mut h, "overlay-freehand");
+        h.get_by_label("Save").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, shape: Some(AreaShape::Freehand(_)), .. } => {
+                assert_eq!(*action, Action::Save);
+                assert!((area.x - 250).abs() <= 2, "the second outline: {area:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// An open menu is listed in front of the windows (the capture service finds it): a click on
+    /// it keeps just the menu, a click beside it the window under it.
+    #[test]
+    fn an_open_menu_in_front_of_its_window_is_clicked_alone() {
+        use egui_kittest::kittest::Queryable as _;
+        let menu = OverlayWindow { rect: IRect::new(150, 100, 120, 160), title: "Menu".into() };
+        let notes = OverlayWindow { rect: IRect::new(100, 50, 400, 300), title: "Notes".into() };
+        for (at, rect, title) in [((200.0, 200.0), menu.rect, "Menu"), ((400.0, 300.0), notes.rect, "Notes")] {
+            let mut h = harness(Overlay::new(vec![screen_800()], vec![menu.clone(), notes.clone()], Purpose::VideoWindow));
+            h.run_steps(2);
+            click(&mut h, egui::pos2(at.0, at.1));
+            h.get_by_label("Start recording").click();
+            h.run_steps(2);
+            match h.state().outcome() {
+                Outcome::Chosen { area, title: t, .. } => {
+                    assert_eq!(*area, rect);
+                    assert_eq!(t.as_deref(), Some(title));
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 

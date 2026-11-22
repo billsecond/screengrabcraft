@@ -7,7 +7,7 @@
 
 use global_hotkey::GlobalHotKeyManager;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys};
+use screengrabcraft_model::{CaptureMode, CapturePreset, Hotkey, Hotkeys};
 
 /// What a registered shortcut does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,12 @@ pub enum Target {
     Pause,
     /// While recording: stop it and keep it.
     Stop,
+    /// While recording: draw on the screen, or stop drawing.
+    Draw,
+    /// While recording: the camera full screen, the screen in its corner, or back.
+    CameraFull,
+    /// A capture preset, by its place in the settings' list.
+    Preset(usize),
 }
 
 /// The system's key code for a key name of [`screengrabcraft_model::settings::KEYS`].
@@ -123,8 +129,8 @@ pub fn logo_name() -> &'static str {
 pub struct Registered {
     manager: Option<GlobalHotKeyManager>,
     active: Vec<(HotKey, Target)>,
-    /// Pause and Stop, registered only while a recording runs (F9 and F10 are other programs'
-    /// the rest of the time).
+    /// Pause, Stop, Draw and the camera full screen, registered only while a recording runs (F7
+    /// to F10 are other programs' the rest of the time).
     during: Vec<(HotKey, Target)>,
     pub problems: Vec<String>,
 }
@@ -152,7 +158,12 @@ impl Registered {
         if !on {
             return;
         }
-        for (key, target) in [(keys.pause.as_ref(), Target::Pause), (keys.stop.as_ref(), Target::Stop)] {
+        for (key, target) in [
+            (keys.pause.as_ref(), Target::Pause),
+            (keys.stop.as_ref(), Target::Stop),
+            (keys.draw.as_ref(), Target::Draw),
+            (keys.camera_full.as_ref(), Target::CameraFull),
+        ] {
             let Some(hk) = key.and_then(to_system) else { continue };
             if self.active.iter().chain(&self.during).any(|(k, _)| *k == hk) {
                 log::warn!("{} is already a shortcut; it isn't the recording's too", key.map(|k| k.display(logo_name())).unwrap_or_default());
@@ -170,6 +181,8 @@ impl Registered {
         let k = match target {
             Target::Pause => keys.pause.as_ref(),
             Target::Stop => keys.stop.as_ref(),
+            Target::Draw => keys.draw.as_ref(),
+            Target::CameraFull => keys.camera_full.as_ref(),
             _ => None,
         };
         k.map(|k| k.display(logo_name()))
@@ -180,8 +193,8 @@ impl Registered {
         self.manager.is_some()
     }
 
-    /// Registers the shortcuts of `keys`, replacing those registered before.
-    pub fn apply(&mut self, keys: &Hotkeys) {
+    /// Registers the shortcuts of `keys` and the presets', replacing those registered before.
+    pub fn apply(&mut self, keys: &Hotkeys, presets: &[CapturePreset]) {
         let Some(manager) = &self.manager else { return };
         for (k, _) in self.active.drain(..) {
             let _ = manager.unregister(k);
@@ -189,6 +202,7 @@ impl Registered {
         self.problems.clear();
         let mut wanted: Vec<(Option<&Hotkey>, Target)> = CaptureMode::ALL.iter().map(|m| (keys.get(*m), Target::Capture(*m))).collect();
         wanted.push((keys.editor.as_ref(), Target::Editor));
+        wanted.extend(presets.iter().enumerate().map(|(i, p)| (p.hotkey.as_ref(), Target::Preset(i))));
         for (key, target) in wanted {
             let Some(key) = key else { continue };
             let label = key.display(logo_name());
@@ -214,6 +228,13 @@ impl Registered {
     /// What a pressed shortcut is for.
     pub fn target(&self, id: u32) -> Option<Target> {
         self.active.iter().chain(&self.during).find(|(k, _)| k.id() == id).map(|(_, t)| *t)
+    }
+
+    /// A preset's shortcut as menus show it, if it was registered.
+    pub fn preset_label(&self, p: &CapturePreset) -> Option<String> {
+        let k = p.hotkey.as_ref()?;
+        let hk = to_system(k)?;
+        self.active.iter().any(|(a, _)| *a == hk).then(|| k.display(logo_name()))
     }
 
     /// The shortcut registered for a mode, for menus.

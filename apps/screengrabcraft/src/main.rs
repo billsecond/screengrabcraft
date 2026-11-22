@@ -4,6 +4,8 @@
 //! screengrabcraft                      start the service (or show the running one's window)
 //! screengrabcraft --capture <mode>     capture now: region, window, screen, all, repeat,
 //!                                      scrolling or gif (the running service does it)
+//! screengrabcraft --preset <name>      take a capture preset (by its name or its number);
+//!                                      also --capture preset:<name>
 //! screengrabcraft --delay <seconds>    capture an area after a countdown
 //! screengrabcraft --settings           show the settings
 //! screengrabcraft --check-updates      look for a newer release now (and say what was found)
@@ -24,9 +26,12 @@ mod app;
 mod captions;
 mod home;
 mod hotkeys;
+mod ink;
 mod popups;
 mod record;
 mod recorder;
+mod steps;
+mod timed;
 mod tray;
 mod update;
 
@@ -34,7 +39,9 @@ use std::process::ExitCode;
 
 use screengrabcraft_desktop::{graphics, instance, logging, paths, service, store, version};
 
-const USAGE: &str = "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif] [--delay <s>] [--settings] [--quit]
+const USAGE: &str =
+    "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif|preset:<name>] [--delay <s>] [--settings] [--quit]
+       screengrabcraft --preset <name or number>
        screengrabcraft --check-updates
        screengrabcraft --background | --tray
        screengrabcraft --transcribe <recording.sgvideo>

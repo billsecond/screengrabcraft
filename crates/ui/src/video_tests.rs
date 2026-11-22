@@ -129,6 +129,85 @@ fn the_camera_moves_to_another_corner_and_becomes_a_circle() {
 }
 
 #[test]
+fn the_camera_is_mirrored_and_given_a_border_of_its_own_colour() {
+    let mut h = harness();
+    h.get_by_label("Mirror").click();
+    h.run_steps(2);
+    let cam = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera;
+    assert!(cam(&h).mirror);
+    h.get_by_label("The border's colour");
+    // Wider (from the engine, as its slider does) and orange.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.session.execute("video.camera", &serde_json::json!({"border": 0.08, "borderColor": "#FF8800"})).unwrap();
+    }
+    h.run_steps(3);
+    assert_eq!((cam(&h).border, cam(&h).border_color), (0.08, Color::rgb(0xFF, 0x88, 0)));
+    // The picture shows it: orange round the camera, in its corner.
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera is on the picture");
+    shot(&mut h, "video-camera-border");
+    let img = h.render().unwrap();
+    let orange = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        p[0] > 220 && (110..170).contains(&p[1]) && p[2] < 60
+    };
+    assert!(orange(r.min.x + 1.5, r.center().y) && orange(r.center().x, r.max.y - 1.5), "{r:?}");
+    assert!(!orange(r.center().x, r.center().y));
+    // Undone a step at a time.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(cam(&h).border, 0.0);
+    assert!(cam(&h).mirror);
+}
+
+/// A chosen stretch made the camera's alone: the camera fills the picture, the screen in its
+/// corner; listed in the camera's panel, gone again with Remove.
+#[test]
+fn the_camera_is_made_full_screen_for_a_stretch_and_the_stretch_removed() {
+    let mut h = harness();
+    let full = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera_full.clone();
+    assert!(full(&h).is_empty());
+    h.get_by_label("Camera Full Screen for the Stretch");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = Some((1_000_000, 3_000_000));
+        v.playhead = 2_000_000;
+    }
+    h.run_steps(2);
+    h.get_by_label("Camera Full Screen for the Stretch").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Camera Full Screen for the Stretch").click();
+    h.run_steps(3);
+    assert_eq!(full(&h), vec![[1_000_000, 3_000_000]]);
+    h.get_by_label("0:01.0 to 0:03.0");
+    // The picture: the camera's teal fills it, the white screen in the camera's corner.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = None;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-camera-full-screen");
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera's place is on the picture");
+    let img = h.render().unwrap();
+    let at = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        [p[0], p[1], p[2]]
+    };
+    let teal = |p: [u8; 3]| p[0] < 80 && p[1] > 120 && p[2] > 100;
+    let white = |p: [u8; 3]| p.iter().all(|v| *v > 220);
+    assert!(teal(at(r.min.x - r.width(), r.center().y)), "{:?}", at(r.min.x - r.width(), r.center().y));
+    assert!(white(at(r.min.x + r.width() * 0.1, r.max.y - r.height() * 0.1)), "{r:?}");
+    // Removed: the screen again, with the camera in its corner.
+    h.get_by_label("Remove").scroll_to_me();
+    h.run_steps(4);
+    shot(&mut h, "video-camera-full-screen-list");
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert!(full(&h).is_empty());
+    let img = h.render().unwrap();
+    let p = img.get_pixel((r.min.x - r.width()) as u32, r.center().y as u32);
+    assert!(!teal([p[0], p[1], p[2]]));
+    h.get_by_label_contains("While recording, the camera button");
+}
+
+#[test]
 fn deleting_a_selected_clip_leaves_a_gap_on_its_track_only() {
     let mut h = harness();
     if let Some(v) = h.state_mut().video.as_mut() {

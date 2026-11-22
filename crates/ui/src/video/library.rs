@@ -192,6 +192,7 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         motion_blur: Default::default(),
         pointer_hidden: Vec::new(),
         pointer_paths: Vec::new(),
+        camera_full: Vec::new(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());

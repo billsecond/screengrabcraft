@@ -6,7 +6,8 @@
 use std::collections::BTreeMap;
 
 use screengrabcraft_media::recording::Recording;
-use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, Timeline};
+use screengrabcraft_media::timeline::{CameraShape, Corner, EditError, MAX_CAMERA_BORDER, Timeline};
+use screengrabcraft_model::Color;
 use serde_json::{Value, json};
 
 use crate::{EngineError, Result};
@@ -406,6 +407,35 @@ fn camera(s: &mut VideoSession, p: &Value) -> Result<Value> {
         let size = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`size` must be a number".to_string()))?;
         c.size = (size as f32).clamp(0.1, 0.5);
     }
+    if let Some(v) = p.get("border") {
+        let border = v.as_f64().filter(|f| f.is_finite()).ok_or_else(|| EngineError::Params("`border` must be a number".to_string()))?;
+        c.border = (border as f32).clamp(0.0, MAX_CAMERA_BORDER);
+    }
+    if let Some(v) = p.get("borderColor") {
+        c.border_color = serde_json::from_value::<Color>(v.clone())
+            .map_err(|_| EngineError::Params("`borderColor` is a colour, \"#RRGGBB\" or \"#RRGGBBAA\"".to_string()))?;
+    }
+    if let Some(v) = p.get("mirror") {
+        c.mirror = v.as_bool().ok_or_else(|| EngineError::Params("`mirror` must be true or false".to_string()))?;
+    }
+    Ok(json!({}))
+}
+
+fn camera_full(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let full = match p.get("full") {
+        None => true,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`full` must be true or false".to_string()))?,
+    };
+    if p.get("stretch").is_some_and(|v| !v.is_null()) {
+        if full {
+            return Err(EngineError::Params("a stretch by its number is only taken away (`full`: false)".to_string()));
+        }
+        let k = index(p, "stretch")?;
+        s.timeline.remove_camera_full(k).map_err(edit_err)?;
+        return Ok(json!({}));
+    }
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    s.timeline.set_camera_full(from, to, full).map_err(edit_err)?;
     Ok(json!({}))
 }
 
@@ -1937,8 +1967,14 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.camera",
         label: "Camera",
-        params: r#"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5}"#,
+        params: r##"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5, "border"?: 0..0.1 (a share of the picture's shorter side, 0 is none), "borderColor"?: "#RRGGBB", "mirror"?: bool}"##,
         run: camera,
+    },
+    VideoCommand {
+        id: "video.cameraFull",
+        label: "Camera Full Screen",
+        params: r#"{"from": µs, "to": µs, "full"?: bool (true)}: the camera fills the picture then, the screen in its place (false: as before); or {"stretch": n, "full": false}: that stretch taken away"#,
+        run: camera_full,
     },
     VideoCommand {
         id: "video.captions",
@@ -2845,6 +2881,65 @@ mod tests {
         assert_eq!(s.timeline.keys, k, "a command that fails changes nothing");
         s.execute("edit.undo", &json!({})).unwrap();
         assert!(!s.edited());
+    }
+
+    #[test]
+    fn the_cameras_border_and_mirror_are_set_and_undone() {
+        let mut s = session();
+        s.execute("video.camera", &json!({"border": 0.04, "borderColor": "#FF8800", "mirror": true})).unwrap();
+        let c = s.timeline.camera;
+        assert_eq!((c.border, c.border_color, c.mirror), (0.04, Color::rgb(0xFF, 0x88, 0), true));
+        assert_eq!(s.undo_label(), Some("Camera"));
+        // Too wide is the widest; a wrong value changes nothing (not even what came with it).
+        s.execute("video.camera", &json!({"border": 5})).unwrap();
+        assert_eq!(s.timeline.camera.border, MAX_CAMERA_BORDER);
+        let before = s.timeline.clone();
+        for junk in [json!({"mirror": "yes"}), json!({"border": "wide"}), json!({"border": null}), json!({"size": 0.3, "borderColor": "orange"})] {
+            assert!(s.execute("video.camera", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera, screengrabcraft_media::timeline::CameraLayout::default());
+    }
+
+    #[test]
+    fn the_camera_is_made_full_screen_for_a_stretch_and_taken_back() {
+        // Without a camera there's nothing to make full screen.
+        let mut s = session();
+        assert!(s.execute("video.cameraFull", &json!({"from": 0, "to": 1_000_000})).is_err());
+        // With one.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 16, height: 16, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(16, 16, Color::WHITE).unwrap()).unwrap();
+        let mut s = VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap());
+        s.execute("video.cameraFull", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        s.execute("video.cameraFull", &json!({"from": 3_000_000, "to": 4_000_000, "full": true})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 2_000_000], [3_000_000, 4_000_000]]);
+        assert_eq!(s.undo_label(), Some("Camera Full Screen"));
+        // Part of one taken back, then the other by its number.
+        s.execute("video.cameraFull", &json!({"from": 1_500_000, "to": 2_500_000, "full": false})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 1_500_000], [3_000_000, 4_000_000]]);
+        s.execute("video.cameraFull", &json!({"stretch": 1, "full": false})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 1_500_000]]);
+        let before = s.timeline.clone();
+        for junk in [
+            json!({"stretch": 7, "full": false}),
+            json!({"stretch": 0}),
+            json!({"stretch": -1, "full": false}),
+            json!({"from": 2, "to": 1}),
+            json!({"from": 0, "to": 9, "full": "yes"}),
+            json!({"from": 90_000_000, "to": 99_000_000}),
+        ] {
+            assert!(s.execute("video.cameraFull", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera_full, vec![[1_000_000, 2_000_000], [3_000_000, 4_000_000]]);
     }
 
     #[test]

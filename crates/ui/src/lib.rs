@@ -7,20 +7,24 @@
 
 pub mod autosave;
 pub mod background;
+pub mod batch;
 pub mod canvas;
 pub mod dialogs;
 pub mod editor;
 pub mod effects;
 pub mod eyedropper;
 pub mod grab_text;
+pub mod guide;
 pub mod icons;
 pub mod overlay;
 pub mod playback;
 pub mod props;
+pub mod qr;
 pub mod quick;
 pub mod recorder;
 pub mod services;
 pub mod strip;
+pub mod tags;
 pub mod theme;
 pub mod transcribe;
 pub mod video;

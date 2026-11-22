@@ -116,6 +116,38 @@ impl DesktopServices {
 
 /// Writes a save. Whatever happens in drawing or encoding, an answer comes back: the editor
 /// waits for it before it closes.
+/// The pictures and videos in these folders (not their folders), newest first, as many as the
+/// strip shows. A folder that isn't there, or a file that can't be looked at, is left out.
+fn captures_in(dirs: &[PathBuf]) -> Vec<RecentItem> {
+    let mut items: Vec<RecentItem> = dirs
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
+                let x = x.to_ascii_lowercase();
+                PICTURES.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
+            })
+        })
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(std::fs::Metadata::is_file)?;
+            let since = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+            let modified = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
+            let path: PathBuf = e.path();
+            Some(RecentItem {
+                name: e.file_name().to_string_lossy().to_string(),
+                path: path.to_string_lossy().to_string(),
+                modified,
+                ..RecentItem::default()
+            })
+        })
+        .collect();
+    items.sort_by_key(|i| std::cmp::Reverse(i.modified));
+    items.truncate(screengrabcraft_ui::strip::MAX_SHOWN);
+    items
+}
+
 fn write_save(job: &SaveJob) -> Saved {
     let write = |path: &str, bytes: &[u8]| store::write_atomic(Path::new(path), bytes).map_err(|e| e.to_string());
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.run(&write))) {
@@ -310,35 +342,60 @@ impl Services for DesktopServices {
     }
 
     fn recent(&self) -> Vec<RecentItem> {
-        let dir = paths::captures_dir(&store::load_settings());
-        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
-        let mut items: Vec<RecentItem> = entries
-            .filter_map(Result::ok)
-            .filter(|e| {
-                e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
-                    let x = x.to_ascii_lowercase();
-                    PICTURES.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
-                })
-            })
-            .filter_map(|e| {
-                let since = e.metadata().ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-                let modified = u64::try_from(since.as_millis()).unwrap_or(u64::MAX);
-                let path: PathBuf = e.path();
-                Some(RecentItem {
-                    name: e.file_name().to_string_lossy().to_string(),
-                    path: path.to_string_lossy().to_string(),
-                    modified,
-                    ..RecentItem::default()
-                })
-            })
-            .collect();
-        items.sort_by_key(|i| std::cmp::Reverse(i.modified));
-        items.truncate(screengrabcraft_ui::strip::MAX_SHOWN);
+        let mut items = captures_in(&paths::capture_folders(&store::load_settings()));
         // The local day and time of those kept (All captures groups them by day).
         for i in &mut items {
             (i.day, i.time) = screengrabcraft_desktop::time::local_day_time(i.modified);
         }
         items
+    }
+
+    fn request_pictures(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("pictures-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new().set_title("Pictures to Change").set_directory(&start).add_filter("Pictures", PICTURES).pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Pictures(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
+    fn file_exists(&self, path: &str) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    fn print(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        screengrabcraft_desktop::print::print(picture, name)
+    }
+
+    fn can_print(&self) -> Result<(), String> {
+        screengrabcraft_desktop::print::available()
+    }
+
+    fn can_open_with(&self) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::available()
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_picture_with(picture, name)
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        screengrabcraft_desktop::open_with::open_with(std::path::Path::new(path))
+    }
+
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        screengrabcraft_desktop::library::for_paths(paths)
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_desktop::library::run(id, params)
     }
 
     fn today(&self) -> String {
@@ -683,5 +740,31 @@ impl ReadText for SystemText {
     fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
         let lines = screengrabcraft_desktop::text::read(picture)?;
         Ok(lines.into_iter().map(|l| TextLine { text: l.text, rect: screengrabcraft_model::Rect::new(l.x, l.y, l.w, l.h) }).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Captures kept in a capture preset's own folder are in the strip with the rest, newest first.
+    #[test]
+    fn the_strip_lists_the_captures_of_every_folder_they_were_kept_in() {
+        let base = std::env::temp_dir().join(format!("sgc-strip-{}", std::process::id()));
+        let (main, own, gone) = (base.join("Captures"), base.join("Bugs"), base.join("Not there"));
+        for d in [&main, &own] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let png = screengrabcraft_render::encode(&Raster::filled(4, 4, screengrabcraft_model::Color::WHITE).unwrap(), ImageFormat::Png, 90).unwrap();
+        std::fs::write(main.join("Capture 1.png"), &png).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(own.join("Bug 1.png"), &png).unwrap();
+        std::fs::write(own.join("notes.txt"), b"not a capture").unwrap();
+        std::fs::create_dir_all(own.join("folder.png")).unwrap();
+        let items = captures_in(&[main.clone(), own.clone(), gone]);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["Bug 1.png", "Capture 1.png"], "newest first, pictures only, from both");
+        assert!(items.first().is_some_and(|i| Path::new(&i.path).starts_with(&own)));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

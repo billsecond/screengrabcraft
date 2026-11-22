@@ -16,6 +16,8 @@ screengrabcraft-model = { workspace = true }
 screengrabcraft-matte = { workspace = true }
 # Grab Text (text.rs): a small picture is made larger before it is read.
 screengrabcraft-render = { workspace = true }
+# The captures' library (library.rs) is changed by the engine's library commands.
+screengrabcraft-engine = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }

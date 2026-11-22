@@ -24,27 +24,27 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Frozen screen while choosing, with a magnifier, crosshairs and the pixel's colour | Has | |
 | Arrow keys nudge the area, Shift+arrows resize it | Has | |
 | Windows snap under the pointer | Has | |
-| Open menus and tooltips caught as they were | Part | the screen is frozen when the key is pressed, so open menus are in it; menus aren't found and cut out by themselves |
+| Open menus and tooltips caught as they were | Has | the screen is frozen when the key is pressed, so open menus are in it; on Windows an open menu, drop-down (the system's, or the program in front's own) or tooltip is snapped to like a window, a click keeping just it; elsewhere it's dragged round |
 | Parts of a window (a button, a pane) snapped to | Missing | |
-| Freehand-shaped area | Missing | |
-| Several areas in one capture | Missing | |
-| Fixed size or fixed place area | Part | the Recorder has fixed sizes for videos; still pictures don't |
-| Aspect ratio held while dragging (square, 16:9, 4:3) | Missing | |
+| Freehand-shaped area | Has | Capture Freehand Area (the tray, the Capture page, a shortcut or a preset): drawn round with the button held down; what's outside the outline is see-through |
+| Several areas in one capture | Has | Alt (Option on a Mac) held as an area is let go keeps it and another is dragged out; the areas of one screen in one picture, laid out as they were, the rest see-through |
+| Fixed size or fixed place area | Has | a capture preset of a set size, placed with a click; the Recorder's fixed sizes for videos |
+| Aspect ratio held while dragging (square, 16:9, 4:3) | Has | Shift, Ctrl, Ctrl+Shift while dragging (the overlay says so); a preset can hold any shape |
 | The program's own windows kept out of the picture | Has | the editor steps aside |
 | The mouse pointer in the picture | Part | drawn into the picture when Settings say so; not a separate object to move or delete later |
 | **Grab Text: the text in an area straight to the clipboard** | Has (0.1.54) | Windows' own text reader, on this computer; Windows only for now |
 | Scrolling capture, scrolled by hand | Has | |
-| Scrolling capture that scrolls by itself | Missing | |
-| Captures again and again on a timer (time-lapse), or at a set time | Missing | |
-| A picture for each click, made into a numbered how-to guide | Missing | |
-| The guide saved as a document, slides, PDF, web page or Markdown | Missing | |
-| A still from the camera | Missing | |
+| **Scrolling capture that scrolls by itself** | Has | Windows: it turns the mouse wheel over the area and stops at the end of the page or at the longest picture; elsewhere, by hand |
+| Captures again and again on a timer (time-lapse), or at a set time | Has | the Capture page: one every so many seconds of the screen with the pointer, all screens or the last area, skipping those where nothing changed; one at a time of day; saved straight to the captures folder, stopped from the tray |
+| A picture for each click, made into a numbered how-to guide | Has | Record Steps (the Capture page or the tray): each left click takes the window clicked with a red ring where the click was; Stop opens the guide, its steps to reorder, take out and word |
+| The guide saved as a document, slides, PDF, web page or Markdown | Has | a PDF (a page a step), a word-processor document (`.docx`) and slides (`.pptx`, a slide a step) with the pictures in them, a web page and Markdown with the pictures in a folder beside them |
+| A still from the camera | Has | Picture from the Camera (the tray, the Capture page, a shortcut, after a wait if asked): Video Production's camera, read at its largest and kept at its own size (up to 4096 on a side); Windows and macOS |
 | A whole web page from its address | Missing | |
 | Printing from any program into the editor | Missing | |
 | HDR screens captured in their true colours | Missing | |
-| QR codes made or read | Missing | |
+| QR codes made or read | Has | the Image menu: Read QR Codes (the picture or the area selected) shows each code's words to copy, a web address shown and never opened; Make a QR Code… puts one of your words on the picture as a picture annotation. On this computer, every system |
 | Pictures sent from a phone | Not planned | needs a network service |
-| Capture presets (an area type, effects and where it goes, under one shortcut) | Missing | one default for every capture (Settings, After a capture) |
+| Capture presets (an area type, effects and where it goes, under one shortcut) | Has | the area (any kind, a shape or a set size), a wait, what happens after, effects added as it's taken (border, round corners, torn edge, shadow, grey), a folder and a file format of its own (its captures listed in the Recent strip and All captures with the rest, the folders remembered) and a shortcut of its own; on the Capture page, in the tray, and `screengrabcraft --preset <name>` for scripts and a desktop's own shortcuts |
 | After a capture: copy, open in the editor, save, or ask with a bar | Has | |
 | Every shortcut changed or turned off | Has | |
 
@@ -58,13 +58,13 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | A smaller file format | Has | AV1 and Opus, beside H.264 and AAC on Windows |
 | Microphone and the computer's sound | Has | the computer's sound on Windows only |
 | Camera in a corner: square, rounded, circle | Has | |
-| Camera full screen, swapped with the screen while recording | Part | with the screen off the camera is the video |
-| Camera border, mirrored camera | Missing | |
+| Camera full screen, swapped with the screen while recording | Has | the camera button on the recording's controls, F7 or the tray: the camera fills the picture, the screen in its corner, and back; kept as stretches the video editor's camera panel lists, adds to and removes (`video.cameraFull`). With the screen off the camera is the video |
+| Camera border, mirrored camera | Has | Mirror and Border (with its colour) under the Recorder's camera picture, shown there as they will be; the video editor's camera panel changes both, and how wide the border is |
 | **Camera background blurred or replaced** | Has | taken away in the video editor (a colour, or the background learnt by the model), then the camera panel's Behind you: the screen, your room blurred, or a picture of the Media bin as large as covers it |
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
 | Recording controls kept out of the video | Has | |
-| Countdown before recording | Part | the capture delay; no countdown of its own |
+| Countdown before recording | Has | 3 seconds by default (Settings › Recording: 1 to 10, or off), shown over the area and gone before the recording starts; a GIF, a video, Video Production |
 | Longest recording | Has | Settings |
 | Microphone heard as silent (muted or not allowed) said plainly | Has | after the recording |
 | Background noise taken out | Has | in the video editor, after recording: a track at a time |
@@ -72,8 +72,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Pointer made larger, smoothed, click rings, hidden | Has | |
 | Pointer highlighted, spotlit or magnified; click sounds | Has | in the video editor's Pointer panel |
 | **Keys pressed shown in the video** | Has | Video Production keeps the shortcuts pressed (Windows; never what's typed), the video editor shows them |
-| Drawing on the screen while recording | Missing | |
-| A recording survives a crash | Part | the recording file is written as it goes |
+| Drawing on the screen while recording | Part | a pen, arrows, boxes and step numbers, drawn into the recording and fading after a few seconds (F8, the controls or the tray); Windows only, and not on a recording of every screen at once |
+| A recording survives a crash | Has | the recording file is written as it goes; when the capture service starts again after a crash, it keeps what was recorded (Record Video's moved from the temporary folder to the captures folder as "Recording cut short …") and says so, Edit opening it in the video editor |
 | Desktop icons hidden while recording | Missing | |
 | **A narrated video made from pictures** | Has | File › New Video from Pictures (or the start page's A Video of Pictures): a new recording of nothing but a blank screen as long as the pictures take (1920 × 1080, an ordinary `.sgvideo` in the captures folder), the pictures one after another on a layer over it, four seconds each, as large as fits, fading from one to the next; then Record Narration talks over it. The Media bin's Put the Pictures in Turn does the same over a recording |
 
@@ -148,7 +148,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Watermark (a picture or words) | Missing | |
 | Capture details written on the picture (time, program) | Missing | |
 | Effects on a selected area only | Missing | |
-| Effects added at capture time | Missing | |
+| Effects added at capture time | Has | by a capture preset: border, round corners, torn edge, shadow, grey, made by the editor's own effects |
 
 ## Pictures: changing, keeping, sharing
 
@@ -158,18 +158,18 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Rotate by any angle | Missing | |
 | Templates: pictures laid out in a frame with words | Missing | |
 | Several pictures combined into one | Missing | |
-| Many pictures changed at once (batch) | Missing | |
-| Print | Missing | |
+| Many pictures changed at once (batch) | Has | Batch Changes (File menu, or All captures for the pictures shown): resize, the effects, grayscale, invert, trim, in order; a format and a name pattern; each saved beside its picture, none written over |
+| Print | Part | the Image Editor's File menu and Ctrl+P, through Windows' own printing window; greyed out elsewhere |
 | Recent captures strip; delete to the bin | Has | |
-| Pin captures in the strip | Missing | |
+| Pin captures in the strip | Has | right-click a capture in the strip, Pin to the Front: the pinned stay first, with a pin on them, and are remembered |
 | All captures by day, with search | Has | |
-| Captures sorted by program or website, tags, favourites | Missing | |
+| Captures sorted by program or website, tags, favourites | Part | All captures filters by favourites, the program a window was taken from and tags, and searches them and the window's title; a website only by its page's title |
 | Captures folder of your choosing | Has | |
 | PNG, JPEG, WebP, BMP, GIF, PDF | Has | |
 | TIFF, HEIF | Missing | |
-| Multi-page PDF of several captures | Missing | |
+| Multi-page PDF of several captures | Has | All captures' PDF of These (the pictures shown, or those chosen with Ctrl+click), or Batch Changes' "One PDF, a page each": a page for each picture, changed first if asked, saved where the owner says |
 | Copy, save | Has | |
-| Open in another program | Part | Show in Folder |
+| Open in another program | Part | Open With… (the File menu: the picture as shown; a capture's right-click menu in the strip: its file) in Windows' own window for choosing a program, and Show in Folder; greyed out elsewhere |
 | Links, uploads, chat and cloud drives | Not planned | needs a network service |
 
 ## Editing a video: the timeline
@@ -222,7 +222,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Camera background removed (no green screen)** | Has | the background model looks at four of the camera's pictures and learns the room; each picture keeps what differs from it (the camera kept still) |
 | **A colour removed (green screen)** | Has | the camera's panel: the colour and how far from it still goes; its glow on you taken out |
 | **Colour adjustments and looks** | Has | a screen or camera clip's brightness, contrast, colour and tint, in its panel; eight ready-made looks (warm, cool, vivid, faded, dramatic, black and white, sepia, night) |
-| **Border, shadow, rounded corners on a clip** | Has | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the recording's own screen too, made smaller on a background colour (the side panel's Screen Frame); the camera's shapes |
+| **Border, shadow, rounded corners on a clip** | Has | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the recording's own screen too, made smaller on a background colour (the side panel's Screen Frame); the camera's shapes and its border |
 | **Device frames, masks, blend modes** | Has | an item's panel (Mask and Blend): shown only inside a rectangle, rounded rectangle, oval, diamond, star or heart, or with the shape cut out of it, placed and sized on the item; laid on what's under it as multiply, screen, overlay, darken or lighten. A plain laptop, phone or browser window drawn in code round the screen (Screen Frame, the screen made small enough for it) or round a picture or a video on a layer (its panel, Device round it) |
 | Spotlight, blur a region | Has | |
 | **Motion blur, freeze a region** | Has | the side panel's Motion Blur (or a zoom's panel): items sliding, growing or moving by their keyframes, and zooms going in, out or panning, blurred along their way (five moments of the shutter blended). Edit › Freeze a Region (or the screen track's right button): a rectangle of the screen held as it was at its start while the rest plays on, an item on a layer, dragged and sized on the picture or in its panel; it stays with the screen through zooms (the pointer still shows over it) |
@@ -310,23 +310,38 @@ By how much someone using it every day would miss each one. Built ones move to a
 33. The sound turned round while playing backwards (J), as recorded (#125).
 34. Narration recorded over the video in the editor, onto a sound layer of its own (#126).
 35. A narrated video made only of pictures: a new video of them, no screen recording needed (#127).
+4. Scrolling capture that scrolls by itself (Windows; #59).
+5. Capture presets; areas of a set size; shapes held while dragging (#62).
+6. Drawing on the screen while recording (Windows; #65).
+7. Tags, favourites, and captures sorted by the program they were taken from (#68).
+8. Print; batch changes; captures on a timer or at a set time (#72).
+9. A picture per click made into a how-to guide (#74).
+10. Several areas in one capture; a freehand area (#78).
+11. A multi-page PDF of several captures (#80).
+12. Captures pinned at the front of the Recent strip (#83).
+13. A countdown before a recording; a still from the camera (#84).
+14. A border round the camera, and the camera mirrored (#87).
+15. QR codes read and made (#91).
+16. Capture presets with effects added as they're taken, a folder and a format of their own, and
+    `--preset <name>` (#93).
+17. Open With: a capture in a program of the owner's choosing (Windows; #94).
+18. The camera full screen, swapped with the screen while recording (#98).
+19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
+20. The how-to guide saved as a word-processor document and as slides (#101).
+21. A still from the camera at the camera's own size (#103).
+22. A recording cut short by a crash kept and said when the service starts again (#104).
+23. Open menus, drop-downs and tooltips snapped to like windows (Windows; #107).
 
 **Still to build, in this order**
 
-1. Scrolling capture that scrolls by itself.
 2. Step badges as letters or Roman numerals, and other badge shapes.
 3. Polygons, triangles and stars; curved arrows.
 4. A stamp library with search, emoji, and pictures of your own as stamps.
 5. Any font on the computer.
-6. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
 7. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
 8. Rotate, group and align annotations; select all of one kind.
 9. Magic wand, eraser, ellipse and freehand selections.
-10. Drawing on the screen while recording.
-11. Tags, favourites, and captures sorted by program.
 12. Templates; several pictures combined into one.
-13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-15. Print; batch changes; captures on a timer or at a set time.
-16. The rest: HDR, QR codes, measuring, spell check.
+16. The rest: HDR, measuring, spell check.

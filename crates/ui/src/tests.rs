@@ -875,6 +875,15 @@ struct DiskState {
     fail_trash: bool,
     made: u32,
     thumbs_asked: Vec<(String, u64)>,
+    /// The captures' tags, favourites and programs, as the host keeps them.
+    library: screengrabcraft_model::Library,
+    /// Where the next save dialog answers to save (else it's cancelled), what it was asked to
+    /// save, and its answer, waiting to be polled.
+    save_answer: Option<String>,
+    asked_save: Vec<String>,
+    dialog: Option<crate::services::DialogResult>,
+    /// The captures handed to a program the owner chose (Open With).
+    opened_with: Vec<String>,
 }
 
 /// A host with a fake disk, shared with the test.
@@ -917,6 +926,28 @@ impl Disk {
 }
 
 impl Services for Disk {
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_file_with(&self, path: &str) -> Result<(), String> {
+        self.0.borrow_mut().opened_with.push(path.to_string());
+        Ok(())
+    }
+
+    fn request_save(&self, suggested_name: &str, _filters: &[crate::services::Filter]) {
+        let mut s = self.0.borrow_mut();
+        s.asked_save.push(suggested_name.to_string());
+        s.dialog = Some(match s.save_answer.take() {
+            Some(p) => crate::services::DialogResult::SaveTo(p),
+            None => crate::services::DialogResult::Cancelled,
+        });
+    }
+
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.0.borrow_mut().dialog.take()
+    }
+
     fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
         self.get(path).ok_or_else(|| "no such file".to_string())
     }
@@ -976,6 +1007,23 @@ impl Services for Disk {
     fn thumbnail(&self, path: &str, modified: u64) -> Option<Raster> {
         self.0.borrow_mut().thumbs_asked.push((path.to_string(), modified));
         Raster::filled(20, 10, Color::rgb(0, 0, 255)).ok()
+    }
+
+    fn library(&self, paths: &[String]) -> screengrabcraft_model::Library {
+        let s = self.0.borrow();
+        let mut out = screengrabcraft_model::Library::default();
+        for p in paths {
+            out.set(p, s.library.get(p));
+        }
+        out
+    }
+
+    fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+        screengrabcraft_engine::library::run(&mut self.0.borrow_mut().library, id, params).map_err(|e| e.to_string())
+    }
+
+    fn file_exists(&self, path: &str) -> bool {
+        self.0.borrow().files.contains_key(path)
     }
 }
 
@@ -1964,13 +2012,442 @@ fn all_captures_lists_every_capture_and_opens_the_one_picked() {
     assert_eq!(h.get_all_by_label("Capture 000.png").count(), 2, "in the strip and in the menu");
     // A search narrows it down; the oldest is there too.
     crate::quick_tests::shot(&mut h, "all-captures-grid");
-    h.state_mut().capture_search = "117".into();
+    h.state_mut().capture_filter.search = "117".into();
     h.run_steps(3);
     crate::quick_tests::shot(&mut h, "all-captures");
     let item = h.get_all_by_label("Capture 117.png").last().map(|n| n.rect()).expect("in the menu");
     click_at(&mut h, item.center());
     h.run_steps(4);
     assert_eq!(h.state().picture_path.as_deref(), Some("captures/Capture 117.png"));
+}
+
+// ---- tags, favourites and the program a capture was taken from ----
+
+/// Six captures: two from Notes (the first a favourite), one from a browser, the second and the
+/// third tagged.
+fn library_disk() -> Disk {
+    use screengrabcraft_model::CaptureInfo;
+    let disk = many_captures(6);
+    let info = |program: &str, tags: &[&str], favorite: bool| CaptureInfo {
+        program: program.into(),
+        title: format!("{program} window"),
+        tags: tags.iter().map(|t| t.to_string()).collect(),
+        favorite,
+        ..CaptureInfo::default()
+    };
+    let mut s = disk.0.borrow_mut();
+    s.library.set("captures/Capture 000.png", info("Notes", &[], true));
+    s.library.set("captures/Capture 001.png", info("Browser", &["receipts"], false));
+    s.library.set("captures/Capture 002.png", info("Notes", &["receipts", "plans"], false));
+    drop(s);
+    disk
+}
+
+/// The captures All captures shows (each is in the strip as well).
+fn in_all_captures(h: &Harness<'_, Editor>) -> Vec<usize> {
+    (0..6).filter(|i| h.get_all_by_label(&format!("Capture {i:03}.png")).count() == 2).collect()
+}
+
+fn open_all_captures(h: &mut Harness<'_, Editor>) {
+    h.get_by_label("All captures (6)").click();
+    h.run_steps(3);
+}
+
+#[test]
+fn all_captures_filters_by_favourites_program_and_tag_and_searches_them() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5]);
+    crate::quick_tests::shot(&mut h, "all-captures-filters");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0], "favourites only");
+    h.get_by_label("\u{2605} Favorites (1)").click();
+    h.run_steps(3);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 2], "taken from Notes");
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [2], "from Notes and tagged receipts");
+    crate::quick_tests::shot(&mut h, "all-captures-filtered");
+    h.get_by_label("Notes (2)").click();
+    h.get_by_label("#receipts (2)").click();
+    h.run_steps(3);
+    assert_eq!(in_all_captures(&h), [0, 1, 2, 3, 4, 5], "every filter off again");
+    // The search goes through the program, the window's title and the tags too.
+    for (search, shown) in [("browser", vec![1]), ("plans", vec![2]), ("notes window", vec![0, 2]), ("005", vec![5])] {
+        h.state_mut().capture_filter.search = search.into();
+        h.run_steps(3);
+        assert_eq!(in_all_captures(&h), shown, "{search}");
+    }
+}
+
+#[test]
+fn a_star_makes_a_favourite_and_its_tags_are_added_and_taken_off_in_all_captures() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    let path = "captures/Capture 003.png";
+    h.get_by_label("Add Capture 003.png to Favorites").click();
+    h.run_steps(3);
+    assert!(disk.0.borrow().library.get(path).favorite, "kept by the host");
+    assert!(h.state().library.get(path).favorite, "and shown");
+    h.get_by_label("Remove Capture 003.png from Favorites");
+    // Its tags: one typed, one another capture has.
+    h.get_by_label("Tags of Capture 003.png").click();
+    h.run_steps(3);
+    h.state_mut().new_tag = "  bug  report ".into();
+    h.get_by_label("Add").click();
+    h.run_steps(3);
+    h.get_by_label("+ receipts").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["bug report", "receipts"]);
+    crate::quick_tests::shot(&mut h, "all-captures-tags");
+    h.get_by_label("bug report  \u{00d7}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["receipts"]);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 2, "the row's heading and the button");
+    h.get_by_label("Done").click();
+    h.run_steps(3);
+    assert_eq!(h.state().tagging, None);
+    assert_eq!(h.get_all_by_label("Tags of Capture 003.png").count(), 1, "the row is gone");
+    // The capture wasn't opened by any of it.
+    assert_eq!(h.state().picture_path, None);
+}
+
+#[test]
+fn a_right_click_in_the_strip_makes_a_favourite_and_tags_it() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    crate::quick_tests::shot(&mut h, "strip-menu");
+    h.get_by_label("Add to Favorites").click();
+    h.run_steps(3);
+    let path = "captures/Capture 004.png";
+    assert!(disk.0.borrow().library.get(path).favorite);
+    right_click(&mut h, thumb.center());
+    h.get_by_label("plans").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().library.get(path).tags, ["plans"]);
+}
+
+/// The captures in the strip, left to right (each is named by its thumbnail).
+fn strip_order(h: &Harness<'_, Editor>) -> Vec<usize> {
+    let mut at: Vec<(f32, usize)> = (0..6).map(|i| (h.get_by_label(&format!("Capture {i:03}.png")).rect().min.x, i)).collect();
+    at.sort_by(|a, b| a.0.total_cmp(&b.0));
+    at.into_iter().map(|(_, i)| i).collect()
+}
+
+#[test]
+fn a_capture_pinned_in_the_strip_stays_first_and_is_remembered() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [0, 1, 2, 3, 4, 5]);
+    for name in ["Capture 004.png", "Capture 002.png"] {
+        let thumb = h.get_by_label(name).rect();
+        right_click(&mut h, thumb.center());
+        h.get_by_label("Pin to the Front").click();
+        h.run_steps(3);
+    }
+    assert!(disk.0.borrow().library.get("captures/Capture 004.png").pinned, "kept by the host");
+    // The pinned first (newest first among them, as the rest), then the others.
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    assert_eq!(h.state().toast_text(), Some("Pinned at the front of the strip"));
+    crate::quick_tests::shot(&mut h, "strip-pinned");
+    // Remembered: a new editor on the same captures has them first too.
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    // Unpinned, it goes back among the others.
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    h.get_by_label("Unpin from the Front").click();
+    h.run_steps(3);
+    assert!(!disk.0.borrow().library.get("captures/Capture 004.png").pinned);
+    assert_eq!(strip_order(&h), [2, 0, 1, 3, 4, 5]);
+}
+
+#[test]
+fn a_capture_deleted_from_the_strip_leaves_the_library_too() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    delete_from_strip(&mut h, "Capture 002.png");
+    assert!(disk.0.borrow().library.get("captures/Capture 002.png").is_empty());
+    assert!(!disk.0.borrow().library.get("captures/Capture 001.png").is_empty(), "the others stay");
+}
+
+// ---- Print and Batch Changes ----
+
+/// A host with a printer: what it was asked to print.
+#[derive(Clone, Default)]
+struct Printer(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Printer {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_print(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn print(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+fn file_menu_item(h: &mut Harness<'_, Editor>, item: &str) {
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    h.get_by_label_contains(item).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn print_sends_the_picture_as_shown_and_is_greyed_out_where_there_is_no_printing() {
+    let printer = Printer::default();
+    let mut ed = Editor::new(Box::new(printer.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Print\u{2026}");
+    assert_eq!(printer.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // Ctrl+P too.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert_eq!(printer.0.borrow().len(), 2);
+    // No printing here: greyed out, and the key says why.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Print\u{2026}")).is_disabled());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("Printing needs")), "{:?}", h.state().toast_text());
+}
+
+/// A host with a system window for choosing a program: the pictures handed to it.
+#[derive(Clone, Default)]
+struct Opener(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Opener {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_open_with(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn open_picture_with(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn open_with_hands_the_picture_as_shown_to_a_program_and_is_greyed_out_where_it_cant() {
+    let opener = Opener::default();
+    let mut ed = Editor::new(Box::new(opener.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Open With\u{2026}");
+    assert_eq!(opener.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // No window for it here: greyed out.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Open With\u{2026}")).is_disabled());
+}
+
+#[test]
+fn a_capture_in_the_strip_is_opened_with_a_program_from_its_menu() {
+    let disk = many_captures(3);
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let thumb = h.get_by_label("Capture 001.png").rect();
+    right_click(&mut h, thumb.center());
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/strip-open-with.png"));
+    }
+    h.get_by_label("Open With\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(disk.0.borrow().opened_with, vec!["captures/Capture 001.png".to_string()]);
+}
+
+fn decoded(disk: &Disk, path: &str) -> Raster {
+    screengrabcraft_render::decode(&disk.get(path).unwrap_or_else(|| panic!("{path} was not written"))).unwrap()
+}
+
+#[test]
+fn batch_changes_resize_and_grey_every_picture_beside_it_and_say_which_could_not_be() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let originals: Vec<Vec<u8>> = (0..3).map(|i| disk.get(&format!("captures/Capture {i:03}.png")).unwrap()).collect();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    file_menu_item(&mut h, "Batch Changes\u{2026}");
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    for change in ["Resize", "Grayscale"] {
+        h.get_by_label("Add a Change").click();
+        h.run_steps(3);
+        h.get_by_label(change).click();
+        h.run_steps(3);
+    }
+    if let Some(b) = h.state_mut().batch.as_mut() {
+        b.pattern = "{name} small".into();
+        b.format = Some(ImageFormat::Png);
+    }
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "batch-changes");
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    crate::quick_tests::shot(&mut h, "batch-done");
+    for i in 0..3 {
+        let out = decoded(&disk, &format!("captures/Capture {i:03} small.png"));
+        assert_eq!((out.width(), out.height()), (4, 3), "half of 8x6");
+        assert_eq!(disk.get(&format!("captures/Capture {i:03}.png")).as_ref(), originals.get(i), "the original stays as it was");
+    }
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done);
+    assert_eq!(progress.written.len(), 3);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Changed 3; 1 couldn't be"));
+    // Again: new names, nothing written over.
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.run_steps(2);
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    assert!(disk.get("captures/Capture 000 small (2).png").is_some());
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().batch.is_none());
+}
+
+#[test]
+fn all_captures_hands_the_pictures_shown_to_batch_changes() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    h.get_by_label("Batch Change These (2)\u{2026}").click();
+    h.run_steps(3);
+    let files = h.state().batch.as_ref().map(|b| b.files.clone()).unwrap_or_default();
+    assert_eq!(files.len(), 2);
+    assert!(files.contains(&"captures/Capture 000.png".to_string()) && files.contains(&"captures/Capture 002.png".to_string()));
+}
+
+/// How many pages a PDF has, as its page tree says.
+fn pdf_pages(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("%PDF-1.4") && text.trim_end().ends_with("%%EOF"), "a PDF");
+    text.split("/Type /Pages").nth(1).and_then(|s| s.split("/Count ").nth(1)).and_then(|s| s.split(' ').next()).and_then(|n| n.parse().ok()).unwrap()
+}
+
+#[test]
+fn batch_changes_make_one_pdf_a_page_each_saved_where_asked() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    // One PDF needs no change; the name pattern isn't asked.
+    h.state_mut().batch.as_mut().unwrap().format = Some(ImageFormat::Pdf);
+    h.run_steps(3);
+    assert!(h.query_by_label("Name").is_none());
+    crate::quick_tests::shot(&mut h, "batch-pdf");
+    // Asked where: cancelled, nothing is made.
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(6);
+    assert_eq!(disk.0.borrow().asked_save, ["Captures.pdf"]);
+    assert!(h.state().batch.as_ref().is_some_and(|b| b.progress.is_none() && !b.asking));
+    // Answered: a page for each picture that could be read, in order, there.
+    disk.0.borrow_mut().save_answer = Some("exports/Week".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let pdf = disk.get("exports/Week.pdf").expect("the PDF is written where asked, with its extension");
+    assert_eq!(pdf_pages(&pdf), 3);
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done && progress.pdf.is_none());
+    assert_eq!(progress.written, ["exports/Week.pdf"]);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Made a PDF of 3 pages: Week.pdf"));
+    crate::quick_tests::shot(&mut h, "batch-pdf-done");
+    // With a change first: each page is changed (half of 8x6 at 96 pixels to the inch).
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.get_by_label("Add a Change").click();
+    h.run_steps(3);
+    h.get_by_label("Resize").click();
+    h.run_steps(3);
+    disk.0.borrow_mut().save_answer = Some("exports/Small.pdf".into());
+    h.get_by_label("Make a PDF of 4 Pictures").click();
+    h.run_steps(12);
+    let small = String::from_utf8_lossy(&disk.get("exports/Small.pdf").unwrap()).to_string();
+    assert!(small.contains("/MediaBox [0 0 3.00 2.25]"), "{}", &small[..small.len().min(400)]);
+}
+
+#[test]
+fn all_captures_makes_a_pdf_of_the_pictures_shown_or_those_chosen() {
+    let disk = library_disk();
+    // Written again: the newest.
+    disk.put("captures/Capture 004.png", png(8, 6, Color::WHITE));
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    // Ctrl+click chooses (the tile in All captures, the larger of its two).
+    let tile = |h: &Harness<'_, Editor>, name: &str| {
+        let all: Vec<egui::Rect> = h.get_all_by_label(name).map(|n| n.rect()).collect();
+        all.into_iter().max_by(|a, b| a.width().total_cmp(&b.width())).unwrap()
+    };
+    for name in ["Capture 004.png", "Capture 001.png"] {
+        let at = tile(&h, name).center();
+        h.hover_at(at);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::COMMAND });
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::COMMAND });
+        h.run_steps(3);
+    }
+    assert_eq!(h.state().chosen_captures, ["captures/Capture 004.png", "captures/Capture 001.png"]);
+    assert!(h.state().picture_path.is_none(), "chosen, not opened");
+    crate::quick_tests::shot(&mut h, "all-captures-chosen");
+    h.get_by_label("PDF of Chosen (2)\u{2026}").click();
+    h.run_steps(3);
+    let b = h.state().batch.clone().unwrap();
+    assert!(b.makes_pdf());
+    // Oldest first (Capture 004 was written last here).
+    assert_eq!(b.files, ["captures/Capture 001.png", "captures/Capture 004.png"]);
+    // None chosen: every picture shown.
+    h.state_mut().batch = None;
+    h.state_mut().chosen_captures.clear();
+    h.run_steps(2);
+    open_all_captures(&mut h);
+    h.get_by_label("PDF of These (6)\u{2026}").click();
+    h.run_steps(3);
+    assert_eq!(h.state().batch.as_ref().map(|b| b.files.len()), Some(6));
 }
 
 // ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----

@@ -22,7 +22,7 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::settings::VideoOptions;
 use screengrabcraft_model::{IRect, MonitorChoice, Raster, RecordArea, RecorderOptions};
 use screengrabcraft_render::anim::GifWriter;
-use screengrabcraft_render::stitch::{Step, Stitcher};
+use screengrabcraft_render::stitch::{Next, Pacer, Step, Stitcher};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -63,6 +63,17 @@ pub struct Recording {
     pub progress: Arc<AtomicU32>,
     /// Frames that could not be joined lately (scrolling): the owner scrolled too fast.
     pub lost: Arc<AtomicU32>,
+    /// A scrolling capture is scrolling by itself (else the owner scrolls it).
+    pub by_itself: Arc<AtomicBool>,
+    /// What the owner draws on the screen while it records, drawn into its frames.
+    pub ink: crate::ink::SharedInk,
+    /// Whether it can be drawn on: one area or one monitor, on Windows (which keeps the drawing
+    /// window out of the recording).
+    pub drawable: bool,
+    /// The camera fills the picture just now, the screen in its corner (the owner's switch).
+    pub camera_full: Arc<AtomicBool>,
+    /// Whether that can be: a video of the screen with the camera asked for.
+    pub can_swap: bool,
     /// Making the video after the recording stopped: 0 not yet, then 1 to 1001 (its progress + 1).
     pub saving: Arc<AtomicU32>,
     /// How loud the computer's sound and the microphone are just now (`f32` bits, 0 to 1).
@@ -106,6 +117,16 @@ impl Recording {
         self.paused.store(paused, Ordering::SeqCst);
     }
 
+    /// Whether the camera can fill the picture now: a video of the screen whose camera started
+    /// and wasn't let go.
+    pub fn swappable(&self) -> bool {
+        let sources = self.sources.lock().map(|s| s.clone()).unwrap_or_default();
+        self.can_swap
+            && !self.stopping()
+            && sources.iter().any(|s| s.starts_with("Camera:"))
+            && !sources.iter().any(|s| s.starts_with("No camera:") || s.starts_with("No camera was found"))
+    }
+
     /// Whether it has been asked to stop and is finishing.
     pub fn stopping(&self) -> bool {
         self.stopped.is_some()
@@ -137,20 +158,46 @@ impl Recording {
     }
 }
 
-/// Starts recording part of a monitor (`area` in its pixels).
-pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, max_secs: u32, wake: egui::Context) -> Result<Recording, String> {
+/// How a scrolling capture goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollPlan {
+    /// The service turns the wheel over the area (where the system lets it); else the owner
+    /// scrolls.
+    pub by_itself: bool,
+    /// The longest the picture gets, in its pixels.
+    pub longest: u32,
+}
+
+/// Starts recording part of a monitor (`area` in its pixels; `desktop` the same on the desktop).
+pub fn start(
+    kind: Kind,
+    monitor: u32,
+    area: IRect,
+    desktop: IRect,
+    fps: u32,
+    max_secs: u32,
+    scroll: ScrollPlan,
+    wake: egui::Context,
+) -> Result<Recording, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(AtomicU32::new(0));
     let lost = Arc::new(AtomicU32::new(0));
     let paused = Arc::new(AtomicBool::new(false));
-    let (s, c, p, l, z) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone());
+    let scroll = ScrollPlan { by_itself: scroll.by_itself && screengrabcraft_capture::scroll::supported(), ..scroll };
+    let by_itself = Arc::new(AtomicBool::new(kind == Kind::Scrolling && scroll.by_itself));
+    let ink = crate::ink::SharedInk::default();
+    let marks = ink.clone();
+    let (s, c, p, l, z, b) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone(), by_itself.clone());
     let handle = std::thread::Builder::new()
         .name(format!("{kind:?}").to_lowercase())
         .spawn(move || {
             let out = match kind {
-                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &wake),
-                Kind::Scrolling => scrolling(monitor, area, &s, &c, &p, &l, &wake),
+                Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &marks, &wake),
+                Kind::Scrolling => {
+                    let flags = Flags { stop: &s, progress: &p, lost: &l, by_itself: &b };
+                    scrolling(monitor, area, middle(desktop), scroll, &c, &flags, &wake)
+                }
                 Kind::Video | Kind::Production => Err("a video is started with start_video".to_string()),
             };
             wake.request_repaint();
@@ -168,12 +215,22 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
         paused_at: None,
         progress,
         lost,
+        by_itself,
+        drawable: kind == Kind::Gif && cfg!(target_os = "windows"),
+        camera_full: Arc::default(),
+        can_swap: false,
+        ink,
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
         stopped: None,
         handle: Some(handle),
     })
+}
+
+/// The middle of an area of the desktop.
+fn middle(r: IRect) -> (i32, i32) {
+    (r.x.saturating_add((r.w / 2).min(i32::MAX as u32) as i32), r.y.saturating_add((r.h / 2).min(i32::MAX as u32) as i32))
 }
 
 fn gif(
@@ -185,6 +242,7 @@ fn gif(
     cancel: &AtomicBool,
     paused: &AtomicBool,
     progress: &AtomicU32,
+    ink: &crate::ink::SharedInk,
     wake: &egui::Context,
 ) -> Result<Output, String> {
     let dir = std::env::temp_dir().join("ScreenGrabCraft");
@@ -222,6 +280,7 @@ fn gif(
         let at = Instant::now();
         match grab() {
             Ok(frame) if frame.width() == area.w && frame.height() == area.h => {
+                let frame = crate::ink::mark_frame(ink, frame);
                 let delay = at.duration_since(last).as_millis().min(u128::from(u32::MAX)) as u32;
                 // A frame left out only makes the one before last longer.
                 if writer.offer(frame, if frames == 0 { 0 } else { delay }).map_err(|e| e.to_string())? {
@@ -254,43 +313,112 @@ fn at_least(d: Duration) -> Duration {
     d.max(Duration::from_millis(100))
 }
 
+/// What a scrolling capture tells the service as it goes, and is told.
+struct Flags<'a> {
+    stop: &'a AtomicBool,
+    /// The picture's height so far.
+    progress: &'a AtomicU32,
+    /// Frames in a row that could not be joined.
+    lost: &'a AtomicU32,
+    /// Whether it's scrolling by itself just now.
+    by_itself: &'a AtomicBool,
+}
+
+/// How often a scrolling capture takes a frame.
+const SCROLL_TICK: Duration = Duration::from_millis(120);
+/// How long scrolling by itself waits before the first turn of the wheel: the overlay gone, the
+/// controls up.
+const SCROLL_SETTLE: Duration = Duration::from_millis(400);
+
 fn scrolling(
     monitor: u32,
     area: IRect,
-    stop: &AtomicBool,
+    over: (i32, i32),
+    plan: ScrollPlan,
     cancel: &AtomicBool,
-    progress: &AtomicU32,
-    lost: &AtomicU32,
+    flags: &Flags,
     wake: &egui::Context,
 ) -> Result<Output, String> {
+    let mut grabber = screengrabcraft_capture::grabber(monitor, area).map_err(|e| e.to_string())?;
+    let mut grab = move || grabber().map_err(|e| e.to_string());
+    let mut turn = move |t: i32| screengrabcraft_capture::scroll::wheel(over, t);
+    if plan.by_itself {
+        log::info!("scrolling by itself: {}×{} px, at most {} px long", area.w, area.h, plan.longest);
+        std::thread::sleep(SCROLL_SETTLE);
+    }
+    let wheel: Option<&mut dyn FnMut(i32) -> Result<(), String>> = if plan.by_itself { Some(&mut turn) } else { None };
+    let s = scroll_frames(&mut grab, wheel, plan.longest, SCROLL_TICK, flags, &|| wake.request_repaint());
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(Output::Cancelled);
+    }
+    s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
+}
+
+/// A scrolling capture's frames: one from `grab` every `tick`, joined to the picture, until it's
+/// stopped, `longest` rows long, or as long as a picture gets. With a `wheel` it scrolls by itself
+/// as [`Pacer`] says, and stops at the end of the page; where the page doesn't move (or the wheel
+/// can't be turned) it's left to the owner, and `by_itself` says so.
+fn scroll_frames(
+    grab: &mut dyn FnMut() -> Result<Raster, String>,
+    mut wheel: Option<&mut dyn FnMut(i32) -> Result<(), String>>,
+    longest: u32,
+    tick: Duration,
+    flags: &Flags,
+    wake: &dyn Fn(),
+) -> Stitcher {
     let mut s = Stitcher::new();
-    let tick = Duration::from_millis(120);
-    while !stop.load(Ordering::SeqCst) {
+    let mut pacer = Pacer::new(longest);
+    let by_hand = |pacer: &mut Pacer, why: &str| {
+        log::info!("scrolling by hand: {why}");
+        pacer.hand_over();
+        flags.by_itself.store(false, Ordering::SeqCst);
+        wake();
+    };
+    if wheel.is_none() {
+        pacer.hand_over();
+        flags.by_itself.store(false, Ordering::SeqCst);
+    }
+    while !flags.stop.load(Ordering::SeqCst) {
         let at = Instant::now();
-        match screengrabcraft_capture::grab_on_monitor(monitor, area) {
-            Ok(frame) => match s.push(frame) {
-                Step::Scrolled(_) | Step::Started => {
-                    progress.store(s.length(), Ordering::SeqCst);
-                    lost.store(0, Ordering::SeqCst);
-                    wake.request_repaint();
+        match grab() {
+            Ok(frame) => {
+                let step = s.push(frame);
+                match step {
+                    Step::Scrolled(_) | Step::Started => {
+                        flags.progress.store(s.length(), Ordering::SeqCst);
+                        flags.lost.store(0, Ordering::SeqCst);
+                        wake();
+                    }
+                    Step::Lost => {
+                        flags.lost.fetch_add(1, Ordering::SeqCst);
+                        wake();
+                    }
+                    Step::Full | Step::Unchanged | Step::WrongSize => {}
                 }
-                Step::Lost => {
-                    lost.fetch_add(1, Ordering::SeqCst);
-                    wake.request_repaint();
+                match pacer.after(step, s.length()) {
+                    Next::Wheel(t) => {
+                        if let Some(turn) = wheel.as_mut()
+                            && let Err(e) = turn(t)
+                        {
+                            by_hand(&mut pacer, &e);
+                            wheel = None;
+                        }
+                    }
+                    Next::Wait => {}
+                    Next::ByHand => by_hand(&mut pacer, "the wheel doesn't move the area"),
+                    Next::Stop(end) => {
+                        log::info!("scrolling capture done ({end:?}): {} px", s.length());
+                        break;
+                    }
                 }
-                Step::Full => break,
-                Step::Unchanged | Step::WrongSize => {}
-            },
+            }
             Err(e) => log::warn!("a frame could not be captured: {e}"),
         }
         if let Some(rest) = tick.checked_sub(at.elapsed()) {
             std::thread::sleep(rest);
         }
     }
-    if cancel.load(Ordering::SeqCst) {
-        return Ok(Output::Cancelled);
-    }
-    s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
+    s
 }
 
 /// What of the screen a video recording shows.
@@ -434,6 +562,11 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         paused_at: None,
         progress: Arc::default(),
         lost: Arc::default(),
+        by_itself: Arc::default(),
+        ink: crate::ink::SharedInk::default(),
+        drawable: cfg!(target_os = "windows") && matches!(plan.screen, Screen::Part { .. } | Screen::Monitor { .. }),
+        camera_full: Arc::default(),
+        can_swap: plan.options.camera && !matches!(plan.screen, Screen::Off),
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
@@ -443,9 +576,12 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
     let (stop, cancel, progress, saving, levels, sources, begun) =
         (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone(), r.begun.clone());
     let paused = r.paused.clone();
+    let ink = r.ink.clone();
+    let camera_full = r.camera_full.clone();
     let handle = std::thread::Builder::new()
         .name("video".into())
         .spawn(move || {
+            let swaps = Mutex::new(Swaps::default());
             let shared = Shared {
                 stop: &stop,
                 cancel: &cancel,
@@ -455,6 +591,9 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
                 levels: &levels,
                 sources: &sources,
                 begun: &begun,
+                ink: &ink,
+                camera_full: &camera_full,
+                swaps: &swaps,
                 wake: &wake,
             };
             let out = video(&plan, &shared);
@@ -475,7 +614,149 @@ struct Shared<'a> {
     sources: &'a Mutex<Vec<String>>,
     /// When the recording really began.
     begun: &'a Mutex<Option<Instant>>,
+    /// What the owner draws on the screen, drawn into the screen's frames.
+    ink: &'a crate::ink::SharedInk,
+    /// The owner's switch for the camera full screen, and the stretches it was on.
+    camera_full: &'a AtomicBool,
+    swaps: &'a Mutex<Swaps>,
     wake: &'a egui::Context,
+}
+
+/// The stretches the camera filled the picture (the owner's switch on), in the recording's time
+/// (µs, the pauses left out, as the camera's pictures are placed): they become the recording's
+/// edits, which the video editor can change.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Swaps {
+    done: Vec<[u64; 2]>,
+    /// The one going on, since when.
+    since: Option<u64>,
+}
+
+impl Swaps {
+    /// Follows the switch, at `now` in the recording.
+    fn follow(&mut self, on: bool, now: u64) {
+        match (on, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(from)) => {
+                if now > from && self.done.len() < screengrabcraft_media::timeline::MAX_CAMERA_FULL {
+                    self.done.push([from, now]);
+                }
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Those so far, the one going on to the end of the recording.
+    fn so_far(&self) -> Vec<[u64; 2]> {
+        let mut v = self.done.clone();
+        v.extend(self.since.map(|s| [s, u64::MAX]));
+        v
+    }
+
+    /// All of them, the one going on ended at `end`.
+    fn end(&mut self, end: u64) -> Vec<[u64; 2]> {
+        self.follow(false, end);
+        std::mem::take(&mut self.done)
+    }
+}
+
+/// The note left in the settings folder while a video records: its recording's file. A
+/// recording that ends (kept, thrown away, or failed) takes it away; one cut short (the service
+/// or the computer went down) leaves it, and the service finds the recording when it starts again
+/// ([`cut_short`]).
+const UNDER_WAY: &str = "recording-under-way.txt";
+
+/// The largest note read back.
+const UNDER_WAY_MAX: u64 = 64 * 1024;
+
+fn under_way_note() -> Option<PathBuf> {
+    if screengrabcraft_desktop::paths::no_prefs() {
+        return None;
+    }
+    screengrabcraft_desktop::paths::settings_dir().map(|d| d.join(UNDER_WAY))
+}
+
+/// The recording under way, noted for as long as this lives.
+struct UnderWay(Option<PathBuf>);
+
+impl UnderWay {
+    fn note(file: &std::path::Path, created: &str) -> UnderWay {
+        UnderWay::note_at(under_way_note().filter(|_| screengrabcraft_desktop::paths::ensure_settings_dir().is_some()), file, created)
+    }
+
+    /// [`UnderWay::note`] in the note `note` (none: nowhere).
+    fn note_at(note: Option<PathBuf>, file: &std::path::Path, created: &str) -> UnderWay {
+        if let Some(n) = &note {
+            // Its file, and when it was started (for its name if it's kept), a line each.
+            let text = format!("{}\n{}\n", file.to_string_lossy(), created.replace(char::is_control, " "));
+            if let Err(e) = screengrabcraft_desktop::store::write_atomic(n, text.as_bytes()) {
+                log::warn!("the recording couldn't be noted as under way: {e}");
+            }
+        }
+        UnderWay(note)
+    }
+}
+
+impl Drop for UnderWay {
+    fn drop(&mut self) {
+        if let Some(n) = &self.0 {
+            let _ = std::fs::remove_file(n);
+        }
+    }
+}
+
+/// The recording a crash cut short, if the last one was (its note is read and taken away):
+/// Record Video's, in the temporary folder, is moved to `captures` (as "Recording cut short …"),
+/// so what was recorded is kept; Video Production's is where it was. None when there's none.
+pub fn cut_short(captures: &std::path::Path) -> Option<PathBuf> {
+    cut_short_from(&under_way_note()?, &std::env::temp_dir().join("ScreenGrabCraft"), captures)
+}
+
+/// [`cut_short`] from the note `note`, Record Video's recordings being kept in `temp`.
+fn cut_short_from(note: &std::path::Path, temp: &std::path::Path, captures: &std::path::Path) -> Option<PathBuf> {
+    let size = std::fs::metadata(note).ok()?.len();
+    let text = (size <= UNDER_WAY_MAX).then(|| std::fs::read_to_string(note).ok()).flatten();
+    let _ = std::fs::remove_file(note);
+    let text = text?;
+    let mut lines = text.lines();
+    let file = PathBuf::from(lines.next()?.trim());
+    let is_recording = file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(recording::EXT));
+    if !is_recording || !file.is_file() {
+        return None;
+    }
+    if file.parent() != Some(temp) {
+        return Some(file);
+    }
+    // Its name: when it was started, as far as it's safe in a file name.
+    let created: String = lines
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(40)
+        .map(|c| match c {
+            ':' => '.',
+            'T' => ' ',
+            c => c,
+        })
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ' '))
+        .collect();
+    let name = if created.is_empty() { "Recording cut short".to_string() } else { format!("Recording cut short {created}") };
+    std::fs::create_dir_all(captures).ok()?;
+    let to = crate::app::free_path(captures, &name, recording::EXT);
+    if std::fs::rename(&file, &to).is_err() {
+        std::fs::copy(&file, &to).ok()?;
+        let _ = std::fs::remove_file(&file);
+    }
+    Some(to)
+}
+
+/// The edits Record Video's MP4 is made with: every track whole, the camera full screen where
+/// it was switched on.
+fn made_with(rec: &recording::Recording, full: Vec<[u64; 2]>) -> Timeline {
+    let mut tl = Timeline::new(rec);
+    tl.camera_full = full;
+    tl
 }
 
 impl Shared<'_> {
@@ -983,7 +1264,16 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     }
     let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
     let file = std::fs::File::create(&file_path).map_err(|e| format!("{}: {e}", file_path.display()))?;
-    let writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
+    // Noted until it ends here, so a crash doesn't lose it (see `cut_short`).
+    let _under_way = UnderWay::note(&file_path, &plan.created);
+    let mut writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
+    // The camera's look chosen in the Recorder (mirrored, a border): the recording starts with it
+    // as its edits, which the video editor can change.
+    if d.camera.is_some()
+        && let Some(look) = camera_look(&plan.options)
+    {
+        writer.edit(&look).map_err(|e| e.to_string())?;
+    }
     let (tx, rx) = std::sync::mpsc::channel::<Item>();
     let waiting = Arc::new(AtomicUsize::new(0));
     let w = waiting.clone();
@@ -1024,8 +1314,9 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let mut pointer_feed = screen.as_ref().and_then(|src| PointerFeed::start(&plan.screen, src.size, started));
     // The shortcuts pressed, to show on the video (Video Production, when asked for).
     let mut keys_feed = (plan.kind == Kind::Production && plan.options.keys && screen.is_some()).then(|| KeysFeed::start(started)).flatten();
+    let camera_recorded = d.camera.is_some();
     let (frames, live) = std::thread::scope(|scope| {
-        let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
+        let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding, s.swaps)));
         let feeds = Feeds { pointer: pointer_feed.as_mut(), keys: keys_feed.as_mut() };
         let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses, feeds);
         feeding.store(false, Ordering::SeqCst);
@@ -1036,6 +1327,8 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let end = started.elapsed();
     pauses.follow(false, end);
     let duration = end.saturating_sub(pauses.total(end)).as_micros() as u64;
+    // The camera full screen switched on and off: its stretches, the last one ended here.
+    let full = if camera_recorded { s.swaps.lock().map(|mut w| w.end(duration)).unwrap_or_default() } else { Vec::new() };
     if let Some(p) = &mut pointer_feed {
         p.end();
         p.pass_on(&tx, &pauses);
@@ -1061,7 +1354,14 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         }
     }
     drop(tx);
-    let writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
+    let mut writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
+    // The stretches the camera filled the picture become its edits, with the camera's look.
+    if !full.is_empty() {
+        let mut edits = camera_look(&plan.options).unwrap_or_default();
+        edits.camera_full = full.clone();
+        writer.edit(&edits).map_err(|e| e.to_string())?;
+        log::info!("the camera filled the picture {} time(s)", full.len());
+    }
     writer.finish(duration).map_err(|e| e.to_string())?;
     if s.cancel.load(Ordering::SeqCst) || frames.is_err() {
         let _ = std::fs::remove_file(&file_path);
@@ -1074,14 +1374,29 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     s.saving.store(1, Ordering::SeqCst);
     s.wake.request_repaint();
     let made = match live {
-        Some((ex, cancel)) => finish_live(ex, &cancel, &file_path, s),
-        None => make_mp4(plan, &file_path, s),
+        Some((ex, cancel)) => finish_live(ex, &cancel, &file_path, s, full),
+        None => make_mp4(plan, &file_path, s, full),
     };
     let _ = std::fs::remove_file(&file_path);
     if s.cancel.load(Ordering::SeqCst) {
         return Ok(Output::Cancelled);
     }
     made.map(|d| Output::Video(plan.out.clone(), d))
+}
+
+/// The edits a recording starts with for the camera's look the owner chose (mirrored, a border),
+/// or none when it's as the camera sends it. Only the camera's place is in them: the tracks are
+/// filled in whole when the recording is opened.
+fn camera_look(o: &VideoOptions) -> Option<Timeline> {
+    let border = o.camera_border.min(screengrabcraft_model::settings::CAMERA_BORDER_MAX);
+    if !o.camera_mirror && border == 0 {
+        return None;
+    }
+    let mut tl = Timeline::default();
+    tl.camera.mirror = o.camera_mirror;
+    tl.camera.border = f32::from(border) / 100.0;
+    tl.camera.border_color = o.camera_border_color;
+    Some(tl)
 }
 
 /// How much sound came, for the log and to tell a microphone that heard nothing.
@@ -1266,6 +1581,12 @@ fn record_screen(
         pauses.follow(s.paused.load(Ordering::SeqCst), at);
         // While paused the screen isn't taken; the devices go on, and what they send is left out.
         let place = pauses.place(at);
+        // The camera full screen, switched on or off now (nothing changes while paused).
+        if let Some(pts) = place
+            && let Ok(mut w) = s.swaps.lock()
+        {
+            w.follow(s.camera_full.load(Ordering::SeqCst), pts.as_micros() as u64);
+        }
         if let Some(p) = feeds.pointer.as_deref_mut() {
             p.pass_on(tx, pauses);
         }
@@ -1275,6 +1596,7 @@ fn record_screen(
         if let Some(pts) = place
             && let Some(pic) = screen.as_deref_mut().and_then(ScreenSource::grab)
         {
+            let pic = crate::ink::mark_frame(s.ink, pic);
             if waiting.load(Ordering::SeqCst) < WAITING {
                 waiting.fetch_add(1, Ordering::SeqCst);
                 let _ = tx.send(Item::Screen(pts.as_micros() as u64, pic));
@@ -1376,7 +1698,13 @@ fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Export
 
 /// While recording: every second, what's been written is read again and every stretch it
 /// has got past is made. None if that went wrong (the video is then made after).
-fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, feeding: &AtomicBool) -> Option<(Exporter, Arc<AtomicBool>)> {
+fn feed_live(
+    mut ex: Exporter,
+    cancel: Arc<AtomicBool>,
+    file: &std::path::Path,
+    feeding: &AtomicBool,
+    swaps: &Mutex<Swaps>,
+) -> Option<(Exporter, Arc<AtomicBool>)> {
     let mut next = Instant::now() + Duration::from_secs(1);
     while feeding.load(Ordering::SeqCst) {
         if Instant::now() < next {
@@ -1390,7 +1718,8 @@ fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, 
             continue;
         };
         let rec = Arc::new(rec);
-        let tl = Arc::new(Timeline::new(&rec));
+        let full = swaps.lock().map(|w| w.so_far()).unwrap_or_default();
+        let tl = Arc::new(made_with(&rec, full));
         // Half a second's margin: the sound comes in a little after the pictures.
         let ready = rec.duration_us.saturating_sub(500_000);
         if let Err(e) = ex.feed(rec, tl, ready) {
@@ -1402,10 +1731,10 @@ fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, 
 }
 
 /// The recording is over: the stretches not made yet are made, and the MP4 is put in place.
-fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Shared) -> Result<u64, String> {
+fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Shared, full: Vec<[u64; 2]>) -> Result<u64, String> {
     let source = FileSource::open(file).map_err(|e| e.to_string())?;
     let rec = Arc::new(recording::Recording::open(Box::new(source)).map_err(|e| e.to_string())?);
-    let tl = Arc::new(Timeline::new(&rec));
+    let tl = Arc::new(made_with(&rec, full));
     let progress = AtomicU32::new(0);
     let done = std::thread::scope(|scope| {
         let relay = scope.spawn(|| {
@@ -1433,10 +1762,10 @@ fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Sh
 }
 
 /// Record Video's MP4, made from the recording file. How long it is, in µs.
-fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared) -> Result<u64, String> {
+fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared, full: Vec<[u64; 2]>) -> Result<u64, String> {
     let source = FileSource::open(file_path).map_err(|e| e.to_string())?;
     let rec = Arc::new(recording::Recording::open(Box::new(source)).map_err(|e| e.to_string())?);
-    let tl = Timeline::new(&rec);
+    let tl = made_with(&rec, full);
     let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
     // The export counts 0 to 1000; the control window reads it + 1 (0 is "not saving").
     let progress = AtomicU32::new(0);
@@ -1466,6 +1795,84 @@ mod tests {
     use screengrabcraft_model::Color;
 
     use super::*;
+
+    /// A made-up page `rows` long, every row its own, seen through an area of 64 × 90 from `top`.
+    fn page_view(top: u32) -> Raster {
+        let (w, h) = (64u32, 90u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let r = top + y;
+                px.extend_from_slice(&[(r.wrapping_mul(2_654_435_761) >> 9) as u8, (r * 3 + x * 5) as u8, (x * 11) as u8, 255]);
+            }
+        }
+        Raster::new(w, h, px).unwrap()
+    }
+
+    fn flags<'a>(stop: &'a AtomicBool, progress: &'a AtomicU32, lost: &'a AtomicU32, by_itself: &'a AtomicBool) -> Flags<'a> {
+        Flags { stop, progress, lost, by_itself }
+    }
+
+    /// The scrolling capture's loop on a made-up page the wheel scrolls (never the owner's
+    /// windows): it turns the wheel, joins the frames and stops by itself at the end of the page.
+    #[test]
+    fn a_scrolling_capture_scrolls_a_page_by_itself_to_its_end() {
+        let top = std::cell::Cell::new(0u32);
+        let end = 700u32;
+        let turns = std::cell::Cell::new(0u32);
+        let mut grab = || -> Result<Raster, String> { Ok(page_view(top.get())) };
+        let mut wheel = |t: i32| -> Result<(), String> {
+            turns.set(turns.get() + 1);
+            // 45 rows a notch, as a browser might.
+            let moved = (i64::from(top.get()) + i64::from(t) * 45 / 120).clamp(0, i64::from(end));
+            top.set(moved as u32);
+            Ok(())
+        };
+        let (stop, progress, lost, by_itself) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0), AtomicBool::new(true));
+        let f = flags(&stop, &progress, &lost, &by_itself);
+        let s = scroll_frames(&mut grab, Some(&mut wheel), 60_000, Duration::ZERO, &f, &|| {});
+        let out = s.finish().unwrap();
+        assert_eq!(out.height(), 90 + end, "the whole page");
+        assert_eq!(progress.load(Ordering::SeqCst), 90 + end);
+        assert!(by_itself.load(Ordering::SeqCst), "it scrolled by itself all the way");
+        assert!(turns.get() > end / 45, "{} turns", turns.get());
+        for y in [0, 345, 789] {
+            let p = out.pixel(7, y).unwrap();
+            let want = page_view(y).pixel(7, 0).unwrap();
+            assert_eq!(p, want, "row {y}");
+        }
+    }
+
+    /// A page the wheel doesn't move is left to the owner, who scrolls it; the longest picture
+    /// still stops it.
+    #[test]
+    fn a_page_the_wheel_doesnt_move_is_scrolled_by_hand() {
+        let frame = std::cell::Cell::new(0u32);
+        // Nothing moves for a while, whatever the wheel does; then the owner scrolls 30 rows a frame.
+        let mut grab = || -> Result<Raster, String> {
+            frame.set(frame.get() + 1);
+            Ok(page_view(frame.get().saturating_sub(20) * 30))
+        };
+        let mut wheel = |_t: i32| -> Result<(), String> { Ok(()) };
+        let (stop, progress, lost, by_itself) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0), AtomicBool::new(true));
+        let f = flags(&stop, &progress, &lost, &by_itself);
+        let s = scroll_frames(&mut grab, Some(&mut wheel), 400, Duration::ZERO, &f, &|| {});
+        assert!(!by_itself.load(Ordering::SeqCst), "handed over to the owner");
+        assert!((400..430).contains(&s.length()), "stopped at the longest: {}", s.length());
+        // A wheel that can't be turned hands over too, and Done stops it.
+        let mut broken = |_t: i32| -> Result<(), String> { Err("no wheel here".to_string()) };
+        let mut still = || -> Result<Raster, String> { Ok(page_view(0)) };
+        by_itself.store(true, Ordering::SeqCst);
+        let stopper = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::SeqCst);
+            });
+            scroll_frames(&mut still, Some(&mut broken), 400, Duration::from_millis(1), &f, &|| {})
+        });
+        assert!(!by_itself.load(Ordering::SeqCst));
+        assert_eq!(stopper.length(), 90);
+    }
 
     fn mon(id: u32, name: &str, rect: IRect, primary: bool) -> Monitor {
         Monitor { id, name: name.into(), rect, scale: 1.0, primary }
@@ -1637,7 +2044,10 @@ mod tests {
 
     #[test]
     fn the_clock_stands_still_while_paused_and_scrolling_cant_be() {
-        let mut rec = start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, egui::Context::default()).unwrap();
+        // Scrolled by hand: a test never turns the wheel over the owner's windows.
+        let by_hand = ScrollPlan { by_itself: false, longest: 1000 };
+        let mut rec =
+            start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, by_hand, egui::Context::default()).unwrap();
         rec.set_paused(true);
         assert!(!rec.is_paused(), "a scrolling capture isn't paused");
         rec.cancel();
@@ -1650,6 +2060,7 @@ mod tests {
             camera_index: None,
             captions: false,
             keys: false,
+            ..VideoOptions::default()
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1663,17 +2074,26 @@ mod tests {
             created: String::new(),
         };
         let mut rec = start_video(plan, egui::Context::default()).unwrap();
-        if let Ok(mut b) = rec.begun.lock() {
-            *b = Some(Instant::now());
+        // Its own start, however long a busy machine takes to get to it (set by hand, the
+        // recording's worker could set it again later, under the pause).
+        let asked = Instant::now();
+        while rec.begun.lock().map(|b| b.is_none()).unwrap_or(true) && asked.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(10));
         }
+        assert!(rec.begun.lock().map(|b| b.is_some()).unwrap_or(false), "the recording began");
         rec.set_paused(true);
         assert!(rec.is_paused());
         let at = rec.elapsed();
         std::thread::sleep(Duration::from_millis(60));
-        assert!(rec.elapsed() <= at + Duration::from_millis(5), "the time shown stands still while paused");
+        // Nothing moves the clock while paused, however long the sleep took.
+        assert_eq!(rec.elapsed(), at, "the time shown stands still while paused");
+        let before = Instant::now();
         rec.set_paused(false);
         std::thread::sleep(Duration::from_millis(40));
-        assert!(rec.elapsed() >= at + Duration::from_millis(30), "and goes on after");
+        // At least the time slept since it went on (a busy machine only sleeps longer), and no
+        // more than the time since it was asked to.
+        let gone = rec.elapsed().saturating_sub(at);
+        assert!(gone >= Duration::from_millis(40) && gone <= before.elapsed(), "and goes on after: {gone:?}");
         rec.cancel();
         assert!(!rec.is_paused() || rec.stopping());
     }
@@ -1689,6 +2109,7 @@ mod tests {
             camera_index: None,
             captions: false,
             keys: false,
+            ..VideoOptions::default()
         };
         let plan = VideoPlan {
             kind: Kind::Production,
@@ -1716,6 +2137,111 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(result.is_err());
+    }
+
+    /// A recording under way is noted, and the note goes when it ends; one a crash left is kept
+    /// when the service starts again.
+    #[test]
+    fn a_recording_cut_short_by_a_crash_is_kept_and_said() {
+        let base = std::env::temp_dir().join(format!("sgc-cut-short-{}", std::process::id()));
+        let (temp, captures, elsewhere) = (base.join("ScreenGrabCraft"), base.join("Captures"), base.join("Videos"));
+        for d in [&temp, &captures, &elsewhere] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let note = base.join(UNDER_WAY);
+        // Record Video's, in the temporary folder: moved to the captures folder, named for when.
+        let file = temp.join(format!("recording-1.{}", recording::EXT));
+        std::fs::write(&file, b"SGVIDEO\x01 what was written").unwrap();
+        let crashed = UnderWay::note_at(Some(note.clone()), &file, "2026-11-21T10:05:00");
+        assert!(note.is_file(), "noted while it records");
+        std::mem::forget(crashed);
+        let kept = cut_short_from(&note, &temp, &captures).unwrap();
+        assert_eq!(kept, captures.join(format!("Recording cut short 2026-11-21 10.05.00.{}", recording::EXT)));
+        assert!(kept.is_file() && !file.exists() && !note.exists());
+        assert_eq!(std::fs::read(&kept).unwrap(), b"SGVIDEO\x01 what was written");
+        // Video Production's: where it was, said.
+        let production = elsewhere.join(format!("Production.{}", recording::EXT));
+        std::fs::write(&production, b"SGVIDEO\x01").unwrap();
+        std::mem::forget(UnderWay::note_at(Some(note.clone()), &production, "x"));
+        assert_eq!(cut_short_from(&note, &temp, &captures), Some(production.clone()));
+        assert!(production.is_file());
+        // One that ended takes its note away: nothing to find.
+        drop(UnderWay::note_at(Some(note.clone()), &production, "x"));
+        assert!(!note.exists() && cut_short_from(&note, &temp, &captures).is_none());
+        // A note of a file that isn't there or isn't a recording, or junk: nothing, the note gone.
+        for text in [
+            format!("{}\n", elsewhere.join("gone.sgvideo").display()),
+            format!("{}\n", production.with_extension("png").display()),
+            "\u{0}\u{1}junk".to_string(),
+            "x".repeat(UNDER_WAY_MAX as usize + 10),
+            String::new(),
+        ] {
+            std::fs::write(&note, &text).unwrap();
+            assert!(cut_short_from(&note, &temp, &captures).is_none());
+            assert!(!note.exists());
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_camera_full_screen_switch_makes_stretches_of_the_recording() {
+        let mut w = Swaps::default();
+        w.follow(false, 100);
+        w.follow(true, 1_000);
+        w.follow(true, 1_500);
+        assert_eq!(w.so_far(), vec![[1_000, u64::MAX]], "going on: to the end for now");
+        w.follow(false, 3_000);
+        w.follow(true, 5_000);
+        w.follow(true, 5_000);
+        // Stopped with it on: it ends where the recording does.
+        assert_eq!(w.end(8_000), vec![[1_000, 3_000], [5_000, 8_000]]);
+        // On and off at once: nothing.
+        let mut w = Swaps::default();
+        w.follow(true, 10);
+        assert!(w.end(10).is_empty());
+        // Written as the recording's edits at its end, with the camera's look: read back so.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let o = VideoOptions { camera_mirror: true, ..VideoOptions::production() };
+        w.edit(&camera_look(&o).unwrap()).unwrap();
+        w.video_frame(0, 0, &Raster::filled(64, 48, Color::BLACK).unwrap()).unwrap();
+        let mut edits = camera_look(&o).unwrap();
+        edits.camera_full = vec![[200_000, 600_000]];
+        w.edit(&edits).unwrap();
+        let rec = recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
+        let tl = rec.timeline.clone().unwrap();
+        assert!(tl.camera.mirror);
+        assert_eq!(tl.camera_full, vec![[200_000, 600_000]]);
+        assert_eq!(made_with(&rec, vec![[1, 2]]).camera_full, vec![[1, 2]]);
+    }
+
+    #[test]
+    fn a_recording_starts_with_the_cameras_chosen_look() {
+        assert!(camera_look(&VideoOptions::production()).is_none(), "as the camera sends it: no edits");
+        let o = VideoOptions { camera_mirror: true, camera_border: 50, camera_border_color: Color::rgb(0, 120, 255), ..VideoOptions::production() };
+        let look = camera_look(&o).unwrap();
+        // Written first, as the recorder does, then the pictures: opened, every track is whole.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.edit(&look).unwrap();
+        let jpeg =
+            screengrabcraft_render::encode(&Raster::filled(16, 12, Color::WHITE).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 80).unwrap();
+        for t in 0..10u64 {
+            w.video_frame(0, t * 100_000, &Raster::filled(64, 48, Color::BLACK).unwrap()).unwrap();
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let rec = recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
+        let tl = rec.timeline.clone().unwrap();
+        assert!(tl.camera.mirror);
+        assert_eq!(tl.camera.border, 0.1, "at most the widest");
+        assert_eq!(tl.camera.border_color, Color::rgb(0, 120, 255));
+        assert_eq!(tl.tracks, Timeline::new(&rec).tracks);
     }
 
     #[test]
@@ -1801,6 +2327,7 @@ mod tests {
                 camera_index: None,
                 captions: false,
                 keys: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -1933,6 +2460,7 @@ mod tests {
                 camera_index: None,
                 captions: false,
                 keys: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),
@@ -1989,6 +2517,7 @@ mod tests {
                 camera_index: None,
                 captions: false,
                 keys: false,
+                ..VideoOptions::default()
             },
             out: out.clone(),
             max_size: (1920, 1080),

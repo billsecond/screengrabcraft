@@ -38,12 +38,16 @@ use none as backend;
 
 #[cfg_attr(not(any(target_os = "windows", target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub mod audio;
+// Open menus are looked for on Windows only; elsewhere there are none to add.
 pub mod camera;
 pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
 pub mod keys;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod menus;
 pub mod mouse;
+pub mod scroll;
 
 /// How long a device's thread is waited for when it's stopped.
 const STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(2);

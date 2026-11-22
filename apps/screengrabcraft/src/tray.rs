@@ -16,11 +16,20 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::hotkeys::Registered;
 
+/// What runs that the main menu stops.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Running {
+    pub timed: bool,
+    pub steps: bool,
+}
+
 /// What a menu item does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Item {
     Capture(CaptureMode),
     Delayed(u32),
+    /// A capture preset, by its place in the settings' list.
+    Preset(usize),
     Editor,
     /// The video editor: the editor's window for recordings.
     VideoEditor,
@@ -38,8 +47,18 @@ pub enum Item {
     ToggleControls,
     /// The red border round the area, on or off.
     ToggleBorder,
+    /// Drawing on the screen over the area, on or off.
+    ToggleDrawing,
+    /// The camera full screen with the screen in its corner, or back.
+    ToggleCameraFull,
     /// Stop and throw it away.
     DiscardRecording,
+    /// Captures on a timer: their settings (the Capture page), or stop them while they run.
+    TimedCaptures,
+    StopTimed,
+    /// Step capture: start it, or stop it and make the guide.
+    RecordSteps,
+    StopSteps,
 }
 
 /// How a recording is, for its menu.
@@ -56,6 +75,14 @@ pub struct RecordingState {
     pub stop_key: Option<String>,
     /// Capture Region's shortcut: a picture can be taken while recording.
     pub shot_key: Option<String>,
+    /// The owner is drawing on the screen; whether it can be drawn on; the shortcut that does it.
+    pub drawing: bool,
+    pub can_draw: bool,
+    pub draw_key: Option<String>,
+    /// The camera fills the picture; whether it can; the shortcut that does it.
+    pub camera_full: bool,
+    pub can_swap: bool,
+    pub camera_full_key: Option<String>,
 }
 
 /// One entry of the menu shown while a recording runs.
@@ -83,6 +110,12 @@ pub fn recording_entries(s: &RecordingState) -> Vec<RecordingEntry> {
     e.push(E::Separator);
     // A picture, while the recording goes on.
     e.push(E::Item(label("Take a Screenshot", s.shot_key.clone()), Item::Capture(CaptureMode::Region)));
+    if s.can_draw {
+        e.push(E::Check(label("Draw on the Screen", s.draw_key.clone()), Item::ToggleDrawing, s.drawing));
+    }
+    if s.can_swap {
+        e.push(E::Check(label("Camera Full Screen", s.camera_full_key.clone()), Item::ToggleCameraFull, s.camera_full));
+    }
     e.push(E::Separator);
     let controls = if s.controls { "Hide the Controls in the Tray" } else { "Show the Controls" };
     e.push(E::Item(controls.to_string(), Item::ToggleControls));
@@ -101,6 +134,8 @@ pub enum Entry {
     Marked(String, Item),
     /// The submenu of captures after a delay.
     Delays,
+    /// The submenu of the capture presets: each one's words (its name and shortcut), in order.
+    Presets(Vec<String>),
     Separator,
 }
 
@@ -111,12 +146,18 @@ pub const IMAGE_EDITOR_ITEM: &str = "Open Image Editor";
 pub const VIDEO_EDITOR_ITEM: &str = "Open Video Editor";
 
 /// The menu's entries, top to bottom: `shortcut` is a capture's shortcut as the menu shows it,
-/// `update` the update waiting.
-pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<&str>) -> Vec<Entry> {
+/// `presets` the capture presets' names and shortcuts, `update` the update waiting.
+pub fn entries(
+    shortcut: &dyn Fn(CaptureMode) -> Option<String>,
+    presets: &[(String, Option<String>)],
+    update: Option<&str>,
+    running: Running,
+) -> Vec<Entry> {
     let capture = |m: CaptureMode| Entry::Item(label(m.label(), shortcut(m)), Item::Capture(m));
     let mut e: Vec<Entry> = [
         CaptureMode::Region,
         CaptureMode::Adjust,
+        CaptureMode::Freehand,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
@@ -124,11 +165,25 @@ pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<
         CaptureMode::Gif,
         CaptureMode::Repeat,
         CaptureMode::Text,
+        CaptureMode::Camera,
     ]
     .into_iter()
     .map(capture)
     .collect();
+    e.push(if running.timed {
+        Entry::Item("Stop Captures on a Timer".to_string(), Item::StopTimed)
+    } else {
+        Entry::Item("Captures on a Timer…".to_string(), Item::TimedCaptures)
+    });
+    e.push(if running.steps {
+        Entry::Item("Stop Recording Steps".to_string(), Item::StopSteps)
+    } else {
+        Entry::Item("Record Steps for a How-to Guide".to_string(), Item::RecordSteps)
+    });
     e.push(Entry::Delays);
+    if !presets.is_empty() {
+        e.push(Entry::Presets(presets.iter().map(|(name, key)| label(name, key.clone())).collect()));
+    }
     // The pictures' editor, at the end of the pictures.
     e.push(Entry::Item(IMAGE_EDITOR_ITEM.to_string(), Item::Editor));
     // Video, a section of its own, with its own editor.
@@ -180,6 +235,8 @@ pub struct Tray {
     transcribing: Option<String>,
     /// The update waiting, as its item says it (`Install Update 0.1.8`); see `crate::update`.
     pub update: Option<String>,
+    /// Captures on a timer, or step capture, are running (the menu stops them).
+    pub running: Running,
     /// The menu of captures, kept while the recording's own menu is shown.
     main: Option<Menu>,
     /// The recording's menu as it was last built, and its items.
@@ -211,6 +268,7 @@ impl Tray {
             recording: false,
             transcribing: None,
             update: None,
+            running: Running::default(),
             main: None,
             shown: None,
             recording_items: Vec::new(),
@@ -250,7 +308,9 @@ impl Tray {
         self.stoppers.clear();
         self.production = None;
         let shortcut = |m: CaptureMode| keys.label(&settings.hotkeys, m);
-        for entry in entries(&shortcut, self.update.as_deref()) {
+        let presets: Vec<(String, Option<String>)> =
+            settings.presets.iter().enumerate().map(|(i, p)| (p.title(i + 1), keys.preset_label(p))).collect();
+        for entry in entries(&shortcut, &presets, self.update.as_deref(), self.running) {
             match entry {
                 Entry::Item(text, item) => {
                     let mi = MenuItem::new(&text, true, None);
@@ -288,6 +348,15 @@ impl Tray {
                         let _ = delayed.append(&mi);
                     }
                     let _ = menu.append(&delayed);
+                }
+                Entry::Presets(names) => {
+                    let presets = Submenu::new("Capture Presets", true);
+                    for (i, name) in names.iter().enumerate() {
+                        let mi = MenuItem::new(name, true, None);
+                        self.items.push((mi.id().clone(), Item::Preset(i)));
+                        let _ = presets.append(&mi);
+                    }
+                    let _ = menu.append(&presets);
                 }
                 Entry::Separator => {
                     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -433,6 +502,7 @@ mod tests {
             pause_key: None,
             stop_key: None,
             shot_key: Some("PrintScreen".to_string()),
+            ..RecordingState::default()
         };
         let r = recording_entries(&s);
         let shot = r.iter().find_map(|e| match e {
@@ -440,6 +510,22 @@ mod tests {
             _ => None,
         });
         assert!(shot.is_some_and(|t| t.starts_with("Take a Screenshot") && t.contains("PrintScreen")), "{r:?}");
+        assert!(!r.iter().any(|e| matches!(e, RecordingEntry::Check(_, Item::ToggleDrawing, _))), "not where it can't be drawn on");
+        let d = recording_entries(&RecordingState { can_draw: true, drawing: true, draw_key: Some("F8".into()), ..s.clone() });
+        assert!(
+            d.iter()
+                .any(|e| matches!(e, RecordingEntry::Check(t, Item::ToggleDrawing, true) if t.starts_with("Draw on the Screen") && t.contains("F8"))),
+            "{d:?}"
+        );
+        // The camera full screen only where the camera can fill the picture, ticked while it does.
+        assert!(!r.iter().any(|e| matches!(e, RecordingEntry::Check(_, Item::ToggleCameraFull, _))));
+        let c = recording_entries(&RecordingState { can_swap: true, camera_full: true, camera_full_key: Some("F7".into()), ..s.clone() });
+        assert!(
+            c.iter().any(
+                |e| matches!(e, RecordingEntry::Check(t, Item::ToggleCameraFull, true) if t.starts_with("Camera Full Screen") && t.contains("F7"))
+            ),
+            "{c:?}"
+        );
         let m = menu();
         // The Image Editor at the end of the pictures, the Video Editor under Video Production.
         let at = |item: Item| m.iter().position(|e| matches!(e, Entry::Item(_, i) | Entry::Marked(_, i) if *i == item)).unwrap();
@@ -454,13 +540,13 @@ mod tests {
 
     fn menu() -> Vec<Entry> {
         let shortcut = |m: CaptureMode| (m == CaptureMode::Video).then(|| "Ctrl+Alt+Shift+PrintScreen".to_string());
-        entries(&shortcut, None)
+        entries(&shortcut, &[], None, Running::default())
     }
 
     fn words(e: &Entry) -> Option<&str> {
         match e {
             Entry::Item(t, _) | Entry::Marked(t, _) => Some(t.as_str()),
-            Entry::Delays | Entry::Separator => None,
+            Entry::Delays | Entry::Presets(_) | Entry::Separator => None,
         }
     }
 
@@ -496,8 +582,30 @@ mod tests {
 
     #[test]
     fn an_update_waiting_has_its_item_with_the_settings() {
-        let m = entries(&|_| None, Some("Install Update 9.9.9"));
+        let m = entries(&|_| None, &[], Some("Install Update 9.9.9"), Running::default());
         let settings = m.iter().position(|e| words(e) == Some("Settings…")).unwrap();
         assert_eq!(m.get(settings + 1), Some(&Entry::Item("Install Update 9.9.9".to_string(), Item::InstallUpdate)));
+    }
+
+    #[test]
+    fn captures_on_a_timer_have_an_item_that_stops_them_while_they_run() {
+        let has = |m: &[Entry], it: Item| m.iter().any(|e| matches!(e, Entry::Item(_, i) if *i == it));
+        let off = entries(&|_| None, &[], None, Running::default());
+        assert!(has(&off, Item::TimedCaptures) && !has(&off, Item::StopTimed));
+        let on = entries(&|_| None, &[], None, Running { timed: true, steps: true });
+        assert!(has(&on, Item::StopTimed) && !has(&on, Item::TimedCaptures));
+        assert!(has(&on, Item::StopSteps) && !has(&on, Item::RecordSteps) && has(&off, Item::RecordSteps));
+    }
+
+    #[test]
+    fn the_capture_presets_have_a_submenu_after_the_delays_when_there_are_any() {
+        assert!(!menu().iter().any(|e| matches!(e, Entry::Presets(_))), "none without presets");
+        let presets = [("Docs shot".to_string(), Some("Ctrl+Alt+D".to_string())), ("Wide".to_string(), None)];
+        let m = entries(&|_| None, &presets, None, Running::default());
+        let delays = m.iter().position(|e| *e == Entry::Delays).unwrap();
+        let Some(Entry::Presets(names)) = m.get(delays + 1) else { panic!("{m:?}") };
+        assert_eq!(names.len(), 2);
+        assert!(names[0].starts_with("Docs shot") && names[0].contains("Ctrl+Alt+D"), "{names:?}");
+        assert_eq!(names[1], "Wide");
     }
 }

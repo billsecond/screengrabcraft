@@ -648,6 +648,16 @@ pub struct CameraLayout {
     /// picture of the media bin.
     #[serde(default, skip_serializing_if = "is_screen")]
     pub behind: Behind,
+    /// A line round the camera's picture, inside its shape: its width as a share of the
+    /// picture's shorter side, 0 (none) to [`MAX_CAMERA_BORDER`].
+    #[serde(default)]
+    pub border: f32,
+    /// The border's colour.
+    #[serde(default = "border_color")]
+    pub border_color: screengrabcraft_model::Color,
+    /// The camera's picture flipped left to right, as in a mirror.
+    #[serde(default)]
+    pub mirror: bool,
 }
 
 /// What shows behind the person where the camera's background is taken away.
@@ -683,8 +693,15 @@ fn key_tolerance() -> f32 {
     0.35
 }
 
+/// The widest border round the camera, as a share of its picture's shorter side.
+pub const MAX_CAMERA_BORDER: f32 = 0.1;
+
 fn camera_size() -> f32 {
     0.22
+}
+
+fn border_color() -> screengrabcraft_model::Color {
+    screengrabcraft_model::Color::WHITE
 }
 
 impl Default for CameraLayout {
@@ -698,6 +715,9 @@ impl Default for CameraLayout {
             key_colour: key_colour(),
             key_tolerance: key_tolerance(),
             behind: Behind::Screen,
+            border: 0.0,
+            border_color: border_color(),
+            mirror: false,
         }
     }
 }
@@ -725,7 +745,7 @@ impl Default for CaptionOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Timeline {
     pub tracks: Vec<Track>,
@@ -775,6 +795,10 @@ pub struct Timeline {
     /// through points dragged where they should be, instead of where it went. Apart, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pointer_paths: Vec<crate::pointer::Path>,
+    /// The stretches the camera fills the picture, the screen in the camera's place: from and
+    /// to in the camera track's recording (µs), in order and apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub camera_full: Vec<[u64; 2]>,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -795,6 +819,27 @@ fn checked_transition(t: ClipTransition, sound: bool) -> ClipTransition {
 /// A marker's name as it's kept: one clean line, else "Chapter n".
 fn marker_name(name: &str, n: usize) -> String {
     clean_name(name).unwrap_or_else(|| format!("Chapter {}", n.max(1)))
+}
+
+/// The most stretches of the camera full screen kept.
+pub const MAX_CAMERA_FULL: usize = 1000;
+
+/// Stretches sorted, joined where they touch or overlap, kept inside `0..len`, the shortest left
+/// out.
+fn tidy(mut spans: Vec<[u64; 2]>, len: u64) -> Vec<[u64; 2]> {
+    spans.retain(|[a, b]| a < b);
+    spans.sort_unstable();
+    let mut out: Vec<[u64; 2]> = Vec::with_capacity(spans.len());
+    for [a, b] in spans {
+        let (a, b) = (a.min(len), b.min(len));
+        match out.last_mut() {
+            Some(last) if a <= last[1] => last[1] = last[1].max(b),
+            _ => out.push([a, b]),
+        }
+    }
+    out.retain(|[a, b]| b - a >= MIN_CLIP_US);
+    out.truncate(MAX_CAMERA_FULL);
+    out
 }
 
 impl Timeline {
@@ -838,6 +883,7 @@ impl Timeline {
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
+            camera_full: Vec::new(),
         }
     }
 
@@ -928,8 +974,15 @@ impl Timeline {
             tracks.push(t);
         }
         self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
+        self.camera.border = if self.camera.border.is_finite() { self.camera.border.clamp(0.0, MAX_CAMERA_BORDER) } else { 0.0 };
         self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
         self.camera.key_tolerance = if self.camera.key_tolerance.is_finite() { self.camera.key_tolerance.clamp(0.0, 1.0) } else { key_tolerance() };
+        // The camera full screen only where there's a camera, inside what it recorded.
+        let camera_len = tracks.iter().find(|t| t.kind == StreamKind::Camera).map(|t| rec.stream_duration(t.stream));
+        let camera_full = match camera_len {
+            Some(len) => tidy(self.camera_full.into_iter().take(MAX_CAMERA_FULL * 4).collect(), len),
+            None => Vec::new(),
+        };
         let mut checked = Timeline {
             tracks,
             camera: self.camera,
@@ -946,6 +999,7 @@ impl Timeline {
             motion_blur: self.motion_blur.checked(),
             pointer_hidden: merged(self.pointer_hidden),
             pointer_paths: crate::pointer::checked_paths(self.pointer_paths),
+            camera_full,
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -1988,6 +2042,69 @@ impl Timeline {
         self.track_mut(track)?.volume = volume.clamp(0.0, 2.0);
         Ok(())
     }
+
+    /// Whether the camera fills the picture at `src` in the camera's recording.
+    pub fn camera_full_at(&self, src: u64) -> bool {
+        let i = self.camera_full.partition_point(|[a, _]| *a <= src);
+        i.checked_sub(1).and_then(|i| self.camera_full.get(i)).is_some_and(|[_, b]| src < *b)
+    }
+
+    /// The camera full screen (or not) from `from` to `to` on the timeline: what the camera's
+    /// clips play then. An error when there's no camera, or it plays nothing then.
+    pub fn set_camera_full(&mut self, from: u64, to: u64, full: bool) -> Result<(), EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch is empty".to_string()));
+        }
+        let i = self.find(StreamKind::Camera).ok_or_else(|| EditError::Invalid("the recording has no camera".to_string()))?;
+        let spans: Vec<[u64; 2]> = self
+            .track(i)?
+            .clips
+            .iter()
+            .filter(|c| c.at < to && from < c.end())
+            .map(|c| {
+                let (a, b) = (from.max(c.at), to.min(c.end()));
+                [c.from.saturating_add(a - c.at), c.from.saturating_add(b - c.at)]
+            })
+            .collect();
+        if spans.is_empty() {
+            return Err(EditError::Invalid("the camera plays nothing in that stretch".to_string()));
+        }
+        let mut now = std::mem::take(&mut self.camera_full);
+        if full {
+            now.extend(spans);
+        } else {
+            // Each stretch less the parts taken off.
+            for [x, y] in spans {
+                now = now.into_iter().flat_map(|[a, b]| [[a, b.min(x)], [a.max(y), b]]).filter(|[a, b]| a < b).collect();
+            }
+        }
+        self.camera_full = tidy(now, u64::MAX);
+        Ok(())
+    }
+
+    /// Takes one stretch of the camera full screen away.
+    pub fn remove_camera_full(&mut self, k: usize) -> Result<(), EditError> {
+        if k >= self.camera_full.len() {
+            return Err(EditError::Invalid(format!("there is no stretch {k} of the camera full screen")));
+        }
+        self.camera_full.remove(k);
+        Ok(())
+    }
+
+    /// Where on the timeline stretch `k` of the camera full screen plays: from its first moment
+    /// shown to its last; none if it's all cut out.
+    pub fn camera_full_shown(&self, k: usize) -> Option<(u64, u64)> {
+        let [a, b] = *self.camera_full.get(k)?;
+        let track = self.tracks.get(self.find(StreamKind::Camera)?)?;
+        track
+            .clips
+            .iter()
+            .filter_map(|c| {
+                let (x, y) = (a.max(c.from), b.min(c.from.saturating_add(c.len)));
+                (x < y).then(|| (c.at + (x - c.from), c.at + (y - c.from)))
+            })
+            .reduce(|(s, e), (x, y)| (s.min(x), e.max(y)))
+    }
 }
 
 #[cfg(test)]
@@ -2024,7 +2141,41 @@ mod tests {
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
+            camera_full: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_camera_is_full_screen_where_asked_and_follows_the_cuts() {
+        let mut t = two_tracks();
+        assert!(t.set_camera_full(0, 1_000_000, true).is_err(), "no camera");
+        t.tracks[1].kind = StreamKind::Camera;
+        // 2 to 4 s and 3 to 5 s: one stretch, 2 to 5 s.
+        t.set_camera_full(2_000_000, 4_000_000, true).unwrap();
+        t.set_camera_full(3_000_000, 5_000_000, true).unwrap();
+        assert_eq!(t.camera_full, vec![[2_000_000, 5_000_000]]);
+        assert!(t.camera_full_at(2_000_000) && t.camera_full_at(4_999_999));
+        assert!(!t.camera_full_at(1_999_999) && !t.camera_full_at(5_000_000));
+        // Taken off in the middle: two.
+        t.set_camera_full(3_000_000, 4_000_000, false).unwrap();
+        assert_eq!(t.camera_full, vec![[2_000_000, 3_000_000], [4_000_000, 5_000_000]]);
+        // The first second cut: the stretches are the camera's own times, so they stay with what
+        // was recorded, and play a second earlier.
+        t.cut(0, 1_000_000).unwrap();
+        assert_eq!(t.camera_full_shown(0), Some((1_000_000, 2_000_000)));
+        assert!(t.camera_full_at(t.source_time(1, 1_500_000).unwrap()));
+        // Asked on the timeline after the cut: the recording's 7 to 8 s.
+        t.set_camera_full(6_000_000, 7_000_000, true).unwrap();
+        assert_eq!(t.camera_full.last(), Some(&[7_000_000, 8_000_000]));
+        t.remove_camera_full(0).unwrap();
+        assert_eq!(t.camera_full.len(), 2);
+        assert!(t.remove_camera_full(9).is_err());
+        assert!(t.set_camera_full(5, 5, true).is_err());
+        // Cut out entirely: not shown, though kept.
+        t.cut(3_000_000, 4_000_000).unwrap();
+        assert_eq!(t.camera_full_shown(0), None);
+        // Past the end of the camera's clips: nothing to make full screen.
+        assert!(t.set_camera_full(50_000_000, 60_000_000, true).is_err());
     }
 
     #[test]
