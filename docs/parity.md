@@ -290,7 +290,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. QR codes read and made (#91).
 16. Capture presets with effects added as they're taken, a folder and a format of their own, and
     `--preset <name>` (#93).
-17. Open With: a capture in a program of the owner's choosing (Windows).
+17. Open With: a capture in a program of the owner's choosing (Windows; #94).
 
 **Still to build, in this order**
 
