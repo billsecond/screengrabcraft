@@ -2662,3 +2662,46 @@ fn ellipse_freehand_and_wand_selections_and_the_eraser() {
     assert_eq!(h.state().session.undo_label(), Some("Erase"));
     assert_eq!((alpha(&h, 150, 250), alpha(&h, 150, 240)), (0, 255));
 }
+
+/// Combine Pictures puts this picture and others (a recent capture, files) together; Template
+/// lays them out on a page with a title and the steps' words, every part an annotation.
+#[test]
+fn pictures_are_combined_and_laid_out_in_a_template_from_the_image_menu() {
+    use crate::compose::ComposeKind;
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.get_by_label("Image").click();
+    h.run_steps(2);
+    h.get_by_label("Combine Pictures…").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_some());
+    // A picture file picked (as the host hands it over).
+    let pic = Raster::filled(120, 90, Color::rgb(0, 0, 255)).unwrap();
+    let bytes = screengrabcraft_render::encode(&pic, ImageFormat::Png, 92).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes: bytes.clone() }]);
+    h.run_steps(3);
+    h.get_by_label_contains("blue.png");
+    crate::quick_tests::shot(&mut h, "combine-pictures");
+    h.get_by_label("Combine").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_none());
+    assert_eq!(h.state().session.undo_label(), Some("Combine Pictures"));
+    assert!(h.state().session.doc.width() > 400 + 120);
+    assert!(h.state().session.lent.is_empty());
+    // A template of the two, with a title and the steps' words.
+    h.state_mut().session.undo();
+    h.state_mut().open_compose(ComposeKind::Template);
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes }]);
+    if let Some(c) = &mut h.state_mut().compose {
+        c.title = "How to do it".into();
+        c.steps = vec!["Open the menu".into(), "Pick the blue one".into()];
+    }
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "template-window");
+    h.get_by_label("Make").click();
+    h.run_steps(6);
+    let doc = &h.state().session.doc;
+    assert_eq!((doc.count(Kind::Image), doc.count(Kind::Step), doc.count(Kind::Text)), (2, 2, 3));
+    crate::quick_tests::shot(&mut h, "template-made");
+}

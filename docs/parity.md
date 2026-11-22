@@ -156,8 +156,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Resize, rotate a quarter turn, flip | Has | |
 | Rotate by any angle | Missing | |
-| Templates: pictures laid out in a frame with words | Missing | |
-| Several pictures combined into one | Missing | |
+| **Templates: pictures laid out in a frame with words** | Has | Image › Template…: steps in a row, down the page, in a grid, or before and after, with a title and each step's words; every part stays an annotation |
+| **Several pictures combined into one** | Has | Image › Combine Pictures…: side by side, stacked or in a grid, with recent captures or picture files |
 | Many pictures changed at once (batch) | Missing | |
 | Print | Missing | |
 | Recent captures strip; delete to the bin | Has | |
@@ -284,6 +284,7 @@ By how much someone using it every day would miss each one. Built ones move to a
    perspective, a page curl, a reflection, a watermark, capture details; on a selected area.
 9. Rotate, group, align, distribute and flip annotations; select all of one kind.
 10. Magic wand, an eraser, ellipse and freehand selections; invert the selection.
+11. Templates; several pictures combined into one.
 
 **Still to build, in this order**
 
@@ -302,11 +303,10 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. Drawing on the screen while recording.
 14. Volume along a clip; music lowered under the voice; levels evened out.
 15. Tags, favourites, and captures sorted by program.
-16. Templates; several pictures combined into one.
-17. A picture per click made into a how-to guide.
-18. Groups, pushing later clips along, locked and solo tracks, clip colours.
-19. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-20. Print; batch changes; captures on a timer or at a set time.
-21. Cutting words from the transcript; filler words taken out.
-22. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+16. A picture per click made into a how-to guide.
+17. Groups, pushing later clips along, locked and solo tracks, clip colours.
+18. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+19. Print; batch changes; captures on a timer or at a set time.
+20. Cutting words from the transcript; filler words taken out.
+21. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

@@ -9,6 +9,7 @@ pub mod arrange;
 pub mod autosave;
 pub mod background;
 pub mod canvas;
+pub mod compose;
 pub mod dialogs;
 pub mod editor;
 pub mod effects;

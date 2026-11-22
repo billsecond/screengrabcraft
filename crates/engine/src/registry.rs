@@ -11,6 +11,7 @@ use screengrabcraft_render::{effects, region};
 use serde_json::{Value, json};
 
 use crate::arrange;
+use crate::compose;
 use crate::fx;
 use crate::session::Session;
 use crate::{EngineError, Result};
@@ -248,6 +249,24 @@ pub static COMMANDS: &[CommandSpec] = &[
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
     cmd!(
+        "image.combine",
+        "Combine Pictures",
+        "Image",
+        None,
+        r##"{"layout"?: "across"|"down"|"grid", "columns"?: 2 (grid), "gap"?: 16 (0 to 400 px), "background"?: "#FFFFFF"} — this picture and the ones the host lent (the command line's --picture) side by side, stacked or in a grid, on one picture; the annotations stay on this one"##,
+        always,
+        compose::combine
+    ),
+    cmd!(
+        "image.template",
+        "Template",
+        "Image",
+        None,
+        r##"{"layout"?: "stepsAcross"|"stepsDown"|"beforeAfter"|"grid", "title"?: "…", "steps"?: ["the words of each step"], "background"?: "#F4F6FA", "accent"?: "#1E88E5", "size"?: 480} — this picture (as shown) and the ones lent, laid out on a page with a title, step numbers and their words, all annotations to change"##,
+        always,
+        compose::template
+    ),
+    cmd!(
         "image.cutOut",
         "Cut Out",
         "Image",
@@ -442,7 +461,7 @@ fn need(p: &Value, key: &str) -> Result<f32> {
     num(p, key).ok_or_else(|| EngineError::Params(format!("`{key}` must be a number")))
 }
 
-fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
+pub(crate) fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(v) => {

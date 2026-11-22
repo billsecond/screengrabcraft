@@ -220,6 +220,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   area selected on the picture. Drag the panes' left edge to make them wider, and the bar
   between them to give either more room (a double click puts it back). The Effects menu has
   them too.
+- **Combine Pictures** and **Template** (Image menu): this picture with recent captures or picture
+  files, side by side, stacked or in a grid; or laid out on a page with a title, step numbers and
+  each step's words, every part an annotation to change.
 - **Turn, group and line up annotations**: the round handle over a selected box (or group) turns
   it, Shift in steps of 15°; Edit › Group (Ctrl+G) and Ungroup, Rotate and Flip, Align and
   Distribute, and Select All of This Kind, in the right-click menu too.
