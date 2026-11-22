@@ -40,6 +40,8 @@ pub enum Item {
     ToggleControls,
     /// The red border round the area, on or off.
     ToggleBorder,
+    /// Drawing on the screen over the area, on or off.
+    ToggleDrawing,
     /// Stop and throw it away.
     DiscardRecording,
 }
@@ -58,6 +60,10 @@ pub struct RecordingState {
     pub stop_key: Option<String>,
     /// Capture Region's shortcut: a picture can be taken while recording.
     pub shot_key: Option<String>,
+    /// The owner is drawing on the screen; whether it can be drawn on; the shortcut that does it.
+    pub drawing: bool,
+    pub can_draw: bool,
+    pub draw_key: Option<String>,
 }
 
 /// One entry of the menu shown while a recording runs.
@@ -85,6 +91,9 @@ pub fn recording_entries(s: &RecordingState) -> Vec<RecordingEntry> {
     e.push(E::Separator);
     // A picture, while the recording goes on.
     e.push(E::Item(label("Take a Screenshot", s.shot_key.clone()), Item::Capture(CaptureMode::Region)));
+    if s.can_draw {
+        e.push(E::Check(label("Draw on the Screen", s.draw_key.clone()), Item::ToggleDrawing, s.drawing));
+    }
     e.push(E::Separator);
     let controls = if s.controls { "Hide the Controls in the Tray" } else { "Show the Controls" };
     e.push(E::Item(controls.to_string(), Item::ToggleControls));
@@ -451,6 +460,7 @@ mod tests {
             pause_key: None,
             stop_key: None,
             shot_key: Some("PrintScreen".to_string()),
+            ..RecordingState::default()
         };
         let r = recording_entries(&s);
         let shot = r.iter().find_map(|e| match e {
@@ -458,6 +468,13 @@ mod tests {
             _ => None,
         });
         assert!(shot.is_some_and(|t| t.starts_with("Take a Screenshot") && t.contains("PrintScreen")), "{r:?}");
+        assert!(!r.iter().any(|e| matches!(e, RecordingEntry::Check(_, Item::ToggleDrawing, _))), "not where it can't be drawn on");
+        let d = recording_entries(&RecordingState { can_draw: true, drawing: true, draw_key: Some("F8".into()), ..s.clone() });
+        assert!(
+            d.iter()
+                .any(|e| matches!(e, RecordingEntry::Check(t, Item::ToggleDrawing, true) if t.starts_with("Draw on the Screen") && t.contains("F8"))),
+            "{d:?}"
+        );
         let m = menu();
         // The Image Editor at the end of the pictures, the Video Editor under Video Production.
         let at = |item: Item| m.iter().position(|e| matches!(e, Entry::Item(_, i) | Entry::Marked(_, i) if *i == item)).unwrap();

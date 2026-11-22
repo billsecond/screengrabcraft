@@ -92,6 +92,8 @@ enum RecordingChoice {
     Border,
     /// Put the controls away in the tray.
     Hide,
+    /// Drawing on the screen, on or off.
+    Draw,
     /// The bar is being dragged somewhere else.
     Drag,
 }
@@ -99,8 +101,8 @@ enum RecordingChoice {
 fn recording_size(kind: Kind) -> Vec2 {
     let w = match kind {
         Kind::Scrolling => 600.0,
-        Kind::Video | Kind::Production => 680.0,
-        Kind::Gif => 560.0,
+        Kind::Video | Kind::Production => 716.0,
+        Kind::Gif => 596.0,
     };
     vec2(w, 56.0)
 }
@@ -129,6 +131,10 @@ struct RecordingView {
     /// The shortcuts that pause and stop it, as the tips show them.
     pause_key: Option<String>,
     stop_key: Option<String>,
+    /// Drawing on the screen: whether it can be, whether it's on, and its shortcut.
+    can_draw: bool,
+    drawing: bool,
+    draw_key: Option<String>,
 }
 
 /// A red light that blinks every second and the time, or, paused, an amber pause sign.
@@ -252,6 +258,12 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
             if icons::button(ui, Icon::Restart, "Restart: throw this away and record again", false, true).clicked() {
                 choice = Some(RecordingChoice::Restart);
             }
+            if v.can_draw && kind != Kind::Scrolling {
+                let words = if v.drawing { "Stop drawing" } else { "Draw on the screen: arrows, boxes, a pen, steps (they fade)" };
+                if icons::button(ui, Icon::Pen, &with_key(words, &v.draw_key), v.drawing, true).clicked() {
+                    choice = Some(RecordingChoice::Draw);
+                }
+            }
             if kind != Kind::Scrolling {
                 let (icon, words) = if v.paused { (Icon::Play, "Resume") } else { (Icon::Pause, "Pause") };
                 if icons::button(ui, icon, &with_key(words, &v.pause_key), v.paused, true).clicked() {
@@ -312,6 +324,9 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         missing: sources.iter().filter(|s| s.starts_with("No ")).cloned().collect(),
         pause_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Pause),
         stop_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Stop),
+        can_draw: rec.drawable,
+        drawing: svc.drawing,
+        draw_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Draw),
     };
     let size = recording_size(kind);
     // Where the owner dragged it; else beside the area, else on a screen that isn't recorded,
@@ -374,8 +389,63 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         Some(RecordingChoice::Pause) => svc.toggle_pause(),
         Some(RecordingChoice::Restart) => svc.restart_recording(),
         Some(RecordingChoice::Border) => svc.toggle_border(),
+        Some(RecordingChoice::Draw) => svc.toggle_drawing(),
         Some(RecordingChoice::Hide) => svc.controls_hidden = true,
         Some(RecordingChoice::Drag) | None => {}
+    }
+}
+
+/// The drawing window's title (how it's found to be kept out of the recording).
+const DRAW_TITLE: &str = "ScreenGrabCraft drawing";
+
+/// While the owner draws on the screen: a window over the area being recorded, showing what's
+/// recorded (the latest frame with the marks) and taking the pointer. Windows keeps it out of the
+/// recording, which has the marks drawn into its frames.
+pub fn drawing(svc: &mut Service, ctx: &egui::Context) {
+    let Some(rec) = svc.recording.as_ref().filter(|r| svc.drawing && r.drawable && !r.stopping()) else {
+        svc.draw_texture = None;
+        return;
+    };
+    let d = rec.desktop;
+    let ink = rec.ink.clone();
+    let monitors: Vec<(IRect, f32)> =
+        screengrabcraft_capture::monitors().map(|ms| ms.into_iter().map(|m| (m.rect, m.scale)).collect()).unwrap_or_default();
+    let (cx, cy) = (i64::from(d.x) + i64::from(d.w / 2), i64::from(d.y) + i64::from(d.h / 2));
+    let s = monitors.iter().find(|(m, _)| m.contains(cx, cy)).map_or(1.0, |(_, s)| *s);
+    let size = vec2(d.w.max(1) as f32 / s.max(0.5), d.h.max(1) as f32 / s.max(0.5));
+    // The latest frame, as a picture to show (made again only when a new one came).
+    let mut picture = None;
+    if let Ok(ink) = ink.lock()
+        && let Some(frame) = &ink.latest
+    {
+        let fresh = svc.draw_texture.as_ref().is_none_or(|(n, _)| *n != ink.serial);
+        if fresh {
+            let img = egui::ColorImage::from_rgba_unmultiplied([frame.width() as usize, frame.height() as usize], frame.pixels());
+            match &mut svc.draw_texture {
+                Some((n, tex)) => {
+                    tex.set(img, egui::TextureOptions::LINEAR);
+                    *n = ink.serial;
+                }
+                None => svc.draw_texture = Some((ink.serial, ctx.load_texture("drawing", img, egui::TextureOptions::LINEAR))),
+            }
+        }
+        picture = svc.draw_texture.as_ref().map(|(_, t)| (t.id(), (frame.width(), frame.height())));
+    }
+    let key = crate::hotkeys::Registered::recording_label(&svc.settings.hotkeys, crate::hotkeys::Target::Draw);
+    let mut choice = None;
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("drawing"), popup(DRAW_TITLE, points(d.x as f32, d.y as f32, s), size, true), |ui, _| {
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            if let Ok(mut ink) = ink.lock() {
+                choice = crate::ink::draw_ui(ui, &mut ink, picture, key.as_deref(), Instant::now());
+            }
+        });
+    });
+    // Out of the recording: the marks are drawn into its frames instead.
+    screengrabcraft_desktop::cloak::keep_out_of_captures(DRAW_TITLE);
+    screengrabcraft_desktop::cloak::calm_windows();
+    ctx.request_repaint_after(std::time::Duration::from_millis(30));
+    if choice == Some(crate::ink::DrawChoice::Done) {
+        svc.toggle_drawing();
     }
 }
 
@@ -767,6 +837,38 @@ mod tests {
                 h.run_steps(1);
                 assert_eq!(*h.state(), Some(wanted), "{label}");
             }
+        }
+    }
+
+    /// A recording that can be drawn on has a pen on its controls, lit while drawing; one that
+    /// can't (and a scrolling capture) has none.
+    #[test]
+    fn the_recording_control_draws_on_the_screen_where_it_can() {
+        let tip = "Draw on the screen: arrows, boxes, a pen, steps (they fade) (F8)";
+        for kind in [Kind::Gif, Kind::Video, Kind::Production] {
+            let view = RecordingView { secs: 12, can_draw: true, draw_key: Some("F8".into()), ..RecordingView::default() };
+            let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
+            h.run_steps(2);
+            let r = h.get_by_label(tip).rect();
+            assert!(r.max.x <= recording_size(kind).x + ROOT, "{kind:?} {r:?}");
+            h.get_by_label(tip).click();
+            h.run_steps(1);
+            assert_eq!(*h.state(), Some(RecordingChoice::Draw), "{kind:?}");
+        }
+        let view = RecordingView { can_draw: true, drawing: true, draw_key: Some("F8".into()), ..RecordingView::default() };
+        let mut h = popup_harness(recording_size(Kind::Video), Theme::Dark, move |ui| recording_ui(ui, Kind::Video, &view));
+        h.run_steps(2);
+        h.get_by_label("Stop drawing (F8)");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recording-bar-drawing.png"));
+        }
+        for (kind, can_draw) in [(Kind::Video, false), (Kind::Scrolling, true)] {
+            let view = RecordingView { can_draw, ..RecordingView::default() };
+            let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
+            h.run_steps(2);
+            assert!(h.query_by_label_contains("Draw on the screen").is_none(), "{kind:?}");
         }
     }
 

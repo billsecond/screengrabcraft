@@ -24,6 +24,7 @@ mod app;
 mod captions;
 mod home;
 mod hotkeys;
+mod ink;
 mod popups;
 mod record;
 mod recorder;

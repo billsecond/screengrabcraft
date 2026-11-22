@@ -664,8 +664,13 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             keys.stop = s;
             changed = true;
         }
+        let mut d = keys.draw.clone();
+        if hotkey_row(ui, "Draw on the Screen While Recording", &mut d, defaults.draw.clone()) {
+            keys.draw = d;
+            changed = true;
+        }
     });
-    ui.label(RichText::new("Pause and Stop are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
+    ui.label(RichText::new("Pause, Stop and Draw are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
     if changed {
         svc.settings.hotkeys = keys;
         svc.apply_settings();

@@ -18,6 +18,8 @@ pub enum Target {
     Pause,
     /// While recording: stop it and keep it.
     Stop,
+    /// While recording: draw on the screen, or stop drawing.
+    Draw,
     /// A capture preset, by its place in the settings' list.
     Preset(usize),
 }
@@ -154,7 +156,7 @@ impl Registered {
         if !on {
             return;
         }
-        for (key, target) in [(keys.pause.as_ref(), Target::Pause), (keys.stop.as_ref(), Target::Stop)] {
+        for (key, target) in [(keys.pause.as_ref(), Target::Pause), (keys.stop.as_ref(), Target::Stop), (keys.draw.as_ref(), Target::Draw)] {
             let Some(hk) = key.and_then(to_system) else { continue };
             if self.active.iter().chain(&self.during).any(|(k, _)| *k == hk) {
                 log::warn!("{} is already a shortcut; it isn't the recording's too", key.map(|k| k.display(logo_name())).unwrap_or_default());
@@ -172,6 +174,7 @@ impl Registered {
         let k = match target {
             Target::Pause => keys.pause.as_ref(),
             Target::Stop => keys.stop.as_ref(),
+            Target::Draw => keys.draw.as_ref(),
             _ => None,
         };
         k.map(|k| k.display(logo_name()))
