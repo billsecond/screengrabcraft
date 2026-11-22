@@ -326,14 +326,15 @@ pub trait Services {
         Err("videos are made by the editor on the desktop".to_string())
     }
 
-    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, until it's
-    /// dropped.
+    /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, `rate` times
+    /// as fast as recorded (1, 2, 4 or 8; faster at its own pitch), until it's dropped.
     fn play_sound(
         &self,
         _recording: std::sync::Arc<Recording>,
         _timeline: Timeline,
         _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
         _from_us: u64,
+        _rate: u32,
     ) -> Option<Box<dyn SoundOut>> {
         None
     }

@@ -69,11 +69,18 @@ pub struct Layer {
     /// 0 to 2 (sound).
     pub volume: f32,
     pub items: Vec<Item>,
+    /// Its sound's two sides mixed into one, heard the same from both speakers (sound).
+    #[serde(skip_serializing_if = "is_off")]
+    pub mono: bool,
+}
+
+fn is_off(v: &bool) -> bool {
+    !*v
 }
 
 impl Default for Layer {
     fn default() -> Layer {
-        Layer { id: 0, name: String::new(), kind: LayerKind::Picture, hidden: false, volume: 1.0, items: Vec::new() }
+        Layer { id: 0, name: String::new(), kind: LayerKind::Picture, hidden: false, volume: 1.0, items: Vec::new(), mono: false }
     }
 }
 
@@ -337,6 +344,12 @@ pub struct Item {
     /// How it's framed: turned, and (a picture or a video) cut down, bordered, rounded, shadowed.
     #[serde(skip_serializing_if = "ItemLook::is_plain")]
     pub look: ItemLook,
+    /// A video whose sound isn't heard with it (taken apart onto a sound layer, or just silent).
+    #[serde(skip_serializing_if = "is_off")]
+    pub silent: bool,
+    /// Only its media's sound: a video's sound apart from its picture, on a sound layer.
+    #[serde(skip_serializing_if = "is_off")]
+    pub sound_only: bool,
 }
 
 /// How an item is framed on the picture: turned about its middle, and, a picture or a video, cut
@@ -564,6 +577,8 @@ impl Default for Item {
             outro: Anim::default(),
             keys: Vec::new(),
             look: ItemLook::default(),
+            silent: false,
+            sound_only: false,
         }
     }
 }
@@ -621,9 +636,23 @@ impl Item {
     /// The kind of layer it goes on.
     pub fn layer_kind(&self, media: &[MediaItem]) -> LayerKind {
         match &self.what {
-            What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Sound) => LayerKind::Sound,
+            What::Media { id }
+                if media.iter().any(|m| m.id == *id && (m.kind == MediaKind::Sound || (self.sound_only && m.kind == MediaKind::Video))) =>
+            {
+                LayerKind::Sound
+            }
             _ => LayerKind::Picture,
         }
+    }
+
+    /// Whether its media's sound is heard with it: a sound, or a video's (unless it's silent).
+    pub fn plays_sound(&self, media: &[MediaItem]) -> bool {
+        let What::Media { id } = &self.what else { return false };
+        media.iter().find(|m| m.id == *id).is_some_and(|m| match m.kind {
+            MediaKind::Picture => false,
+            MediaKind::Sound => true,
+            MediaKind::Video => !self.silent,
+        })
     }
 
     /// How far in it is at timeline time `t`: (how much it has come in, 0 to 1; how much it has
@@ -640,6 +669,9 @@ impl Item {
     /// Its name on the timeline.
     pub fn label(&self, media: &[MediaItem]) -> String {
         match &self.what {
+            What::Media { id } if self.sound_only => {
+                media.iter().find(|m| m.id == *id).map(|m| format!("{} (its sound)", m.name)).unwrap_or_else(|| "Missing media".to_string())
+            }
             What::Media { id } => media.iter().find(|m| m.id == *id).map(|m| m.name.clone()).unwrap_or_else(|| "Missing media".to_string()),
             What::Text { style, title, .. } if style.has_words() && !title.trim().is_empty() => title.clone(),
             What::Text { style, .. } => style_name(*style).to_string(),
@@ -1223,6 +1255,42 @@ impl Timeline {
         Ok(())
     }
 
+    /// A sound layer's two sides mixed into one (or kept apart again).
+    pub fn set_layer_mono(&mut self, layer: u32, mono: bool) -> Result<(), EditError> {
+        let l = self.layer_mut(layer)?;
+        if l.kind != LayerKind::Sound {
+            return Err(bad("only a sound layer is mixed to mono"));
+        }
+        l.mono = mono;
+        Ok(())
+    }
+
+    /// A video item's sound taken apart from its picture: the same stretch of its sound put on a
+    /// sound layer at the same moment (the first with room there, else a new one), and the video
+    /// left silent. From then on they're apart: each is moved, trimmed and deleted on its own. The
+    /// sound's layer and item.
+    pub fn separate_sound(&mut self, layer: u32, item: u32) -> Result<(u32, u32), EditError> {
+        let it = self.item(layer, item).cloned().ok_or_else(|| bad("there's no such item"))?;
+        let video = matches!(&it.what, What::Media { id } if self.media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+        if !video || it.sound_only {
+            return Err(bad("only a video has a sound to take apart from its picture"));
+        }
+        if it.silent {
+            return Err(bad("its sound is apart already (or it's silent): turn its sound on again first"));
+        }
+        let sound =
+            Item { id: 0, sound_only: true, silent: false, keys: Vec::new(), look: ItemLook::default(), place: Placement::default(), ..it.clone() };
+        let room = self
+            .layers
+            .iter()
+            .filter(|l| l.kind == LayerKind::Sound)
+            .find(|l| free_start(&l.items, it.at, it.len, None) == Some(it.at))
+            .map(|l| l.id);
+        let placed = self.place(sound, room, it.at)?;
+        self.set_item(layer, item, |i| i.silent = true)?;
+        Ok(placed)
+    }
+
     /// Takes `from..to` out of every layer too (as a cut does the recording's tracks).
     pub(crate) fn cut_layers(&mut self, from: u64, to: u64) {
         let gap = to - from;
@@ -1371,7 +1439,11 @@ impl Timeline {
                 What::Media { id } => media.iter().any(|m| m.id == *id),
                 _ => true,
             });
+            l.mono = l.mono && l.kind == LayerKind::Sound;
             for i in &mut l.items {
+                // Only a video's sound is apart from its picture.
+                let video = matches!(&i.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind == MediaKind::Video));
+                i.sound_only = i.sound_only && video;
                 i.at = i.at.min(u64::MAX / 8);
                 i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
                 i.from = i.from.min(u64::MAX / 8);
@@ -1450,6 +1522,7 @@ mod tests {
                 points: Vec::new(),
                 locked: false,
                 solo: false,
+                mono: false,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),

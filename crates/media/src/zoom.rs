@@ -313,6 +313,7 @@ mod follow_tests {
                 points: Vec::new(),
                 locked: false,
                 solo: false,
+                mono: false,
             }],
             camera: Default::default(),
             captions: Default::default(),

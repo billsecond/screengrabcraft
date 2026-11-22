@@ -180,7 +180,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Lock a track; play one track alone** | Has | the padlock and S in its header (or its right button): a locked track's clips stay as they are (cuts, speeds and holds of the whole video still keep it in time); while any sound track plays alone only those are heard |
 | Zoom the timeline, scroll it | Has | |
 | Play, step a frame, full screen | Has | |
-| **Faster and slower playback keys (J, K, L)** | Has | J plays backwards, K pauses, L plays on; pressed again, 2, 4 and 8 times as fast (the Play menu too). Only playing on as recorded has sound |
+| **Faster and slower playback keys (J, K, L)** | Has | J plays backwards, K pauses, L plays on; pressed again, 2, 4 and 8 times as fast (the Play menu too). Playing on faster has its sound, voices at their own pitch; backwards has none |
 | Split one track or every track | Has | |
 | Cut leaving a gap, or closing it | Has | |
 | Trim, slide a clip | Has | |
@@ -240,7 +240,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Fade in and out** | Has | a sound clip at its start and end |
 | **Background noise taken out** | Has | the steady noise learnt from the track itself and turned down, on this computer (no trained model) |
 | **Levels evened out; music lowered under the voice** | Has | Even Out the Levels gives each sound track the volume that makes it as loud as the others (measured on this computer); Lower the rest under the voice turns the computer's sound, music and media down while the microphone is heard |
-| Sound of a video apart from its picture; mono | Missing | |
+| **Sound of a video apart from its picture; mono** | Has | a video on a layer: Separate the Sound (its panel or right button) puts its sound on a sound layer of its own at the same moment and leaves the video silent, each then moved, trimmed and deleted on its own. Mix to Mono: a sound track (its right button, its clip's panel) or a sound layer |
 | Narration recorded over the video | Missing | |
 | Captions made on this computer (You and Others) | Has | |
 | Captions shown, burned in, saved as `.srt` and `.txt` | Has | |
@@ -296,7 +296,9 @@ By how much someone using it every day would miss each one. Built ones move to a
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
     bordered and shadowed (#111).
 22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch (#112).
-23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart).
+23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart) (#113).
+24. Sound while playing faster (J and L), at its own pitch; a video's sound apart from its picture;
+    tracks and sound layers mixed to mono.
 
 **Still to build, in this order**
 

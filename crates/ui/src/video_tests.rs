@@ -887,9 +887,22 @@ struct MediaHost {
     progress: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Result<f32, String>>>>,
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
     media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
+    /// How fast each sound asked for plays (none is played).
+    rates: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 impl crate::services::Services for MediaHost {
+    fn play_sound(
+        &self,
+        _recording: std::sync::Arc<screengrabcraft_media::recording::Recording>,
+        _timeline: screengrabcraft_media::timeline::Timeline,
+        _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
+        _from_us: u64,
+        rate: u32,
+    ) -> Option<Box<dyn crate::services::SoundOut>> {
+        self.rates.lock().unwrap().push(rate);
+        None
+    }
     fn request_import(&self) {
         *self.imports.lock().unwrap() += 1;
     }
@@ -927,6 +940,9 @@ impl crate::services::Services for MediaHost {
         let loaded = if path.ends_with(".png") {
             let pic = Raster::filled(80, 40, Color::rgb(0xE0, 0x20, 0x20)).unwrap();
             Loaded { kind: MediaKind::Picture, duration: 0, width: 80, height: 40, content: Content::Picture(pic) }
+        } else if path.ends_with(".sgvideo") {
+            // Another recording: the made-up one, its picture and its hum.
+            Loaded::recording(screengrabcraft_media::recording::Recording::open(Box::new(recording())).unwrap())
         } else {
             let tone: Vec<i16> = (0..48_000 * 2)
                 .flat_map(|i| {
@@ -1115,6 +1131,72 @@ fn media_brought_in_goes_in_the_bin_then_onto_a_layer_of_its_kind() {
     let id = v.session.timeline.media[0].id;
     v.session.execute("video.removeMedia", &serde_json::json!({"id": id})).unwrap();
     assert!(v.session.timeline.layers[0].items.is_empty());
+}
+
+#[test]
+fn a_videos_sound_is_separated_tracks_go_mono_and_faster_playback_asks_for_sound() {
+    use crate::services::DialogResult;
+    use screengrabcraft_media::layers::LayerKind;
+    let host = MediaHost::default();
+    let mut h = media_harness(host.clone());
+    h.get_by_label("Media").click();
+    h.run_steps(2);
+    *host.answer.lock().unwrap() = Some(DialogResult::Import(vec!["C:/Videos/Demo.sgvideo".to_string()]));
+    h.run_steps(4);
+    h.get_by_label("Add Demo.sgvideo").click();
+    h.run_steps(3);
+    let tl = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.clone();
+    let heard = |h: &Harness<'_, Editor>| {
+        let v = h.state().video.as_ref().unwrap();
+        let mut t = v.session.timeline.clone();
+        // The recording's own tracks muted: only the layers are heard.
+        for k in 0..t.tracks.len() {
+            t.set_muted(k, true).unwrap();
+        }
+        screengrabcraft_media::compose::mix_with(&v.rec, &t, v.library.as_ref(), 24_000, 4800)
+    };
+    let before = heard(&h);
+    assert!(before.iter().any(|s| s.abs() > 0.05), "the video's hum is heard");
+    assert_eq!(tl(&h).layers.len(), 1);
+    // Its panel: Separate the Sound.
+    scroll_side_panel_to(&mut h, "Separate the Sound");
+    shot(&mut h, "video-separate-sound");
+    h.get_by_label("Separate the Sound").click();
+    h.run_steps(3);
+    let t = tl(&h);
+    assert_eq!(t.layers.iter().map(|l| l.kind).collect::<Vec<_>>(), [LayerKind::Picture, LayerKind::Sound]);
+    let (video, sound) = (&t.layers[0].items[0], &t.layers[1].items[0]);
+    assert!(video.silent && sound.sound_only && sound.at == video.at && sound.len == video.len);
+    assert_eq!(h.state().video.as_ref().unwrap().item, Some((t.layers[1].id, sound.id)), "the sound chosen");
+    assert_eq!(heard(&h), before, "heard as before, from the sound layer");
+    shot(&mut h, "video-sound-apart");
+    // The sound layer mixed to mono from its panel.
+    h.get_by_label("Mix the layer to mono").click();
+    h.run_steps(2);
+    assert!(tl(&h).layers[1].mono);
+    // A sound track's clip: its panel mixes the track to mono.
+    let mic = t.find(StreamKind::Microphone).unwrap();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.item = None;
+        v.selected = Some((mic, 0));
+    }
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Mix the track to mono");
+    h.get_by_label("Mix the track to mono").click();
+    h.run_steps(2);
+    assert!(tl(&h).tracks[mic].mono);
+    // L, L, L: the sound asked for as recorded, then twice and four times as fast; J: none.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.selected = None;
+    }
+    h.run_steps(1);
+    for _ in 0..3 {
+        h.key_press(egui::Key::L);
+        h.run_steps(1);
+    }
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4]);
 }
 
 #[test]

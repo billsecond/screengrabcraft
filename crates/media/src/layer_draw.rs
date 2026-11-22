@@ -255,6 +255,10 @@ pub fn media_rect(item: &Item, pw: u32, ph: u32, w: f32, h: f32) -> Rect {
 /// Where an item is on a `w × h` video (before its motion): for the designer's handles. None for
 /// a transition, or media not read yet.
 pub fn item_rect(item: &Item, timeline: &Timeline, store: &dyn MediaStore, w: f32, h: f32) -> Option<Rect> {
+    // A video's sound apart from its picture is nowhere on the picture.
+    if item.sound_only {
+        return None;
+    }
     match &item.what {
         What::Media { id } => {
             let m = timeline.media.iter().find(|m| m.id == *id)?;
@@ -598,8 +602,8 @@ pub fn draw_layers_at(
         .iter()
         .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
         .filter_map(|l| l.items.iter().find(|i| i.at <= t && t < i.end()))
-        // A zoom draws nothing of its own.
-        .filter(|i| !matches!(i.what, What::Zoom))
+        // A zoom draws nothing of its own, nor a video's sound apart from its picture.
+        .filter(|i| !matches!(i.what, What::Zoom) && !i.sound_only)
         .collect();
     if showing.is_empty() {
         return;
@@ -882,9 +886,9 @@ pub fn mix_layers(out: &mut [f32], timeline: &Timeline, store: &dyn MediaStore, 
             continue;
         }
         for item in &l.items {
+            // A picture, or a video whose sound is apart (or silent), has none.
             let What::Media { id } = &item.what else { continue };
-            let Some(m) = timeline.media.iter().find(|m| m.id == *id) else { continue };
-            if m.kind == MediaKind::Picture {
+            if !item.plays_sound(&timeline.media) {
                 continue;
             }
             let (at, len, from) = (to_samples(item.at), to_samples(item.len), to_samples(item.from));
@@ -902,8 +906,10 @@ pub fn mix_layers(out: &mut [f32], timeline: &Timeline, store: &dyn MediaStore, 
                 let fade = |kind: AnimKind, p: f32| if kind == AnimKind::None { 1.0 } else { p };
                 let g = l.volume * fade(item.intro.kind, inn) * (1.0 - if item.outro.kind == AnimKind::None { 0.0 } else { outp });
                 if let (Some(o), Some(s)) = (out.get_mut(base + k * 2..base + k * 2 + 2), src.get(k * 2..k * 2 + 2)) {
-                    o[0] += s[0] * g;
-                    o[1] += s[1] * g;
+                    // Mixed to mono, both sides the same.
+                    let (sl, sr) = if l.mono { ((s[0] + s[1]) / 2.0, (s[0] + s[1]) / 2.0) } else { (s[0], s[1]) };
+                    o[0] += sl * g;
+                    o[1] += sr * g;
                 }
             }
         }
@@ -930,6 +936,7 @@ mod tests {
                 points: Vec::new(),
                 locked: false,
                 solo: false,
+                mono: false,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
@@ -1056,6 +1063,80 @@ mod tests {
         let mut mixed = vec![0.0f32; 20];
         mix_layers(&mut mixed, &tl, &OnePicture(red), 48_000, 10);
         assert!(mixed.iter().all(|v| (*v - 0.5).abs() < 1e-6), "{mixed:?}");
+    }
+
+    /// A video whose picture is blue and whose sound is 0.4 on the left, 0.1 on the right.
+    struct OneVideo;
+
+    impl MediaStore for OneVideo {
+        fn picture(&self, _id: u32, _t: u64) -> Option<Arc<Raster>> {
+            Raster::filled(10, 10, Color::rgb(0, 0, 255)).ok().map(Arc::new)
+        }
+        fn sound(&self, _id: u32, _first: u64, count: usize) -> Vec<f32> {
+            [0.4, 0.1].repeat(count)
+        }
+    }
+
+    #[test]
+    fn a_videos_sound_taken_apart_plays_on_a_sound_layer_and_is_mixed_to_mono() {
+        let mut tl = timeline();
+        let clip = tl
+            .add_media(layers::MediaItem {
+                name: "Demo.mp4".into(),
+                path: "C:/Demo.mp4".into(),
+                kind: MediaKind::Video,
+                duration: 6_000_000,
+                width: 10,
+                height: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        let none = layers::Anim { kind: AnimKind::None, len: 0 };
+        let item = Item { what: What::Media { id: clip }, len: 4_000_000, from: 1_000_000, intro: none, outro: none, ..Item::default() };
+        let (vl, vi) = tl.place(item, None, 500_000).unwrap();
+        let heard = |tl: &Timeline| {
+            let mut mixed = vec![0.0f32; 4];
+            mix_layers(&mut mixed, tl, &OneVideo, crate::compose::to_samples(1_000_000), 2);
+            mixed
+        };
+        assert_eq!(heard(&tl), [0.4, 0.1, 0.4, 0.1], "a video on a picture layer is heard");
+        let (sl, si) = tl.separate_sound(vl, vi).unwrap();
+        assert_ne!(sl, vl, "its sound on a layer of its own");
+        assert_eq!(tl.layer(sl).unwrap().kind, LayerKind::Sound);
+        let (v, s) = (tl.item(vl, vi).unwrap().clone(), tl.item(sl, si).unwrap().clone());
+        assert!(v.silent && !v.sound_only && s.sound_only && !s.silent);
+        assert_eq!((s.at, s.len, s.from), (v.at, v.len, v.from), "the same stretch of it, at the same moment");
+        assert_eq!(s.label(&tl.media), "Demo.mp4 (its sound)");
+        assert_eq!(heard(&tl), [0.4, 0.1, 0.4, 0.1], "heard once: from the sound layer");
+        // Its picture is still drawn, and the sound draws nothing.
+        let mut out = grey(100, 100);
+        draw_layers(&mut out, &tl, &OneVideo, 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+        assert_eq!(out.pixel(50, 50).unwrap().b, 255);
+        // Apart: the sound moves on its own, the picture stays.
+        tl.move_item(sl, si, Some(sl), 2_000_000).unwrap();
+        assert_eq!((tl.item(vl, vi).unwrap().at, tl.item(sl, si).unwrap().at), (500_000, 2_000_000));
+        assert_eq!(heard(&tl), [0.0; 4], "silent until the sound comes in");
+        // Asked again, or of something that isn't a video: refused.
+        assert!(tl.separate_sound(vl, vi).is_err());
+        assert!(tl.separate_sound(sl, si).is_err());
+        // The sound layer mixed to mono: both sides the same; a picture layer can't be.
+        tl.move_item(sl, si, Some(sl), 500_000).unwrap();
+        tl.set_layer_mono(sl, true).unwrap();
+        let m = heard(&tl);
+        assert!(m.iter().all(|x| (x - 0.25).abs() < 1e-6), "{m:?}");
+        assert!(tl.set_layer_mono(vl, true).is_err());
+        // From a file: a picture can't be a sound, and a picture layer isn't mono.
+        let mut raw = tl.clone();
+        let pic = raw.add_media(layers::MediaItem { name: "P.png".into(), path: "C:/P.png".into(), ..Default::default() }).unwrap();
+        raw.layers.push(layers::Layer {
+            id: 90,
+            mono: true,
+            items: vec![Item { id: 91, what: What::Media { id: pic }, sound_only: true, ..Item::default() }],
+            ..Default::default()
+        });
+        raw.check_layers();
+        let l = raw.layer(90).unwrap();
+        assert!(!l.mono && !l.items[0].sound_only);
     }
 
     #[test]

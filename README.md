@@ -133,7 +133,7 @@ the picture editor to the video editor. Its timeline has a row for each track:
   they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
   that isn't as recorded says its speed on the timeline.
 - **J, K and L**: L plays on, K pauses, J plays backwards; press J or L again to play that way
-  2, 4 or 8 times as fast (without sound: only playing on as recorded is heard). **Play
+  2, 4 or 8 times as fast (playing on, voices keep their pitch; backwards plays without sound). **Play
   backwards**: a clip's right button (or Play backwards in its panel) plays it from its end to
   its start, the picture and the sound turned round, with the clips grouped with it.
 - **Hold a frame**: H (or Edit, or the ruler's right button) holds the picture at the playhead
@@ -155,6 +155,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
   as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
   sound, music and media go down while the microphone is heard, and back up after.
+- **A video's sound apart, and mono**: a video put on a layer has Separate the Sound in its panel
+  (or its right button): its sound goes onto a sound layer of its own at the same moment and the
+  video goes silent, so each can be moved, trimmed or deleted on its own. **Mix to Mono** (a sound
+  track's right button or its clip's panel, a sound layer's right button or its item's panel) mixes
+  its two sides into one, heard the same from both speakers.
 - **Markers**: M (or Edit, or the ruler's right button) marks the moment at the playhead with a
   flag on the ruler. The Markers section of the panel names them, goes to them and deletes them;
   they move with cuts and speed changes, and Export Video makes them the MP4's chapters, which

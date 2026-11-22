@@ -764,8 +764,15 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
         Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`maskCut` must be true or false".to_string()))?),
     };
     let device = device_param(p)?;
+    let silent = match p.get("silent") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`silent` must be true or false".to_string()))?),
+    };
     s.timeline
         .set_item(id(p, "layer")?, id(p, "item")?, |i| {
+            if let Some(v) = silent {
+                i.silent = v;
+            }
             if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
                 if let Some(v) = title {
                     *t = v;
@@ -1047,6 +1054,23 @@ fn lock(s: &mut VideoSession, p: &Value) -> Result<Value> {
 fn solo(s: &mut VideoSession, p: &Value) -> Result<Value> {
     s.timeline.set_solo(index(p, "track")?, flag(p, "solo")?).map_err(edit_err)?;
     Ok(json!({}))
+}
+
+/// A sound track's (or a sound layer's) two sides mixed into one.
+fn mono(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let on = flag(p, "mono")?;
+    match (p.get("track"), p.get("layer")) {
+        (Some(_), None) => s.timeline.set_mono(index(p, "track")?, on).map_err(edit_err)?,
+        (None, Some(_)) => s.timeline.set_layer_mono(id(p, "layer")?, on).map_err(edit_err)?,
+        _ => return Err(EngineError::Params("say a `track` or a `layer`".to_string())),
+    }
+    Ok(json!({}))
+}
+
+/// A video item's sound put apart from its picture, on a sound layer.
+fn separate_sound(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (layer, item) = s.timeline.separate_sound(id(p, "layer")?, id(p, "item")?).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
 }
 
 fn clip_colour(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -1377,6 +1401,18 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: solo,
     },
     VideoCommand {
+        id: "video.mono",
+        label: "Mix to Mono",
+        params: r#"{"track": n, "mono": bool} or {"layer": id, "mono": bool}: a sound track's (or a sound layer's) two sides mixed into one, heard the same from both speakers"#,
+        run: mono,
+    },
+    VideoCommand {
+        id: "video.separateSound",
+        label: "Separate the Sound",
+        params: r#"{"layer": id, "item": id}: a video item's sound taken apart from its picture: the same stretch of its sound on a sound layer at the same moment, the video silent; from then on each moves, trims and is deleted on its own. Says the sound's layer and item"#,
+        run: separate_sound,
+    },
+    VideoCommand {
         id: "video.clipColour",
         label: "Clip Colour",
         params: r#"{"track": n, "clip": n, "colour": 0..7 | null}: its colour on the timeline (null: its track's)"#,
@@ -1543,7 +1579,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser"} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -1650,6 +1686,40 @@ mod tests {
 
     fn session() -> VideoSession {
         VideoSession::new(&recording())
+    }
+
+    #[test]
+    fn a_videos_sound_is_separated_and_tracks_and_layers_are_mixed_to_mono() {
+        let mut s = session();
+        let v = s.execute("video.addMedia", &json!({"kind": "video", "name": "Demo.mp4", "path": "C:/Demo.mp4", "duration": 3_000_000})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": v["id"], "at": 1_000_000})).unwrap();
+        let (vl, vi) = (placed["layer"].clone(), placed["item"].clone());
+        let sound = s.execute("video.separateSound", &json!({"layer": vl, "item": vi})).unwrap();
+        assert_eq!(s.undo_label(), Some("Separate the Sound"));
+        let (sl, si) = (sound["layer"].as_u64().unwrap() as u32, sound["item"].as_u64().unwrap() as u32);
+        let it = s.timeline.item(sl, si).unwrap();
+        assert!(it.sound_only && it.at == 1_000_000);
+        assert!(s.timeline.item(vl.as_u64().unwrap() as u32, vi.as_u64().unwrap() as u32).unwrap().silent);
+        assert!(s.execute("video.separateSound", &json!({"layer": vl, "item": vi})).is_err(), "once");
+        // Its sound brought back with the video: heard with it again.
+        s.execute("video.setItem", &json!({"layer": vl, "item": vi, "silent": false})).unwrap();
+        assert!(!s.timeline.item(vl.as_u64().unwrap() as u32, vi.as_u64().unwrap() as u32).unwrap().silent);
+        assert!(s.execute("video.setItem", &json!({"layer": vl, "item": vi, "silent": "no"})).is_err());
+        // Mono: the microphone track, the sound layer; not the screen, nor a picture layer.
+        s.execute("video.mono", &json!({"track": 1, "mono": true})).unwrap();
+        assert!(s.timeline.tracks[1].mono);
+        assert_eq!(s.undo_label(), Some("Mix to Mono"));
+        s.execute("video.mono", &json!({"layer": sl, "mono": true})).unwrap();
+        assert!(s.timeline.layer(sl).unwrap().mono);
+        for bad in [
+            json!({"track": 0, "mono": true}),
+            json!({"layer": vl, "mono": true}),
+            json!({"track": 1}),
+            json!({"mono": true}),
+            json!({"track": 1, "layer": sl, "mono": true}),
+        ] {
+            assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

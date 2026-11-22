@@ -71,6 +71,9 @@ const ROW_H: f32 = 48.0;
 const EDGE: f32 = 7.0;
 /// Edits are written this long after the last change.
 const SAVE_AFTER: f64 = 1.0;
+/// What Separate the Sound does, said on its buttons.
+const SEPARATE_TIP: &str =
+    "Its sound put on a sound layer of its own at the same moment, the video left silent: each then moves and trims on its own";
 /// The preview is made no larger than this (the export has its own size).
 const PREVIEW_MAX: (u32, u32) = (1920, 1080);
 /// The play button under the video, and the room kept under the picture for it.
@@ -181,7 +184,7 @@ struct Playing {
     since: f64,
     from: u64,
     /// How fast and which way: 1 as recorded (with its sound), 2, 4 or 8 times as fast, and
-    /// below 0 backwards (J and L); any but 1 plays without sound.
+    /// below 0 backwards (J and L); backwards plays without sound, faster at its own pitch.
     rate: i32,
     /// It started in the chosen stretch: it stops at its end.
     in_range: bool,
@@ -951,15 +954,14 @@ impl VideoView {
         self.play_at_rate(ed, now, rate);
     }
 
-    /// Plays from the playhead, `rate` times as fast as recorded (below 0, backwards): with its
-    /// sound only as recorded.
+    /// Plays from the playhead, `rate` times as fast as recorded (below 0, backwards): forwards
+    /// with its sound (faster, at its own pitch), backwards without.
     fn play_at_rate(&mut self, ed: &Editor, now: f64, rate: i32) {
         // The sound that was playing stops first.
         self.playing = None;
-        let sound = if rate == 1 {
-            ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead)
-        } else {
-            None
+        let sound = match u32::try_from(rate) {
+            Ok(r) if r >= 1 => ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead, r),
+            _ => None,
         };
         let in_range = self.range.is_some_and(|(a, b)| (a..b).contains(&self.playhead) || (rate < 0 && self.playhead == b));
         self.playing = Some(Playing { since: now, from: self.playhead, rate, in_range, sound });
@@ -969,7 +971,7 @@ impl VideoView {
     const MOST_RATE: i32 = 8;
 
     /// L (`forward`) or J: plays that way as recorded, or, playing that way already, twice as
-    /// fast (up to 8 times). Backwards, and faster, it plays without sound.
+    /// fast (up to 8 times). Backwards it plays without sound; faster, voices keep their pitch.
     pub fn shuttle(&mut self, ed: &Editor, now: f64, forward: bool) {
         let rate = match &self.playing {
             Some(p) if (p.rate > 0) == forward => (p.rate * 2).clamp(-Self::MOST_RATE, Self::MOST_RATE),
@@ -1654,7 +1656,7 @@ impl VideoView {
                     }
                     if ui
                         .add(egui::Button::new("Play Faster").shortcut_text("L"))
-                        .on_hover_text("Plays on; again plays faster (2, 4, 8 times, without sound)")
+                        .on_hover_text("Plays on; again plays faster (2, 4, 8 times), voices at their own pitch")
                         .clicked()
                     {
                         self.shuttle(ed, now, true);
@@ -2091,6 +2093,15 @@ impl VideoView {
         }
         ui.add_space(4.0);
         ui.label(RichText::new("The noise is taken out of the whole track, on this computer.").size(12.0).color(t.muted));
+        ui.add_space(6.0);
+        let mut mono = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.mono);
+        if ui
+            .checkbox(&mut mono, "Mix the track to mono")
+            .on_hover_text("Its two sides mixed into one, heard the same from both speakers (a voice recorded on one side only)")
+            .changed()
+        {
+            self.run(ed, &ctx, "video.mono", json!({"track": track, "mono": mono}));
+        }
     }
 
     /// The mouse pointer on the video: shown or not, how large, how smooth, its clicks ringed.
@@ -3016,6 +3027,15 @@ impl VideoView {
                     self.run(ed, ctx, "video.solo", json!({"track": i, "solo": !track.solo}));
                     ui.close();
                 }
+                if !track.kind.is_video()
+                    && ui
+                        .add(egui::Button::new("Mix to Mono").selected(track.mono))
+                        .on_hover_text("Its two sides mixed into one, heard the same from both speakers")
+                        .clicked()
+                {
+                    self.run(ed, ctx, "video.mono", json!({"track": i, "mono": !track.mono}));
+                    ui.close();
+                }
                 if !track.kind.is_video() {
                     if ui
                         .add_enabled(self.session.timeline.source_time(i, at).is_some(), egui::Button::new("Add a Volume Point Here"))
@@ -3078,7 +3098,20 @@ impl VideoView {
                         self.run(ed, ctx, "video.deleteItem", json!({"layer": id, "item": item}));
                         ui.close();
                     }
+                    if self.separable(it) && ui.button("Separate the Sound").on_hover_text(SEPARATE_TIP).clicked() {
+                        self.separate_sound(ed, ctx, id, item);
+                        ui.close();
+                    }
                     ui.separator();
+                }
+                if layer.kind == screengrabcraft_media::layers::LayerKind::Sound
+                    && ui
+                        .add(egui::Button::new("Mix to Mono").selected(layer.mono))
+                        .on_hover_text("Its two sides mixed into one, heard the same from both speakers")
+                        .clicked()
+                {
+                    self.run(ed, ctx, "video.mono", json!({"layer": id, "mono": !layer.mono}));
+                    ui.close();
                 }
                 if ui.add(egui::Button::new("Add Text Here").shortcut_text("T")).clicked() {
                     self.seek(ed, at, now);

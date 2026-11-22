@@ -238,6 +238,7 @@ mod tests {
                 points: Vec::new(),
                 locked: false,
                 solo: false,
+                mono: false,
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
