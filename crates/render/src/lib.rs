@@ -23,6 +23,7 @@ pub mod pdf;
 pub mod pointer;
 pub mod project;
 pub mod region;
+pub mod simplify;
 pub mod stamp;
 pub mod stitch;
 pub mod text;

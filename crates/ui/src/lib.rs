@@ -24,6 +24,7 @@ pub mod quick;
 pub mod recorder;
 pub mod selection;
 pub mod services;
+pub mod simplify;
 pub mod stamps;
 pub mod strip;
 pub mod theme;

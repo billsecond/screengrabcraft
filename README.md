@@ -180,7 +180,12 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a
   box, an ellipse, a freehand outline, or a colour with the magic wand; Invert Selection
   (Ctrl+Shift+I) takes everything else. **Eraser** (E): rubs the picture out to see-through or
-  to a colour.
+  to a colour. With "Fill where a moved part was" ticked, a part dragged away (a button, a block)
+  leaves its place filled from the colours round it; **Fill from Round It** takes something out
+  of the picture that way.
+- **Simplify** (Image menu): the picture's parts drawn over it as plain shapes, flat boxes in
+  their colours and grey bars for the text, one group under the other annotations (Ungroup to
+  change one).
   **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
   these and the rest. Copy with annotations selected copies just them.
 - **Arrow** (one or two heads, notched, solid, an open V, a dot or a bar, any thickness; straight

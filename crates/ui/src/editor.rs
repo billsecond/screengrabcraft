@@ -301,6 +301,8 @@ pub struct Editor {
     pub(crate) grab_text: crate::grab_text::State,
     /// Hide Personal Details: its window, and the reader at work for it.
     pub(crate) details: crate::details::State,
+    /// Simplify, while it reads the text.
+    pub(crate) simplify: crate::simplify::State,
 }
 
 const TOAST_SECS: f64 = 3.5;
@@ -403,6 +405,7 @@ impl Editor {
             background: crate::background::State::default(),
             grab_text: crate::grab_text::State::default(),
             details: crate::details::State::default(),
+            simplify: crate::simplify::State::default(),
         }
     }
 
@@ -1048,6 +1051,14 @@ impl Editor {
         self.run(ctx, "image.erase", params);
     }
 
+    /// Fill from Round It: what is in the selected area is taken out of the picture, the colours
+    /// round it closing over where it was.
+    pub fn fill_area_from_round(&mut self, ctx: &egui::Context) {
+        let Some(mut params) = self.area_params() else { return };
+        params["fill"] = json!(true);
+        self.run(ctx, "image.erase", params);
+    }
+
     /// Crop to Selection: only the selected area is kept.
     pub fn crop_to_area(&mut self, ctx: &egui::Context) {
         let Some(params) = self.area_params() else { return };
@@ -1365,6 +1376,7 @@ impl Editor {
         crate::compose::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
         crate::details::show(self, &ctx);
+        crate::simplify::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
@@ -1378,6 +1390,7 @@ impl Editor {
             || self.background.busy()
             || self.grab_text.busy()
             || self.details.busy()
+            || self.simplify.busy()
         {
             return;
         }
@@ -1723,6 +1736,14 @@ impl Editor {
                         self.erase_area(&ctx);
                         ui.close();
                     }
+                    if ui
+                        .add_enabled(area, egui::Button::new("Fill Area from Round It"))
+                        .on_hover_text("Takes what is in the area out of the picture: the colours round it close over it")
+                        .clicked()
+                    {
+                        self.fill_area_from_round(&ctx);
+                        ui.close();
+                    }
                     if ui.add_enabled(area, egui::Button::new("Crop to Selection")).clicked() {
                         self.crop_to_area(&ctx);
                         ui.close();
@@ -1787,6 +1808,8 @@ impl Editor {
                     ui.separator();
                     crate::grab_text::item(self, ui);
                     crate::details::item(self, ui);
+                    ui.separator();
+                    crate::simplify::item(self, ui);
                 });
                 ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {

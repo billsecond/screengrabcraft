@@ -1120,7 +1120,11 @@ fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
 /// as a piece of its own (the command `image.lift`), and the drag moves it. False when the drag
 /// starts elsewhere.
 fn lift_area(ed: &mut Editor, ctx: &egui::Context, start: Pt) -> bool {
-    let Some(params) = ed.area.filter(|a| a.contains(start)).and_then(|_| ed.area_params()) else { return false };
+    let Some(mut params) = ed.area.filter(|a| a.contains(start)).and_then(|_| ed.area_params()) else { return false };
+    // Where it was: see-through, or filled from round it (as the Selection tool's panel says).
+    if ed.settings.fill_lifted {
+        params["fill"] = serde_json::json!(true);
+    }
     ed.area = None;
     if let Some(id) = ed.run(ctx, "image.lift", params).and_then(|out| out.get("id").and_then(serde_json::Value::as_u64)) {
         let id = ObjectId(id);
