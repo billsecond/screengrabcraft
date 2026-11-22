@@ -41,6 +41,10 @@ tiny-skia = { version = "0.12", default-features = false, features = ["std", "si
 ab_glyph = "0.2.32"
 # Deflate for the PDF writer (the backend written in Rust).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# QR codes, on this computer: reading them in a picture (rqrr: MIT or Apache-2.0, and ISC) and
+# making one from words (qrcode: MIT or Apache-2.0). Rust only, the browser build included.
+rqrr = { version = "0.11", default-features = false }
+qrcode = { version = "0.15", default-features = false, features = ["std"] }
 
 # Video: the recording file's frames (LZ4, Rust only) and its checksums, then the encoders that
 # make the MP4: AV1 (rav1e) and Opus (rusty-opus), both royalty-free and written in Rust.

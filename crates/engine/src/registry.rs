@@ -218,6 +218,25 @@ pub static COMMANDS: &[CommandSpec] = &[
         always,
         make_color_transparent
     ),
+    CommandSpec {
+        id: "image.readQr",
+        label: "Read QR Codes",
+        group: "Image",
+        shortcut: None,
+        params: r#"{"x"?, "y"?, "w"?, "h"?} (an area; all of the picture without one) → {"codes": [{"text": "…", "link": bool, "rect": {"x", "y", "w", "h"}}]}: the QR codes in the picture as it is shown, read on this computer; a link is only words, never opened"#,
+        undoable: false,
+        enabled: always,
+        run: read_qr,
+    },
+    cmd!(
+        "image.makeQr",
+        "Make a QR Code",
+        "Image",
+        None,
+        r#"{"text": "words or a web address", "size"?: px (its side, 40 to 2000; a third of the picture's shorter side without one), "x"?: px, "y"?: px (its top left; in the middle without them)} → {"id": id}: a QR code of the words, black on white, placed as a picture annotation and selected"#,
+        always,
+        make_qr
+    ),
     cmd!("effect.border", "Border", "Effects", None, r##"{"width"?: 4, "color"?: "#000000"}"##, always, border),
     cmd!("effect.shadow", "Drop Shadow", "Effects", None, r##"{"offset"?: 8, "softness"?: 10, "color"?: "#00000080"}"##, always, shadow),
     cmd!(
@@ -277,6 +296,14 @@ fn num(p: &Value, key: &str) -> Option<f32> {
 
 fn need(p: &Value, key: &str) -> Result<f32> {
     num(p, key).ok_or_else(|| EngineError::Params(format!("`{key}` must be a number")))
+}
+
+/// A number if one is given (none when it's left out or null); anything else is an error.
+fn opt(p: &Value, key: &str) -> Result<Option<f32>> {
+    match p.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => need(p, key).map(Some),
+    }
 }
 
 fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
@@ -594,6 +621,48 @@ fn lift(s: &mut Session, p: &Value) -> Result<Value> {
     // Where it was, looking as it did (no shadow, no border).
     let style = Style { shadow: false, ..Kind::Image.default_style() };
     let id = s.doc.add(Shape::Image { rect: Rect::new(x as f32, y as f32, w as f32, h as f32), image: key }, style)?;
+    s.selection = vec![id];
+    Ok(json!({ "id": id.0 }))
+}
+
+/// The QR codes in the picture as shown (or in an area of it), where each is on the picture.
+fn read_qr(s: &mut Session, p: &Value) -> Result<Value> {
+    use screengrabcraft_render::qr;
+    let whole = screengrabcraft_render::render(&s.doc).ok_or_else(|| EngineError::Failed("the picture could not be drawn".to_string()))?;
+    let (pic, dx, dy) = if ["x", "y", "w", "h"].iter().any(|k| p.get(k).is_some()) {
+        let (x, y, w, h) = area_param(s, p)?;
+        (whole.crop(x, y, w, h).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?, x as f32, y as f32)
+    } else {
+        (whole, 0.0, 0.0)
+    };
+    let codes: Vec<Value> = qr::read(&pic)
+        .into_iter()
+        .map(|f| {
+            let r = f.rect;
+            json!({"text": f.text, "link": qr::is_link(&f.text), "rect": {"x": r.x + dx, "y": r.y + dy, "w": r.w, "h": r.h}})
+        })
+        .collect();
+    Ok(json!({ "codes": codes }))
+}
+
+/// A QR code of the words, placed on the picture as a picture annotation (selected).
+fn make_qr(s: &mut Session, p: &Value) -> Result<Value> {
+    use screengrabcraft_render::qr;
+    let text = p.get("text").and_then(Value::as_str).ok_or_else(|| EngineError::Params("`text` must be the words to put in the code".to_string()))?;
+    let (pw, ph) = (s.doc.width() as f32, s.doc.height() as f32);
+    let side = match opt(p, "size")? {
+        Some(v) => v,
+        None => (pw.min(ph) / 3.0).max(120.0),
+    }
+    .clamp(40.0, 2000.0);
+    let pic = qr::make(text, side as u32).map_err(|e| EngineError::Params(e.to_string()))?;
+    let (w, h) = (pic.width() as f32, pic.height() as f32);
+    // Anywhere it can still be seen and taken hold of.
+    let x = opt(p, "x")?.unwrap_or(((pw - w) / 2.0).round()).clamp(-w + 1.0, pw - 1.0);
+    let y = opt(p, "y")?.unwrap_or(((ph - h) / 2.0).round()).clamp(-h + 1.0, ph - 1.0);
+    let key = s.doc.add_image(pic)?;
+    let style = Style { shadow: false, ..Kind::Image.default_style() };
+    let id = s.doc.add(Shape::Image { rect: Rect::new(x, y, w, h).finite(), image: key }, style)?;
     s.selection = vec![id];
     Ok(json!({ "id": id.0 }))
 }

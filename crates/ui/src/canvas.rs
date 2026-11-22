@@ -1026,6 +1026,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
                 }
             }
             crate::grab_text::item(ed, ui);
+            crate::qr::read_item(ed, ui);
             ui.separator();
         }
         let sel = ed.session.selected();
@@ -1087,6 +1088,7 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
         }
         if ed.area.is_none() {
             crate::grab_text::item(ed, ui);
+            crate::qr::read_item(ed, ui);
         }
         ui.separator();
         if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {
