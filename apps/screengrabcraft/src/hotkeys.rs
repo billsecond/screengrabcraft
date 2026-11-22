@@ -7,7 +7,7 @@
 
 use global_hotkey::GlobalHotKeyManager;
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
-use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys};
+use screengrabcraft_model::{CaptureMode, CapturePreset, Hotkey, Hotkeys};
 
 /// What a registered shortcut does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,8 @@ pub enum Target {
     Pause,
     /// While recording: stop it and keep it.
     Stop,
+    /// A capture preset, by its place in the settings' list.
+    Preset(usize),
 }
 
 /// The system's key code for a key name of [`screengrabcraft_model::settings::KEYS`].
@@ -180,8 +182,8 @@ impl Registered {
         self.manager.is_some()
     }
 
-    /// Registers the shortcuts of `keys`, replacing those registered before.
-    pub fn apply(&mut self, keys: &Hotkeys) {
+    /// Registers the shortcuts of `keys` and the presets', replacing those registered before.
+    pub fn apply(&mut self, keys: &Hotkeys, presets: &[CapturePreset]) {
         let Some(manager) = &self.manager else { return };
         for (k, _) in self.active.drain(..) {
             let _ = manager.unregister(k);
@@ -189,6 +191,7 @@ impl Registered {
         self.problems.clear();
         let mut wanted: Vec<(Option<&Hotkey>, Target)> = CaptureMode::ALL.iter().map(|m| (keys.get(*m), Target::Capture(*m))).collect();
         wanted.push((keys.editor.as_ref(), Target::Editor));
+        wanted.extend(presets.iter().enumerate().map(|(i, p)| (p.hotkey.as_ref(), Target::Preset(i))));
         for (key, target) in wanted {
             let Some(key) = key else { continue };
             let label = key.display(logo_name());
@@ -214,6 +217,13 @@ impl Registered {
     /// What a pressed shortcut is for.
     pub fn target(&self, id: u32) -> Option<Target> {
         self.active.iter().chain(&self.during).find(|(k, _)| k.id() == id).map(|(_, t)| *t)
+    }
+
+    /// A preset's shortcut as menus show it, if it was registered.
+    pub fn preset_label(&self, p: &CapturePreset) -> Option<String> {
+        let k = p.hotkey.as_ref()?;
+        let hk = to_system(k)?;
+        self.active.iter().any(|(a, _)| *a == hk).then(|| k.display(logo_name()))
     }
 
     /// The shortcut registered for a mode, for menus.
