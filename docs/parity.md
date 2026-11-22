@@ -247,7 +247,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Transcript pane: who said what, click to go there | Has | |
 | **Captions edited (a word put right, split, joined, moved)** | Has | in the transcript pane; kept with the edits, undone like any edit |
 | Captions that light up word by word | Missing | |
-| Cut words by deleting them from the transcript; filler words taken out | Missing | |
+| **Cut words by deleting them from the transcript; filler words taken out** | Part | the transcript pane: a line's words chosen and cut (its right button), Take Out Filler Words (um, uh, er and the like); where each is said goes from every track. The speech model times lines only, so a word's time is worked out from its line's by its length, not heard |
 | Computer voices, translation, dubbing | Not planned | online services |
 
 ## Video: making the file
@@ -287,7 +287,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 12. The camera's background removed, with or without a green screen (#79).
 13. Transitions between clips; keyframe animation of an item's place, size and opacity (#85).
 14. Volume along a clip; the rest lowered under the voice; levels evened out (#88).
-15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours.
+15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours (#90).
+16. Words cut out of the video from the transcript; filler words taken out (word times estimated).
 
 **Still to build, in this order**
 
@@ -307,6 +308,5 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 15. Print; batch changes; captures on a timer or at a set time.
-16. Cutting words from the transcript; filler words taken out.
-17. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+16. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.
