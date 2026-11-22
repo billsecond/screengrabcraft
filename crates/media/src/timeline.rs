@@ -279,6 +279,24 @@ pub struct Timeline {
     /// moved), in recording time; none: as they were heard. See [`crate::captions::edit`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrected: Option<Vec<crate::captions::Cue>>,
+    /// Moments marked on the timeline, in order: the chapters of the video made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub markers: Vec<Marker>,
+}
+
+/// A moment marked on the timeline, with a name: a chapter of the video made.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Marker {
+    pub at: u64,
+    pub name: String,
+}
+
+/// The most markers a video has (as many as an MP4's chapter list holds).
+pub const MAX_MARKERS: usize = 255;
+
+/// A marker's name as it's kept: one clean line, else "Chapter n".
+fn marker_name(name: &str, n: usize) -> String {
+    clean_name(name).unwrap_or_else(|| format!("Chapter {}", n.max(1)))
 }
 
 impl Timeline {
@@ -302,6 +320,7 @@ impl Timeline {
             media: Vec::new(),
             pointer: Default::default(),
             corrected: None,
+            markers: Vec::new(),
         }
     }
 
@@ -371,8 +390,16 @@ impl Timeline {
             media: self.media,
             pointer: self.pointer.checked(),
             corrected: self.corrected.map(|c| crate::captions::Captions { cues: c, model: String::new() }.checked(rec.duration_us).cues),
+            markers: Vec::new(),
         };
         checked.check_layers();
+        // The markers: named, in order, one to a moment, not too many.
+        let mut markers: Vec<Marker> =
+            self.markers.into_iter().take(MAX_MARKERS * 4).map(|m| Marker { at: m.at.min(u64::MAX / 4), name: marker_name(&m.name, 0) }).collect();
+        markers.sort_by_key(|m| m.at);
+        markers.dedup_by_key(|m| m.at);
+        markers.truncate(MAX_MARKERS);
+        checked.markers = markers;
         checked
     }
 
@@ -429,6 +456,11 @@ impl Timeline {
             t.clips = out;
         }
         self.cut_layers(from, to);
+        // Markers in the stretch go to where it was; those after move up.
+        for m in &mut self.markers {
+            m.at = if m.at >= to { m.at - gap } else { m.at.min(from) };
+        }
+        self.markers.dedup_by_key(|m| m.at);
         Ok(())
     }
 
@@ -629,6 +661,10 @@ impl Timeline {
         }
         if track.is_none() {
             self.retime_layers(&map);
+            for m in &mut self.markers {
+                m.at = map(m.at);
+            }
+            self.markers.dedup_by_key(|m| m.at);
         }
         Ok(map(to))
     }
@@ -674,6 +710,64 @@ impl Timeline {
         }
         t.denoise = amount.clamp(0.0, 1.0);
         Ok(())
+    }
+
+    /// Marks a moment, named (else "Chapter n"): its place among the markers, which stay in order.
+    pub fn add_marker(&mut self, at: u64, name: Option<&str>) -> Result<usize, EditError> {
+        if self.markers.len() >= MAX_MARKERS {
+            return Err(EditError::Invalid(format!("a video has at most {MAX_MARKERS} markers")));
+        }
+        let at = at.min(u64::MAX / 4);
+        if self.markers.iter().any(|m| m.at == at) {
+            return Err(EditError::Invalid("there's a marker there already".to_string()));
+        }
+        let name = marker_name(name.unwrap_or(""), self.markers.len() + 1);
+        self.markers.push(Marker { at, name });
+        self.markers.sort_by_key(|m| m.at);
+        Ok(self.markers.iter().position(|m| m.at == at).unwrap_or(0))
+    }
+
+    fn marker_mut(&mut self, i: usize) -> Result<&mut Marker, EditError> {
+        self.markers.get_mut(i).ok_or_else(|| EditError::Invalid(format!("there's no marker {i}")))
+    }
+
+    pub fn remove_marker(&mut self, i: usize) -> Result<(), EditError> {
+        self.marker_mut(i)?;
+        self.markers.remove(i);
+        Ok(())
+    }
+
+    /// A marker's new name (an empty one keeps the old).
+    pub fn rename_marker(&mut self, i: usize, name: &str) -> Result<(), EditError> {
+        let m = self.marker_mut(i)?;
+        if let Some(n) = clean_name(name) {
+            m.name = n;
+        }
+        Ok(())
+    }
+
+    /// A marker moved to another moment (not onto another marker): its new place among them.
+    pub fn move_marker(&mut self, i: usize, at: u64) -> Result<usize, EditError> {
+        let at = at.min(u64::MAX / 4);
+        if self.markers.iter().enumerate().any(|(k, m)| k != i && m.at == at) {
+            return Err(EditError::Invalid("there's a marker there already".to_string()));
+        }
+        self.marker_mut(i)?.at = at;
+        self.markers.sort_by_key(|m| m.at);
+        Ok(self.markers.iter().position(|m| m.at == at).unwrap_or(0))
+    }
+
+    /// The chapters of the video made: each marker in it with its name, and a "Start" from the
+    /// beginning when the first marker is later (players expect the first chapter at the start).
+    /// None when there are no markers.
+    pub fn chapters(&self) -> Vec<(u64, String)> {
+        let length = self.length();
+        let mut out: Vec<(u64, String)> = self.markers.iter().filter(|m| m.at < length).map(|m| (m.at, m.name.clone())).collect();
+        if out.first().is_some_and(|(at, _)| *at > 0) {
+            out.insert(0, (0, "Start".to_string()));
+        }
+        out.truncate(MAX_MARKERS);
+        out
     }
 
     pub fn set_muted(&mut self, track: usize, muted: bool) -> Result<(), EditError> {
@@ -722,6 +816,7 @@ mod tests {
             media: Vec::new(),
             pointer: Default::default(),
             corrected: None,
+            markers: Vec::new(),
         }
     }
 
@@ -986,6 +1081,38 @@ mod tests {
         assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
         let old: Timeline = serde_json::from_str(r#"{"tracks":[{"stream":1,"kind":"microphone","clips":[{"at":0,"from":0,"len":5}]}]}"#).unwrap();
         assert_eq!((old.tracks[0].denoise, old.tracks[0].clips[0].fade_in), (0.0, 0));
+    }
+
+    #[test]
+    fn markers_stay_in_order_follow_the_edits_and_become_chapters() {
+        let mut t = two_tracks();
+        assert!(t.chapters().is_empty(), "no markers, no chapters");
+        assert_eq!(t.add_marker(6_000_000, Some("Wrap up")).unwrap(), 0);
+        assert_eq!(t.add_marker(2_000_000, None).unwrap(), 0);
+        assert_eq!(t.markers[0].name, "Chapter 2");
+        assert!(t.add_marker(2_000_000, Some("again")).is_err(), "one to a moment");
+        t.rename_marker(0, "  The login\npage ").unwrap();
+        t.rename_marker(0, "   ").unwrap();
+        assert_eq!(t.markers[0].name, "The loginpage", "one clean line; empty keeps it");
+        assert_eq!(t.chapters(), vec![(0, "Start".to_string()), (2_000_000, "The loginpage".to_string()), (6_000_000, "Wrap up".to_string())]);
+        // Cut before the second: it moves up; one in the cut goes to where it was.
+        t.add_marker(4_500_000, Some("Gone")).unwrap();
+        t.cut(4_000_000, 5_000_000).unwrap();
+        assert_eq!(t.markers.iter().map(|m| m.at).collect::<Vec<_>>(), vec![2_000_000, 4_000_000, 5_000_000]);
+        // Twice as fast from 0 to 4 s: the first comes at 1 s, the rest 2 s sooner.
+        t.set_speed(0, 4_000_000, 200, None).unwrap();
+        assert_eq!(t.markers.iter().map(|m| m.at).collect::<Vec<_>>(), vec![1_000_000, 2_000_000, 3_000_000]);
+        // Moved past another: in order again; onto one: refused. Removed; a missing one is an error.
+        assert_eq!(t.move_marker(0, 2_500_000).unwrap(), 1);
+        assert!(t.move_marker(0, 2_500_000).is_err());
+        t.remove_marker(2).unwrap();
+        assert!(t.remove_marker(5).is_err() && t.rename_marker(9, "x").is_err());
+        // A marker past the end isn't a chapter.
+        t.add_marker(99_000_000, None).unwrap();
+        assert_eq!(t.chapters().len(), 3);
+        // Saved and read back.
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
     }
 
     #[test]

@@ -329,6 +329,7 @@ impl Exporter {
             let end = ((k as u64 + 1) * self.per).min(frames);
             self.send(k, end, &rec, &timeline)?;
         }
+        let chapters = timeline.chapters();
         self.latest = Some((rec, timeline));
         self.jobs = None;
         while self.written < self.sent {
@@ -338,7 +339,9 @@ impl Exporter {
             self.collect_one()?;
             progress.store((self.written * 1000 / stretches.max(1)) as u32, Ordering::SeqCst);
         }
-        let mp4 = self.mp4.take().ok_or_else(|| MediaError::Encode("the video is already finished".to_string()))?;
+        let mut mp4 = self.mp4.take().ok_or_else(|| MediaError::Encode("the video is already finished".to_string()))?;
+        // The timeline's markers, as chapters.
+        mp4.set_chapters(chapters);
         let file = mp4.finish()?;
         file.into_inner().map_err(|e| MediaError::Io(e.into_error()))?.sync_all()?;
         std::fs::rename(&self.part, &self.out)?;
@@ -620,6 +623,8 @@ mod tests {
         let rec = recording(5);
         let mut tl = Timeline::new(&rec);
         tl.cut(1_000_000, 2_000_000).unwrap();
+        tl.add_marker(500_000, Some("Intro")).unwrap();
+        tl.add_marker(3_000_000, Some("Outro")).unwrap();
         let dir = dir("export");
         let out = dir.join("video.mp4");
         let progress = AtomicU32::new(0);
@@ -630,6 +635,8 @@ mod tests {
         assert_eq!(progress.load(Ordering::SeqCst), 1000);
         let bytes = std::fs::read(&out).unwrap();
         assert_eq!(top_boxes(&bytes), ["ftyp", "mdat", "moov"]);
+        let chapters = vec![(0, "Start".to_string()), (500_000, "Intro".to_string()), (3_000_000, "Outro".to_string())];
+        assert_eq!(crate::mp4::chapters_of(&bytes), chapters, "the markers are its chapters");
         assert!(!out.with_extension("mp4.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -684,6 +691,7 @@ mod tests {
         let rec = recording(5);
         let mut tl = Timeline::new(&rec);
         tl.cut(1_000_000, 2_000_000).unwrap();
+        tl.add_marker(2_000_000, Some("Second half")).unwrap();
         let dir = dir("h264");
         let out = dir.join("video.mp4");
         let progress = AtomicU32::new(0);
@@ -696,6 +704,7 @@ mod tests {
         assert!(top.iter().any(|b| b == "ftyp") && top.iter().any(|b| b == "moov") && top.iter().any(|b| b == "mdat"), "{top:?}");
         let has = |tag: &[u8]| bytes.windows(4).any(|w| w == tag);
         assert!(has(b"avc1") && has(b"mp4a"), "H.264 pictures and AAC sound");
+        assert_eq!(crate::mp4::chapters_of(&bytes), vec![(0, "Start".to_string()), (2_000_000, "Second half".to_string())], "chapters put in");
         assert!(!has(b"av01") && !has(b"Opus"));
         assert!(!out.with_extension("mp4.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();

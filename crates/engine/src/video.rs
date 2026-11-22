@@ -370,6 +370,30 @@ fn caption_times(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+// ---- markers: moments marked on the timeline, the chapters of the video made ----
+
+fn add_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?;
+    let i = s.timeline.add_marker(int(p, "at")?, name.as_deref()).map_err(edit_err)?;
+    Ok(json!({"marker": i}))
+}
+
+fn remove_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.remove_marker(index(p, "marker")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn rename_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let name = text(p, "name")?.ok_or_else(|| EngineError::Params("`name` is missing".to_string()))?;
+    s.timeline.rename_marker(index(p, "marker")?, &name).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+fn move_marker(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let i = s.timeline.move_marker(index(p, "marker")?, int(p, "at")?).map_err(edit_err)?;
+    Ok(json!({"marker": i}))
+}
+
 fn captions_heard(s: &mut VideoSession, _: &Value) -> Result<Value> {
     s.timeline.corrected = None;
     Ok(json!({}))
@@ -663,6 +687,25 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: caption_times,
     },
     VideoCommand {
+        id: "video.addMarker",
+        label: "Add Marker",
+        params: r#"{"at": µs, "name"?: text}: marks a moment on the timeline (a chapter of the video made); its place among the markers"#,
+        run: add_marker,
+    },
+    VideoCommand {
+        id: "video.removeMarker",
+        label: "Delete Marker",
+        params: r#"{"marker": n}: its place among the markers, in order"#,
+        run: remove_marker,
+    },
+    VideoCommand { id: "video.renameMarker", label: "Rename Marker", params: r#"{"marker": n, "name": text}"#, run: rename_marker },
+    VideoCommand {
+        id: "video.moveMarker",
+        label: "Move Marker",
+        params: r#"{"marker": n, "at": µs}: not onto another marker; its new place among them"#,
+        run: move_marker,
+    },
+    VideoCommand {
         id: "video.captionsHeard",
         label: "Captions as Heard",
         params: "{}: every line put right goes back to how it was heard",
@@ -900,6 +943,34 @@ mod tests {
         // Captions that came later are what's put right from then on.
         s.set_heard(None);
         assert!(s.execute("video.captionJoin", &json!({"line": 0})).is_err());
+    }
+
+    #[test]
+    fn markers_are_added_renamed_moved_and_deleted_each_one_undo_step() {
+        let mut s = session();
+        let r = s.execute("video.addMarker", &json!({"at": 3_000_000, "name": "Demo"})).unwrap();
+        assert_eq!(r["marker"].as_u64(), Some(0));
+        assert_eq!(s.undo_label(), Some("Add Marker"));
+        s.execute("video.addMarker", &json!({"at": 1_000_000})).unwrap();
+        s.execute("video.renameMarker", &json!({"marker": 0, "name": "Intro"})).unwrap();
+        let r = s.execute("video.moveMarker", &json!({"marker": 0, "at": 4_000_000})).unwrap();
+        assert_eq!(r["marker"].as_u64(), Some(1));
+        assert_eq!(s.timeline.chapters(), vec![(0, "Start".to_string()), (3_000_000, "Demo".to_string()), (4_000_000, "Intro".to_string())]);
+        s.execute("video.removeMarker", &json!({"marker": 0})).unwrap();
+        assert_eq!(s.timeline.markers.len(), 1);
+        for (id, bad) in [
+            ("video.addMarker", json!({"at": 4_000_000})),
+            ("video.addMarker", json!({"name": "x"})),
+            ("video.renameMarker", json!({"marker": 0})),
+            ("video.moveMarker", json!({"marker": 3, "at": 0})),
+            ("video.removeMarker", json!({"marker": "first"})),
+        ] {
+            assert!(s.execute(id, &bad).is_err(), "{id} {bad}");
+        }
+        for _ in 0..5 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.markers.is_empty());
     }
 
     #[test]

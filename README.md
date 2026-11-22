@@ -128,6 +128,10 @@ the picture editor to the video editor. Its timeline has a row for each track:
   its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
   track itself, on this computer; voices stay). The track's right button turns the noise off and
   on too.
+- **Markers**: M (or Edit, or the ruler's right button) marks the moment at the playhead with a
+  flag on the ruler. The Markers section of the panel names them, goes to them and deletes them;
+  they move with cuts and speed changes, and Export Video makes them the MP4's chapters, which
+  video players list.
 - **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows

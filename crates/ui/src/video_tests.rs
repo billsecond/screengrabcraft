@@ -1713,6 +1713,46 @@ fn a_caption_is_put_right_split_joined_and_moved_from_the_transcript() {
 }
 
 #[test]
+fn markers_are_added_with_m_named_in_the_panel_and_deleted() {
+    let mut h = harness();
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    h.run_steps(2);
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    h.state_mut().video.as_mut().unwrap().playhead = 3_000_000;
+    h.run_steps(2);
+    h.get_by_label_contains("Add a Marker at the Playhead").click();
+    h.run_steps(3);
+    let markers = |h: &Harness<'_, Editor>| {
+        h.state().video.as_ref().unwrap().session.timeline.markers.iter().map(|m| (m.at, m.name.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(markers(&h), vec![(1_000_000, "Chapter 1".to_string()), (3_000_000, "Chapter 2".to_string())]);
+    // The same moment again: said, not added.
+    h.key_press(egui::Key::M);
+    h.run_steps(2);
+    assert_eq!(markers(&h).len(), 2);
+    // Named in the panel: typed, kept when the box is left.
+    let name = h.query_all_by_value("Chapter 1").next().unwrap().rect().center();
+    h.drag_at(name);
+    h.drop_at(name);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("The login page".into()));
+    h.key_press(egui::Key::Enter);
+    h.run_steps(3);
+    assert_eq!(markers(&h)[0].1, "The login page");
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.chapters()[1], (1_000_000, "The login page".to_string()));
+    shot(&mut h, "video-markers");
+    // Its time goes there; its button deletes it.
+    h.get_by_label("0:03.0").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().playhead, 3_000_000);
+    h.get_by_label("Delete the Marker Chapter 2").click();
+    h.run_steps(3);
+    assert_eq!(markers(&h).len(), 1);
+}
+
+#[test]
 fn add_text_puts_words_at_the_playhead_ready_to_be_typed_over() {
     let mut h = harness();
     let half = length(&h) / 2;
