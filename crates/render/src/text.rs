@@ -2,11 +2,15 @@
 //! text is filled, outlined and shadowed like any other shape, at any size).
 //!
 //! The fonts are PatroneOS Sans (regular and semibold) and PatroneOS Mono, under the SIL Open
-//! Font Licence (`assets/fonts/`, listed in ATTRIBUTION.md). Italic is the upright face slanted.
+//! Font Licence (`assets/fonts/`, listed in ATTRIBUTION.md). Italic is the upright face slanted. A style may
+//! name a font on the computer instead: the host says where those are ([`FontSource`]); they
+//! are read when a text needs one and never shipped, and where one is missing the text is drawn
+//! in the bundled font.
 
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
-use ab_glyph::{Font, FontRef, GlyphId, OutlineCurve, PxScale, ScaleFont};
+use ab_glyph::{Font, FontArc, FontVec, GlyphId, OutlineCurve, PxScale, ScaleFont};
 use screengrabcraft_model::{Pt, Rect, Style, TextAlign};
 use tiny_skia::{Path, PathBuilder, Transform};
 
@@ -20,28 +24,95 @@ pub fn font_files() -> [(&'static str, &'static [u8]); 3] {
 }
 
 struct Fonts {
-    regular: Option<FontRef<'static>>,
-    bold: Option<FontRef<'static>>,
-    mono: Option<FontRef<'static>>,
+    regular: Option<FontArc>,
+    bold: Option<FontArc>,
+    mono: Option<FontArc>,
 }
 
 fn fonts() -> &'static Fonts {
     static FONTS: OnceLock<Fonts> = OnceLock::new();
     FONTS.get_or_init(|| Fonts {
-        regular: FontRef::try_from_slice(SANS).ok(),
-        bold: FontRef::try_from_slice(SANS_BOLD).ok(),
-        mono: FontRef::try_from_slice(MONO).ok(),
+        regular: FontArc::try_from_slice(SANS).ok(),
+        bold: FontArc::try_from_slice(SANS_BOLD).ok(),
+        mono: FontArc::try_from_slice(MONO).ok(),
     })
 }
 
-fn font_for(style: &Style) -> Option<&'static FontRef<'static>> {
+/// Where the fonts on the computer come from: the host finds them (the desktop does; the browser
+/// has none). They are used, never shipped.
+pub trait FontSource: Send + Sync {
+    /// The file of the font `family` (its bold face when asked and there is one), and the face's
+    /// number in it; none when the computer has no such font.
+    fn face(&self, family: &str, bold: bool) -> Option<(Vec<u8>, u32)>;
+
+    /// The families of the fonts on the computer, by name.
+    fn families(&self) -> Vec<String>;
+}
+
+static SOURCE: OnceLock<Box<dyn FontSource>> = OnceLock::new();
+
+/// The most fonts of the computer kept read at once.
+const MAX_LOADED: usize = 32;
+
+/// Fonts of the computer read so far, by family and boldness: none for one that isn't there.
+type Loaded = HashMap<(String, bool), Option<FontArc>>;
+
+fn loaded() -> &'static Mutex<Loaded> {
+    static LOADED: OnceLock<Mutex<Loaded>> = OnceLock::new();
+    LOADED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Sets where the fonts on the computer come from; once (false when one was set already).
+pub fn set_font_source(source: Box<dyn FontSource>) -> bool {
+    SOURCE.set(source).is_ok()
+}
+
+/// The families of the fonts on the computer; none where there is no way to them (the browser).
+pub fn font_families() -> Option<Vec<String>> {
+    SOURCE.get().map(|s| s.families())
+}
+
+/// The file of a font on the computer and its face's number, to show text being typed in it.
+pub fn font_file(family: &str, bold: bool) -> Option<(Vec<u8>, u32)> {
+    SOURCE.get()?.face(family, bold)
+}
+
+/// Whether there is a way to the fonts on the computer (not in the browser).
+pub fn has_font_source() -> bool {
+    SOURCE.get().is_some()
+}
+
+/// A font of the computer, read once.
+fn system_font(family: &str, bold: bool) -> Option<FontArc> {
+    let source = SOURCE.get()?;
+    let key = (family.to_string(), bold);
+    let mut map = loaded().lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(f) = map.get(&key) {
+        return f.clone();
+    }
+    if map.len() >= MAX_LOADED {
+        map.clear();
+    }
+    let font = source.face(family, bold).and_then(|(bytes, index)| FontVec::try_from_vec_and_index(bytes, index).ok()).map(FontArc::new);
+    map.insert(key, font.clone());
+    font
+}
+
+/// The font a style's text is drawn in: the computer's font it names when there is one, else
+/// the bundled ones (the typewriter's, bold or regular).
+fn font_for(style: &Style) -> Option<FontArc> {
+    if !style.font.is_bundled()
+        && let Some(f) = system_font(style.font.as_str(), style.bold)
+    {
+        return Some(f);
+    }
     let f = fonts();
     if style.mono {
-        f.mono.as_ref().or(f.regular.as_ref())
+        f.mono.clone().or_else(|| f.regular.clone())
     } else if style.bold {
-        f.bold.as_ref().or(f.regular.as_ref())
+        f.bold.clone().or_else(|| f.regular.clone())
     } else {
-        f.regular.as_ref()
+        f.regular.clone()
     }
 }
 
@@ -231,6 +302,37 @@ mod tests {
     fn fonts_load() {
         let f = fonts();
         assert!(f.regular.is_some() && f.bold.is_some() && f.mono.is_some());
+    }
+
+    /// A computer with one font, "Test Mono" (the bundled typewriter's file under another name).
+    struct OneFont;
+
+    impl FontSource for OneFont {
+        fn face(&self, family: &str, _bold: bool) -> Option<(Vec<u8>, u32)> {
+            (family == "Test Mono").then(|| (MONO.to_vec(), 0))
+        }
+
+        fn families(&self) -> Vec<String> {
+            vec!["Test Mono".to_string()]
+        }
+    }
+
+    /// Text in a font on the computer is laid out and drawn in it; a font the computer hasn't
+    /// falls back to the bundled one.
+    #[test]
+    fn a_font_on_the_computer_is_used_and_a_missing_one_falls_back() {
+        set_font_source(Box::new(OneFont));
+        assert_eq!(font_families(), Some(vec!["Test Mono".to_string()]));
+        let sans = Style { font_size: 30.0, ..Style::default() };
+        let mono = Style { font: screengrabcraft_model::FontName::new("Test Mono"), ..sans };
+        let missing = Style { font: screengrabcraft_model::FontName::new("Nowhere Sans"), ..sans };
+        let w = |s: &Style| layout("iiii", s, None).width;
+        assert!(w(&mono) > w(&sans) * 1.5, "typewriter letters are wider: {} {}", w(&mono), w(&sans));
+        assert_eq!(w(&missing), w(&sans), "the bundled font where the computer hasn't it");
+        assert_eq!(w(&Style { bold: true, ..mono }), w(&mono), "a font without a bold face keeps its letters");
+        let path = text_path(&layout("ii", &mono, None), &mono, Pt::ZERO, 200.0).unwrap();
+        assert!(path.bounds().width() > 20.0);
+        assert!(font_file("Test Mono", false).is_some() && font_file("Nowhere Sans", false).is_none());
     }
 
     #[test]

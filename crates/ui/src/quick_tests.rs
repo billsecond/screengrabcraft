@@ -737,3 +737,47 @@ fn stamps_of_your_own_are_greyed_out_without_files() {
     assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Add a Picture…")).is_disabled());
     shot(&mut h, "stamp-library-browser");
 }
+
+/// A computer with one font, "Test Mono" (the bundled typewriter's file under another name).
+struct OneFont;
+
+impl screengrabcraft_render::text::FontSource for OneFont {
+    fn face(&self, family: &str, _bold: bool) -> Option<(Vec<u8>, u32)> {
+        let mono = screengrabcraft_render::text::font_files().into_iter().find(|(n, _)| *n == "mono").map(|(_, b)| b.to_vec());
+        if family == "Test Mono" { mono.map(|b| (b, 0)) } else { None }
+    }
+
+    fn families(&self) -> Vec<String> {
+        vec!["Test Mono".to_string(), "Unused Serif".to_string()]
+    }
+}
+
+/// The Text tool's font menu lists the computer's fonts with a search; text typed in one is
+/// shown in it as it is typed, and keeps its name.
+#[test]
+fn text_takes_a_font_from_the_computer() {
+    screengrabcraft_render::text::set_font_source(Box::new(OneFont));
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Text));
+    click(&mut h, crate::props::FONT_MENU);
+    h.get_by_label(crate::props::BUNDLED_FONT);
+    h.get_by_label("Unused Serif");
+    click(&mut h, crate::props::FONT_SEARCH);
+    h.event(egui::Event::Text("mono".into()));
+    h.run_steps(3);
+    assert!(h.query_by_label("Unused Serif").is_none(), "the search leaves it out");
+    shot(&mut h, "font-menu");
+    click(&mut h, "Test Mono");
+    assert_eq!(h.state().tool_style(Kind::Text).font.as_str(), "Test Mono");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let p = at(&h, 60.0, 60.0);
+    crate::tests::click_at(&mut h, p);
+    h.event(egui::Event::Text("iiii".into()));
+    h.run_steps(4);
+    assert!(h.state().egui_fonts.contains("computer:Test Mono:bold"), "handed to egui to type in (text is bold at first)");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    assert_eq!((o.shape.text(), o.style.font.as_str()), (Some("iiii"), "Test Mono"));
+    shot(&mut h, "font-text");
+}

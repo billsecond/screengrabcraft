@@ -32,7 +32,7 @@ impl QuickStyle {
     }
 
     /// Whether this look describes `current` (a tool's look, or an annotation's): the same tool,
-    /// the same style (the text size aside, unless the look sets it), and every option it sets
+    /// the same style (the text size aside, unless the look sets it, and the font aside), and every option it sets
     /// the same (a tail's spot only where `current` knows it).
     pub fn matches(&self, current: &QuickStyle) -> bool {
         let o = &self.options;
@@ -40,7 +40,7 @@ impl QuickStyle {
         let same = |a: Option<bool>, b: Option<bool>| a.is_none() || a == b;
         let size = if self.sized { self.style.font_size } else { current.style.font_size };
         self.kind.family() == current.kind.family()
-            && Style { font_size: size, ..self.style } == current.style
+            && Style { font_size: size, font: current.style.font, ..self.style } == current.style
             && (o.heads.is_none() || o.heads == c.heads)
             && (o.radius.is_none() || o.radius == c.radius)
             && (o.form.is_none() || o.form == c.form)

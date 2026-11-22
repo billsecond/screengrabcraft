@@ -472,7 +472,9 @@ pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
     let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse, Kind::Polygon] } else { std::slice::from_ref(&family) };
     for k in kinds {
         let size = if look.sized { look.style.font_size } else { ed.tool_style(*k).font_size };
-        ed.settings.styles.insert(*k, Style { font_size: size, ..look.style }.clamped());
+        // The font stays too, unless the look (a favourite) has one of its own.
+        let font = if look.style.font.is_bundled() { ed.tool_style(*k).font } else { look.style.font };
+        ed.settings.styles.insert(*k, Style { font_size: size, font, ..look.style }.clamped());
     }
     ed.set_tool_options(family, look.options);
     let ids: Vec<ObjectId> =

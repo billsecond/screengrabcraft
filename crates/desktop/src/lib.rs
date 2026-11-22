@@ -12,6 +12,7 @@
 
 pub mod clipboard;
 pub mod cloak;
+pub mod fonts;
 pub mod graphics;
 pub mod instance;
 pub mod launch;

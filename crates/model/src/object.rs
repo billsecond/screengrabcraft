@@ -809,6 +809,74 @@ impl Kind {
     }
 }
 
+/// The most bytes of a font's name kept.
+pub const MAX_FONT_NAME: usize = 63;
+
+/// A font on the computer, by its family's name ("Segoe UI", "DejaVu Serif"); empty for the
+/// bundled fonts. Kept in a style (which is copied freely), so it is a short name held in place.
+/// A project keeps the name; where that font is missing, the text is drawn in the bundled font.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontName {
+    len: u8,
+    bytes: [u8; MAX_FONT_NAME],
+}
+
+impl Default for FontName {
+    fn default() -> FontName {
+        FontName { len: 0, bytes: [0; MAX_FONT_NAME] }
+    }
+}
+
+impl FontName {
+    /// The bundled fonts.
+    pub const BUNDLED: FontName = FontName { len: 0, bytes: [0; MAX_FONT_NAME] };
+
+    /// `name`, trimmed, without control characters, cut to [`MAX_FONT_NAME`] bytes at a character's edge.
+    pub fn new(name: &str) -> FontName {
+        let mut out = FontName::default();
+        let mut len = 0;
+        for ch in name.trim().chars().filter(|c| !c.is_control()) {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf).as_bytes();
+            let Some(dst) = out.bytes.get_mut(len..len + s.len()) else { break };
+            dst.copy_from_slice(s);
+            len += s.len();
+        }
+        out.len = len as u8;
+        out
+    }
+
+    pub fn as_str(&self) -> &str {
+        let bytes = self.bytes.get(..usize::from(self.len)).unwrap_or_default();
+        std::str::from_utf8(bytes).unwrap_or_default()
+    }
+
+    /// Whether it is the bundled fonts (no name).
+    pub fn is_bundled(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl std::fmt::Debug for FontName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.as_str())
+    }
+}
+
+impl Serialize for FontName {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for FontName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<FontName, D::Error> {
+        // Anything else than words is the bundled font, not an error: a style is never lost over it.
+        let v = serde_json::Value::deserialize(d)?;
+        Ok(v.as_str().map(FontName::new).unwrap_or_default())
+    }
+}
+
 /// How an annotation looks. Every field has a default, so files written by later versions with
 /// more to say still open.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -838,6 +906,10 @@ pub struct Style {
     pub text_outline: Color,
     /// How thick that line is, in pixels outside the letter.
     pub text_outline_width: f32,
+    /// A font on the computer for the text, by name; the bundled fonts when none (or where the
+    /// computer hasn't it).
+    #[serde(skip_serializing_if = "FontName::is_bundled")]
+    pub font: FontName,
 }
 
 impl Default for Style {
@@ -858,6 +930,7 @@ impl Default for Style {
             strength: 10.0,
             text_outline: Color::TRANSPARENT,
             text_outline_width: 3.0,
+            font: FontName::BUNDLED,
         }
     }
 }
@@ -1730,6 +1803,24 @@ mod tests {
         assert_eq!(serde_json::to_string(&round).unwrap(), r#"{"round":true}"#);
         assert_eq!(Kind::Ellipse.family(), Kind::Rect);
         assert_eq!(Kind::Callout.family(), Kind::Callout);
+    }
+
+    #[test]
+    fn a_style_keeps_a_font_by_name_and_reads_nonsense_as_the_bundled_one() {
+        let s = Style { font: FontName::new("  DejaVu Serif "), ..Style::default() };
+        assert_eq!(s.font.as_str(), "DejaVu Serif");
+        let v = serde_json::to_value(s).unwrap();
+        assert_eq!(v["font"], "DejaVu Serif");
+        assert_eq!(serde_json::from_value::<Style>(v).unwrap(), s);
+        // The bundled font isn't written, and styles from before read as it.
+        assert!(serde_json::to_value(Style::default()).unwrap().get("font").is_none());
+        assert!(serde_json::from_str::<Style>(r#"{"fontSize":20}"#).unwrap().font.is_bundled());
+        // Not words, too long, or with control characters: kept in bounds, never an error.
+        assert!(serde_json::from_str::<Style>(r#"{"font":42}"#).unwrap().font.is_bundled());
+        let long = FontName::new(&"é".repeat(100));
+        assert!(long.as_str().len() <= MAX_FONT_NAME && long.as_str().chars().all(|c| c == 'é'));
+        assert_eq!(FontName::new("A\u{0}\nB\u{7}").as_str(), "AB");
+        assert_eq!(format!("{:?}", FontName::new("Mono")), "\"Mono\"");
     }
 
     #[test]

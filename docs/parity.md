@@ -85,7 +85,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Curved arrow, more head shapes** | Has | a diamond in a selected arrow's middle bends it, or Straight and Curved in its Shape options; heads notched, solid, an open V, a dot or a bar |
 | Line, pen, highlighter | Has | |
 | Text: fill, outline round the letters, shadow, alignment | Has | |
-| Any font on the computer | Missing | two bundled fonts |
+| **Any font on the computer** | Has | for text and callouts, with a search; used, never shipped; a project keeps the font's name and shows the built-in font where it's missing; not in the browser |
 | Callouts in five forms, tails any way | Has | |
 | Callout with several tails | Missing | |
 | Rectangle, rounded rectangle, ellipse | Has | |
@@ -279,6 +279,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 4. Step badges as letters or Roman numerals, and other badge shapes.
 5. Polygons, triangles and stars; curved arrows and more head shapes.
 6. A stamp library with search, faces, and pictures of your own as stamps.
+7. Any font on the computer.
 
 **Still to build, in this order**
 
@@ -291,22 +292,21 @@ By how much someone using it every day would miss each one. Built ones move to a
 7. A frame saved as a picture; just the chosen stretch; just the sound.
 8. Hold a frame.
 9. Keys pressed shown in the video.
-10. Any font on the computer.
-11. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-12. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+10. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+11. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-13. Rotate, group and align annotations; select all of one kind.
-14. Magic wand, eraser, ellipse and freehand selections.
-15. Camera background removed, or a colour removed.
-16. Transitions between clips; keyframe animation.
-17. Drawing on the screen while recording.
-18. Volume along a clip; music lowered under the voice; levels evened out.
-19. Tags, favourites, and captures sorted by program.
-20. Templates; several pictures combined into one.
-21. A picture per click made into a how-to guide.
-22. Groups, pushing later clips along, locked and solo tracks, clip colours.
-23. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-24. Print; batch changes; captures on a timer or at a set time.
-25. Cutting words from the transcript; filler words taken out.
-26. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+12. Rotate, group and align annotations; select all of one kind.
+13. Magic wand, eraser, ellipse and freehand selections.
+14. Camera background removed, or a colour removed.
+15. Transitions between clips; keyframe animation.
+16. Drawing on the screen while recording.
+17. Volume along a clip; music lowered under the voice; levels evened out.
+18. Tags, favourites, and captures sorted by program.
+19. Templates; several pictures combined into one.
+20. A picture per click made into a how-to guide.
+21. Groups, pushing later clips along, locked and solo tracks, clip colours.
+22. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+23. Print; batch changes; captures on a timer or at a set time.
+24. Cutting words from the transcript; filler words taken out.
+25. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

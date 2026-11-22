@@ -109,7 +109,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Change Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, …}}"##,
+        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, "font"?: "a font on the computer by name (empty for the built-in one)", …}}"##,
         has_selection,
         restyle
     ),

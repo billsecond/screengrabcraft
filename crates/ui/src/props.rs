@@ -6,7 +6,8 @@ use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
 use screengrabcraft_model::object::{MAX_SIDES, MIN_SIDES};
 use screengrabcraft_model::{
-    ArrowHeads, BadgeShape, CalloutForm, Color, HeadShape, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot, TextAlign,
+    ArrowHeads, BadgeShape, CalloutForm, Color, FontName, HeadShape, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot,
+    TextAlign,
 };
 
 use crate::editor::{Editor, Tool};
@@ -45,7 +46,8 @@ fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
         align,
         strength,
         text_outline,
-        text_outline_width
+        text_outline_width,
+        font
     );
 }
 
@@ -639,6 +641,10 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
 
     if kind.has_text() {
         slider(ui, "Text size", &mut s.font_size, 8.0..=120.0, 1.0, " px");
+        if letters {
+            font_menu(ed, ui, &mut s.font);
+            ui.add_space(2.0);
+        }
         if kind != Kind::Step {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -742,6 +748,55 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     if s != old {
         commit_style(ed, kind, &old, &s, first.is_some());
     }
+}
+
+/// What the font menu, its search and the bundled font in it are called.
+pub const FONT_MENU: &str = "Choose a font";
+pub const FONT_SEARCH: &str = "Search fonts";
+pub const BUNDLED_FONT: &str = "Built-in font";
+/// The most fonts the menu lists at once (the search finds the rest).
+const MAX_LISTED: usize = 400;
+
+/// The font menu of text and callouts: the built-in font, then the fonts on the computer, with a
+/// search. Greyed out, with the reason, where there is no way to them (the browser).
+fn font_menu(ed: &mut Editor, ui: &mut Ui, font: &mut FontName) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(egui::RichText::new("Font").size(12.0).color(t.muted));
+    let shown = if font.is_bundled() { BUNDLED_FONT.to_string() } else { font.as_str().to_string() };
+    if !screengrabcraft_render::text::has_font_source() {
+        ui.add_enabled_ui(false, |ui| {
+            egui::ComboBox::from_id_salt("font-menu").width(ui.available_width()).selected_text(shown).show_ui(ui, |_| {});
+        })
+        .response
+        .on_disabled_hover_text("The browser can't use the computer's fonts: text is in the built-in font");
+        return;
+    }
+    let resp = egui::ComboBox::from_id_salt("font-menu")
+        .width(ui.available_width())
+        .height(320.0)
+        .selected_text(shown)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            let search = ui.add(egui::TextEdit::singleline(&mut ed.font_query).hint_text("Search").desired_width(f32::INFINITY));
+            search.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, FONT_SEARCH));
+            if ui.selectable_label(font.is_bundled(), BUNDLED_FONT).on_hover_text("PatroneOS Sans, or PatroneOS Mono for Mono").clicked() {
+                *font = FontName::BUNDLED;
+            }
+            let list = ed.font_list.get_or_insert_with(|| screengrabcraft_render::text::font_families().unwrap_or_default()).clone();
+            let query = ed.font_query.trim().to_lowercase();
+            let found: Vec<&String> = list.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query)).take(MAX_LISTED).collect();
+            for name in &found {
+                if ui.selectable_label(font.as_str() == name.as_str(), name.as_str()).clicked() {
+                    *font = FontName::new(name);
+                }
+            }
+            if found.is_empty() {
+                ui.label(egui::RichText::new("No font on this computer goes by that name.").size(12.0).color(t.muted));
+            }
+        });
+    resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, FONT_MENU));
+    let _ =
+        resp.response.on_hover_text("A font on this computer for the text (projects keep its name; a computer without it shows the built-in font)");
 }
 
 /// The Cut Out tool's panel: what it takes out (columns or rows) and how the parts meet.
