@@ -295,7 +295,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 20. Masks and blend modes for layer items; ready-made colour looks for a clip (#109).
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
     bordered and shadowed (#111).
-22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch.
+22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch (#112).
 
 **Still to build, in this order**
 
