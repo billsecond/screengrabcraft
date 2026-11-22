@@ -309,7 +309,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 32. Templates and themes of your own in the video editor (#124).
 33. The sound turned round while playing backwards (J), as recorded (#125).
 34. Narration recorded over the video in the editor, onto a sound layer of its own (#126).
-35. A narrated video made only of pictures: a new video of them, no screen recording needed.
+35. A narrated video made only of pictures: a new video of them, no screen recording needed (#127).
 
 **Still to build, in this order**
 
