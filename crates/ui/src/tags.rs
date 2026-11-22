@@ -271,6 +271,18 @@ pub fn pin_label(on: bool) -> &'static str {
 pub(crate) fn menu(ed: &mut Editor, ui: &mut Ui, item: &RecentItem, items: &[RecentItem]) {
     let ctx = ui.ctx().clone();
     let info = ed.library.get(&item.path);
+    let can_open = ed.services.can_open_with();
+    let open_with = ui.add_enabled(can_open.is_ok(), egui::Button::new("Open With\u{2026}"));
+    let open_with = match &can_open {
+        Ok(()) => open_with.on_hover_text("This capture in a program you choose"),
+        Err(why) => open_with.on_disabled_hover_text(why),
+    };
+    if open_with.clicked() {
+        if let Err(e) = ed.services.open_file_with(&item.path) {
+            ed.error(&ctx, e);
+        }
+        ui.close();
+    }
     if ui.button(pin_label(info.pinned)).on_hover_text("Pinned captures stay first in the strip").clicked() {
         ed.toggle_pin(&ctx, &item.path);
         ui.close();

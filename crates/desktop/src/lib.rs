@@ -19,6 +19,7 @@ pub mod launch;
 pub mod library;
 pub mod logging;
 pub mod models;
+pub mod open_with;
 pub mod paths;
 pub mod print;
 pub mod service;
