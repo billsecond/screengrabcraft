@@ -264,6 +264,10 @@ pub struct Editor {
     pub(crate) adding_stamp: bool,
     /// The open dialog picks the watermark's picture (not one to open).
     pub(crate) choosing_watermark: bool,
+    /// Combine Pictures or Template, while it is open.
+    pub(crate) compose: Option<crate::compose::Compose>,
+    /// The open dialog picks pictures to put with this one (not one to open).
+    pub(crate) adding_pictures: bool,
     /// The picture chosen for a watermark, and its name: lent to the session when one is applied.
     pub(crate) watermark_picture: Option<(String, Raster)>,
     /// The font menu's search.
@@ -378,6 +382,8 @@ impl Editor {
             own_stamp_pictures: std::collections::HashMap::new(),
             adding_stamp: false,
             choosing_watermark: false,
+            compose: None,
+            adding_pictures: false,
             watermark_picture: None,
             font_query: String::new(),
             font_list: None,
@@ -1185,6 +1191,10 @@ impl Editor {
         match answer {
             DialogResult::Opened(files) => {
                 let adding = std::mem::take(&mut self.adding_stamp);
+                if std::mem::take(&mut self.adding_pictures) {
+                    self.compose_files(ctx, files);
+                    return;
+                }
                 let watermark = std::mem::take(&mut self.choosing_watermark);
                 if let Some(f) = files.into_iter().next() {
                     if watermark {
@@ -1230,6 +1240,7 @@ impl Editor {
             DialogResult::Cancelled => {
                 self.adding_stamp = false;
                 self.choosing_watermark = false;
+                self.adding_pictures = false;
                 self.saving = None;
                 self.saving_project = false;
                 self.saving_transcript = None;
@@ -1351,6 +1362,7 @@ impl Editor {
         crate::dialogs::show(self, &ctx);
         self.opening_window(&ctx);
         crate::background::show(self, &ctx);
+        crate::compose::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
@@ -1359,6 +1371,7 @@ impl Editor {
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
         if self.dialog.is_some()
+            || self.compose.is_some()
             || self.save_problem.is_some()
             || (self.pending.is_some() && !self.autosaves())
             || self.background.busy()
@@ -1756,6 +1769,15 @@ impl Editor {
                     }
                     if ui.button("Flip Vertical").clicked() {
                         self.run(&ctx, "image.flip", json!({"horizontal": false}));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button("Combine Pictures…").on_hover_text("This picture and others side by side, stacked or in a grid").clicked() {
+                        self.open_compose(crate::compose::ComposeKind::Combine);
+                        ui.close();
+                    }
+                    if ui.button("Template…").on_hover_text("Pictures laid out on a page with a title and the words of each step").clicked() {
+                        self.open_compose(crate::compose::ComposeKind::Template);
                         ui.close();
                     }
                     ui.separator();

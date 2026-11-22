@@ -890,3 +890,39 @@ fn shaped_areas_the_magic_wand_and_the_eraser() {
     assert_eq!(s.undo_label(), Some("Erase"));
     assert!(s.execute("image.eraseStroke", &json!({"points": [{"x": 500, "y": 500}]})).is_err());
 }
+
+/// Pictures combined into one, or laid out in a template of annotations; one undo step each.
+#[test]
+fn pictures_are_combined_or_laid_out_in_a_template() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 10, "y": 10, "w": 50, "h": 30}}));
+    assert!(s.execute("image.combine", &json!({})).is_err(), "nothing lent to combine with");
+    s.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap(), Raster::filled(40, 140, Color::rgb(0, 255, 0)).unwrap()];
+    let out = s.execute("image.combine", &json!({"layout": "across", "gap": 10, "background": "#000000"})).unwrap();
+    assert_eq!((out["width"].as_u64(), out["height"].as_u64()), (Some(10 + 200 + 10 + 80 + 10 + 40 + 10), Some(160)));
+    // This picture first, centred in its row: its annotations moved with it.
+    assert_eq!((s.doc.base.pixel(15, 35), s.doc.base.pixel(15, 25)), (Some(Color::WHITE), Some(Color::BLACK)));
+    assert_eq!(s.doc.base.pixel(250, 75), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(s.doc.get(a).unwrap().shape.rect().unwrap().min(), Pt::new(20.0, 40.0));
+    assert_eq!(s.undo_label(), Some("Combine Pictures"));
+    s.undo();
+    s.execute("image.combine", &json!({"layout": "grid", "columns": 2})).unwrap();
+    assert!(s.doc.height() > 200);
+    assert!(s.execute("image.combine", &json!({"layout": "sideways"})).is_err());
+    // A template: a page of annotations (the pictures, the title, the steps).
+    let mut s = session();
+    s.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap()];
+    s.execute("image.template", &json!({"title": "How to", "steps": ["Open it", "Click it"]})).unwrap();
+    assert_eq!(s.doc.count(Kind::Image), 2);
+    assert_eq!(s.doc.count(Kind::Step), 2);
+    assert_eq!(s.doc.count(Kind::Text), 3, "the title and two steps");
+    for layout in ["stepsDown", "beforeAfter", "grid"] {
+        let mut t = session();
+        t.lent = vec![Raster::filled(80, 60, Color::rgb(0, 0, 255)).unwrap()];
+        t.execute("image.template", &json!({"layout": layout})).unwrap();
+        assert!(t.doc.count(Kind::Image) == 2, "{layout}");
+    }
+    assert!(session().execute("image.template", &json!({"layout": "beforeAfter"})).is_err(), "before and after needs two");
+    s.undo();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 100), "undo puts the picture back");
+}
