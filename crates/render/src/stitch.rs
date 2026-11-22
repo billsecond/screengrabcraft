@@ -181,6 +181,136 @@ impl Default for Stitcher {
     }
 }
 
+/// One notch of a mouse wheel, as systems count it.
+pub const NOTCH: i32 = 120;
+/// Frames in a row that didn't move, after the wheel was turned, before the page is taken to be at
+/// its end. The wheel is turned again every [`RETRY_EVERY`] of them (the page may be slow, or a
+/// turn too small to move it).
+pub const QUIET_END: u32 = 6;
+pub const RETRY_EVERY: u32 = 2;
+/// Frames in a row that could not be joined before scrolling by itself gives up (something other
+/// than scrolling keeps changing there).
+pub const LOST_END: u32 = 6;
+/// The smallest turn it steps down to when a turn went too far.
+pub const MIN_TURN: i32 = 40;
+
+/// Scrolling by itself: what to do after each frame, from what the frame did. The wheel is
+/// turned a notch whenever the picture moved; the page has reached its end when the picture stops
+/// changing; a frame that could not be joined (the turn went further than the area is tall) is
+/// undone with the opposite turn and the turns are made smaller. A page that never moves when the
+/// wheel turns is left to be scrolled by hand. It does no input itself: the service turns the
+/// wheel and takes the frames, and the tests play a page made up.
+#[derive(Clone, Debug)]
+pub struct Pacer {
+    /// The turn for one step.
+    turn: i32,
+    /// The turn sent last, undone when its frame is lost (0: nothing to undo).
+    last: i32,
+    /// Frames in a row that didn't move.
+    quiet: u32,
+    /// Frames in a row that could not be joined.
+    lost: u32,
+    /// Whether the page has moved at all since it began.
+    moved: bool,
+    /// Left to the owner: the page didn't move when the wheel turned.
+    by_hand: bool,
+    /// The longest the picture may get.
+    cap: u32,
+}
+
+/// What to do next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Next {
+    /// Turn the wheel this much: more than 0 goes down the page, [`NOTCH`] is one notch.
+    Wheel(i32),
+    /// Take the next frame.
+    Wait,
+    /// The wheel moves nothing there: the owner scrolls it by hand from now on.
+    ByHand,
+    /// The picture is done.
+    Stop(End),
+}
+
+/// Why scrolling by itself stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum End {
+    /// The page stopped moving: its end.
+    Bottom,
+    /// The picture is as long as it may get.
+    Long,
+    /// The frames could not be joined again.
+    Lost,
+}
+
+impl Pacer {
+    /// Scrolls until the picture is `cap` rows long at most.
+    pub fn new(cap: u32) -> Pacer {
+        Pacer { turn: NOTCH, last: 0, quiet: 0, lost: 0, moved: false, by_hand: false, cap: cap.max(1) }
+    }
+
+    /// Whether the owner scrolls from now on.
+    pub fn by_hand(&self) -> bool {
+        self.by_hand
+    }
+
+    /// Leaves the scrolling to the owner from now on (the wheel can't be turned there): it only
+    /// waits for frames, and still stops at the longest picture.
+    pub fn hand_over(&mut self) {
+        self.by_hand = true;
+    }
+
+    fn send(&mut self, turn: i32) -> Next {
+        self.last = turn;
+        Next::Wheel(turn)
+    }
+
+    /// What to do after a frame that did `step`, the picture now `length` rows long.
+    pub fn after(&mut self, step: Step, length: u32) -> Next {
+        if matches!(step, Step::Full) || length >= self.cap {
+            return Next::Stop(End::Long);
+        }
+        if self.by_hand {
+            return Next::Wait;
+        }
+        match step {
+            Step::Started | Step::Scrolled(_) => {
+                self.moved |= step != Step::Started;
+                self.quiet = 0;
+                self.lost = 0;
+                self.send(self.turn)
+            }
+            Step::Unchanged => {
+                self.quiet = self.quiet.saturating_add(1);
+                if self.quiet >= QUIET_END {
+                    if self.moved {
+                        return Next::Stop(End::Bottom);
+                    }
+                    self.by_hand = true;
+                    return Next::ByHand;
+                }
+                if self.quiet.is_multiple_of(RETRY_EVERY) { self.send(self.turn) } else { Next::Wait }
+            }
+            Step::Lost => {
+                self.quiet = 0;
+                self.lost = self.lost.saturating_add(1);
+                if self.lost >= LOST_END {
+                    return Next::Stop(End::Lost);
+                }
+                // Lost again before the undo shows: nothing more to undo, and the turns stay as
+                // they are.
+                let undo = self.last.saturating_neg();
+                self.last = 0;
+                if undo == 0 {
+                    return Next::Wait;
+                }
+                self.turn = (self.turn / 2).max(MIN_TURN);
+                Next::Wheel(undo)
+            }
+            Step::WrongSize | Step::Full => Next::Wait,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +372,122 @@ mod tests {
         let flat = Raster::filled(w, h, screengrabcraft_model::Color::WHITE).unwrap();
         assert_eq!(s.push(flat), Step::Lost);
         assert_eq!(s.length(), h);
+    }
+
+    /// Scrolling by itself, played on a made-up page: its top can go from 0 to `end`, it's seen
+    /// through an area `h` rows tall (a header of 6 and a footer of 5 staying put), a notch of the
+    /// wheel moves it `per_notch` rows, and a turn shows `lag` frames after it's made. The
+    /// picture, how it ended and the turns made.
+    fn play(end: u32, h: u32, per_notch: i32, lag: usize, cap: u32) -> (Raster, Next, Vec<i32>) {
+        let (w, header, footer) = (90, 6, 5);
+        let mut s = Stitcher::new();
+        let mut pacer = Pacer::new(cap);
+        let mut top = 0i64;
+        let mut coming = std::collections::VecDeque::new();
+        let mut turns = Vec::new();
+        for _ in 0..5000 {
+            while coming.len() > lag {
+                let turn: i32 = coming.pop_front().unwrap();
+                top = (top + i64::from(turn) * i64::from(per_notch) / i64::from(NOTCH)).clamp(0, i64::from(end));
+            }
+            let step = s.push(view(top as u32, w, h, header, footer));
+            match pacer.after(step, s.length()) {
+                Next::Wheel(turn) => {
+                    turns.push(turn);
+                    coming.push_back(turn);
+                }
+                Next::Wait => coming.push_back(0),
+                last @ (Next::Stop(_) | Next::ByHand) => return (s.finish().unwrap(), last, turns),
+            }
+        }
+        panic!("it never stopped");
+    }
+
+    /// The page reads straight through the picture, from its top to `rows` rows of it.
+    fn reads_straight(out: &Raster, rows: u32) {
+        for y in 0..rows {
+            let want = page_row(y + 6, 3);
+            let got = out.pixel(3, 6 + y).unwrap();
+            assert_eq!([got.r, got.g, got.b, got.a], want, "row {y}");
+        }
+        assert_eq!(out.pixel(3, out.height() - 1).unwrap().r, 200, "the footer is at the very end");
+    }
+
+    #[test]
+    fn scrolling_by_itself_goes_to_the_end_of_the_page_and_stops() {
+        for lag in [0, 1, 2] {
+            let (out, end, turns) = play(500, 80, 40, lag, 60_000);
+            assert_eq!(end, Next::Stop(End::Bottom), "lag {lag}");
+            assert_eq!(out.height(), 80 + 500, "the whole page, lag {lag}");
+            reads_straight(&out, 80 + 500 - 11);
+            assert!(turns.iter().all(|t| *t == NOTCH), "a notch at a time: {turns:?}");
+        }
+    }
+
+    #[test]
+    fn a_turn_that_goes_too_far_is_undone_and_the_turns_get_smaller() {
+        // A notch moves the page 100 rows: more than the 69 that change in the area.
+        let (out, end, turns) = play(400, 80, 100, 1, 60_000);
+        assert_eq!(end, Next::Stop(End::Bottom));
+        assert_eq!(out.height(), 80 + 400);
+        reads_straight(&out, 80 + 400 - 11);
+        assert_eq!(turns.get(..2), Some(&[NOTCH, -NOTCH][..]), "the first turn is taken back");
+        assert!(turns.iter().skip(2).all(|t| *t == NOTCH / 2), "then half a notch: {turns:?}");
+    }
+
+    #[test]
+    fn scrolling_by_itself_stops_at_the_longest_picture() {
+        let (out, end, _) = play(5000, 80, 40, 0, 300);
+        assert_eq!(end, Next::Stop(End::Long));
+        assert!((300..300 + 40).contains(&out.height()), "{}", out.height());
+        reads_straight(&out, out.height() - 11);
+    }
+
+    #[test]
+    fn a_page_the_wheel_doesnt_move_is_left_to_be_scrolled_by_hand() {
+        let (out, end, turns) = play(500, 80, 0, 0, 60_000);
+        assert_eq!(end, Next::ByHand);
+        assert_eq!(out.height(), 80);
+        assert_eq!(turns.len() as u32, 1 + (QUIET_END - 1) / RETRY_EVERY, "tried a few times: {turns:?}");
+        // From then on it only waits for the owner, and still stops at the longest picture.
+        let mut p = Pacer::new(200);
+        for _ in 0..QUIET_END {
+            p.after(Step::Unchanged, 80);
+        }
+        assert!(p.by_hand());
+        assert_eq!(p.after(Step::Scrolled(40), 120), Next::Wait);
+        assert_eq!(p.after(Step::Unchanged, 120), Next::Wait);
+        assert_eq!(p.after(Step::Scrolled(90), 210), Next::Stop(End::Long));
+    }
+
+    #[test]
+    fn scrolling_by_itself_gives_up_on_an_area_that_changes_of_itself() {
+        let (w, h) = (60, 40);
+        let mut s = Stitcher::new();
+        let mut p = Pacer::new(60_000);
+        assert_eq!(p.after(s.push(view(0, w, h, 0, 0)), s.length()), Next::Wheel(NOTCH));
+        let mut last = Next::Wait;
+        for i in 1..=LOST_END {
+            last = p.after(s.push(view(i * 5000, w, h, 0, 0)), s.length());
+            if i == 1 {
+                assert_eq!(last, Next::Wheel(-NOTCH), "the turn is taken back");
+            } else if i < LOST_END {
+                assert_eq!(last, Next::Wait, "nothing more to take back");
+            }
+        }
+        assert_eq!(last, Next::Stop(End::Lost));
+        assert_eq!(s.length(), h, "what it had is kept");
+    }
+
+    #[test]
+    fn the_pacer_takes_any_steps_without_fuss() {
+        let steps = [Step::Started, Step::Scrolled(0), Step::Scrolled(u32::MAX), Step::Unchanged, Step::Lost, Step::WrongSize, Step::Full];
+        for cap in [0, 1, u32::MAX] {
+            let mut p = Pacer::new(cap);
+            for i in 0..500usize {
+                let step = steps[(i * 7 + i / 3) % steps.len()];
+                let _ = p.after(step, (i as u32).wrapping_mul(2_654_435_761));
+            }
+        }
     }
 }

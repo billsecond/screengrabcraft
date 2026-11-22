@@ -668,6 +668,11 @@ impl RecorderOptions {
 /// default for Capture All Screens).
 pub const HOTKEYS_VERSION: u32 = 1;
 
+/// The longest a scrolling capture's picture gets unless the owner says otherwise, and the least
+/// they can make it.
+pub const SCROLLING_LONGEST: u32 = 30_000;
+pub const SCROLLING_SHORTEST: u32 = 1_000;
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -731,6 +736,12 @@ pub struct Settings {
     /// controls and the tray). On by default.
     #[serde(default = "on")]
     pub recording_border: bool,
+    /// A scrolling capture turns the mouse wheel over the area by itself and stops at the end of
+    /// the page (where the system lets it: elsewhere, or off, the owner scrolls). On by default.
+    #[serde(default = "on")]
+    pub scroll_by_itself: bool,
+    /// The longest a scrolling capture's picture gets, in pixels.
+    pub scrolling_longest: u32,
 }
 
 fn on() -> bool {
@@ -768,6 +779,8 @@ impl Default for Settings {
             check_updates: true,
             keep_editor_ready: true,
             recording_border: true,
+            scroll_by_itself: true,
+            scrolling_longest: SCROLLING_LONGEST,
         }
     }
 }
@@ -815,6 +828,7 @@ impl Settings {
         self.video_frame_rate = self.video_frame_rate.clamp(5, 30);
         self.video_max_mins = self.video_max_mins.clamp(1, 240);
         self.recorder = self.recorder.clamped();
+        self.scrolling_longest = self.scrolling_longest.clamp(SCROLLING_SHORTEST, crate::MAX_SIDE);
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }

@@ -42,7 +42,7 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 | Alt+Print Screen | Ctrl+Shift+W | **Window**: click a window |
 | Ctrl+Print Screen | Ctrl+Shift+F | **Full screen**: the monitor under the pointer |
 | — (set one in Settings; Ctrl+Shift+Print Screen is Windows' own) | — | **All screens** in one picture |
-| Alt+Shift+Print Screen | Ctrl+Shift+S | **Scrolling**: scroll a long page while ScreenGrabCraft joins it into one picture |
+| Alt+Shift+Print Screen | Ctrl+Shift+S | **Scrolling**: a long page joined into one picture; on Windows it scrolls the page by itself and stops at its end (elsewhere, or with that setting off, you scroll it) |
 | Ctrl+Alt+Print Screen | Ctrl+Shift+G | **Record GIF** of an area (press again, or click the tray icon, to stop) |
 | Ctrl+Alt+Shift+Print Screen | Ctrl+Shift+V | **Record Video**: a small MP4 of an area, with the computer's sound (press again to stop) |
 | — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |

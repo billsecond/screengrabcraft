@@ -22,7 +22,7 @@ use screengrabcraft_media::timeline::Timeline;
 use screengrabcraft_model::settings::VideoOptions;
 use screengrabcraft_model::{IRect, MonitorChoice, Raster, RecordArea, RecorderOptions};
 use screengrabcraft_render::anim::GifWriter;
-use screengrabcraft_render::stitch::{Step, Stitcher};
+use screengrabcraft_render::stitch::{Next, Pacer, Step, Stitcher};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -63,6 +63,8 @@ pub struct Recording {
     pub progress: Arc<AtomicU32>,
     /// Frames that could not be joined lately (scrolling): the owner scrolled too fast.
     pub lost: Arc<AtomicU32>,
+    /// A scrolling capture is scrolling by itself (else the owner scrolls it).
+    pub by_itself: Arc<AtomicBool>,
     /// Making the video after the recording stopped: 0 not yet, then 1 to 1001 (its progress + 1).
     pub saving: Arc<AtomicU32>,
     /// How loud the computer's sound and the microphone are just now (`f32` bits, 0 to 1).
@@ -137,20 +139,44 @@ impl Recording {
     }
 }
 
-/// Starts recording part of a monitor (`area` in its pixels).
-pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, max_secs: u32, wake: egui::Context) -> Result<Recording, String> {
+/// How a scrolling capture goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollPlan {
+    /// The service turns the wheel over the area (where the system lets it); else the owner
+    /// scrolls.
+    pub by_itself: bool,
+    /// The longest the picture gets, in its pixels.
+    pub longest: u32,
+}
+
+/// Starts recording part of a monitor (`area` in its pixels; `desktop` the same on the desktop).
+pub fn start(
+    kind: Kind,
+    monitor: u32,
+    area: IRect,
+    desktop: IRect,
+    fps: u32,
+    max_secs: u32,
+    scroll: ScrollPlan,
+    wake: egui::Context,
+) -> Result<Recording, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = Arc::new(AtomicU32::new(0));
     let lost = Arc::new(AtomicU32::new(0));
     let paused = Arc::new(AtomicBool::new(false));
-    let (s, c, p, l, z) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone());
+    let scroll = ScrollPlan { by_itself: scroll.by_itself && screengrabcraft_capture::scroll::supported(), ..scroll };
+    let by_itself = Arc::new(AtomicBool::new(kind == Kind::Scrolling && scroll.by_itself));
+    let (s, c, p, l, z, b) = (stop.clone(), cancel.clone(), progress.clone(), lost.clone(), paused.clone(), by_itself.clone());
     let handle = std::thread::Builder::new()
         .name(format!("{kind:?}").to_lowercase())
         .spawn(move || {
             let out = match kind {
                 Kind::Gif => gif(monitor, area, fps, max_secs, &s, &c, &z, &p, &wake),
-                Kind::Scrolling => scrolling(monitor, area, &s, &c, &p, &l, &wake),
+                Kind::Scrolling => {
+                    let flags = Flags { stop: &s, progress: &p, lost: &l, by_itself: &b };
+                    scrolling(monitor, area, middle(desktop), scroll, &c, &flags, &wake)
+                }
                 Kind::Video | Kind::Production => Err("a video is started with start_video".to_string()),
             };
             wake.request_repaint();
@@ -168,12 +194,18 @@ pub fn start(kind: Kind, monitor: u32, area: IRect, desktop: IRect, fps: u32, ma
         paused_at: None,
         progress,
         lost,
+        by_itself,
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
         stopped: None,
         handle: Some(handle),
     })
+}
+
+/// The middle of an area of the desktop.
+fn middle(r: IRect) -> (i32, i32) {
+    (r.x.saturating_add((r.w / 2).min(i32::MAX as u32) as i32), r.y.saturating_add((r.h / 2).min(i32::MAX as u32) as i32))
 }
 
 fn gif(
@@ -254,43 +286,112 @@ fn at_least(d: Duration) -> Duration {
     d.max(Duration::from_millis(100))
 }
 
+/// What a scrolling capture tells the service as it goes, and is told.
+struct Flags<'a> {
+    stop: &'a AtomicBool,
+    /// The picture's height so far.
+    progress: &'a AtomicU32,
+    /// Frames in a row that could not be joined.
+    lost: &'a AtomicU32,
+    /// Whether it's scrolling by itself just now.
+    by_itself: &'a AtomicBool,
+}
+
+/// How often a scrolling capture takes a frame.
+const SCROLL_TICK: Duration = Duration::from_millis(120);
+/// How long scrolling by itself waits before the first turn of the wheel: the overlay gone, the
+/// controls up.
+const SCROLL_SETTLE: Duration = Duration::from_millis(400);
+
 fn scrolling(
     monitor: u32,
     area: IRect,
-    stop: &AtomicBool,
+    over: (i32, i32),
+    plan: ScrollPlan,
     cancel: &AtomicBool,
-    progress: &AtomicU32,
-    lost: &AtomicU32,
+    flags: &Flags,
     wake: &egui::Context,
 ) -> Result<Output, String> {
+    let mut grabber = screengrabcraft_capture::grabber(monitor, area).map_err(|e| e.to_string())?;
+    let mut grab = move || grabber().map_err(|e| e.to_string());
+    let mut turn = move |t: i32| screengrabcraft_capture::scroll::wheel(over, t);
+    if plan.by_itself {
+        log::info!("scrolling by itself: {}×{} px, at most {} px long", area.w, area.h, plan.longest);
+        std::thread::sleep(SCROLL_SETTLE);
+    }
+    let wheel: Option<&mut dyn FnMut(i32) -> Result<(), String>> = if plan.by_itself { Some(&mut turn) } else { None };
+    let s = scroll_frames(&mut grab, wheel, plan.longest, SCROLL_TICK, flags, &|| wake.request_repaint());
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(Output::Cancelled);
+    }
+    s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
+}
+
+/// A scrolling capture's frames: one from `grab` every `tick`, joined to the picture, until it's
+/// stopped, `longest` rows long, or as long as a picture gets. With a `wheel` it scrolls by itself
+/// as [`Pacer`] says, and stops at the end of the page; where the page doesn't move (or the wheel
+/// can't be turned) it's left to the owner, and `by_itself` says so.
+fn scroll_frames(
+    grab: &mut dyn FnMut() -> Result<Raster, String>,
+    mut wheel: Option<&mut dyn FnMut(i32) -> Result<(), String>>,
+    longest: u32,
+    tick: Duration,
+    flags: &Flags,
+    wake: &dyn Fn(),
+) -> Stitcher {
     let mut s = Stitcher::new();
-    let tick = Duration::from_millis(120);
-    while !stop.load(Ordering::SeqCst) {
+    let mut pacer = Pacer::new(longest);
+    let by_hand = |pacer: &mut Pacer, why: &str| {
+        log::info!("scrolling by hand: {why}");
+        pacer.hand_over();
+        flags.by_itself.store(false, Ordering::SeqCst);
+        wake();
+    };
+    if wheel.is_none() {
+        pacer.hand_over();
+        flags.by_itself.store(false, Ordering::SeqCst);
+    }
+    while !flags.stop.load(Ordering::SeqCst) {
         let at = Instant::now();
-        match screengrabcraft_capture::grab_on_monitor(monitor, area) {
-            Ok(frame) => match s.push(frame) {
-                Step::Scrolled(_) | Step::Started => {
-                    progress.store(s.length(), Ordering::SeqCst);
-                    lost.store(0, Ordering::SeqCst);
-                    wake.request_repaint();
+        match grab() {
+            Ok(frame) => {
+                let step = s.push(frame);
+                match step {
+                    Step::Scrolled(_) | Step::Started => {
+                        flags.progress.store(s.length(), Ordering::SeqCst);
+                        flags.lost.store(0, Ordering::SeqCst);
+                        wake();
+                    }
+                    Step::Lost => {
+                        flags.lost.fetch_add(1, Ordering::SeqCst);
+                        wake();
+                    }
+                    Step::Full | Step::Unchanged | Step::WrongSize => {}
                 }
-                Step::Lost => {
-                    lost.fetch_add(1, Ordering::SeqCst);
-                    wake.request_repaint();
+                match pacer.after(step, s.length()) {
+                    Next::Wheel(t) => {
+                        if let Some(turn) = wheel.as_mut()
+                            && let Err(e) = turn(t)
+                        {
+                            by_hand(&mut pacer, &e);
+                            wheel = None;
+                        }
+                    }
+                    Next::Wait => {}
+                    Next::ByHand => by_hand(&mut pacer, "the wheel doesn't move the area"),
+                    Next::Stop(end) => {
+                        log::info!("scrolling capture done ({end:?}): {} px", s.length());
+                        break;
+                    }
                 }
-                Step::Full => break,
-                Step::Unchanged | Step::WrongSize => {}
-            },
+            }
             Err(e) => log::warn!("a frame could not be captured: {e}"),
         }
         if let Some(rest) = tick.checked_sub(at.elapsed()) {
             std::thread::sleep(rest);
         }
     }
-    if cancel.load(Ordering::SeqCst) {
-        return Ok(Output::Cancelled);
-    }
-    s.finish().map(Output::Picture).ok_or_else(|| "nothing was captured".to_string())
+    s
 }
 
 /// What of the screen a video recording shows.
@@ -434,6 +535,7 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         paused_at: None,
         progress: Arc::default(),
         lost: Arc::default(),
+        by_itself: Arc::default(),
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
@@ -1375,6 +1477,84 @@ mod tests {
 
     use super::*;
 
+    /// A made-up page `rows` long, every row its own, seen through an area of 64 × 90 from `top`.
+    fn page_view(top: u32) -> Raster {
+        let (w, h) = (64u32, 90u32);
+        let mut px = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let r = top + y;
+                px.extend_from_slice(&[(r.wrapping_mul(2_654_435_761) >> 9) as u8, (r * 3 + x * 5) as u8, (x * 11) as u8, 255]);
+            }
+        }
+        Raster::new(w, h, px).unwrap()
+    }
+
+    fn flags<'a>(stop: &'a AtomicBool, progress: &'a AtomicU32, lost: &'a AtomicU32, by_itself: &'a AtomicBool) -> Flags<'a> {
+        Flags { stop, progress, lost, by_itself }
+    }
+
+    /// The scrolling capture's loop on a made-up page the wheel scrolls (never the owner's
+    /// windows): it turns the wheel, joins the frames and stops by itself at the end of the page.
+    #[test]
+    fn a_scrolling_capture_scrolls_a_page_by_itself_to_its_end() {
+        let top = std::cell::Cell::new(0u32);
+        let end = 700u32;
+        let turns = std::cell::Cell::new(0u32);
+        let mut grab = || -> Result<Raster, String> { Ok(page_view(top.get())) };
+        let mut wheel = |t: i32| -> Result<(), String> {
+            turns.set(turns.get() + 1);
+            // 45 rows a notch, as a browser might.
+            let moved = (i64::from(top.get()) + i64::from(t) * 45 / 120).clamp(0, i64::from(end));
+            top.set(moved as u32);
+            Ok(())
+        };
+        let (stop, progress, lost, by_itself) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0), AtomicBool::new(true));
+        let f = flags(&stop, &progress, &lost, &by_itself);
+        let s = scroll_frames(&mut grab, Some(&mut wheel), 60_000, Duration::ZERO, &f, &|| {});
+        let out = s.finish().unwrap();
+        assert_eq!(out.height(), 90 + end, "the whole page");
+        assert_eq!(progress.load(Ordering::SeqCst), 90 + end);
+        assert!(by_itself.load(Ordering::SeqCst), "it scrolled by itself all the way");
+        assert!(turns.get() > end / 45, "{} turns", turns.get());
+        for y in [0, 345, 789] {
+            let p = out.pixel(7, y).unwrap();
+            let want = page_view(y).pixel(7, 0).unwrap();
+            assert_eq!(p, want, "row {y}");
+        }
+    }
+
+    /// A page the wheel doesn't move is left to the owner, who scrolls it; the longest picture
+    /// still stops it.
+    #[test]
+    fn a_page_the_wheel_doesnt_move_is_scrolled_by_hand() {
+        let frame = std::cell::Cell::new(0u32);
+        // Nothing moves for a while, whatever the wheel does; then the owner scrolls 30 rows a frame.
+        let mut grab = || -> Result<Raster, String> {
+            frame.set(frame.get() + 1);
+            Ok(page_view(frame.get().saturating_sub(20) * 30))
+        };
+        let mut wheel = |_t: i32| -> Result<(), String> { Ok(()) };
+        let (stop, progress, lost, by_itself) = (AtomicBool::new(false), AtomicU32::new(0), AtomicU32::new(0), AtomicBool::new(true));
+        let f = flags(&stop, &progress, &lost, &by_itself);
+        let s = scroll_frames(&mut grab, Some(&mut wheel), 400, Duration::ZERO, &f, &|| {});
+        assert!(!by_itself.load(Ordering::SeqCst), "handed over to the owner");
+        assert!((400..430).contains(&s.length()), "stopped at the longest: {}", s.length());
+        // A wheel that can't be turned hands over too, and Done stops it.
+        let mut broken = |_t: i32| -> Result<(), String> { Err("no wheel here".to_string()) };
+        let mut still = || -> Result<Raster, String> { Ok(page_view(0)) };
+        by_itself.store(true, Ordering::SeqCst);
+        let stopper = std::thread::scope(|sc| {
+            sc.spawn(|| {
+                std::thread::sleep(Duration::from_millis(50));
+                stop.store(true, Ordering::SeqCst);
+            });
+            scroll_frames(&mut still, Some(&mut broken), 400, Duration::from_millis(1), &f, &|| {})
+        });
+        assert!(!by_itself.load(Ordering::SeqCst));
+        assert_eq!(stopper.length(), 90);
+    }
+
     fn mon(id: u32, name: &str, rect: IRect, primary: bool) -> Monitor {
         Monitor { id, name: name.into(), rect, scale: 1.0, primary }
     }
@@ -1522,7 +1702,10 @@ mod tests {
 
     #[test]
     fn the_clock_stands_still_while_paused_and_scrolling_cant_be() {
-        let mut rec = start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, egui::Context::default()).unwrap();
+        // Scrolled by hand: a test never turns the wheel over the owner's windows.
+        let by_hand = ScrollPlan { by_itself: false, longest: 1000 };
+        let mut rec =
+            start(Kind::Scrolling, u32::MAX, IRect::new(0, 0, 10, 10), IRect::new(0, 0, 10, 10), 10, 1, by_hand, egui::Context::default()).unwrap();
         rec.set_paused(true);
         assert!(!rec.is_paused(), "a scrolling capture isn't paused");
         rec.cancel();

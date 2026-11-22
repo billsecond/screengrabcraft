@@ -395,10 +395,36 @@ fn after_tab(svc: &mut Service, ui: &mut Ui) {
     ui.checkbox(&mut s.magnifier, "Show the magnifier next to the pointer");
     ui.checkbox(&mut s.crosshair, "Show crosshair lines");
     ui.checkbox(&mut s.include_cursor, "Include the mouse pointer in captures");
+    ui.add_space(12.0);
+    scrolling_options(ui, &mut s, screengrabcraft_capture::scroll::supported());
     if s != svc.settings {
         svc.settings = s;
         svc.apply_settings();
     }
+}
+
+/// How a scrolling capture goes: by itself (where the system lets it, `can`), and how long its
+/// picture may get.
+fn scrolling_options(ui: &mut Ui, s: &mut screengrabcraft_model::Settings, can: bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new("Scrolling Capture").strong());
+    ui.add_enabled_ui(can, |ui| {
+        let mut on = s.scroll_by_itself && can;
+        if ui.checkbox(&mut on, "Scroll the page by itself").on_disabled_hover_text(screengrabcraft_capture::scroll::UNSUPPORTED).changed() {
+            s.scroll_by_itself = on;
+        }
+    });
+    let how = if can && s.scroll_by_itself {
+        "It turns the mouse wheel over the area and stops at the end of the page. Where the page doesn't move, you scroll it and press Done."
+    } else {
+        "You scroll the page yourself and press Done."
+    };
+    ui.label(RichText::new(how).size(12.0).color(t.muted));
+    ui.horizontal(|ui| {
+        ui.label("Longest picture");
+        let range = screengrabcraft_model::settings::SCROLLING_SHORTEST..=screengrabcraft_model::MAX_SIDE;
+        ui.add(egui::DragValue::new(&mut s.scrolling_longest).range(range).speed(100.0).suffix(" px"));
+    });
 }
 
 fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
@@ -789,6 +815,39 @@ mod tests {
             h.get_by_label("Capture After a Wait").click();
             h.run_steps(2);
             assert_eq!(h.state().1, Some((CaptureMode::Region, 5)));
+        }
+    }
+
+    /// Scrolling by itself is turned off and on where the system can do it, and greyed out with
+    /// the reason where it can't.
+    #[test]
+    fn scrolling_by_itself_is_a_setting_greyed_out_where_it_cant_be() {
+        for can in [true, false] {
+            let mut h = Harness::builder().with_size(vec2(560.0, 200.0)).build_ui_state(
+                move |ui, s: &mut screengrabcraft_model::Settings| {
+                    screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                    egui::CentralPanel::default().show(ui, |ui| scrolling_options(ui, s, can));
+                },
+                screengrabcraft_model::Settings::default(),
+            );
+            h.run_steps(2);
+            assert!(h.state().scroll_by_itself, "on by default");
+            let shown = h.get_by_label("Scroll the page by itself");
+            assert_eq!(egui_kittest::kittest::NodeT::accesskit_node(&shown).is_disabled(), !can);
+            if can {
+                h.get_by_label_contains("stops at the end of the page");
+                h.get_by_label("Scroll the page by itself").click();
+                h.run_steps(2);
+                assert!(!h.state().scroll_by_itself);
+                h.get_by_label("You scroll the page yourself and press Done.");
+            } else {
+                h.get_by_label("You scroll the page yourself and press Done.");
+            }
+            if let Ok(dir) = std::env::var("SGC_SHOTS")
+                && let Ok(img) = h.render()
+            {
+                let _ = img.save(format!("{dir}/home-scrolling-{can}.png"));
+            }
         }
     }
 

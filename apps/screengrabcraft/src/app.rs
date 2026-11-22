@@ -795,7 +795,9 @@ impl Service {
     fn start_again(&mut self, again: Again) {
         let started = match &again {
             Again::Area { kind, monitor, area, desktop } => {
-                record::start(*kind, *monitor, *area, *desktop, self.settings.gif_frame_rate, self.settings.gif_max_secs, self.ctx.clone())
+                let s = &self.settings;
+                let scroll = record::ScrollPlan { by_itself: s.scroll_by_itself, longest: s.scrolling_longest };
+                record::start(*kind, *monitor, *area, *desktop, s.gif_frame_rate, s.gif_max_secs, scroll, self.ctx.clone())
             }
             Again::Video { mode, screen, desktop } => self.start_video(*mode, screen.clone(), *desktop),
         };

@@ -112,6 +112,8 @@ struct RecordingView {
     /// Frames (GIF, video) or the picture's height (scrolling).
     progress: u32,
     lost: u32,
+    /// A scrolling capture is scrolling by itself.
+    by_itself: bool,
     /// A video being made after the recording: 1 to 1001 (its progress + 1), else 0.
     saving: u32,
     /// Stop was pressed and it's finishing.
@@ -191,6 +193,11 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
             Kind::Gif => {
                 red_light(ui, v.secs, v.paused, t.text);
                 ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
+            }
+            Kind::Scrolling if v.by_itself => {
+                ui.add(egui::Spinner::new().size(14.0).color(t.text));
+                ui.label(RichText::new(format!("Scrolling by itself — {} px", v.progress)).color(t.text))
+                    .on_hover_text("It stops at the end of the page. Done keeps what it has.");
             }
             Kind::Scrolling => {
                 let text = if v.lost > 2 { "Scroll more slowly…".to_string() } else { format!("Scroll the area — {} px", v.progress) };
@@ -295,6 +302,7 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         secs,
         progress,
         lost,
+        by_itself: rec.by_itself.load(std::sync::atomic::Ordering::SeqCst),
         saving: rec.saving.load(std::sync::atomic::Ordering::SeqCst),
         stopping: rec.stopping(),
         paused: rec.is_paused(),
@@ -759,6 +767,28 @@ mod tests {
                 h.run_steps(1);
                 assert_eq!(*h.state(), Some(wanted), "{label}");
             }
+        }
+    }
+
+    /// A scrolling capture says whether it's scrolling by itself or the owner scrolls, and Done
+    /// keeps the picture either way.
+    #[test]
+    fn the_scrolling_control_says_who_scrolls() {
+        for (by_itself, words) in [(true, "Scrolling by itself — 1840 px"), (false, "Scroll the area — 1840 px")] {
+            let view = RecordingView { progress: 1840, by_itself, border: true, ..RecordingView::default() };
+            let mut h = popup_harness(recording_size(Kind::Scrolling), Theme::Dark, move |ui| recording_ui(ui, Kind::Scrolling, &view));
+            h.run_steps(2);
+            let said = h.get_by_label(words).rect();
+            let done = h.get_by_label("Done").rect();
+            assert!(said.max.x < done.min.x, "the words left of Done: {said:?} {done:?}");
+            if let Ok(dir) = std::env::var("SGC_SHOTS")
+                && let Ok(img) = h.render()
+            {
+                let _ = img.save(format!("{dir}/scrolling-bar-{}.png", if by_itself { "by-itself" } else { "by-hand" }));
+            }
+            h.get_by_label("Done").click();
+            h.run_steps(1);
+            assert_eq!(*h.state(), Some(RecordingChoice::Stop));
         }
     }
 
