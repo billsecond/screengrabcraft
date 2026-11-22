@@ -250,6 +250,8 @@ mod tests {
             ducking: Default::default(),
             watermark: Default::default(),
             frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
         }
     }
 

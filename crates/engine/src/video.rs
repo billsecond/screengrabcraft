@@ -856,6 +856,39 @@ fn screen_frame(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// Motion blur on what moves: on or off, and how long the shutter is open.
+fn motion_blur(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("motion blur is given as an object".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let amount = number(p, "amount")?;
+    let mut b = s.timeline.motion_blur;
+    b.on = on.unwrap_or(b.on);
+    b.amount = amount.unwrap_or(b.amount);
+    s.timeline.motion_blur = b.checked();
+    Ok(json!({}))
+}
+
+/// The pointer hidden over a stretch of the timeline.
+fn hide_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    s.timeline.hide_pointer(int(p, "from")?, int(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The pointer shown again over a stretch of the timeline, or (no stretch) everywhere.
+fn show_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if p.get("from").is_none() && p.get("to").is_none() {
+        s.timeline.pointer_hidden.clear();
+        return Ok(json!({}));
+    }
+    s.timeline.show_pointer(int(p, "from")?, int(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
 /// A picture track's clip's colours and crop.
 fn clip_look(s: &mut VideoSession, p: &Value) -> Result<Value> {
     let level = |key: &str| -> Result<Option<i8>> {
@@ -1201,6 +1234,24 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         label: "Move Clip",
         params: r#"{"track": n, "clip": n, "to": µs, "ripple"?: bool}: the clips grouped with it move as far; with `ripple` every later clip of their tracks moves along with them"#,
         run: move_clip,
+    },
+    VideoCommand {
+        id: "video.motionBlur",
+        label: "Motion Blur",
+        params: r#"{"on"?: bool, "amount"?: 0.1..1 of a 25th of a second}: what moves on the picture (items sliding, growing or moving by their keyframes; zooms going in, out or panning) blurred along its way"#,
+        run: motion_blur,
+    },
+    VideoCommand {
+        id: "video.hidePointer",
+        label: "Hide the Pointer",
+        params: r#"{"from": µs, "to": µs}: the mouse pointer (and its clicks, seen and heard) hidden over that stretch of the timeline; it stays hidden over what the screen showed there through later edits"#,
+        run: hide_pointer,
+    },
+    VideoCommand {
+        id: "video.showPointer",
+        label: "Show the Pointer",
+        params: r#"{"from"?: µs, "to"?: µs}: the pointer shown again over that stretch, or with neither, everywhere"#,
+        run: show_pointer,
     },
     VideoCommand {
         id: "video.screenFrame",
@@ -2095,6 +2146,32 @@ mod layer_tests {
         s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "look": "plain"})).unwrap();
         let c = s.timeline.tracks[0].clips[0].look;
         assert!(c.colours_plain() && c.crop[0] == 100);
+    }
+
+    #[test]
+    fn motion_blur_is_set_and_the_pointer_hidden_for_a_stretch_through_later_edits() {
+        let mut s = session();
+        s.execute("video.motionBlur", &json!({"on": true, "amount": 7})).unwrap();
+        assert_eq!(s.undo_label(), Some("Motion Blur"));
+        assert!(s.timeline.motion_blur.on && s.timeline.motion_blur.amount == 1.0 && s.timeline.motion_blur.span() == 40_000);
+        for bad in [json!({"on": "yes"}), json!({"amount": "lots"}), json!([1])] {
+            assert!(s.execute("video.motionBlur", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.hidePointer", &json!({"from": 1_000_000, "to": 2_000_000})).unwrap();
+        assert_eq!(s.undo_label(), Some("Hide the Pointer"));
+        assert!(s.timeline.pointer_hidden_at(1_500_000) && !s.timeline.pointer_hidden_at(500_000));
+        // A cut before it: still hidden over what the screen showed then.
+        s.execute("video.cut", &json!({"from": 0, "to": 500_000})).unwrap();
+        assert_eq!(s.timeline.pointer_hidden_on_timeline(), vec![(500_000, 1_500_000)]);
+        // Shown again in its middle: two stretches; then everywhere.
+        s.execute("video.showPointer", &json!({"from": 800_000, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.pointer_hidden_on_timeline(), vec![(500_000, 800_000), (1_000_000, 1_500_000)]);
+        s.execute("video.showPointer", &json!({})).unwrap();
+        assert!(s.timeline.pointer_hidden.is_empty());
+        for bad in [json!({"from": 5, "to": 5}), json!({"from": "a", "to": 9}), json!({"from": 90_000_000, "to": 99_000_000})] {
+            assert!(s.execute("video.hidePointer", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.showPointer", &json!({"from": 9})).is_err());
     }
 
     #[test]

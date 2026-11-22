@@ -225,9 +225,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Border, shadow, rounded corners on a clip** | Has | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the recording's own screen too, made smaller on a background colour (the side panel's Screen Frame); the camera's shapes |
 | **Device frames, masks, blend modes** | Has | an item's panel (Mask and Blend): shown only inside a rectangle, rounded rectangle, oval, diamond, star or heart, or with the shape cut out of it, placed and sized on the item; laid on what's under it as multiply, screen, overlay, darken or lighten. A plain laptop, phone or browser window drawn in code round the screen (Screen Frame, the screen made small enough for it) or round a picture or a video on a layer (its panel, Device round it) |
 | Spotlight, blur a region | Has | |
-| Motion blur, freeze a region | Missing | |
+| **Motion blur**, freeze a region | Part | the side panel's Motion Blur (or a zoom's panel): items sliding, growing or moving by their keyframes, and zooms going in, out or panning, blurred along their way (five moments of the shutter blended); no region frozen yet |
 | Pointer: larger, smoothed, rings, hidden | Has | |
-| Pointer hidden for a stretch, a pointer of another look, its path edited | Missing | |
+| **Pointer hidden for a stretch**, a pointer of another look, its path edited | Part | hidden for a stretch: the Pointer panel with a stretch chosen, or the screen track's right button (its clicks neither seen nor heard there; a dashed line on the screen's row; it stays with what the screen showed through later edits). No pointer of another look; its path isn't edited |
 | Pointer highlight, spotlight, magnifier, click sounds | Has | the click sound is made in code |
 | Clickable areas and quizzes in the video | Not planned | they need a web player |
 
@@ -295,6 +295,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 20. Masks and blend modes for layer items; ready-made colour looks for a clip (#109).
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
     bordered and shadowed (#111).
+22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch.
 
 **Still to build, in this order**
 

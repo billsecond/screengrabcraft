@@ -101,8 +101,21 @@ impl Composer {
         // zooms are left out, one being placed).
         let zoom = if self.zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
         let view = within(screen_look.view(), zoom);
+        // With motion blur, a zoom going in, out or along is the screen shown at each moment of
+        // the shutter, the pictures averaged.
+        let views: Vec<crate::zoom::View> = if self.zoom && timeline.motion_blur.on {
+            let all: Vec<_> =
+                timeline.motion_blur.moments(t).into_iter().map(|s| within(screen_look.view(), crate::zoom::view_at(timeline, s))).collect();
+            let moving = all.windows(2).any(|p| p.first().zip(p.get(1)).is_some_and(|(a, b)| differs(*a, *b, w, h)));
+            if moving { all } else { vec![view] }
+        } else {
+            vec![view]
+        };
         let fit = |pic: Raster| {
-            if !view.is_whole() {
+            if views.len() > 1 {
+                let each: Vec<Raster> = views.iter().filter_map(|v| zoomed(&pic, *v, w, h)).collect();
+                average(&each)
+            } else if !view.is_whole() {
                 zoomed(&pic, view, w, h)
             } else if (pic.width(), pic.height()) == (w, h) {
                 Some(pic)
@@ -138,6 +151,7 @@ impl Composer {
         if screen_shown
             && let Some((i, dec)) = &self.screen
             && let Some(src) = timeline.source_time(*i, t)
+            && !timeline.pointer_hidden_at(src)
             && let Some(s) = self.rec.stream(dec.stream())
         {
             let (left, top, vw, _) = view.pixels(s.width, s.height);
@@ -186,7 +200,8 @@ impl Composer {
         }
         // The layers over it (media, titles, overlays, transitions), the shortcuts pressed, the
         // captions over them.
-        crate::layer_draw::draw_layers(&mut out, timeline, self.media.as_ref(), t, &mut self.texts, &mut self.pictures);
+        let blur = timeline.motion_blur.span();
+        crate::layer_draw::draw_layers_at(&mut out, timeline, self.media.as_ref(), t, blur, &mut self.texts, &mut self.pictures);
         if timeline.keys.show
             && let Some((keys, alpha)) = crate::keys::showing(&self.rec.keys, timeline, t)
         {
@@ -602,6 +617,31 @@ pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline,
     }
 }
 
+/// Whether two views of the screen differ by about a pixel or more on a `w × h` picture.
+fn differs(a: crate::zoom::View, b: crate::zoom::View, w: u32, h: u32) -> bool {
+    let (w, h) = (w as f32, h as f32);
+    (a.x - b.x).abs() * w > 0.5 || (a.y - b.y).abs() * h > 0.5 || (a.w - b.w).abs() * w > 0.5 || (a.h - b.h).abs() * h > 0.5
+}
+
+/// Pictures of one size averaged (the first's size; any of another size left out): none if
+/// there are none.
+pub fn average(pics: &[Raster]) -> Option<Raster> {
+    let first = pics.first()?;
+    let same: Vec<&Raster> = pics.iter().filter(|p| (p.width(), p.height()) == (first.width(), first.height())).collect();
+    if same.len() == 1 {
+        return Some(first.clone());
+    }
+    let n = same.len() as u32;
+    let mut sum = vec![0u32; first.pixels().len()];
+    for p in &same {
+        for (s, v) in sum.iter_mut().zip(p.pixels()) {
+            *s = s.saturating_add(u32::from(*v));
+        }
+    }
+    let px: Vec<u8> = sum.into_iter().map(|s| ((s + n / 2) / n).min(255) as u8).collect();
+    Raster::new(first.width(), first.height(), px).ok()
+}
+
 /// `inner` (a part of a picture) of the part `outer` of a picture: the part of the whole picture.
 fn within(outer: crate::zoom::View, inner: crate::zoom::View) -> crate::zoom::View {
     crate::zoom::View { x: outer.x + inner.x * outer.w, y: outer.y + inner.y * outer.h, w: inner.w * outer.w, h: inner.h * outer.h }
@@ -890,6 +930,9 @@ fn mix_clicks(out: &mut [f32], rec: &Recording, timeline: &Timeline, first: u64,
         let from = clicks.partition_point(|k| k.t < src_a);
         for k in clicks.iter().skip(from).take_while(|k| k.t < src_b).take(10_000) {
             let Some(at) = c.time_of(k.t) else { continue };
+            if timeline.pointer_hidden_at(k.t) {
+                continue;
+            }
             let start = to_samples(at);
             if start >= end || start.saturating_add(len) <= first {
                 continue;
@@ -1049,6 +1092,53 @@ mod tests {
         // A larger video of a zoom is smooth, not blocky: the edge between the halves is blended.
         let big = zoomed_edge();
         assert!(big.0 > 0 && big.1 > 0, "{big:?}");
+    }
+
+    #[test]
+    fn with_motion_blur_a_zoom_going_in_is_blurred_and_one_held_still_is_not() {
+        use crate::layers::{Anim, AnimKind, Item, Placement, What};
+        let r = rec_halves();
+        let mut tl = Timeline::new(&r);
+        // Into the right half's middle, slowly, from 0.2 s to 1.9 s.
+        let zoom = Item {
+            at: 200_000,
+            len: 1_700_000,
+            what: What::Zoom,
+            place: Placement { x: 0.75, y: 0.5, w: 0.4, opacity: 1.0 },
+            intro: Anim { kind: AnimKind::Fade, len: 1_000_000 },
+            outro: Anim { kind: AnimKind::None, len: 0 },
+            ..Item::default()
+        };
+        tl.place(zoom, None, 200_000).unwrap();
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        // The edge between the halves, going in: one row's colours.
+        let row = |c: &mut Composer, tl: &Timeline, t: u64| -> Vec<Color> { (0..64).map(|x| c.frame(tl, t).pixel(x, 24).unwrap()).collect() };
+        let sharp = row(&mut c, &tl, 700_000);
+        tl.motion_blur = crate::timeline::MotionBlur { on: true, amount: 1.0 };
+        let soft = row(&mut c, &tl, 700_000);
+        assert_ne!(sharp, soft, "going in, it's blurred");
+        let between = |r: &[Color]| r.iter().filter(|p| p.r > 20 && p.b > 20).count();
+        assert!(between(&soft) >= between(&sharp), "{} {}", between(&soft), between(&sharp));
+        // Held in, it's as sharp as without.
+        let held = row(&mut c, &tl, 1_600_000);
+        tl.motion_blur.on = false;
+        assert_eq!(held, row(&mut c, &tl, 1_600_000));
+    }
+
+    #[test]
+    fn the_pointer_hidden_for_a_stretch_is_neither_seen_nor_heard_there() {
+        let r = rec_with_pointer();
+        let mut tl = Timeline::new(&r);
+        tl.pointer.click_sound = true;
+        let green = |pic: &Raster| pic.pixels().chunks(4).filter(|p| p[1] > 150 && p[0] < 80).count();
+        let mut c = Composer::new(r.clone(), &tl, 320, 240);
+        assert!(green(&c.frame(&tl, 1_000_000)) > 0);
+        let loud = |tl: &Timeline| mix(&r, tl, to_samples(2_000_000), 4800).iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(loud(&tl) > 0.1, "the click at 2 s is heard");
+        tl.hide_pointer(900_000, 2_500_000).unwrap();
+        assert_eq!(green(&c.frame(&tl, 1_000_000)), 0, "hidden");
+        assert!(green(&c.frame(&tl, 2_700_000)) > 0, "after it, there again");
+        assert!(loud(&tl) < 1e-6, "its click isn't heard");
     }
 
     /// The red and blue of the pixel at the halves' edge when a 4 × 2 picture is zoomed 8 times.

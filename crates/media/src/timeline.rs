@@ -498,6 +498,72 @@ impl Default for Ducking {
     }
 }
 
+/// Motion blur: what moves on the picture (an item sliding, growing or moving by its keyframes; a
+/// zoom going in, out or panning) blurred along its way, as a camera's open shutter would.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MotionBlur {
+    pub on: bool,
+    /// How long the shutter is open: 0.1 to 1 of a 25th of a second.
+    pub amount: f32,
+}
+
+impl Default for MotionBlur {
+    fn default() -> MotionBlur {
+        MotionBlur { on: false, amount: 0.5 }
+    }
+}
+
+/// How many pictures a moment of motion blur is made of.
+pub const BLUR_SAMPLES: usize = 5;
+
+impl MotionBlur {
+    pub fn checked(self) -> MotionBlur {
+        MotionBlur { on: self.on, amount: if self.amount.is_finite() { self.amount.clamp(0.1, 1.0) } else { 0.5 } }
+    }
+
+    /// How long the shutter is open (µs); 0 when it's off.
+    pub fn span(&self) -> u64 {
+        let c = self.checked();
+        if c.on { (c.amount * 40_000.0) as u64 } else { 0 }
+    }
+
+    /// The moments a picture at `t` is made of, spread over the shutter round it, `t` in the
+    /// middle; only `t` when it's off.
+    pub fn moments(&self, t: u64) -> Vec<u64> {
+        let span = self.span();
+        if span == 0 {
+            return vec![t];
+        }
+        let n = BLUR_SAMPLES as u64;
+        let start = t.saturating_sub(span / 2);
+        (0..n).map(|k| start.saturating_add(span * k / (n - 1))).collect()
+    }
+
+    fn is_default(&self) -> bool {
+        *self == MotionBlur::default()
+    }
+}
+
+/// The most stretches the pointer is hidden in.
+pub const MAX_POINTER_HIDDEN: usize = 1_000;
+
+/// Stretches put in order, the empty ones gone and those that touch made one; not too many.
+fn merged(mut s: Vec<[u64; 2]>) -> Vec<[u64; 2]> {
+    s.truncate(MAX_POINTER_HIDDEN * 4);
+    s.retain(|[a, b]| a < b);
+    s.sort_unstable();
+    let mut out: Vec<[u64; 2]> = Vec::with_capacity(s.len());
+    for [a, b] in s {
+        match out.last_mut() {
+            Some(l) if a <= l[1] => l[1] = l[1].max(b),
+            _ => out.push([a, b]),
+        }
+    }
+    out.truncate(MAX_POINTER_HIDDEN);
+    out
+}
+
 fn is_quiet(v: &f32) -> bool {
     !v.is_finite() || *v <= 0.0
 }
@@ -647,6 +713,13 @@ pub struct Timeline {
     /// device round it (see [`crate::frame`]).
     #[serde(default, skip_serializing_if = "crate::frame::ScreenFrame::is_plain")]
     pub frame: crate::frame::ScreenFrame,
+    /// What moves blurred along its way.
+    #[serde(default, skip_serializing_if = "MotionBlur::is_default")]
+    pub motion_blur: MotionBlur,
+    /// Stretches of the screen's recording (its own time, so they stay with what it shows through
+    /// every edit) where the pointer isn't drawn, nor its clicks shown or heard: apart, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pointer_hidden: Vec<[u64; 2]>,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -706,6 +779,8 @@ impl Timeline {
             ducking: Default::default(),
             watermark: Default::default(),
             frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
         }
     }
 
@@ -810,6 +885,8 @@ impl Timeline {
             ducking: Ducking { on: self.ducking.on, level: if self.ducking.level.is_finite() { self.ducking.level.clamp(0.0, 1.0) } else { 0.3 } },
             watermark: self.watermark.checked(),
             frame: self.frame.checked(),
+            motion_blur: self.motion_blur.checked(),
+            pointer_hidden: merged(self.pointer_hidden),
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -845,6 +922,79 @@ impl Timeline {
         let track = self.tracks.get(i)?;
         let c = track.clips.iter().find(|c| c.at <= t && t < c.end())?;
         Some(c.source_at(t - c.at))
+    }
+
+    /// The stretches of the screen's recording that `from..to` of the timeline plays.
+    fn screen_sources(&self, from: u64, to: u64) -> Vec<[u64; 2]> {
+        let Some(track) = self.find(StreamKind::Screen).and_then(|i| self.tracks.get(i)) else { return Vec::new() };
+        track
+            .clips
+            .iter()
+            .filter(|c| !c.hold && c.at < to && from < c.end())
+            .map(|c| {
+                let (x, y) = (c.source_beyond(from.max(c.at)), c.source_beyond(to.min(c.end())));
+                [x.min(y), x.max(y)]
+            })
+            .filter(|[a, b]| a < b)
+            .collect()
+    }
+
+    /// Hides the pointer over `from..to` of the timeline: wherever the screen's recording plays
+    /// there (so it stays hidden over what it showed through every later edit).
+    pub fn hide_pointer(&mut self, from: u64, to: u64) -> Result<(), EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch is empty".to_string()));
+        }
+        let add = self.screen_sources(from, to);
+        if add.is_empty() {
+            return Err(EditError::Invalid("the screen isn't playing in that stretch".to_string()));
+        }
+        let mut all = std::mem::take(&mut self.pointer_hidden);
+        all.extend(add);
+        self.pointer_hidden = merged(all);
+        Ok(())
+    }
+
+    /// Shows the pointer again over `from..to` of the timeline.
+    pub fn show_pointer(&mut self, from: u64, to: u64) -> Result<(), EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch is empty".to_string()));
+        }
+        let cut = self.screen_sources(from, to);
+        let mut out = Vec::with_capacity(self.pointer_hidden.len() + cut.len());
+        for s in std::mem::take(&mut self.pointer_hidden) {
+            // What's left of it once every stretch shown again is taken out.
+            let mut pieces = vec![s];
+            for [x, y] in &cut {
+                pieces = pieces.into_iter().flat_map(|[p, q]| [[p, (*x).min(q)], [(*y).max(p), q]]).filter(|[p, q]| p < q).collect();
+            }
+            out.extend(pieces);
+        }
+        self.pointer_hidden = merged(out);
+        Ok(())
+    }
+
+    /// Whether the pointer is hidden at `src` of the screen's recording.
+    pub fn pointer_hidden_at(&self, src: u64) -> bool {
+        let i = self.pointer_hidden.partition_point(|s| s[1] <= src);
+        self.pointer_hidden.get(i).is_some_and(|s| s[0] <= src)
+    }
+
+    /// Where on the timeline the pointer is hidden, in order.
+    pub fn pointer_hidden_on_timeline(&self) -> Vec<(u64, u64)> {
+        let Some(track) = self.find(StreamKind::Screen).and_then(|i| self.tracks.get(i)) else { return Vec::new() };
+        let mut out: Vec<(u64, u64)> = Vec::new();
+        for c in &track.clips {
+            if c.hold {
+                if self.pointer_hidden_at(c.from) {
+                    out.push((c.at, c.end()));
+                }
+                continue;
+            }
+            out.extend(self.pointer_hidden.iter().filter_map(|s| c.times_of(s[0], s[1])).filter(|(a, b)| a < b));
+        }
+        out.sort_unstable();
+        out
     }
 
     /// The clip of track `i` playing at `t`.
@@ -1663,6 +1813,8 @@ mod tests {
             ducking: Default::default(),
             watermark: Default::default(),
             frame: Default::default(),
+            motion_blur: Default::default(),
+            pointer_hidden: Vec::new(),
         }
     }
 
