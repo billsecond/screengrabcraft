@@ -503,8 +503,16 @@ mod tests {
     }
 
     fn timeline() -> Timeline {
-        let track =
-            |stream, kind| Track { stream, kind, muted: false, volume: 1.0, clips: vec![Clip::new(0, 0, 20_000_000)], name: None, denoise: 0.0 };
+        let track = |stream, kind| Track {
+            stream,
+            kind,
+            muted: false,
+            volume: 1.0,
+            clips: vec![Clip::new(0, 0, 20_000_000)],
+            name: None,
+            denoise: 0.0,
+            points: Vec::new(),
+        };
         Timeline {
             tracks: vec![track(0, StreamKind::Screen), track(1, StreamKind::SystemSound), track(2, StreamKind::Microphone)],
             camera: CameraLayout::default(),
@@ -515,6 +523,7 @@ mod tests {
             corrected: None,
             markers: Vec::new(),
             keys: Default::default(),
+            ducking: Default::default(),
         }
     }
 

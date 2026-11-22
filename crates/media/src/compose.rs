@@ -586,12 +586,18 @@ pub fn mix(rec: &Recording, timeline: &Timeline, first: u64, count: usize) -> Ve
 /// [`mix`], with the sound of the layers' media from `media`.
 pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_draw::MediaStore, first: u64, count: usize) -> Vec<f32> {
     let mut out = vec![0f32; count * 2];
-    crate::layer_draw::mix_layers(&mut out, timeline, media, first, count);
+    // The voice (when the rest is lowered under it) apart from the rest: the layers' media, the
+    // computer's sound.
+    let voice = voice_track(timeline);
+    let mut rest = vec![0f32; count * 2];
+    crate::layer_draw::mix_layers(&mut rest, timeline, media, first, count);
     let end = first.saturating_add(count as u64);
     for (ti, t) in timeline.tracks.iter().enumerate() {
         if t.muted || t.kind.is_video() || t.volume <= 0.0 {
             continue;
         }
+        let into = if voice.is_none_or(|v| v == ti) { &mut out } else { &mut rest };
+        let shaped = !t.points.is_empty();
         let stereo = rec.stream(t.stream).is_some_and(|s| s.channels >= 2);
         // `n` stereo samples of the track as recorded from sample `from` (-1 to 1).
         let read = |from: u64, n: usize| -> Vec<[f32; 2]> {
@@ -645,7 +651,7 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                 crate::stretch::stretched(&|start, n| source(from.saturating_add(start), n), c.rate(), a - at, n)
             };
             let base = (a - first) as usize * 2;
-            let faded = c.fade_in > 0 || c.fade_out > 0 || lead > 0 || tail > 0;
+            let faded = c.fade_in > 0 || c.fade_out > 0 || lead > 0 || tail > 0 || shaped;
             let (cs, ce) = (c.at, c.end());
             for (k, [l, r]) in sound.iter().enumerate() {
                 let gain = if faded {
@@ -657,15 +663,26 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
                     } else {
                         1.0
                     };
-                    t.volume * c.fade_at(u.saturating_sub(cs).min(c.len)) * x
+                    let d = u.saturating_sub(cs).min(c.len);
+                    let line = if shaped { t.level_at(c.source_at(d)) } else { 1.0 };
+                    t.volume * c.fade_at(d) * x * line
                 } else {
                     t.volume
                 };
-                if let Some(o) = out.get_mut(base + k * 2..base + k * 2 + 2) {
+                if let Some(o) = into.get_mut(base + k * 2..base + k * 2 + 2) {
                     o[0] += l * gain;
                     o[1] += r * gain;
                 }
             }
+        }
+    }
+    // The rest lowered while the voice is heard.
+    let duck = voice.map(|v| duck_levels(rec, timeline, v, first, count));
+    for (k, pair) in rest.as_chunks::<2>().0.iter().enumerate() {
+        let g = duck.as_ref().and_then(|d| d.get(k)).copied().unwrap_or(1.0);
+        if let Some(o) = out.get_mut(k * 2..k * 2 + 2) {
+            o[0] += pair[0] * g;
+            o[1] += pair[1] * g;
         }
     }
     mix_clicks(&mut out, rec, timeline, first, count);
@@ -673,6 +690,101 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         *s = s.clamp(-1.0, 1.0);
     }
     out
+}
+
+/// The track whose voice lowers the rest, when the rest is lowered under the voice: the
+/// microphone, if it's heard.
+pub fn voice_track(timeline: &Timeline) -> Option<usize> {
+    if !timeline.ducking.on {
+        return None;
+    }
+    timeline.find(StreamKind::Microphone).filter(|&i| timeline.tracks.get(i).is_some_and(|t| !t.muted && t.volume > 0.0))
+}
+
+/// The steps the voice is listened for in (samples: 10 ms), how long the rest stays down after
+/// the voice stops and then takes to come back up, and how long before the voice it starts going
+/// down (steps).
+const DUCK_STEP: u64 = 480;
+const DUCK_HOLD: u64 = 30;
+const DUCK_RELEASE: u64 = 40;
+const DUCK_ATTACK: u64 = 10;
+/// How loud the voice must be to be heard (the root of its mean square, -1 to 1): about -34 dB.
+const VOICE_LOUD: f32 = 0.02;
+
+/// How loud the rest is at each of `count` samples from timeline sample `first` (1 as it is, down
+/// to the ducking's level while track `voice` is heard). The same whatever stretch is asked for:
+/// it's worked out on steps fixed on the timeline.
+fn duck_levels(rec: &Recording, timeline: &Timeline, voice: usize, first: u64, count: usize) -> Vec<f32> {
+    let level = timeline.ducking.level.clamp(0.0, 1.0);
+    let Some(stream) = timeline.tracks.get(voice).map(|t| t.stream) else { return vec![1.0; count] };
+    let g0 = (first / DUCK_STEP).saturating_sub(DUCK_HOLD + DUCK_RELEASE);
+    let g1 = first.saturating_add(count as u64) / DUCK_STEP + DUCK_ATTACK + 2;
+    let heard: Vec<bool> = (g0..=g1)
+        .map(|g| {
+            let Some(src) = timeline.source_time(voice, to_us(g * DUCK_STEP)) else { return false };
+            let pcm = rec.sound(stream, to_samples(src).saturating_sub(DUCK_STEP / 2), DUCK_STEP as usize);
+            let ms = pcm.iter().map(|v| (f32::from(*v) / 32768.0).powi(2)).sum::<f32>() / pcm.len().max(1) as f32;
+            ms.sqrt() > VOICE_LOUD
+        })
+        .collect();
+    // How far down the rest is at each step, 0 to 1: all the way while the voice is heard and a
+    // moment after, coming back up after that, going down just before it.
+    let down: Vec<f32> = (0..heard.len())
+        .map(|i| {
+            let behind = (0..=(DUCK_HOLD + DUCK_RELEASE) as usize).find(|&d| i.checked_sub(d).and_then(|j| heard.get(j)).copied().unwrap_or(false));
+            let after = behind.map_or(0.0, |d| {
+                let d = d as f32 - DUCK_HOLD as f32;
+                if d <= 0.0 { 1.0 } else { 1.0 - d / DUCK_RELEASE as f32 }
+            });
+            let ahead = (1..=DUCK_ATTACK as usize).find(|&d| heard.get(i + d).copied().unwrap_or(false));
+            let before = ahead.map_or(0.0, |d| 1.0 - d as f32 / DUCK_ATTACK as f32);
+            let x = after.max(before).clamp(0.0, 1.0);
+            x * x * (3.0 - 2.0 * x)
+        })
+        .collect();
+    (0..count as u64)
+        .map(|k| {
+            let s = first + k;
+            let (g, f) = (s / DUCK_STEP, (s % DUCK_STEP) as f32 / DUCK_STEP as f32);
+            let at = |g: u64| down.get(usize::try_from(g.saturating_sub(g0)).unwrap_or(usize::MAX)).copied().unwrap_or(0.0);
+            let d = at(g) + (at(g + 1) - at(g)) * f;
+            1.0 - d * (1.0 - level)
+        })
+        .collect()
+}
+
+/// How loud what track `track` plays is (dB of the full scale, the root of its mean square over
+/// stretches of 0.4 s, near-silent ones left out), before its volume: none for a picture track or
+/// one with nothing heard. At most a few hundred stretches are listened to, spread over it.
+pub fn loudness(rec: &Recording, timeline: &Timeline, track: usize) -> Option<f32> {
+    const BLOCK: u64 = 19_200;
+    const MOST: u64 = 600;
+    let t = timeline.tracks.get(track).filter(|t| !t.kind.is_video())?;
+    // The stretches of the recording it plays, in samples.
+    let spans: Vec<(u64, u64)> = t.clips.iter().map(|c| (to_samples(c.from), to_samples(c.from.saturating_add(c.source_len())))).collect();
+    let total: u64 = spans.iter().map(|(a, b)| b.saturating_sub(*a) / BLOCK).sum();
+    let every = (total / MOST).max(1);
+    let mut powers = Vec::new();
+    let mut n = 0u64;
+    for (a, b) in spans {
+        let mut s = a;
+        while s.saturating_add(BLOCK) <= b && powers.len() < MOST as usize * 2 {
+            if n.is_multiple_of(every) {
+                let pcm = rec.sound(t.stream, s, BLOCK as usize);
+                let ms = pcm.iter().map(|v| f64::from(*v) / 32768.0).map(|v| v * v).sum::<f64>() / pcm.len().max(1) as f64;
+                powers.push(ms);
+            }
+            n += 1;
+            s += BLOCK;
+        }
+    }
+    // Near silence (pauses, below -60 dB) left out, then whatever is far quieter than the rest.
+    let mean = |v: &[f64]| (!v.is_empty()).then(|| v.iter().sum::<f64>() / v.len() as f64);
+    let heard: Vec<f64> = powers.into_iter().filter(|p| *p > 1e-6).collect();
+    let rough = mean(&heard)?;
+    let loud: Vec<f64> = heard.iter().copied().filter(|p| *p > rough / 100.0).collect();
+    let m = mean(&loud).unwrap_or(rough);
+    Some((10.0 * m.log10()) as f32)
 }
 
 /// How loud a clip is `x` of the way (0 to 1) into a cross-fade it comes up in: the two together
@@ -723,6 +835,7 @@ mod tests {
 
     use super::*;
     use crate::recording::{Header, RecordingWriter, StreamInfo};
+    use crate::timeline::VolumePoint;
 
     fn rec() -> Arc<Recording> {
         let streams = vec![
@@ -930,6 +1043,71 @@ mod tests {
         }
         // Away from it, as it was.
         assert!((mix(&r, &tl, to_samples(500_000), 1)[0] - m).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_volume_line_shapes_a_tracks_sound_and_stays_with_it_through_a_cut() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        tl.set_muted(2, true).unwrap();
+        let m = 1000.0 / 32768.0;
+        // Silent at 0.5 s, back up by 1.5 s: halfway at 1 s.
+        assert_eq!(tl.set_volume_point(1, None, 1_500_000, Some(1.0)).unwrap(), 0);
+        assert_eq!(tl.set_volume_point(1, None, 500_000, Some(0.0)).unwrap(), 0);
+        assert!(tl.set_volume_point(0, None, 500_000, None).is_err(), "the screen has no volume line");
+        assert!(tl.set_volume_point(1, None, 9_000_000, None).is_err(), "not on a clip");
+        let at = |tl: &Timeline, t: u64| mix(&r, tl, to_samples(t), 1)[0];
+        assert!(at(&tl, 200_000).abs() < 1e-6);
+        assert!((at(&tl, 1_000_000) - m * 0.5).abs() < 1e-4);
+        assert!((at(&tl, 1_800_000) - m).abs() < 1e-6);
+        // A point dragged: moved to 0.3 s, its level kept; one near it changed rather than added.
+        assert_eq!(tl.set_volume_point(1, Some(0), 300_000, None).unwrap(), 0);
+        tl.set_volume_point(1, None, 305_000, Some(0.5)).unwrap();
+        assert_eq!(tl.tracks[1].points, vec![VolumePoint { at: 300_000, level: 0.5 }, VolumePoint { at: 1_500_000, level: 1.0 }]);
+        // 0.2 s to 1.2 s cut out: what was heard at 1.5 s is at 0.5 s, and its point with it.
+        tl.cut(200_000, 1_200_000).unwrap();
+        assert_eq!(tl.volume_points_on_timeline(1), vec![(1, 500_000)]);
+        assert!((at(&tl, 600_000) - m).abs() < 1e-6);
+        tl.remove_volume_point(1, None).unwrap();
+        assert!(tl.tracks[1].points.is_empty());
+    }
+
+    #[test]
+    fn the_rest_is_lowered_while_the_voice_is_heard() {
+        let streams = vec![
+            StreamInfo { id: 1, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+            StreamInfo { id: 2, kind: StreamKind::SystemSound, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..30u64 {
+            // A voice for the first second, then silence; music all along.
+            let voice: Vec<i16> = (0..4800).map(|i| if t < 10 { if i % 20 < 10 { 8000 } else { -8000 } } else { 0 }).collect();
+            w.audio(1, t * 4800, &voice).unwrap();
+            w.audio(2, t * 4800, &vec![2000; 4800]).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(3_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        let music = 2000.0 / 32768.0;
+        // What's heard less the voice (a square wave for its first second).
+        let rest = |tl: &Timeline, t: u64| {
+            let s = to_samples(t);
+            let v = if t < 1_000_000 { if s % 20 < 10 { 8000.0 } else { -8000.0 } } else { 0.0 } / 32768.0;
+            mix(&r, tl, s, 1)[0] - v
+        };
+        assert!((rest(&tl, 500_000) - music).abs() < 1e-6, "off: as it is");
+        tl.ducking = crate::timeline::Ducking { on: true, level: 0.3 };
+        assert!((rest(&tl, 500_000) - music * 0.3).abs() < 1e-4, "{}", rest(&tl, 500_000) / music);
+        // A moment after the voice stops it's still down; well after, back up.
+        assert!(rest(&tl, 1_200_000) < music * 0.5);
+        assert!((rest(&tl, 2_500_000) - music).abs() < 1e-6);
+        // The same however the sound is asked for, in one piece or a sample at a time.
+        let whole = mix(&r, &tl, to_samples(900_000), 4800);
+        let one = mix(&r, &tl, to_samples(900_000) + 3000, 1);
+        assert!((whole[6000] - one[0]).abs() < 1e-6);
+        // How loud each is.
+        let voice = loudness(&r, &tl, 0).unwrap();
+        assert!((voice - 20.0 * (8000.0f32 / 32768.0).log10()).abs() < 1.5, "{voice}");
+        assert!((loudness(&r, &tl, 1).unwrap() - 20.0 * music.log10()).abs() < 0.5);
     }
 
     #[test]

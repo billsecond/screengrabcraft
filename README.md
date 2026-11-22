@@ -140,6 +140,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
   its end, and takes its track's **background noise** out (a fan, a hum, hiss: learnt from the
   track itself, on this computer; voices stay). The track's right button turns the noise off and
   on too.
+- **Volume line and levels**: double-click a sound clip's wave (or use the track's right button) to
+  put a point of its volume line there, and drag points up and down or along: the sound goes
+  straight from one to the next, and the points stay with the sound through every edit. The Sound
+  Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
+  as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
+  sound, music and media go down while the microphone is heard, and back up after.
 - **Markers**: M (or Edit, or the ruler's right button) marks the moment at the playhead with a
   flag on the ruler. The Markers section of the panel names them, goes to them and deletes them;
   they move with cuts and speed changes, and Export Video makes them the MP4's chapters, which

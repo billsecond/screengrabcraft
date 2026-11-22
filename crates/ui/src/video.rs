@@ -37,6 +37,7 @@ use serde_json::{Value, json};
 mod camera_key;
 mod export_window;
 mod library;
+mod sound;
 mod transcript;
 mod transitions;
 pub use library::{LibDrop, LibTab};
@@ -165,6 +166,11 @@ enum Drag {
         track: usize,
         clip: usize,
         grab: u64,
+    },
+    /// A point of a sound track's volume line, dragged.
+    Point {
+        track: usize,
+        point: usize,
     },
 }
 
@@ -512,7 +518,7 @@ impl VideoView {
 
     /// [`VideoView::new`], its sound's waves worked out already (on another thread).
     pub(crate) fn with_waves(rec: Recording, waves: Waves, path: Option<String>, name: String) -> VideoView {
-        let session = VideoSession::new(&rec);
+        let mut session = VideoSession::new(&rec);
         let (w, h) = rec
             .header
             .streams
@@ -524,6 +530,9 @@ impl VideoView {
         let captions = rec.captions.clone().filter(|c| !c.is_empty());
         let has_sound = rec.header.streams.iter().any(|s| Speaker::of(s.kind).is_some());
         let rec = Arc::new(rec);
+        // How loud a track plays, measured from the recording, for evening levels out.
+        let measured = rec.clone();
+        session.set_measure(Box::new(move |tl, i| compose::loudness(&measured, tl, i)));
         let library = Arc::new(screengrabcraft_media::media_store::MediaLibrary::default());
         let mut composer = Composer::new(rec.clone(), &session.timeline, w, h);
         composer.set_media(library.clone());
@@ -1785,6 +1794,7 @@ impl VideoView {
                         }
                         if sound && let Some((ti, ci)) = self.selected {
                             section(ui, "Sound", &mut false);
+                            self.line_section(ed, ui, ti);
                             self.sound_section(ed, ui, ti, ci);
                         }
                         first = false;
@@ -1840,6 +1850,10 @@ impl VideoView {
                     if self.session.timeline.find(StreamKind::Screen).is_some() {
                         section(ui, "Keys Pressed", &mut first);
                         self.keys_section(ed, ui);
+                    }
+                    if self.session.timeline.tracks.iter().any(|x| !x.kind.is_video()) {
+                        section(ui, "Sound Mix", &mut first);
+                        self.mix_section(ed, ui);
                     }
                     section(ui, "Editing", &mut first);
                     crate::widgets::tips(
@@ -2733,6 +2747,24 @@ impl VideoView {
                     ui.close();
                 }
                 if !track.kind.is_video() {
+                    if ui
+                        .add_enabled(self.session.timeline.source_time(i, at).is_some(), egui::Button::new("Add a Volume Point Here"))
+                        .on_hover_text("A point of its volume line at this moment; drag it up or down")
+                        .on_disabled_hover_text("There's no clip of this track here")
+                        .clicked()
+                    {
+                        self.selected = self.session.timeline.clip_at(i, at).map(|c| (i, c));
+                        self.run(ed, ctx, "video.volumePoint", json!({"track": i, "at": at}));
+                        ui.close();
+                    }
+                    if ui.add_enabled(!track.points.is_empty(), egui::Button::new("Clear the Volume Line")).clicked() {
+                        self.run(ed, ctx, "video.removeVolumePoint", json!({"track": i, "all": true}));
+                        ui.close();
+                    }
+                    if ui.button("Even Out This Track's Level").on_hover_text("Its volume set to an even level").clicked() {
+                        self.even_out(ed, ctx, Some(i));
+                        ui.close();
+                    }
                     let on = track.denoise > 0.0;
                     if ui
                         .add(egui::Button::new("Take Out Background Noise").selected(on))
@@ -2936,6 +2968,9 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         let tracks = self.session.timeline.tracks.clone();
+        // Where each track's volume points are heard on the timeline.
+        let vpoints: Vec<Vec<(usize, u64)>> = (0..tracks.len()).map(|i| self.session.timeline.volume_points_on_timeline(i)).collect();
+        let points_of = |i: usize| -> &[(usize, u64)] { vpoints.get(i).map(Vec::as_slice).unwrap_or_default() };
         // The layers above the tracks, the top one first (it's drawn over the others), and a band
         // above them that a drop on makes a layer of its own.
         let layers: Vec<screengrabcraft_media::layers::Layer> = self.session.timeline.layers.iter().rev().cloned().collect();
@@ -3091,7 +3126,9 @@ impl VideoView {
                                     .unwrap_or_default()
                                     .iter()
                                     .fold((0i16, 0i16), |(l, h), (a, b)| (l.min(*a), h.max(*b)));
-                                let g = track.volume.clamp(0.0, 2.0) / 32768.0 * half;
+                                // As loud as its volume (and its volume line there) has it.
+                                let line = if track.points.is_empty() { 1.0 } else { track.level_at(clip.source_at(a.saturating_sub(clip.at))) };
+                                let g = (track.volume * line).clamp(0.0, 2.0) / 32768.0 * half;
                                 let (top, bottom) = ((mid - f32::from(hi) * g).max(r.min.y + 2.0), (mid - f32::from(lo) * g).min(r.max.y - 2.0));
                                 painter
                                     .line_segment([pos2(x as f32 + 0.5, top), pos2(x as f32 + 0.5, bottom.max(top + 1.0))], Stroke::new(1.0, colour));
@@ -3131,6 +3168,11 @@ impl VideoView {
                             let tag = Rect::from_min_size(pos2((right - size.x - 10.0).max(r.min.x + 2.0), r.min.y + 3.0), size + vec2(6.0, 2.0));
                             painter.rect_filled(tag, 3.0, colour);
                             painter.text(tag.center(), egui::Align2::CENTER_CENTER, words, font, Color32::WHITE);
+                        }
+                        // A sound clip's volume line: when it has points, or it's chosen.
+                        let chosen_here = self.selected.is_some_and(|(st, _)| st == i);
+                        if !track.kind.is_video() && (!track.points.is_empty() || chosen_here) {
+                            sound::draw_line(&painter, track, clip, r, lane, points_of(i), &x_of, &us_of);
                         }
                         if self.selected == Some((i, c)) {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
@@ -3516,6 +3558,13 @@ impl VideoView {
                                 Drag::Scrub
                             }
                         }
+                    } else if let Some((track, point)) = row_at(p.y)
+                        .filter(|&tr| self.selected.is_some_and(|(st, _)| st == tr))
+                        .and_then(|tr| Some((tr, sound::point_near(points_of(tr), tracks.get(tr)?, row_rect(tr), p, &x_of)?)))
+                    {
+                        // A point of the chosen sound clip's volume line.
+                        self.session.begin("Volume Point");
+                        Drag::Point { track, point }
                     } else if let Some(track) = row_at(p.y) {
                         match clip_at(track, p.x) {
                             Some((clip, Some(start))) => {
@@ -3577,6 +3626,17 @@ impl VideoView {
                             caught = edge;
                             let _ = self.session.drag("video.moveClip", &json!({"track": track, "clip": clip, "to": to}));
                         }
+                        Drag::Point { track, point } => {
+                            // Up and down its level, along its moment (on a clip of the track).
+                            let row = row_rect(track);
+                            let r = Rect::from_min_max(pos2(row.min.x, row.min.y + 3.0), pos2(row.max.x, row.max.y - 3.0));
+                            let level = sound::level_of_y(r, p.y);
+                            let params = json!({"track": track, "point": point, "at": us.min(self.length()), "level": level});
+                            if let Ok(v) = self.session.drag("video.volumePoint", &params) {
+                                let now = v.get("point").and_then(Value::as_u64).map_or(point, |k| k as usize);
+                                self.drag = Some(Drag::Point { track, point: now });
+                            }
+                        }
                     }
                     // Near the edges, the timeline scrolls along.
                     if p.x > lane.max.x - 20.0 {
@@ -3586,7 +3646,7 @@ impl VideoView {
                     }
                 }
                 if resp.drag_stopped() {
-                    if matches!(self.drag, Some(Drag::Trim { .. } | Drag::Move { .. })) {
+                    if matches!(self.drag, Some(Drag::Trim { .. } | Drag::Move { .. } | Drag::Point { .. })) {
                         self.session.commit();
                     }
                     self.drag = None;
@@ -3625,6 +3685,19 @@ impl VideoView {
                             self.seek(ed, us_of(p.x), now);
                         }
                     }
+                }
+                // A double click on a sound clip puts a point of its volume line there, as high as
+                // the pointer.
+                if resp.double_clicked()
+                    && let Some(p) = resp.interact_pointer_pos()
+                    && let Some(track) = row_at(p.y).filter(|tr| tracks.get(*tr).is_some_and(|x| !x.kind.is_video()))
+                    && let Some((c, _)) = clip_at(track, p.x)
+                {
+                    let row = row_rect(track);
+                    let r = Rect::from_min_max(pos2(row.min.x, row.min.y + 3.0), pos2(row.max.x, row.max.y - 3.0));
+                    self.selected = Some((track, c));
+                    let params = json!({"track": track, "at": us_of(p.x), "level": sound::level_of_y(r, p.y)});
+                    self.run(ed, &ctx, "video.volumePoint", params);
                 }
                 // The right button: what's under it is chosen, and a menu is about it and that moment.
                 if resp.secondary_clicked()

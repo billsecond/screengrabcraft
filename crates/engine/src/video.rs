@@ -38,7 +38,13 @@ pub struct VideoSession {
     revision: u64,
     /// The recording's captions as they were heard: what putting them right starts from.
     heard: Vec<screengrabcraft_media::captions::Cue>,
+    /// How loud a track plays (dB), as the host measures it from the recording (the engine reads
+    /// no sound itself): for evening levels out.
+    measure: Option<Measure>,
 }
+
+/// Measures how loud track `n` of these edits plays (dB of the full scale), before its volume.
+pub type Measure = Box<dyn Fn(&Timeline, usize) -> Option<f32> + Send + Sync>;
 
 fn edit_err(e: EditError) -> EngineError {
     match e {
@@ -69,13 +75,30 @@ impl VideoSession {
         let timeline = rec.timeline.clone().unwrap_or_else(|| original.clone());
         let sources = rec.header.streams.iter().map(|s| (s.id, rec.stream_duration(s.id))).collect();
         let heard = rec.captions.as_ref().map(|c| c.cues.clone()).unwrap_or_default();
-        VideoSession { timeline, original, sources, undo: Vec::new(), redo: Vec::new(), pending: None, dirty: false, revision: 0, heard }
+        VideoSession {
+            timeline,
+            original,
+            sources,
+            undo: Vec::new(),
+            redo: Vec::new(),
+            pending: None,
+            dirty: false,
+            revision: 0,
+            heard,
+            measure: None,
+        }
     }
 
     /// The recording's captions as heard, when they come after it was opened (made meanwhile):
     /// what putting them right starts from. Lines already put right stay so.
     pub fn set_heard(&mut self, captions: Option<&screengrabcraft_media::captions::Captions>) {
         self.heard = captions.map(|c| c.cues.clone()).unwrap_or_default();
+    }
+
+    /// How the host measures how loud a track plays (see [`Measure`]): without it, levels can't be
+    /// evened out.
+    pub fn set_measure(&mut self, m: Measure) {
+        self.measure = Some(m);
     }
 
     /// How long the recording is (µs): its longest track.
@@ -607,6 +630,69 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// A point of a sound track's volume line: added, changed or moved.
+fn volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let point = if p.get("point").is_some_and(|v| !v.is_null()) { Some(index(p, "point")?) } else { None };
+    let k = s.timeline.set_volume_point(index(p, "track")?, point, int(p, "at")?, number(p, "level")?).map_err(edit_err)?;
+    Ok(json!({"point": k}))
+}
+
+fn remove_volume_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let all = p.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let point = if all { None } else { Some(index(p, "point")?) };
+    s.timeline.remove_volume_point(index(p, "track")?, point).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The rest of the sound lowered while the voice (the microphone) is heard.
+fn ducking(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if !p.is_object() {
+        return Err(EngineError::Params("say `on` and or `level`".to_string()));
+    }
+    let on = match p.get("on") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
+    };
+    let d = &mut s.timeline.ducking;
+    d.on = on.unwrap_or(d.on);
+    if let Some(l) = number(p, "level")? {
+        d.level = l.clamp(0.0, 1.0);
+    }
+    Ok(json!({"on": d.on, "level": d.level}))
+}
+
+/// How loud speech and music are made when levels are evened out (dB of the full scale).
+const LEVEL_TARGET: f32 = -20.0;
+
+/// Each sound track (or one) made as loud as the others: its volume set so what it plays comes
+/// to `target` dB (as near as the volume goes).
+fn levels(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let measure = s.measure.as_ref().ok_or_else(|| EngineError::Failed("levels can't be measured here".to_string()))?;
+    let target = number(p, "target")?.unwrap_or(LEVEL_TARGET).clamp(-40.0, -6.0);
+    let which: Vec<usize> = if p.get("track").is_some_and(|t| !t.is_null()) {
+        vec![index(p, "track")?]
+    } else {
+        s.timeline.tracks.iter().enumerate().filter(|(_, t)| !t.kind.is_video()).map(|(i, _)| i).collect()
+    };
+    let mut done = Vec::new();
+    for i in which {
+        let t = s.timeline.track(i).map_err(edit_err)?;
+        if t.kind.is_video() {
+            return Err(EngineError::Params("only a sound track has a level".to_string()));
+        }
+        // Nothing heard on it: left as it is.
+        let Some(db) = measure(&s.timeline, i).filter(|d| d.is_finite()) else { continue };
+        let volume = 10f32.powf((target - db) / 20.0).clamp(0.0, 2.0);
+        done.push((i, volume));
+    }
+    let mut out = Vec::new();
+    for (i, v) in done {
+        s.timeline.set_volume(i, v).map_err(edit_err)?;
+        out.push(json!({"track": i, "volume": v}));
+    }
+    Ok(json!({"tracks": out}))
+}
+
 /// The transition from the clip before into a clip, where they meet (or none).
 fn transition(s: &mut VideoSession, p: &Value) -> Result<Value> {
     use screengrabcraft_media::timeline::Blend;
@@ -877,6 +963,30 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: set_item,
     },
     VideoCommand {
+        id: "video.volumePoint",
+        label: "Volume Point",
+        params: r#"{"track": n, "at": µs, "level"?: 0..2, "point"?: n}: a point of a sound track's volume line at that moment (on one of its clips): how loud it is there (else what the line has there). With `point`, that point moved there. The line runs straight from point to point and stays with the sound through edits; its place among the points"#,
+        run: volume_point,
+    },
+    VideoCommand {
+        id: "video.removeVolumePoint",
+        label: "Remove Volume Point",
+        params: r#"{"track": n, "point": n} or {"track": n, "all": true}: none left, it's as loud all along"#,
+        run: remove_volume_point,
+    },
+    VideoCommand {
+        id: "video.ducking",
+        label: "Lower Under the Voice",
+        params: r#"{"on"?: bool, "level"?: 0..1}: the rest of the sound (the computer's, music and media) lowered to `level` while the microphone's voice is heard, coming back up after"#,
+        run: ducking,
+    },
+    VideoCommand {
+        id: "video.levels",
+        label: "Even Out Levels",
+        params: r#"{"track"?: n, "target"?: -40..-6 dB}: each sound track (or one) given the volume that makes what it plays as loud as the target (-20 dB of the full scale; as near as the volume goes); says each track's volume"#,
+        run: levels,
+    },
+    VideoCommand {
         id: "video.transition",
         label: "Transition",
         params: r#"{"track": n, "clip": n, "kind": "crossFade"|"dipBlack"|"wipeLeft"|"wipeRight"|"wipeUp"|"wipeDown"|"push"|"circle"|"none", "len"?: µs}: how the clip before turns into this one where they meet (0.1 to 5 s, across the cut; on a sound track a cross-fade)"#,
@@ -950,6 +1060,36 @@ mod tests {
 
     fn session() -> VideoSession {
         VideoSession::new(&recording())
+    }
+
+    #[test]
+    fn a_volume_line_lowering_under_the_voice_and_even_levels_are_edits_like_any() {
+        let mut s = session();
+        s.execute("video.volumePoint", &json!({"track": 1, "at": 1_000_000, "level": 0.25})).unwrap();
+        let v = s.execute("video.volumePoint", &json!({"track": 1, "at": 3_000_000, "level": 1.5})).unwrap();
+        assert_eq!(v["point"].as_u64(), Some(1));
+        assert_eq!(s.undo_label(), Some("Volume Point"));
+        assert!((s.timeline.tracks[1].level_at(2_000_000) - 0.875).abs() < 1e-6);
+        // Dragged, it moves; taken away, it's gone; the screen has none.
+        s.execute("video.volumePoint", &json!({"track": 1, "point": 0, "at": 500_000})).unwrap();
+        assert_eq!(s.timeline.tracks[1].points[0].at, 500_000);
+        assert!(s.execute("video.volumePoint", &json!({"track": 0, "at": 500_000})).is_err());
+        s.execute("video.removeVolumePoint", &json!({"track": 1, "point": 1})).unwrap();
+        assert_eq!(s.timeline.tracks[1].points.len(), 1);
+        // Lowered under the voice.
+        s.execute("video.ducking", &json!({"on": true, "level": 0.2})).unwrap();
+        assert!(s.timeline.ducking.on && (s.timeline.ducking.level - 0.2).abs() < 1e-6);
+        // Levels: not without a way to measure them; with one, the volume that reaches the target.
+        assert!(s.execute("video.levels", &json!({})).is_err());
+        s.set_measure(Box::new(|_, _| Some(-26.0)));
+        let v = s.execute("video.levels", &json!({})).unwrap();
+        assert_eq!(v["tracks"].as_array().map(Vec::len), Some(1));
+        assert!((s.timeline.tracks[1].volume - 2.0).abs() < 0.01, "-26 dB to -20 is twice as loud");
+        assert!(s.execute("video.levels", &json!({"track": 0})).is_err());
+        for _ in 0..7 {
+            s.execute("edit.undo", &json!({})).unwrap();
+        }
+        assert!(s.timeline.tracks[1].points.is_empty() && !s.timeline.ducking.on && s.timeline.tracks[1].volume == 1.0);
     }
 
     #[test]

@@ -653,6 +653,7 @@ mod tests {
                 clips: vec![Clip::new(0, 0, 10_000_000)],
                 name: None,
                 denoise: 0.0,
+                points: Vec::new(),
             }],
             camera: CameraLayout::default(),
             captions: CaptionOptions::default(),
@@ -662,6 +663,7 @@ mod tests {
             corrected: None,
             markers: Vec::new(),
             keys: Default::default(),
+            ducking: Default::default(),
         }
     }
 
