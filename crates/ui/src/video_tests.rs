@@ -1119,6 +1119,47 @@ fn the_recorded_pointer_shows_on_the_video_and_is_enlarged_or_hidden_from_its_pa
     assert!(h.query_by_label("Show the mouse pointer").is_none());
 }
 
+#[test]
+fn the_pointer_is_spotlit_magnified_highlighted_and_its_clicks_heard_from_its_panel() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Pointer.sgvideo".into(), path: None, bytes: recording_with_pointer() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 900.0)).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // At 1 s the pointer is at (80, 60) on the white screen.
+    h.state_mut().video.as_mut().unwrap().playhead = 1_000_000;
+    let frame = |h: &mut Harness<'_, Editor>| h.state_mut().video.as_mut().unwrap().frame_at(1_000_000);
+    let white = frame(&mut h);
+    assert_eq!(white.pixel(300, 170).unwrap(), Color::WHITE);
+    for label in ["Spotlight", "Magnifier", "Highlight", "Click sounds"] {
+        h.get_by_label(label).click();
+        h.run_steps(2);
+    }
+    let look = h.state().video.as_ref().unwrap().session.timeline.pointer;
+    assert!(look.spotlight && look.magnify && look.highlight && look.click_sound);
+    let lit = frame(&mut h);
+    assert!(lit.pixel(300, 170).unwrap().r < 150, "dimmed far from the pointer");
+    let near = lit.pixel(70, 60).unwrap();
+    assert!(near.b < near.r, "yellow under it: {near:?}");
+    shot(&mut h, "video-pointer-effects");
+    // The click at 2 s is heard.
+    let v = h.state().video.as_ref().unwrap();
+    let click = screengrabcraft_media::compose::mix(&v.rec, &v.session.timeline, 96_000, 1440);
+    assert!(click.iter().any(|s| s.abs() > 0.1));
+    // Four undo steps: as it was.
+    for _ in 0..4 {
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(1);
+    }
+    assert_eq!(frame(&mut h).pixel(300, 170).unwrap(), Color::WHITE);
+}
+
 // ---- the broadcast graphics ----
 
 #[test]

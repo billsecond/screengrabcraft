@@ -444,7 +444,11 @@ pub fn has_sound(timeline: &Timeline) -> bool {
         What::Media { id } => timeline.media.iter().any(|m| m.id == *id && m.kind != MediaKind::Picture),
         _ => false,
     });
-    tracks || layers
+    // The pointer's clicks heard, on the screen's clips.
+    let clicks = timeline.pointer.show
+        && timeline.pointer.click_sound
+        && timeline.tracks.iter().any(|t| t.kind == crate::recording::StreamKind::Screen && !t.muted && !t.clips.is_empty());
+    tracks || layers || clicks
 }
 
 /// [`export_with_captions`], with the media bin's pictures and sound for the layers' items.

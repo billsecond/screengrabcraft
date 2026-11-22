@@ -503,10 +503,47 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
             }
         }
     }
+    mix_clicks(&mut out, rec, timeline, first, count);
     for s in &mut out {
         *s = s.clamp(-1.0, 1.0);
     }
     out
+}
+
+/// The pointer's clicks heard (when its look says so), where the screen's clips play them: each
+/// click of the recording that a clip plays is heard where it is on the timeline.
+fn mix_clicks(out: &mut [f32], rec: &Recording, timeline: &Timeline, first: u64, count: usize) {
+    let look = timeline.pointer;
+    if !look.show || !look.click_sound || rec.pointer.clicks().is_empty() {
+        return;
+    }
+    let Some(track) = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i)).filter(|t| !t.muted) else { return };
+    let clicks = rec.pointer.clicks();
+    let end = first.saturating_add(count as u64);
+    let len = crate::pointer::CLICK_SOUND_LEN as u64;
+    for c in &track.clips {
+        // The clicks this clip plays, if it plays near the samples asked for.
+        let (at, clip_end) = (to_samples(c.at), to_samples(c.end()));
+        if clip_end.saturating_add(len) <= first || at >= end {
+            continue;
+        }
+        let (src_a, src_b) = (c.from, c.from.saturating_add(c.source_len()));
+        let from = clicks.partition_point(|k| k.t < src_a);
+        for k in clicks.iter().skip(from).take_while(|k| k.t < src_b).take(10_000) {
+            let start = to_samples(c.at.saturating_add(c.played(k.t - src_a)));
+            if start >= end || start.saturating_add(len) <= first {
+                continue;
+            }
+            for s in start.max(first)..start.saturating_add(len).min(end) {
+                let v = crate::pointer::click_sound((s - start) as usize);
+                let i = (s - first) as usize * 2;
+                if let Some(o) = out.get_mut(i..i + 2) {
+                    o[0] += v;
+                    o[1] += v;
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -586,6 +623,28 @@ mod tests {
         let tl = Timeline::new(&plain);
         assert!(plain.pointer.is_empty());
         let _ = Composer::new(plain, &tl, 64, 48).frame(&tl, 0);
+    }
+
+    #[test]
+    fn the_pointers_clicks_are_heard_where_the_edits_put_them() {
+        let r = rec_with_pointer();
+        let mut tl = Timeline::new(&r);
+        let loud = |tl: &Timeline, us: u64| mix(&r, tl, to_samples(us), 960).iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert_eq!(loud(&tl, 2_000_000), 0.0, "not unless asked");
+        tl.pointer.click_sound = true;
+        assert!(loud(&tl, 2_000_000) > 0.1);
+        assert_eq!(loud(&tl, 1_000_000), 0.0);
+        // The first second cut: heard at 1 s; then twice as fast: at half a second.
+        tl.cut(0, 1_000_000).unwrap();
+        assert!(loud(&tl, 1_000_000) > 0.1 && loud(&tl, 2_000_000) == 0.0);
+        tl.set_speed(0, 2_000_000, 200, None).unwrap();
+        assert!(loud(&tl, 500_000) > 0.1);
+        // The pointer or the screen hidden: none.
+        tl.pointer.show = false;
+        assert_eq!(loud(&tl, 500_000), 0.0);
+        tl.pointer.show = true;
+        tl.set_muted(0, true).unwrap();
+        assert_eq!(loud(&tl, 500_000), 0.0);
     }
 
     /// A screen 64 × 48 with its right half blue, the rest red, for 2 s.
