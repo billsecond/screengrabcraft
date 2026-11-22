@@ -121,9 +121,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Bring forward, send back | Has | |
 | **Group, align, flip annotations; select all of one kind** | Has | Edit menu and right-click: group (Ctrl+G), align, distribute, flip across or up and down, select all of the kinds selected; a group is selected, moved and turned as one |
 | **Rotate annotations** | Has | a round handle over a box or a group (Shift: 15° steps), or Rotate and Flip; lines, arrows and strokes turn by their points; blur, pixelate, spotlight and magnify stay square |
-| Snap to guides | Missing | |
+| **Snap to guides** | Has | View › Rulers and Guides: rulers along the top and the left, guides dragged out of them (moved by dragging, taken away on their ruler or from their right-click menu), Guides at the Middle, Clear Guides; what is moved snaps its edges and middle to the guides and the picture's edges and middle (View › Snap to Guides); guides last while the picture is open |
 | Spell check | Missing | |
-| Measure a distance | Missing | |
+| **Measure a distance** | Has | the Measure tool (I): a drag reads out the length, across, down and the angle; Keep This One on the Picture (or keep each) adds a dimension line with a bar at each end and its length on a label, grouped |
 | Picture grows when something is moved past its edge | Has | |
 | Canvas size and colour, see-through | Has | |
 | Zoom, pan, Hand tool | Has | |
@@ -291,6 +291,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. Polygons of points clicked one by one; bent lines; callouts with several tails.
 16. Gradient fills; themes of your own for the quick styles.
 17. Effect presets; the picture rotated by any angle.
+18. Rulers, guides and snapping; measuring a distance.
 
 **Still to build, in this order**
 
@@ -314,4 +315,4 @@ By how much someone using it every day would miss each one. Built ones move to a
 18. Print; batch changes; captures on a timer or at a set time.
 19. Cutting words from the transcript; filler words taken out.
 20. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
-    backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.
+    backwards, lining up by sound, see-through video, HDR, QR codes, spell check.

@@ -1629,7 +1629,10 @@ fn the_file_menu_has_room_between_its_items() {
 
 #[test]
 fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_another() {
-    let mut h = harness(editor());
+    // Where it is put exactly, not snapped to the picture's middle on the way.
+    let mut ed = editor();
+    ed.settings.no_snap = true;
+    let mut h = harness(ed);
     h.run_steps(2);
     h.state_mut().set_tool(Tool::Draw(Kind::Stamp));
     let p = at(&h, 150.0, 120.0);

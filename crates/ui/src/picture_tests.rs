@@ -215,3 +215,82 @@ fn the_picture_rotates_by_any_angle() {
     h.run_steps(4);
     shot(&mut h, "rotated");
 }
+
+/// View › Rulers and Guides: a guide dragged out of each ruler; a box moved near one snaps to it,
+/// not with snapping off; a guide dragged back onto its ruler goes.
+#[test]
+fn guides_come_out_of_the_rulers_and_moved_boxes_snap() {
+    use crate::guides::{Guide, LEFT_RULER, TOP_RULER};
+    let mut ed = editor();
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::WHITE).unwrap()));
+    let filled = Style { fill: Color::rgb(30, 90, 200), ..Kind::Rect.default_style() };
+    let id = ed.session.doc.add(Shape::Rect { rect: Rect::new(100.0, 100.0, 50.0, 50.0), radius: 0.0 }, filled).unwrap();
+    ed.settings.show_rulers = true;
+    let mut h = ready_tall(ed, Tool::Select);
+    let top = h.get_by_label(TOP_RULER).rect().center();
+    let to = at(&h, 250.0, 200.0);
+    crate::tests::drag(&mut h, egui::pos2(to.x, top.y), to);
+    let left = h.get_by_label(LEFT_RULER).rect().center();
+    let to = at(&h, 300.0, 120.0);
+    crate::tests::drag(&mut h, egui::pos2(left.x, to.y), to);
+    let guides = h.state().guides.clone();
+    assert_eq!(guides.len(), 2, "{guides:?}");
+    assert!(guides.first().is_some_and(|g| g.across && (g.at - 200.0).abs() <= 1.0), "{guides:?}");
+    assert!(guides.get(1).is_some_and(|g| !g.across && (g.at - 300.0).abs() <= 1.0), "{guides:?}");
+    // The box's bottom (its outline's outer edge) dragged to just above the guide across: it
+    // snaps onto it.
+    let line = h.state().guides.first().map(|g| g.at).unwrap();
+    let (a, b) = (at(&h, 125.0, 125.0), at(&h, 126.0, line - 29.0));
+    crate::tests::drag(&mut h, a, b);
+    let seen = h.state().session.doc.bounds_of(&[id]).unwrap();
+    assert!((seen.bottom() - line).abs() < 0.01, "its bottom on the guide: {seen:?}");
+    let r = h.state().session.doc.get(id).and_then(|o| o.shape.rect()).unwrap();
+    assert!((r.x - 101.0).abs() < 0.6, "across, nothing near: {r:?}");
+    shot(&mut h, "guides");
+    // Snapping off: it goes where it is put.
+    h.state_mut().settings.no_snap = true;
+    let (a, b) = (at(&h, 120.0, 170.0), at(&h, 120.0, 168.0));
+    crate::tests::drag(&mut h, a, b);
+    let moved = h.state().session.doc.bounds_of(&[id]).unwrap();
+    assert!((moved.bottom() - (line - 2.0)).abs() < 0.6, "{moved:?}");
+    // A guide dragged back onto its ruler goes.
+    let g = h.get_by_label_contains("Guide down at").rect().center();
+    crate::tests::drag(&mut h, g, egui::pos2(left.x, g.y));
+    assert_eq!(h.state().guides, vec![Guide { across: true, at: line }]);
+    // Guides at the middle, from the View menu; Clear Guides takes them all away.
+    click(&mut h, "View");
+    click(&mut h, "Guides at the Middle");
+    assert_eq!(h.state().guides.len(), 3);
+    click(&mut h, "View");
+    click(&mut h, "Clear Guides");
+    assert!(h.state().guides.is_empty());
+}
+
+/// The Measure tool (I): a drag measures, the panel reads it out, and it is kept on the picture
+/// as a grouped dimension line and label when asked, or every time.
+#[test]
+fn the_measure_tool_measures_a_distance() {
+    let mut h = ready_tall(editor(), Tool::Select);
+    h.key_press(egui::Key::I);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Measure);
+    let (a, b) = (at(&h, 40.0, 60.0), at(&h, 160.0, 60.0));
+    crate::tests::drag(&mut h, a, b);
+    let (from, to) = h.state().measured.unwrap();
+    assert!((from.distance(to) - 120.0).abs() < 1.0, "{from:?} {to:?}");
+    assert!(h.state().session.doc.objects.is_empty(), "not kept unless asked");
+    h.get_by_label("Length");
+    shot(&mut h, "measure");
+    click(&mut h, crate::props::KEEP_THIS);
+    let doc = &h.state().session.doc;
+    assert_eq!(doc.objects.len(), 2);
+    assert!(doc.objects.iter().all(|o| o.group.is_some()));
+    assert!(doc.objects.iter().any(|o| o.shape.text().is_some_and(|t| t.ends_with(" px"))));
+    // Kept every time.
+    click(&mut h, crate::props::KEEP_EACH);
+    assert!(h.state().settings.measure.keep);
+    let (a, b) = (at(&h, 40.0, 120.0), at(&h, 40.0, 220.0));
+    crate::tests::drag(&mut h, a, b);
+    assert_eq!(h.state().session.doc.objects.len(), 4);
+    shot(&mut h, "measure-kept");
+}

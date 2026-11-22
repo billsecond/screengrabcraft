@@ -158,6 +158,11 @@ pub enum Drag {
     Erase {
         points: Vec<Pt>,
     },
+    /// A distance being measured with the Measure tool.
+    Measure {
+        start: Pt,
+        now: Pt,
+    },
     /// The selection being turned by its handle: round `pivot`, from where the press was, the
     /// annotations as they were before.
     Rotate {
@@ -538,12 +543,19 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         ed.upload(&ctx);
         // The right button puts the eyedropper away rather than open the menu.
         let picking = crate::eyedropper::active(&ctx) || ed.edit_text.picking();
+        // Snapping is for a move under way.
+        if !matches!(ed.drag, Some(Drag::Move { .. })) {
+            ed.snap = None;
+            ed.snap_lines.clear();
+        }
         input(ed, ui, &resp);
         if !picking {
             context_menu(ed, &ctx, &resp);
         }
         crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
+        crate::guides::paint_snapped(ed, ui, rect);
+        crate::guides::show(ed, ui, rect);
         crate::edit_text::paint(ed, ui, resp.hover_pos());
         paint_polygon_draft(ed, ui, resp.hover_pos());
         text_editor(ed, ui);
@@ -645,6 +657,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         let on_picture = ed.session.doc.bounds().contains(to_img(h, &ed.view));
         let cursor = match ed.tool {
             Tool::Hand => CursorIcon::Grab,
+            Tool::Measure if on_picture => CursorIcon::Crosshair,
+            Tool::Measure => CursorIcon::Default,
             Tool::Select | Tool::Favorites => {
                 if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) {
                     CursorIcon::Move
@@ -780,6 +794,10 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 }
             }
             Tool::CutOut => ed.drag = Some(Drag::CutNew { start, now: start }),
+            Tool::Measure => {
+                ed.measured = None;
+                ed.drag = Some(Drag::Measure { start, now: start });
+            }
             // The Hand tool's press pans (above), so it never gets here.
             Tool::Hand => {}
             // A fill happens where the button went down; moving on before letting go is no drag.
@@ -880,15 +898,45 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.touch();
             }
             Some(Drag::Move { ids, last }) => {
+                // Snapping on: where they go is worked out from where they began and how far the
+                // pointer has gone, then their edges or middle put on a line within reach.
+                let step = now.sub(last);
+                let snapped = if ed.settings.no_snap {
+                    None
+                } else {
+                    let origin = ed.session.doc.bounds_of(&ids);
+                    let st = match (ed.snap, origin) {
+                        (Some(st), _) => Some(st),
+                        (None, Some(origin)) => Some(crate::guides::SnapState { origin, raw: Pt::ZERO, applied: Pt::ZERO }),
+                        (None, None) => None,
+                    };
+                    st.map(|mut st| {
+                        st.raw = st.raw.add(step);
+                        let (xs, ys) = crate::guides::lines(ed);
+                        let reach = crate::guides::SNAP / ed.view.scale().max(0.01);
+                        let (extra, lines) = crate::guides::snap(st.origin.translate(st.raw), &xs, &ys, reach);
+                        ed.snap_lines = lines;
+                        (st, st.raw.add(extra).sub(st.applied))
+                    })
+                };
                 // Free to go off the picture (within reach): it grows to hold them, see-through
                 // where it is new, as far as they go.
-                let d = ed.session.doc.limit_move_near(&ids, now.sub(last), screengrabcraft_model::document::MAX_GROW);
+                let want = snapped.map_or(step, |(_, d)| d);
+                let d = ed.session.doc.limit_move_near(&ids, want, screengrabcraft_model::document::MAX_GROW);
                 for id in &ids {
                     if let Some(o) = ed.session.doc.get_mut(*id) {
                         o.shape.translate(d);
                     }
                 }
-                let mut last = last.add(d);
+                // Snapping keeps count of the pointer itself; otherwise the pointer's hold on them does.
+                let mut last = match snapped {
+                    Some((mut st, _)) => {
+                        st.applied = st.applied.add(d);
+                        ed.snap = Some(st);
+                        now
+                    }
+                    None => last.add(d),
+                };
                 let (w, h) = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
                 if let Some(shift) = ed.session.doc.bounds_of(&ids).and_then(|area| ed.session.doc.grow_to(area)) {
                     last = last.add(shift);
@@ -961,6 +1009,11 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             }
             Some(Drag::Rubber { start, .. }) => ed.drag = Some(Drag::Rubber { start, now: inside }),
             Some(Drag::CutNew { start, .. }) => ed.drag = Some(Drag::CutNew { start, now: inside }),
+            Some(Drag::Measure { start, .. }) => {
+                // Shift keeps it level, upright or at a step of 15°.
+                let end = if shift { bounds.stop_at_edge(start, snap_angle(start, now)) } else { inside };
+                ed.drag = Some(Drag::Measure { start, now: end });
+            }
             Some(Drag::CropNew { start }) => {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.crop = Rect::from_points(start, end).intersect(bounds);
@@ -1049,6 +1102,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.commit()
             }
             Some(Drag::CutNew { start, now }) => cut_strip(ed, &ctx, start, now),
+            Some(Drag::Measure { start, now }) => {
+                if start.distance(now) >= 1.0 {
+                    ed.measured = Some((start, now));
+                    if ed.settings.measure.keep {
+                        keep_measurement(ed, &ctx);
+                    }
+                }
+            }
             Some(Drag::AreaFree { points }) => {
                 // Round too little to be an area: none.
                 if points.len() < 3 || ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
@@ -1116,6 +1177,43 @@ fn cut_strip(ed: &mut Editor, ctx: &egui::Context, start: Pt, now: Pt) {
 
 /// The Fill tool at an image point: a shape with an inside there takes the colour as its fill;
 /// anywhere else, the area of the picture round the pixel does.
+/// The last measurement kept on the picture: a dimension line and its length (the command
+/// `object.measure`), in the Measure tool's colour.
+pub(crate) fn keep_measurement(ed: &mut Editor, ctx: &egui::Context) {
+    let Some((a, b)) = ed.measured.take() else { return };
+    let colour = ed.settings.measure.color.to_hex();
+    ed.run(ctx, "object.measure", serde_json::json!({"from": {"x": a.x, "y": a.y}, "to": {"x": b.x, "y": b.y}, "color": colour}));
+    // The Measure tool stays in charge: the panel keeps reading out what is measured.
+    if ed.tool == Tool::Measure {
+        ed.session.select(Vec::new());
+    }
+}
+
+/// A measurement on the screen: the line, a bar at each end, and its length by the far end.
+fn paint_measurement(ed: &Editor, painter: &egui::Painter, a: Pt, b: Pt) {
+    let (sa, sb) = (ed.view.to_screen(a), ed.view.to_screen(b));
+    let ink = crate::to_color32(ed.settings.measure.color.with_alpha(255));
+    let d = sb - sa;
+    let n = if d.length() > 0.5 { vec2(-d.y, d.x).normalized() * 6.0 } else { vec2(0.0, 6.0) };
+    painter.line_segment([sa, sb], Stroke::new(3.5, Color32::from_black_alpha(120)));
+    painter.line_segment([sa, sb], Stroke::new(1.5, ink));
+    for e in [sa, sb] {
+        painter.line_segment([e - n, e + n], Stroke::new(1.5, ink));
+    }
+    let text = format!(
+        "{}  ({:.0} across, {:.0} down, {:.0}°)",
+        screengrabcraft_engine::measure::length_text(a, b),
+        (b.x - a.x).abs(),
+        (b.y - a.y).abs(),
+        screengrabcraft_engine::measure::angle(a, b)
+    );
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
+    let at = sb + vec2(12.0, 10.0);
+    let bg = egui::Rect::from_min_size(at, galley.size() + vec2(12.0, 6.0));
+    painter.rect_filled(bg, 4.0, Color32::from_black_alpha(180));
+    painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+}
+
 fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
     let fill = ed.settings.fill;
     let colour = fill.color.to_hex();
@@ -1400,6 +1498,8 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     match ed.tool {
         // A click takes nothing out: the strip is dragged across.
         Tool::Hand | Tool::CutOut => {}
+        // A click lets the last measurement go.
+        Tool::Measure => ed.measured = None,
         Tool::Select | Tool::Favorites | Tool::Crop => {
             if ed.tool == Tool::Crop {
                 return;
@@ -1652,6 +1752,16 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     // The eraser's stroke while it is drawn.
     if let Some(Drag::Erase { points }) = &ed.drag {
         crate::selection::paint_stroke(ed, &painter, points);
+    }
+
+    // Measure: the line being drawn, or the last one, with its length.
+    let measuring = match &ed.drag {
+        Some(Drag::Measure { start, now }) => Some((*start, *now)),
+        _ if ed.tool == Tool::Measure => ed.measured,
+        _ => None,
+    };
+    if let Some((a, b)) = measuring {
+        paint_measurement(ed, &painter, a, b);
     }
 
     // Cut Out: the strip being chosen, all the way across the picture, with its width.

@@ -1068,3 +1068,45 @@ fn polygons_of_points_bent_lines_and_callouts_with_several_tails() {
     s.select(vec![line]);
     assert!(s.execute("object.addTail", &json!({})).is_err());
 }
+
+/// A measurement is a dimension line and its length on a label, grouped, selected, one step.
+#[test]
+fn a_measurement_is_a_line_and_its_length_grouped() {
+    let mut s = session();
+    let out = s.execute("object.measure", &json!({"from": {"x": 20, "y": 60}, "to": {"x": 140, "y": 60}})).unwrap();
+    assert_eq!(out["text"], "120 px");
+    assert_eq!(out["length"].as_f64(), Some(120.0));
+    assert_eq!(s.doc.objects.len(), 2);
+    let (line, label) = (&s.doc.objects[0], &s.doc.objects[1]);
+    assert!(matches!(line.shape, Shape::Arrow { heads: screengrabcraft_model::ArrowHeads::Both, head: screengrabcraft_model::HeadShape::Bar, .. }));
+    assert_eq!(label.shape.text(), Some("120 px"));
+    assert!(line.group.is_some() && line.group == label.group, "grouped");
+    let b = label.shape.rect().unwrap();
+    assert!(b.bottom() < 60.0 && (b.center().x - 80.0).abs() < 1.0, "above the middle of the line: {b:?}");
+    assert_eq!(s.selected().len(), 2);
+    assert_eq!(s.undo_label(), Some("Measure"));
+    s.undo();
+    assert!(s.doc.objects.is_empty(), "one step");
+    for bad in [
+        json!({}),
+        json!({"from": {"x": 1, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 1, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": "far", "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 1e9, "y": 1}}),
+        json!({"from": {"x": 1, "y": 1}, "to": {"x": 50, "y": 1}, "color": "red"}),
+    ] {
+        let before = s.doc.clone();
+        assert!(s.execute("object.measure", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+}
+
+/// A measurement's label goes on the other side of its line when it would be off the picture.
+#[test]
+fn a_measurement_label_stays_on_the_picture() {
+    let mut s = session();
+    s.execute("object.measure", &json!({"from": {"x": 4, "y": 20}, "to": {"x": 4, "y": 90}})).unwrap();
+    let label = s.doc.objects.iter().find_map(|o| o.shape.text().and(o.shape.rect())).unwrap();
+    assert!(label.x > 4.0, "to the right of a line at the left edge: {label:?}");
+    assert!(s.doc.bounds().encloses(label));
+}

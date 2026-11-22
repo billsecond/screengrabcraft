@@ -17,6 +17,7 @@ pub mod editor;
 pub mod effects;
 pub mod eyedropper;
 pub mod grab_text;
+pub mod guides;
 pub mod icons;
 pub mod overlay;
 pub mod playback;

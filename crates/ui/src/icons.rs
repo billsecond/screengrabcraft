@@ -61,6 +61,8 @@ pub enum Icon {
     Marquee,
     /// The Cut Out tool: a picture in two parts, a strip taken out between their saw-toothed edges.
     CutOut,
+    /// The Measure tool: a ruler lying slantwise, its marks along one edge.
+    Measure,
     /// Put a window away (in the tray).
     Minimize,
     /// Start again: a circling arrow.
@@ -353,6 +355,14 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
                 ],
                 false,
             );
+        }
+        Icon::Measure => {
+            // The ruler, slantwise from the lower left to the upper right.
+            poly(vec![at(2.0, 14.0), at(14.0, 2.0), at(18.0, 6.0), at(6.0, 18.0), at(2.0, 14.0)], false);
+            for (i, len) in [(0.0f32, 2.5f32), (1.0, 1.5), (2.0, 2.5), (3.0, 1.5), (4.0, 2.5)] {
+                let (x, y) = (4.5 + i * 2.4, 11.5 - i * 2.4);
+                line(at(x, y), at(x + len * 0.7, y + len * 0.7));
+            }
         }
         Icon::Crop => {
             poly(vec![at(6.0, 2.0), at(6.0, 14.0), at(18.0, 14.0)], false);

@@ -499,6 +499,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             return;
         }
         (None, Tool::Favorites) => return,
+        (None, Tool::Measure) => {
+            measure_panel(ed, ui);
+            return;
+        }
     };
     let sel = ed.session.selected();
     let title = if sel.len() > 1 {
@@ -962,6 +966,63 @@ fn cut_out_panel(ed: &mut Editor, ui: &mut Ui) {
     }
     ui.add_space(12.0);
     crate::widgets::tips(ui, &[("Drag", "across the part to take out."), ("Undo", "puts it back (Ctrl+Z).")]);
+}
+
+/// What the Measure panel's switch and button are called.
+pub const KEEP_EACH: &str = "Keep each measurement on the picture";
+pub const KEEP_THIS: &str = "Keep This One on the Picture";
+
+/// The Measure tool's panel: how to use it, the last measurement, keeping it on the picture.
+fn measure_panel(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    ui.heading("Measure");
+    ui.label(
+        egui::RichText::new("Drag across the picture to measure a distance. Shift keeps the line level, upright or at 15° steps.")
+            .size(12.0)
+            .color(t.muted),
+    );
+    ui.add_space(8.0);
+    match ed.measured {
+        Some((a, b)) => {
+            let rows = [
+                ("Length", screengrabcraft_engine::measure::length_text(a, b)),
+                ("Across", format!("{:.0} px", (b.x - a.x).abs())),
+                ("Down", format!("{:.0} px", (b.y - a.y).abs())),
+                ("Angle", format!("{:.1}°", screengrabcraft_engine::measure::angle(a, b))),
+                ("From", format!("{:.0}, {:.0}", a.x, a.y)),
+                ("To", format!("{:.0}, {:.0}", b.x, b.y)),
+            ];
+            egui::Grid::new("measured").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                for (name, value) in rows {
+                    ui.label(egui::RichText::new(name).color(t.muted));
+                    ui.label(egui::RichText::new(value).strong());
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            if ui.button(KEEP_THIS).on_hover_text("A line with a bar at each end and its length, grouped, to move or delete").clicked() {
+                crate::canvas::keep_measurement(ed, &ctx);
+            }
+        }
+        None => {
+            ui.label(egui::RichText::new("Nothing measured yet.").color(t.muted));
+        }
+    }
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Tool properties").strong());
+    ui.add_space(4.0);
+    let mut m = ed.settings.measure;
+    ui.checkbox(&mut m.keep, KEEP_EACH).on_hover_text("Each line measured stays on the picture as an annotation; otherwise it shows until the next");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        colour_button(ui, "Measure colour", "Colour", &mut m.color, false, false);
+    });
+    if m != ed.settings.measure {
+        ed.settings.measure = m;
+        ed.services.save_settings(&ed.settings);
+    }
 }
 
 /// The Fill tool's own settings, under its colours: any other colour, and the tolerance.
