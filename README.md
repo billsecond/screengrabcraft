@@ -238,7 +238,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
-  drag and drop, zoom and pan, the strip of recent captures.
+  drag and drop, zoom and pan, the strip of recent captures. Right-click a capture there and Pin to
+  the Front keeps it first in the strip (remembered with its tags in `library.json`).
 - **All captures** (in the strip): every capture by day, with a search through names, tags,
   programs and window titles. A star makes a capture a favourite; its tag button (or a right click
   in the strip) gives it tags. Filters show only the favourites, the captures taken from one

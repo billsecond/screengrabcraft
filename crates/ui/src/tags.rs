@@ -1,7 +1,7 @@
 //! Tags and favourites on captures, and the program each was taken from: All captures filters by
 //! them (Favorites, a program, a tag) and searches them; a star on a capture makes it a favourite,
 //! its tag button lists its tags to change. The same are in the menu a right click on a capture in
-//! the strip opens.
+//! the strip opens, with Pin to the Front, which keeps it first in the strip.
 //!
 //! Every change is a library command (`library.*`), run on the host's library and on the editor's
 //! copy of it.
@@ -45,6 +45,14 @@ impl Editor {
         self.library_command(ctx, "library.favorite", json!({"path": path, "on": on}));
     }
 
+    /// Pins a capture at the front of the Recent strip, or lets it go back among the others.
+    pub fn toggle_pin(&mut self, ctx: &egui::Context, path: &str) {
+        let on = !self.library.get(path).pinned;
+        if self.library_command(ctx, "library.pin", json!({"path": path, "on": on})) {
+            self.toast(ctx, if on { "Pinned at the front of the strip" } else { "Unpinned" });
+        }
+    }
+
     /// Adds the tag being typed to the capture being tagged.
     fn add_typed_tag(&mut self, ctx: &egui::Context, path: &str) {
         let tag = std::mem::take(&mut self.new_tag);
@@ -67,7 +75,7 @@ pub fn tags_label(name: &str) -> String {
 /// A capture's tooltip: its name, then where it was taken from and its tags, if known.
 pub fn tooltip(ed: &Editor, item: &RecentItem) -> String {
     let info = ed.library.get(&item.path);
-    let mut lines = vec![item.name.clone()];
+    let mut lines = vec![if info.pinned { format!("{} (pinned)", item.name) } else { item.name.clone() }];
     match (info.program.is_empty(), info.title.is_empty()) {
         (false, false) if info.title != info.program => lines.push(format!("From {}: {}", info.program, info.title)),
         (false, _) => lines.push(format!("From {}", info.program)),
@@ -243,11 +251,30 @@ pub(crate) fn strip_star(ed: &Editor, ui: &Ui, thumb: egui::Rect, item: &RecentI
     }
 }
 
-/// The menu a right click on a capture in the strip opens: Favorites, and its tags (those of the
-/// other captures to tick, and a field for a new one).
+/// A pinned capture's pin in the top left corner of its thumbnail in the strip.
+pub(crate) fn strip_pin(ed: &Editor, ui: &Ui, thumb: egui::Rect, item: &RecentItem) {
+    if ed.library.captures.get(&item.path).is_some_and(|c| c.pinned) {
+        let t = Tokens::get(ui.ctx());
+        let r = egui::Rect::from_min_size(thumb.min + vec2(4.0, 4.0), vec2(20.0, 20.0));
+        ui.painter().circle_filled(r.center(), 10.0, t.accent);
+        icons::paint(ui.painter(), r.shrink(3.0), Icon::Pin, Color32::WHITE);
+    }
+}
+
+/// What a capture's pin item says.
+pub fn pin_label(on: bool) -> &'static str {
+    if on { "Unpin from the Front" } else { "Pin to the Front" }
+}
+
+/// The menu a right click on a capture in the strip opens: pinned at the front, Favorites, and
+/// its tags (those of the other captures to tick, and a field for a new one).
 pub(crate) fn menu(ed: &mut Editor, ui: &mut Ui, item: &RecentItem, items: &[RecentItem]) {
     let ctx = ui.ctx().clone();
     let info = ed.library.get(&item.path);
+    if ui.button(pin_label(info.pinned)).on_hover_text("Pinned captures stay first in the strip").clicked() {
+        ed.toggle_pin(&ctx, &item.path);
+        ui.close();
+    }
     if ui.button(if info.favorite { "Remove from Favorites" } else { "Add to Favorites" }).clicked() {
         ed.toggle_favorite(&ctx, &item.path);
         ui.close();

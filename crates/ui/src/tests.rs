@@ -2022,6 +2022,7 @@ fn library_disk() -> Disk {
         title: format!("{program} window"),
         tags: tags.iter().map(|t| t.to_string()).collect(),
         favorite,
+        ..CaptureInfo::default()
     };
     let mut s = disk.0.borrow_mut();
     s.library.set("captures/Capture 000.png", info("Notes", &[], true));
@@ -2123,6 +2124,43 @@ fn a_right_click_in_the_strip_makes_a_favourite_and_tags_it() {
     h.get_by_label("plans").click();
     h.run_steps(3);
     assert_eq!(disk.0.borrow().library.get(path).tags, ["plans"]);
+}
+
+/// The captures in the strip, left to right (each is named by its thumbnail).
+fn strip_order(h: &Harness<'_, Editor>) -> Vec<usize> {
+    let mut at: Vec<(f32, usize)> = (0..6).map(|i| (h.get_by_label(&format!("Capture {i:03}.png")).rect().min.x, i)).collect();
+    at.sort_by(|a, b| a.0.total_cmp(&b.0));
+    at.into_iter().map(|(_, i)| i).collect()
+}
+
+#[test]
+fn a_capture_pinned_in_the_strip_stays_first_and_is_remembered() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [0, 1, 2, 3, 4, 5]);
+    for name in ["Capture 004.png", "Capture 002.png"] {
+        let thumb = h.get_by_label(name).rect();
+        right_click(&mut h, thumb.center());
+        h.get_by_label("Pin to the Front").click();
+        h.run_steps(3);
+    }
+    assert!(disk.0.borrow().library.get("captures/Capture 004.png").pinned, "kept by the host");
+    // The pinned first (newest first among them, as the rest), then the others.
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    assert_eq!(h.state().toast_text(), Some("Pinned at the front of the strip"));
+    crate::quick_tests::shot(&mut h, "strip-pinned");
+    // Remembered: a new editor on the same captures has them first too.
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    assert_eq!(strip_order(&h), [2, 4, 0, 1, 3, 5]);
+    // Unpinned, it goes back among the others.
+    let thumb = h.get_by_label("Capture 004.png").rect();
+    right_click(&mut h, thumb.center());
+    h.get_by_label("Unpin from the Front").click();
+    h.run_steps(3);
+    assert!(!disk.0.borrow().library.get("captures/Capture 004.png").pinned);
+    assert_eq!(strip_order(&h), [2, 0, 1, 3, 4, 5]);
 }
 
 #[test]

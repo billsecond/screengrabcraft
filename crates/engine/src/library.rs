@@ -1,4 +1,4 @@
-//! The captures' library as commands: tags, favourites and where a capture was taken from
+//! The captures' library as commands: tags, favourites, pins and where a capture was taken from
 //! ([`screengrabcraft_model::Library`]). The editor's All captures and the capture service run
 //! them by id, like every other action; the host keeps the library's file.
 //!
@@ -27,6 +27,12 @@ pub const LIBRARY_COMMANDS: &[LibraryCommand] = &[
         label: "Favorite",
         params: r#"{"path": "…", "on"?: true} (without "on", it's turned the other way)"#,
         run: favorite,
+    },
+    LibraryCommand {
+        id: "library.pin",
+        label: "Pin",
+        params: r#"{"path": "…", "on"?: true}: kept at the front of the Recent strip (without "on", it's turned the other way)"#,
+        run: pin,
     },
     LibraryCommand {
         id: "library.source",
@@ -73,7 +79,7 @@ fn text(p: &Value, key: &str) -> Result<Option<String>> {
 /// What's known of the capture now, as the answer.
 fn answer(lib: &Library, path: &str) -> Value {
     let info = lib.get(path);
-    json!({"path": path, "tags": info.tags, "favorite": info.favorite, "program": info.program, "title": info.title})
+    json!({"path": path, "tags": info.tags, "favorite": info.favorite, "pinned": info.pinned, "program": info.program, "title": info.title})
 }
 
 fn change(lib: &mut Library, path: &str, f: impl FnOnce(&mut CaptureInfo)) -> Value {
@@ -104,13 +110,22 @@ fn untag(lib: &mut Library, p: &Value) -> Result<Value> {
     }))
 }
 
+/// `on`, if it's given.
+fn on(p: &Value) -> Result<Option<bool>> {
+    match p.get("on") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => Ok(Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?)),
+    }
+}
+
 fn favorite(lib: &mut Library, p: &Value) -> Result<Value> {
-    let path = path(p)?;
-    let on = match p.get("on") {
-        None | Some(Value::Null) => None,
-        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`on` must be true or false".to_string()))?),
-    };
+    let (path, on) = (path(p)?, on(p)?);
     Ok(change(lib, &path, |i| i.favorite = on.unwrap_or(!i.favorite)))
+}
+
+fn pin(lib: &mut Library, p: &Value) -> Result<Value> {
+    let (path, on) = (path(p)?, on(p)?);
+    Ok(change(lib, &path, |i| i.pinned = on.unwrap_or(!i.pinned)))
 }
 
 fn source(lib: &mut Library, p: &Value) -> Result<Value> {
@@ -150,6 +165,12 @@ mod tests {
         assert_eq!(run(&mut lib, "library.favorite", &json!({"path": p, "on": true})).unwrap()["favorite"], json!(true));
         run(&mut lib, "library.untag", &json!({"path": p, "tag": "RECEIPTS"})).unwrap();
         assert!(lib.get(p).tags.is_empty());
+        // Pinned, and back.
+        assert_eq!(run(&mut lib, "library.pin", &json!({"path": p})).unwrap()["pinned"], json!(true));
+        assert_eq!(run(&mut lib, "library.pin", &json!({"path": p, "on": true})).unwrap()["pinned"], json!(true));
+        assert!(lib.get(p).pinned);
+        run(&mut lib, "library.pin", &json!({"path": p})).unwrap();
+        assert!(!lib.get(p).pinned);
         run(&mut lib, "library.forget", &json!({"path": p})).unwrap();
         assert!(lib.captures.is_empty());
     }
