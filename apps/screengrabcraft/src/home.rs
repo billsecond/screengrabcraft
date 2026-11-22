@@ -277,6 +277,7 @@ fn capture_buttons(ui: &mut Ui, delay: &mut u32, shortcut: &dyn Fn(CaptureMode) 
     let pictures = [
         (CaptureMode::Region, Icon::Region, "Drag out an area, or click a window"),
         (CaptureMode::Adjust, Icon::Crop, "Drag out an area, then adjust it"),
+        (CaptureMode::Freehand, Icon::Freehand, "Draw round what to keep"),
         (CaptureMode::Window, Icon::Window, "Click a window"),
         (CaptureMode::Screen, Icon::Screen, "The screen under the pointer"),
         (CaptureMode::AllScreens, Icon::AllScreens, "Every monitor in one picture"),
@@ -663,7 +664,7 @@ fn presets_editor(ui: &mut Ui, presets: &mut Vec<CapturePreset>) -> Option<usize
                         ui.checkbox(&mut p.after.copy, "Copy it");
                         ui.checkbox(&mut p.after.open_editor, "Open it in the Image Editor");
                         ui.checkbox(&mut p.after.save, "Save it");
-                        if p.area.mode() == CaptureMode::Region || p.area.mode() == CaptureMode::Window {
+                        if matches!(p.area.mode(), CaptureMode::Region | CaptureMode::Window | CaptureMode::Freehand) {
                             ui.checkbox(&mut p.after.show_bar, "Stop first, with the bar");
                         }
                     });

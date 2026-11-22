@@ -104,6 +104,9 @@ pub enum Icon {
     Starred,
     /// Kept at the front: a pin.
     Pin,
+    /// A freehand area: an uneven loop drawn round something, in dashes, with the line it was
+    /// drawn with trailing off.
+    Freehand,
 }
 
 /// Where the pointer's tip is on an icon drawn as the pointer, on its 20-unit grid: the end of
@@ -604,6 +607,22 @@ pub fn paint(p: &Painter, rect: Rect, icon: Icon, color: Color32) {
             line(at(8.0, 9.4), at(8.0, 11.0));
             line(at(12.0, 9.4), at(12.0, 11.0));
             line(at(10.0, 11.0), at(10.0, 18.0));
+        }
+        Icon::Freehand => {
+            // An uneven loop, wider at the top right, in dashes; and its tail, solid.
+            let loop_at = |i: usize| {
+                let a = i as f32 / 18.0 * std::f32::consts::TAU;
+                let r = 6.2 + 1.3 * (a * 2.0 + 0.6).sin() + 0.7 * (a * 3.0).cos();
+                at(10.5 + a.cos() * r, 8.5 + a.sin() * r * 0.8)
+            };
+            let pts: Vec<Pos2> = (0..=18).map(loop_at).collect();
+            p.extend(Shape::dashed_line(&pts, stroke, 2.2 * u, 1.5 * u));
+            p.add(Shape::CubicBezier(CubicBezierShape::from_points_stroke(
+                [at(5.2, 13.6), at(3.0, 16.0), at(6.5, 18.5), at(4.0, 19.0)],
+                false,
+                Color32::TRANSPARENT,
+                stroke,
+            )));
         }
     }
 }

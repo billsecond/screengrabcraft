@@ -16,7 +16,8 @@ use screengrabcraft_desktop::{clipboard, cloak, graphics, instance, launch, path
 use screengrabcraft_model::{
     AfterCapture, CaptureMode, CapturePreset, IRect, ImageFormat, PresetArea, Raster, RecordArea, RecorderOptions, Settings,
 };
-use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
+use screengrabcraft_render::area::keep_inside;
+use screengrabcraft_ui::overlay::{Action, AreaShape, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
 use crate::hotkeys::{Registered, Target};
 use crate::record::{self, Recording};
@@ -722,6 +723,7 @@ impl Service {
                     CaptureMode::Scrolling => Purpose::Scrolling,
                     CaptureMode::Video => Purpose::Video,
                     CaptureMode::Production => production_purpose(&self.settings.recorder),
+                    CaptureMode::Freehand => Purpose::Freehand,
                     _ => fixed.map_or(Purpose::Picture, |(w, h)| Purpose::PictureFixed(w, h)),
                 };
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
@@ -773,7 +775,7 @@ impl Service {
     fn overlay_done(&mut self) {
         let Some(mut run) = self.overlay.take() else { return };
         run.opening.opened();
-        let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else {
+        let Outcome::Chosen { monitor, area, desktop, action, title, shape } = run.overlay.outcome().clone() else {
             self.preset = None;
             // Choosing the area for Video Production was cancelled: back to the Recorder, as it was.
             if run.mode == CaptureMode::Production {
@@ -801,15 +803,25 @@ impl Service {
                     return;
                 }
                 let pic = self.with_pointer(&pic, &m, (mon.picture.width(), mon.picture.height()), origin, run.pointer);
-                self.settings.last_region = Some(desktop);
-                store::save_settings(&self.settings);
+                // Several areas, or a freehand one: what's outside them is see-through. The last
+                // area (for Repeat and Adjust First) stays a box, so it's left as it was.
+                let (pic, source) = match &shape {
+                    Some(s) => {
+                        (keep_inside(&pic, &s.moved(-area.x, -area.y)), if matches!(s, AreaShape::Freehand(_)) { "Freehand" } else { "Areas" })
+                    }
+                    None => {
+                        self.settings.last_region = Some(desktop);
+                        store::save_settings(&self.settings);
+                        (pic, "Region")
+                    }
+                };
                 // A window clicked: the program it belongs to, for the captures' library.
                 let window = title
                     .as_ref()
                     .and_then(|t| run.programs.iter().find(|(shown, _)| shown == t))
                     .map(|(shown, app)| Window { program: app.clone(), title: shown.clone() });
                 // Kept on the next frame, when the frozen screen has gone.
-                self.chosen = Some((pic, title.unwrap_or_else(|| "Region".to_string()), action, window));
+                self.chosen = Some((pic, title.unwrap_or_else(|| source.to_string()), action, window));
                 self.ctx.request_repaint();
             }
         }

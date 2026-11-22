@@ -176,12 +176,15 @@ pub enum CaptureMode {
     Production,
     /// An area whose text is read and put on the clipboard (Grab Text).
     Text,
+    /// An area drawn round freehand: what's outside the outline is see-through.
+    Freehand,
 }
 
 impl CaptureMode {
-    pub const ALL: [CaptureMode; 11] = [
+    pub const ALL: [CaptureMode; 12] = [
         CaptureMode::Region,
         CaptureMode::Adjust,
+        CaptureMode::Freehand,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
@@ -206,6 +209,7 @@ impl CaptureMode {
             CaptureMode::Video => "Record Video",
             CaptureMode::Production => "Video Production",
             CaptureMode::Text => "Grab Text",
+            CaptureMode::Freehand => "Capture Freehand Area",
         }
     }
 
@@ -223,6 +227,7 @@ impl CaptureMode {
             CaptureMode::Video => "video",
             CaptureMode::Production => "production",
             CaptureMode::Text => "text",
+            CaptureMode::Freehand => "freehand",
         }
     }
 
@@ -231,7 +236,13 @@ impl CaptureMode {
     pub fn is_still(self) -> bool {
         matches!(
             self,
-            CaptureMode::Region | CaptureMode::Adjust | CaptureMode::Window | CaptureMode::Screen | CaptureMode::AllScreens | CaptureMode::Repeat
+            CaptureMode::Region
+                | CaptureMode::Adjust
+                | CaptureMode::Freehand
+                | CaptureMode::Window
+                | CaptureMode::Screen
+                | CaptureMode::AllScreens
+                | CaptureMode::Repeat
         )
     }
 
@@ -257,6 +268,8 @@ pub struct Hotkeys {
     pub production: Option<Hotkey>,
     /// Grab Text: none by default (Print Screen and its variants are taken; macOS has no reader yet).
     pub text: Option<Hotkey>,
+    /// An area drawn round freehand: none by default.
+    pub freehand: Option<Hotkey>,
     pub editor: Option<Hotkey>,
     /// While a recording runs (only then are they taken from other programs): pause it or go on,
     /// and stop it. F9 and F10, as screen recorders have them.
@@ -285,6 +298,7 @@ impl Hotkeys {
                 video: k("V"),
                 production: k("P"),
                 text: None,
+                freehand: None,
                 editor: k("E"),
                 // A Mac's top row is its media keys, so with Control and Shift there.
                 pause: k("F9"),
@@ -305,6 +319,7 @@ impl Hotkeys {
                 video: Some(Hotkey::new(true, true, true, false, "PrintScreen")),
                 production: None,
                 text: None,
+                freehand: None,
                 editor: None,
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
@@ -326,6 +341,7 @@ impl Hotkeys {
             CaptureMode::Video => self.video.as_ref(),
             CaptureMode::Production => self.production.as_ref(),
             CaptureMode::Text => self.text.as_ref(),
+            CaptureMode::Freehand => self.freehand.as_ref(),
         }
     }
 
@@ -357,6 +373,7 @@ impl Hotkeys {
             CaptureMode::Video => &mut self.video,
             CaptureMode::Production => &mut self.production,
             CaptureMode::Text => &mut self.text,
+            CaptureMode::Freehand => &mut self.freehand,
         };
         *slot = key;
     }
@@ -704,14 +721,17 @@ pub enum PresetArea {
     AllScreens,
     /// A long page joined into one picture.
     Scrolling,
+    /// An area drawn round freehand.
+    Freehand,
 }
 
 impl PresetArea {
     /// One of each kind, as the preset's list offers them.
-    pub const KINDS: [PresetArea; 7] = [
+    pub const KINDS: [PresetArea; 8] = [
         PresetArea::Region,
         PresetArea::Shape { w: 16, h: 9 },
         PresetArea::Fixed { w: 1280, h: 720 },
+        PresetArea::Freehand,
         PresetArea::Window,
         PresetArea::Screen,
         PresetArea::AllScreens,
@@ -726,6 +746,7 @@ impl PresetArea {
             PresetArea::Screen => CaptureMode::Screen,
             PresetArea::AllScreens => CaptureMode::AllScreens,
             PresetArea::Scrolling => CaptureMode::Scrolling,
+            PresetArea::Freehand => CaptureMode::Freehand,
         }
     }
 
@@ -739,6 +760,7 @@ impl PresetArea {
             PresetArea::Screen => "Full screen",
             PresetArea::AllScreens => "All screens",
             PresetArea::Scrolling => "Scrolling",
+            PresetArea::Freehand => "Freehand area",
         }
     }
 
@@ -1337,6 +1359,7 @@ mod tests {
                 CaptureMode::Region,
                 CaptureMode::Region,
                 CaptureMode::Region,
+                CaptureMode::Freehand,
                 CaptureMode::Window,
                 CaptureMode::Screen,
                 CaptureMode::AllScreens,
@@ -1373,7 +1396,15 @@ mod tests {
         let still: Vec<CaptureMode> = CaptureMode::ALL.into_iter().filter(|m| m.is_still()).collect();
         assert_eq!(
             still,
-            vec![CaptureMode::Region, CaptureMode::Adjust, CaptureMode::Window, CaptureMode::Screen, CaptureMode::AllScreens, CaptureMode::Repeat]
+            vec![
+                CaptureMode::Region,
+                CaptureMode::Adjust,
+                CaptureMode::Freehand,
+                CaptureMode::Window,
+                CaptureMode::Screen,
+                CaptureMode::AllScreens,
+                CaptureMode::Repeat
+            ]
         );
     }
 
