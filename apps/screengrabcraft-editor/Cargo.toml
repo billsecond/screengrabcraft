@@ -22,10 +22,18 @@ eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "
 egui = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
+# The window's place as eframe keeps it, written over with the last good one (`place.rs`); the
+# same `ron` eframe writes its file with.
+serde = { workspace = true }
+ron = "0.12"
 rfd = { workspace = true }
 pollster = { workspace = true }
 # Deleting a capture from the strip moves it to the Recycle Bin (the Trash), never for good.
 trash = "5.2"
+
+[dev-dependencies]
+# eframe's own reading of the window's place, to check that it reads back what's written.
+egui-winit = { version = "0.36", default-features = false, features = ["serde"] }
 
 [build-dependencies]
 # Icon + VERSIONINFO for the .exe; build.rs only uses it when the target is Windows.

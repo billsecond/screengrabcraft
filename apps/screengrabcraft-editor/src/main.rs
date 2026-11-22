@@ -23,6 +23,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod narration;
+mod place;
 mod services;
 mod video;
 
@@ -121,12 +122,19 @@ struct App {
     /// The window is being brought to the owner: its size is looked at once it's no longer
     /// minimized (frames left to look in).
     size_check: u8,
+    /// The last place the owner left the window in (shown, not minimized, its usual size or
+    /// bigger), written over eframe's whenever eframe writes the window's place (`place.rs`).
+    place: Option<place::Place>,
+    /// The window's place is kept in the settings folder (not with `SCREENGRABCRAFT_NO_PREFS`).
+    keep_place: bool,
 }
 
 /// The smallest the window is ever shown at for the owner, and the size given to one found
 /// smaller (points).
 const SHOWN_MIN: (f64, f64) = (760.0, 480.0);
 const SHOWN_USUAL: (f64, f64) = (1320.0, 860.0);
+/// The same, as the window's place is kept.
+const PLACE_MIN: (f32, f32) = (SHOWN_MIN.0 as f32, SHOWN_MIN.1 as f32);
 
 /// The size to give a window of `inner` (physical pixels, at `scale`) that's being shown, when
 /// it's smaller than the editor is ever shown at; None when it's fine. Windows can leave a window
@@ -222,6 +230,35 @@ impl App {
         }
     }
 
+    /// Notes where the window is while the owner can see it and it's a place they left it in, to
+    /// be kept instead of whatever eframe sees as it writes the window's place (minimized, out of
+    /// sight or squeezed, it would open next time as a sliver at the top left of the first screen).
+    fn note_place(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        if !self.keep_place || self.standby || self.aside.parked || self.cloaked || self.reveal || self.size_check > 0 {
+            return;
+        }
+        let Some(w) = frame.winit_window() else { return };
+        if w.is_visible() != Some(true) || w.is_minimized() == Some(true) {
+            return;
+        }
+        // As eframe measures it: the inside's size in points (pixels over the screen's scale and
+        // egui's zoom), the positions in pixels.
+        let scale = w.scale_factor() * f64::from(ctx.zoom_factor());
+        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let size = w.inner_size();
+        let at = |x: i32, y: i32| place::Xy { x: x as f32, y: y as f32 };
+        let here = place::Place {
+            inner_position_pixels: w.inner_position().ok().map(|p| at(p.x, p.y)),
+            outer_position_pixels: w.outer_position().ok().map(|p| at(p.x, p.y)),
+            fullscreen: w.fullscreen().is_some(),
+            maximized: w.is_maximized(),
+            inner_size_points: Some(place::Xy { x: (f64::from(size.width) / scale) as f32, y: (f64::from(size.height) / scale) as f32 }),
+        };
+        if here.is_good(PLACE_MIN) {
+            self.place = Some(here);
+        }
+    }
+
     /// The window was closed (and nothing is left unsaved): out of sight, with an empty picture.
     fn go_out_of_sight(&mut self, ctx: &egui::Context) {
         self.settings_file.save(&self.editor.settings);
@@ -241,6 +278,7 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
         self.check_size(ctx, frame);
+        self.note_place(ctx, frame);
         for args in self.guard.handed() {
             if let [word] = args.as_slice()
                 && word.starts_with("--")
@@ -361,6 +399,18 @@ impl eframe::App for App {
         self.guard.close();
     }
 
+    /// eframe has just put down the window's place as it is now, whatever that is; it's written
+    /// over with the last place the owner left it in, so that it never opens minimized, squeezed
+    /// or out of sight. With none seen yet (kept ready out of sight since it started, from a bad
+    /// place), nothing is kept: eframe then opens it at its usual size.
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        if !self.keep_place {
+            return;
+        }
+        let text = self.place.and_then(|p| p.write()).unwrap_or_else(|| "()".to_string());
+        storage.set_string(place::KEY, text);
+    }
+
     /// Only the window's place and size are kept, not egui's state (which holds, among other
     /// things, the undo history of text being typed).
     fn persist_egui_memory(&self) -> bool {
@@ -424,10 +474,17 @@ fn main() -> std::process::ExitCode {
     // The window opens where it was left: the same place (and so the same monitor), the same
     // size, maximized or not. eframe keeps that (and nothing else, see `persist_egui_memory`) in
     // the settings folder, and brings a window whose monitor is gone back onto one that's there.
-    match paths::ensure_settings_dir().filter(|_| !paths::no_prefs()) {
-        Some(dir) => options.persistence_path = Some(dir.join(if video { VIDEO_WINDOW_FILE } else { WINDOW_FILE })),
-        None => options.persist_window = false,
-    }
+    // Only ever a place the owner left it in is kept (see `place.rs`).
+    let keep_place = match paths::ensure_settings_dir().filter(|_| !paths::no_prefs()) {
+        Some(dir) => {
+            options.persistence_path = Some(dir.join(if video { VIDEO_WINDOW_FILE } else { WINDOW_FILE }));
+            true
+        }
+        None => {
+            options.persist_window = false;
+            false
+        }
+    };
     screengrabcraft_desktop::graphics::configure(&mut options, eframe::wgpu::Backends::from_env());
     log::info!("start: graphics chosen after {} ms", started.elapsed().as_millis());
     let result = eframe::run_native(
@@ -461,6 +518,13 @@ fn main() -> std::process::ExitCode {
             if standby {
                 log::info!("kept ready out of sight for the next capture");
             }
+            // Where the window was left, if that's a place to open it in; the window was opened
+            // there (or, from a bad place, eframe put it on the first screen, squeezed).
+            let place = if keep_place { cc.storage.and_then(|s| s.get_string(place::KEY)).and_then(|t| place::Place::read(&t)) } else { None };
+            let place = place.filter(|p| p.is_good(PLACE_MIN));
+            if keep_place && place.is_none() {
+                log::info!("start: no good place kept for the window");
+            }
             Ok(Box::new(App {
                 editor,
                 guard,
@@ -472,7 +536,12 @@ fn main() -> std::process::ExitCode {
                 standby,
                 warm: false,
                 started: Some(started),
-                size_check: 0,
+                // Opened for the owner: its size is looked at at once, so that a window opened
+                // from a bad place (minimized or squeezed when it was last kept) is never left a
+                // sliver at the top left of the first screen.
+                size_check: if standby { 0 } else { 5 },
+                place,
+                keep_place,
             }))
         }),
     );
