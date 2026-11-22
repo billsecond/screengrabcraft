@@ -138,16 +138,16 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Border, drop shadow, round corners | Has | |
 | Torn edge | Has | |
-| Other edges: wavy, faded, bevelled | Missing | |
+| **Other edges: wavy, faded, bevelled** | Has | beside the torn edge; each on the sides chosen |
 | Brightness and contrast | Has | |
-| Hue, saturation, gamma | Missing | |
+| **Hue, saturation, gamma** | Has | with lightness, in one effect |
 | Greyscale, invert | Has | |
-| Sepia, sharpen, blur all | Missing | |
+| **Sepia, sharpen, blur all** | Has | |
 | Colour replaced by another | Part | by see-through only |
-| Perspective, page curl, reflection | Missing | |
-| Watermark (a picture or words) | Missing | |
-| Capture details written on the picture (time, program) | Missing | |
-| Effects on a selected area only | Missing | |
+| **Perspective, page curl, reflection** | Has | the annotations move with a tilt; a page curl at any corner |
+| **Watermark (a picture or words)** | Has | in a corner, the middle or all over, turned; over the picture, or under its words and lines |
+| **Capture details written on the picture (time, program)** | Part | the time (from the capture's file), what it is of and its size, in a corner or on a strip below; captures don't record the program yet, so its name is typed |
+| **Effects on a selected area only** | Has | the colour changes, sharpen and blur keep to the area selected on the picture |
 | Effects added at capture time | Missing | |
 
 ## Pictures: changing, keeping, sharing
@@ -280,6 +280,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 5. Polygons, triangles and stars; curved arrows and more head shapes.
 6. A stamp library with search, faces, and pictures of your own as stamps.
 7. Any font on the computer.
+8. More effects: hue, saturation and gamma, sepia, sharpen, blur, wavy and faded edges, a bevel,
+   perspective, a page curl, a reflection, a watermark, capture details; on a selected area.
 
 **Still to build, in this order**
 
@@ -293,20 +295,18 @@ By how much someone using it every day would miss each one. Built ones move to a
 8. Hold a frame.
 9. Keys pressed shown in the video.
 10. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-11. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
-    curl, reflection, watermark, capture details.
-12. Rotate, group and align annotations; select all of one kind.
-13. Magic wand, eraser, ellipse and freehand selections.
-14. Camera background removed, or a colour removed.
-15. Transitions between clips; keyframe animation.
-16. Drawing on the screen while recording.
-17. Volume along a clip; music lowered under the voice; levels evened out.
-18. Tags, favourites, and captures sorted by program.
-19. Templates; several pictures combined into one.
-20. A picture per click made into a how-to guide.
-21. Groups, pushing later clips along, locked and solo tracks, clip colours.
-22. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-23. Print; batch changes; captures on a timer or at a set time.
-24. Cutting words from the transcript; filler words taken out.
-25. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+11. Rotate, group and align annotations; select all of one kind.
+12. Magic wand, eraser, ellipse and freehand selections.
+13. Camera background removed, or a colour removed.
+14. Transitions between clips; keyframe animation.
+15. Drawing on the screen while recording.
+16. Volume along a clip; music lowered under the voice; levels evened out.
+17. Tags, favourites, and captures sorted by program.
+18. Templates; several pictures combined into one.
+19. A picture per click made into a how-to guide.
+20. Groups, pushing later clips along, locked and solo tracks, clip colours.
+21. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+22. Print; batch changes; captures on a timer or at a set time.
+23. Cutting words from the transcript; filler words taken out.
+24. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

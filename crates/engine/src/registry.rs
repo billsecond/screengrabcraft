@@ -10,6 +10,7 @@ use screengrabcraft_render::effects;
 use screengrabcraft_render::matte::{self, Region};
 use serde_json::{Value, json};
 
+use crate::fx;
 use crate::session::Session;
 use crate::{EngineError, Result};
 
@@ -230,20 +231,109 @@ pub static COMMANDS: &[CommandSpec] = &[
         torn
     ),
     cmd!("effect.roundCorners", "Round Corners", "Effects", None, r#"{"radius"?: 16}"#, always, round),
-    cmd!("effect.grayscale", "Grayscale", "Effects", None, "{}", always, |s, _| {
-        s.doc.base = effects::grayscale(&s.doc.base);
-        Ok(Value::Null)
-    }),
-    cmd!("effect.invert", "Invert Colors", "Effects", None, "{}", always, |s, _| {
-        s.doc.base = effects::invert(&s.doc.base);
-        Ok(Value::Null)
-    }),
-    cmd!("effect.brightness", "Brightness and Contrast", "Effects", None, r#"{"brightness"?: 0, "contrast"?: 0} (-100 to 100)"#, always, |s, p| {
-        let b = num(p, "brightness").unwrap_or(0.0);
-        let c = num(p, "contrast").unwrap_or(0.0);
-        s.doc.base = effects::brightness_contrast(&s.doc.base, b, c);
-        Ok(Value::Null)
-    }),
+    cmd!(
+        "effect.wavyEdge",
+        "Wavy Edge",
+        "Effects",
+        None,
+        r#"{"top"?: false, "right"?: false, "bottom"?: true, "left"?: false, "depth"?: 10 (2 to 100), "length"?: 40 (8 to 400, from crest to crest)}"#,
+        always,
+        fx::wavy
+    ),
+    cmd!(
+        "effect.fadedEdge",
+        "Faded Edge",
+        "Effects",
+        None,
+        r#"{"top"?: true, "right"?: true, "bottom"?: true, "left"?: true, "width"?: 30 (2 to 400)} — the picture fades away to see-through at those sides"#,
+        always,
+        fx::faded
+    ),
+    cmd!(
+        "effect.bevel",
+        "Bevel",
+        "Effects",
+        None,
+        r#"{"width"?: 8 (1 to 100), "strength"?: 50 (0 to 100)} — a raised edge, lit from the top left"#,
+        always,
+        fx::bevel
+    ),
+    cmd!(
+        "effect.perspective",
+        "Perspective",
+        "Effects",
+        None,
+        r#"{"horizontal"?: 30, "vertical"?: 0} (-100 to 100) — tilts the picture away: the right side (the left below nought), the bottom (the top); the annotations move with it"#,
+        always,
+        fx::perspective
+    ),
+    cmd!(
+        "effect.pageCurl",
+        "Page Curl",
+        "Effects",
+        None,
+        r#"{"corner"?: "bottomRight"|"bottomLeft"|"topRight"|"topLeft", "size"?: 20 (5 to 60, hundredths of the shorter side)}"#,
+        always,
+        fx::page_curl
+    ),
+    cmd!(
+        "effect.reflection",
+        "Reflection",
+        "Effects",
+        None,
+        r#"{"height"?: 35 (5 to 100, hundredths of the picture's height), "opacity"?: 40 (0 to 100), "gap"?: 0 (0 to 200 px)} — the picture grows downwards to hold it"#,
+        always,
+        fx::reflection
+    ),
+    cmd!("effect.grayscale", "Grayscale", "Effects", None, r#"{"area"?: {"x", "y", "w", "h"}} (default: all of the picture)"#, always, fx::grayscale),
+    cmd!("effect.invert", "Invert Colors", "Effects", None, r#"{"area"?: {"x", "y", "w", "h"}}"#, always, fx::invert),
+    cmd!("effect.sepia", "Sepia", "Effects", None, r#"{"amount"?: 100 (0 to 100), "area"?: {"x", "y", "w", "h"}}"#, always, fx::sepia),
+    cmd!(
+        "effect.brightness",
+        "Brightness and Contrast",
+        "Effects",
+        None,
+        r#"{"brightness"?: 0, "contrast"?: 0 (-100 to 100), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::brightness
+    ),
+    cmd!(
+        "effect.hueSaturation",
+        "Hue, Saturation and Gamma",
+        "Effects",
+        None,
+        r#"{"hue"?: 0 (-180 to 180 degrees round the colour wheel), "saturation"?: 0, "lightness"?: 0 (-100 to 100), "gamma"?: 1 (0.2 to 5; above 1 lightens the mid-tones), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::hue_saturation
+    ),
+    cmd!(
+        "effect.sharpen",
+        "Sharpen",
+        "Effects",
+        None,
+        r#"{"amount"?: 60 (0 to 300), "radius"?: 1.5 (0.5 to 10 px), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::sharpen
+    ),
+    cmd!("effect.blur", "Blur", "Effects", None, r#"{"radius"?: 4 (0.5 to 100 px), "area"?: {"x", "y", "w", "h"}}"#, always, fx::blur),
+    cmd!(
+        "effect.watermark",
+        "Watermark",
+        "Effects",
+        None,
+        r##"{"text"?: "…" or "picture"?: 0 (a picture the host lent: the editor's chosen one, the command line's --picture), "place"?: "center"|"tiled"|"topLeft"|"top"|"topRight"|"left"|"right"|"bottomLeft"|"bottom"|"bottomRight", "size"?: 30 (2 to 100, hundredths of the picture's width), "angle"?: 0 (-90 to 90), "opacity"?: 30 (0 to 100), "under"?: false (under: on the plain parts only, never over words and lines), "color"?: "#FFFFFF", "bold"?: true, "font"?: "a font on the computer"}"##,
+        always,
+        fx::watermark
+    ),
+    cmd!(
+        "effect.captureDetails",
+        "Capture Details",
+        "Effects",
+        None,
+        r##"{"time"?: true|false|"…", "program"?: true|false|"…", "size"?: true, "place"?: "bottomRight"|"bottomLeft"|"topRight"|"topLeft"|"below", "fontSize"?: 14, "color"?: "#FFFFFF", "background"?: "#000000A0"} — writes when it was captured, what of, and its size on it (true: as the document knows them; text: written as given); "below" adds a strip under the picture → {"text"}"##,
+        always,
+        fx::capture_details
+    ),
     CommandSpec {
         id: "doc.info",
         label: "Document Information",
@@ -271,7 +361,7 @@ pub fn find(id: &str) -> Option<&'static CommandSpec> {
 
 // ---- parameters ----
 
-fn num(p: &Value, key: &str) -> Option<f32> {
+pub(crate) fn num(p: &Value, key: &str) -> Option<f32> {
     p.get(key).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite())
 }
 
@@ -289,11 +379,11 @@ fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
     }
 }
 
-fn boolean(p: &Value, key: &str, default: bool) -> bool {
+pub(crate) fn boolean(p: &Value, key: &str, default: bool) -> bool {
     p.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
+pub(crate) fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::String(s)) => Color::from_hex(s).ok_or_else(|| EngineError::Params(format!("`{key}` must be a colour like #RRGGBB"))),
