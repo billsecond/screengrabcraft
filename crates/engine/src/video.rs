@@ -46,6 +46,9 @@ pub struct VideoSession {
     listen: Option<Listen>,
     /// The recording's clicks (its own time, shares of the screen): what zooms follow.
     clicks: Vec<screengrabcraft_media::zoom::ClickAt>,
+    /// Where the recording's pointer was while it showed (its own time, the screen's pixels), a
+    /// sample every 30 ms or so: what a redrawn path of it starts from.
+    way: Vec<(u64, f32, f32)>,
     /// How wide the video is for its height (its screen's, else its camera's; 16:9 without).
     aspect: f32,
 }
@@ -103,6 +106,12 @@ impl VideoSession {
                 rec.pointer.clicks().iter().take(100_000).map(|c| screengrabcraft_media::zoom::ClickAt { t: c.t, x: c.x / w, y: c.y / h }).collect()
             })
             .unwrap_or_default();
+        let mut way: Vec<(u64, f32, f32)> = Vec::new();
+        for p in rec.pointer.samples().iter().filter(|p| p.flags & screengrabcraft_media::pointer::SHOWING != 0) {
+            if way.last().is_none_or(|l| p.t >= l.0.saturating_add(30_000)) && way.len() < 400_000 {
+                way.push((p.t, p.x, p.y));
+            }
+        }
         let aspect = screen
             .or_else(|| picture(screengrabcraft_media::recording::StreamKind::Camera))
             .map(|s| s.width as f32 / s.height as f32)
@@ -120,6 +129,7 @@ impl VideoSession {
             measure: None,
             listen: None,
             clicks,
+            way,
             aspect,
         }
     }
@@ -599,6 +609,10 @@ fn pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
     look.click_sound = click_sound.unwrap_or(look.click_sound);
     look.size = size.unwrap_or(look.size);
     look.smooth = smooth.unwrap_or(look.smooth);
+    if let Some(v) = p.get("kind") {
+        look.kind =
+            serde_json::from_value(v.clone()).map_err(|_| EngineError::Params("`kind` is recorded, arrow, dark, hand, dot or ring".to_string()))?;
+    }
     s.timeline.pointer = look.checked();
     Ok(json!({}))
 }
@@ -1056,6 +1070,72 @@ fn show_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
         return Ok(json!({}));
     }
     s.timeline.show_pointer(int(p, "from")?, int(p, "to")?).map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// The pointer's way over a stretch made a path through points, to be moved.
+fn redraw_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if s.way.is_empty() {
+        return Err(EngineError::Params("this recording kept no pointer".to_string()));
+    }
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    // One every half second by default, the ends too.
+    let points = if p.get("points").is_some() {
+        int(p, "points")?.min(64) as usize
+    } else {
+        ((to.saturating_sub(from) / 500_000).min(64) as usize).saturating_add(1)
+    };
+    let way = &s.way;
+    let at = |t: u64| -> Option<(f32, f32)> {
+        // Where it was then: on the line between the samples either side.
+        let i = way.partition_point(|w| w.0 <= t);
+        let a = way.get(i.checked_sub(1)?)?;
+        let Some(b) = way.get(i) else { return Some((a.1, a.2)) };
+        let f = (t - a.0) as f32 / b.0.saturating_sub(a.0).max(1) as f32;
+        Some((a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f))
+    };
+    let n = s.timeline.redraw_pointer(from, to, points, at).map_err(edit_err)?;
+    Ok(json!({"path": n}))
+}
+
+/// The redrawn path of the pointer that `path` names.
+fn pointer_path<'a>(s: &'a mut VideoSession, p: &Value) -> Result<&'a mut screengrabcraft_media::pointer::Path> {
+    let n = int(p, "path")? as usize;
+    s.timeline.pointer_paths.get_mut(n).ok_or_else(|| EngineError::Params("there's no such redrawn path of the pointer".to_string()))
+}
+
+/// A point of the pointer's redrawn path moved.
+fn pointer_point(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (x, y) = (number(p, "x")?, number(p, "y")?);
+    let (Some(x), Some(y)) = (x, y) else { return Err(EngineError::Params("`x` and `y` say where it goes".to_string())) };
+    let k = int(p, "point")? as usize;
+    let path = pointer_path(s, p)?;
+    let q = path.points.get_mut(k).ok_or_else(|| EngineError::Params("there's no such point on that path".to_string()))?;
+    (q.x, q.y) = (x.clamp(-1.0e6, 1.0e6), y.clamp(-1.0e6, 1.0e6));
+    Ok(json!({}))
+}
+
+/// The pointer's redrawn path made straight, from its first point to its last.
+fn straighten_pointer(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let path = pointer_path(s, p)?;
+    if path.points.len() > 2 {
+        let (Some(a), Some(b)) = (path.points.first().copied(), path.points.last().copied()) else { return Ok(json!({})) };
+        path.points = vec![a, b];
+    }
+    Ok(json!({}))
+}
+
+/// A redrawn path of the pointer taken away, or (none named) every one.
+fn pointer_as_recorded(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    if p.get("path").is_none() {
+        s.timeline.pointer_paths.clear();
+        return Ok(json!({}));
+    }
+    let n = int(p, "path")? as usize;
+    if n >= s.timeline.pointer_paths.len() {
+        return Err(EngineError::Params("there's no such redrawn path of the pointer".to_string()));
+    }
+    s.timeline.pointer_paths.remove(n);
     Ok(json!({}))
 }
 
@@ -1596,6 +1676,30 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: show_pointer,
     },
     VideoCommand {
+        id: "video.redrawPointer",
+        label: "Edit the Pointer's Path",
+        params: r#"{"from": µs, "to": µs, "points"?: 2..64}: the pointer's way over that stretch of the timeline (to the end of the screen's clip there at most) made a path through points, by default one every half second, each where it was then, to be moved with `video.pointerPoint`; a path there before is replaced. Gives {"path": n}. It stays with what the screen showed there through later edits"#,
+        run: redraw_pointer,
+    },
+    VideoCommand {
+        id: "video.pointerPoint",
+        label: "Move the Pointer",
+        params: r#"{"path": n, "point": n, "x": px, "y": px}: a point of the pointer's redrawn path moved (the screen's own pixels); it goes through it on a smooth curve"#,
+        run: pointer_point,
+    },
+    VideoCommand {
+        id: "video.straightenPointer",
+        label: "Straighten the Pointer's Path",
+        params: r#"{"path": n}: the pointer's redrawn path made straight: from its first point to its last, its points between gone"#,
+        run: straighten_pointer,
+    },
+    VideoCommand {
+        id: "video.pointerAsRecorded",
+        label: "Pointer as Recorded",
+        params: r#"{"path"?: n}: that redrawn path taken away (the pointer goes as recorded there), or with none, every one"#,
+        run: pointer_as_recorded,
+    },
+    VideoCommand {
         id: "video.screenFrame",
         label: "Screen Frame",
         params: r##"{"size"?: 0.5..1 of the video, "background"?: "#rrggbb", "radius"?: 0..0.2 of its shorter side, "border"?: 0..0.05 of its width, "borderColour"?: "#rrggbb", "shadow"?: bool, "device"?: "none"|"laptop"|"phone"|"browser"}: the recording's own screen made smaller on a background colour, its corners rounded, a border round it, a soft shadow under it, a device drawn round it (the screen made small enough for it to fit)"##,
@@ -1733,7 +1837,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.pointer",
         label: "Pointer",
-        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool, "highlight"?: bool, "spotlight"?: bool, "magnify"?: bool, "clickSound"?: bool}: the mouse pointer on the video: rings at its clicks, a yellow disc under it, the picture dimmed but round it, a lens showing what's round it twice as large, a click heard at each click"#,
+        params: r#"{"show"?: bool, "size"?: 0.5..4, "smooth"?: 0..1, "clicks"?: bool, "highlight"?: bool, "spotlight"?: bool, "magnify"?: bool, "clickSound"?: bool, "kind"?: "recorded"|"arrow"|"dark"|"hand"|"dot"|"ring"}: the mouse pointer on the video: rings at its clicks, a yellow disc under it, the picture dimmed but round it, a lens showing what's round it twice as large, a click heard at each click; the recorded pointer, or one of another look drawn in its place (a white or black arrow, a hand, a dot, a ring)"#,
         run: pointer,
     },
     VideoCommand {
@@ -2757,6 +2861,46 @@ mod layer_tests {
             w.pointer(&Sample { t, x, y, flags, shape: 1 }).unwrap();
         }
         VideoSession::new(&Recording::open(Box::new(w.finish(20_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn the_pointer_takes_another_look_and_its_path_is_redrawn_through_points() {
+        use screengrabcraft_media::pointer::Kind;
+        let mut s = clicking();
+        s.execute("video.pointer", &json!({"kind": "hand"})).unwrap();
+        assert_eq!(s.timeline.pointer.kind, Kind::Hand);
+        assert!(s.execute("video.pointer", &json!({"kind": "paw"})).is_err());
+        assert_eq!(s.timeline.pointer.kind, Kind::Hand, "unchanged by junk");
+        // From 2 s to 6 s: a point every half second, where it was (the top left).
+        let made = s.execute("video.redrawPointer", &json!({"from": 2_000_000, "to": 6_000_000})).unwrap();
+        assert_eq!(s.undo_label(), Some("Edit the Pointer's Path"));
+        let n = made["path"].as_u64().unwrap() as usize;
+        let path = s.timeline.pointer_paths[n].clone();
+        assert_eq!((path.from, path.to, path.points.len()), (2_000_000, 6_000_000, 9));
+        assert!(path.points.iter().all(|q| q.x == 32.0 && q.y == 18.0));
+        // A point moved; then straightened, ends kept; then as recorded again.
+        s.execute("video.pointerPoint", &json!({"path": n, "point": 4, "x": 90, "y": 60})).unwrap();
+        assert_eq!((s.timeline.pointer_paths[n].points[4].x, s.timeline.pointer_paths[n].points[4].y), (90.0, 60.0));
+        // A cut before it: it stays with what the screen showed.
+        s.execute("video.cut", &json!({"from": 0, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.pointer_paths_on_timeline(), vec![(n, 1_000_000, 5_000_000)]);
+        s.execute("video.straightenPointer", &json!({"path": n})).unwrap();
+        assert_eq!(s.timeline.pointer_paths[n].points.len(), 2);
+        for bad in [
+            json!({"path": n, "point": 99, "x": 1, "y": 1}),
+            json!({"path": 9, "point": 0, "x": 1, "y": 1}),
+            json!({"path": n, "point": 0, "x": "left", "y": 1}),
+            json!({"path": n, "point": 0}),
+        ] {
+            assert!(s.execute("video.pointerPoint", &bad).is_err(), "{bad}");
+        }
+        assert!(s.execute("video.redrawPointer", &json!({"from": 5, "to": 5})).is_err());
+        assert!(s.execute("video.redrawPointer", &json!({"from": 90_000_000, "to": 99_000_000})).is_err());
+        s.execute("video.pointerAsRecorded", &json!({"path": n})).unwrap();
+        assert!(s.timeline.pointer_paths.is_empty());
+        assert!(s.execute("video.pointerAsRecorded", &json!({"path": 0})).is_err());
+        // A recording without a pointer has nothing to redraw.
+        assert!(session().execute("video.redrawPointer", &json!({"from": 0, "to": 1_000_000})).is_err());
     }
 
     #[test]

@@ -72,6 +72,11 @@ pub enum CanvasDrag {
         item: u32,
         corner: usize,
     },
+    /// A point of the pointer's redrawn path.
+    PointerPoint {
+        path: usize,
+        point: usize,
+    },
 }
 
 /// A card's picture is drawn on a video this large (16:9), then made a third as large: the card
@@ -184,6 +189,7 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         frame: Default::default(),
         motion_blur: Default::default(),
         pointer_hidden: Vec::new(),
+        pointer_paths: Vec::new(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
@@ -1296,6 +1302,35 @@ impl VideoView {
         Some((curve, points))
     }
 
+    /// The pointer's redrawn path the playhead is in, on the picture shown in `pic` (screen points):
+    /// which it is, its way and its points; and how a point of the picture goes back to the
+    /// screen's own pixels (an offset and a scale).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn pointer_path_on_picture(&self, pic: Rect) -> Option<(usize, Vec<Pos2>, Vec<Pos2>, (Pos2, Vec2))> {
+        let tl = &self.session.timeline;
+        let i = tl.find(StreamKind::Screen)?;
+        let src = tl.source_time(i, self.playhead)?;
+        let n = tl.pointer_paths.iter().position(|p| p.from <= src && src <= p.to)?;
+        let path = tl.pointer_paths.get(n)?;
+        let s = self.rec.stream(tl.tracks.get(i)?.stream)?;
+        let (vw, vh) = (self.composer.width as f32, self.composer.height as f32);
+        let f = pic.width() / vw.max(1.0);
+        let on = |x: f32, y: f32| {
+            let (px, py) = screengrabcraft_media::compose::screen_point(tl, (s.width, s.height), self.playhead, (x, y), (vw, vh), self.composer.zoom);
+            pic.min + vec2(px * f, py * f)
+        };
+        let steps = 64u64;
+        let way = (0..=steps)
+            .filter_map(|k| screengrabcraft_media::pointer::path_at(&tl.pointer_paths, path.from + (path.to - path.from) * k / steps))
+            .map(|(x, y)| on(x, y))
+            .collect();
+        let points = path.points.iter().map(|q| on(q.x, q.y)).collect();
+        // The mapping is a scale and a shift: two points of the screen say both.
+        let (a, b) = (on(0.0, 0.0), on(1000.0, 1000.0));
+        let scale = vec2(((b.x - a.x) / 1000.0).max(1.0e-4), ((b.y - a.y) / 1000.0).max(1.0e-4));
+        Some((n, way, points, (a, scale)))
+    }
+
     /// Where the chosen item's pinned corners are on the picture (screen points), and where they'd
     /// be unpinned (its box's corners), when it's pinned: top left, top right, bottom right, bottom
     /// left.
@@ -1387,6 +1422,15 @@ impl VideoView {
                 ui.painter().circle(p, 4.5, Color32::from_rgb(0xFF, 0xD5, 0x4F), Stroke::new(1.0, Color32::BLACK));
             }
         }
+        // The pointer's redrawn path the playhead is in: its way, and its points to drag.
+        let pointer_path = self.pointer_path_on_picture(pic);
+        if let Some((_, way, points, _)) = &pointer_path {
+            let colour = Color32::from_rgb(0x4F, 0xC3, 0xF7);
+            ui.painter().add(egui::Shape::dashed_line(way, Stroke::new(2.0, colour), 6.0, 4.0));
+            for p in points {
+                ui.painter().circle(*p, 5.5, colour, Stroke::new(1.5, Color32::WHITE));
+            }
+        }
         let pins = self.pin_corners(pic);
         if let Some(r) = chosen.filter(|_| pins.is_none()) {
             ui.painter().rect_stroke(r, 0.0, Stroke::new(1.5, t.accent), StrokeKind::Outside);
@@ -1443,21 +1487,28 @@ impl VideoView {
         if resp.drag_started()
             && let Some(p) = ctx.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
         {
+            // A point of the pointer's redrawn path moves that point.
+            let way_point = pointer_path.as_ref().and_then(|(n, _, points, _)| Some((*n, points.iter().position(|c| c.distance(p) <= HANDLE)?)));
+            if let Some((path, point)) = way_point {
+                self.session.begin("Move the Pointer");
+                self.canvas_drag = Some(CanvasDrag::PointerPoint { path, point });
+            }
             // A pinned picture's corner moves that corner.
-            let pin_corner = pins.and_then(|(moved, _)| moved.iter().position(|c| c.distance(p) <= HANDLE));
+            let pin_corner = pins.and_then(|(moved, _)| moved.iter().position(|c| c.distance(p) <= HANDLE)).filter(|_| way_point.is_none());
             if let (Some(corner), Some((layer, item))) = (pin_corner, self.item) {
                 self.session.begin("Pin Corner");
                 self.canvas_drag = Some(CanvasDrag::Pin { layer, item, corner });
             }
             // A corner of what's chosen resizes it; inside it, or on another, moves.
             let mut target = match chosen {
-                _ if pin_corner.is_some() => None,
+                _ if pin_corner.is_some() || way_point.is_some() => None,
                 Some(r) if pins.is_none() && corners(r).iter().any(|c| c.distance(p) <= HANDLE) => Some((true, r)),
                 Some(r) if r.contains(p) => Some((false, r)),
                 _ => None,
             };
             if target.is_none()
                 && pin_corner.is_none()
+                && way_point.is_none()
                 && let Some(sel) = pick(self, p)
             {
                 self.item = sel;
@@ -1505,6 +1556,13 @@ impl VideoView {
             };
             let mut lines = (None, None);
             match d {
+                CanvasDrag::PointerPoint { path, point } => {
+                    // The point under the pointer, in the screen's own pixels.
+                    if let Some((_, _, _, (origin, scale))) = self.pointer_path_on_picture(pic) {
+                        let (x, y) = ((p.x - origin.x) / scale.x, (p.y - origin.y) / scale.y);
+                        let _ = self.session.drag("video.pointerPoint", &json!({"path": path, "point": point, "x": x, "y": y}));
+                    }
+                }
                 CanvasDrag::Pin { layer, item, corner } => {
                     // That corner moved from where its box has it to the pointer.
                     if let Some((_, base)) = self.pin_corners(pic)

@@ -227,7 +227,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Spotlight, blur a region | Has | |
 | **Motion blur, freeze a region** | Has | the side panel's Motion Blur (or a zoom's panel): items sliding, growing or moving by their keyframes, and zooms going in, out or panning, blurred along their way (five moments of the shutter blended). Edit › Freeze a Region (or the screen track's right button): a rectangle of the screen held as it was at its start while the rest plays on, an item on a layer, dragged and sized on the picture or in its panel; it stays with the screen through zooms (the pointer still shows over it) |
 | Pointer: larger, smoothed, rings, hidden | Has | |
-| **Pointer hidden for a stretch**, a pointer of another look, its path edited | Part | hidden for a stretch: the Pointer panel with a stretch chosen, or the screen track's right button (its clicks neither seen nor heard there; a dashed line on the screen's row; it stays with what the screen showed through later edits). No pointer of another look; its path isn't edited |
+| **Pointer hidden for a stretch, a pointer of another look, its path edited** | Has | hidden for a stretch: the Pointer panel with a stretch chosen, or the screen track's right button (its clicks neither seen nor heard there; a dashed line on the screen's row; it stays with what the screen showed through later edits). The Pointer panel's Pointer: as recorded, or a white or black arrow, a hand, a dot or a ring drawn in code in its place. Edit Its Path in the Chosen Stretch: points along its way (one every half second) shown on the picture while the playhead is in it, dragged where it should go; it goes through them on a smooth curve, its clicks' rings with it; Straighten, or As Recorded again |
 | Pointer highlight, spotlight, magnifier, click sounds | Has | the click sound is made in code |
 | Clickable areas and quizzes in the video | Not planned | they need a web player |
 
@@ -302,7 +302,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
 26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another (#118).
 27. Motion along a curved path; a picture pinned onto a slanted surface by its corners (#119).
-28. Words that write themselves on; a region of the screen frozen while the rest plays on.
+28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
+29. A pointer of another look drawn in its place; the pointer's path redrawn through points dragged on the picture.
 
 **Still to build, in this order**
 

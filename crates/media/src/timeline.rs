@@ -742,6 +742,10 @@ pub struct Timeline {
     /// every edit) where the pointer isn't drawn, nor its clicks shown or heard: apart, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pointer_hidden: Vec<[u64; 2]>,
+    /// Stretches of the screen's recording (its own time) where the pointer's way is redrawn:
+    /// through points dragged where they should be, instead of where it went. Apart, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pointer_paths: Vec<crate::pointer::Path>,
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -804,6 +808,7 @@ impl Timeline {
             frame: Default::default(),
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
         }
     }
 
@@ -911,6 +916,7 @@ impl Timeline {
             frame: self.frame.checked(),
             motion_blur: self.motion_blur.checked(),
             pointer_hidden: merged(self.pointer_hidden),
+            pointer_paths: crate::pointer::checked_paths(self.pointer_paths),
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -996,6 +1002,54 @@ impl Timeline {
         }
         self.pointer_hidden = merged(out);
         Ok(())
+    }
+
+    /// Redraws the pointer's way over `from..to` of the timeline (where the screen's recording plays
+    /// at `from`, to the end of that clip at most): `points` points (2 to 64) evenly along it, each
+    /// where `way` says the pointer was then, to be dragged where it should go. A way redrawn there
+    /// before is replaced. Which one it is.
+    pub fn redraw_pointer(&mut self, from: u64, to: u64, points: usize, way: impl Fn(u64) -> Option<(f32, f32)>) -> Result<usize, EditError> {
+        if to <= from {
+            return Err(EditError::Invalid("the stretch is empty".to_string()));
+        }
+        let [a, b] = self
+            .screen_sources(from, to)
+            .first()
+            .copied()
+            .ok_or_else(|| EditError::Invalid("the screen isn't playing in that stretch".to_string()))?;
+        let n = points.clamp(2, crate::pointer::MAX_PATH_POINTS) as u64;
+        let mut pts = Vec::new();
+        for k in 0..n {
+            let at = a + (b - a) * k / (n - 1);
+            if let Some((x, y)) = way(at) {
+                pts.push(crate::pointer::PathPoint { at, x, y });
+            }
+        }
+        if pts.len() < 2 {
+            return Err(EditError::Invalid("the pointer wasn't recorded in that stretch".to_string()));
+        }
+        let mut all: Vec<crate::pointer::Path> = std::mem::take(&mut self.pointer_paths).into_iter().filter(|p| p.to <= a || b <= p.from).collect();
+        all.push(crate::pointer::Path { from: a, to: b, points: pts });
+        self.pointer_paths = crate::pointer::checked_paths(all);
+        self.pointer_paths
+            .iter()
+            .position(|p| p.from == a)
+            .ok_or_else(|| EditError::Invalid("there are as many redrawn ways as there can be".to_string()))
+    }
+
+    /// Where on the timeline each redrawn way of the pointer plays, by which it is: (it, from, to).
+    pub fn pointer_paths_on_timeline(&self) -> Vec<(usize, u64, u64)> {
+        let Some(track) = self.find(StreamKind::Screen).and_then(|i| self.tracks.get(i)) else { return Vec::new() };
+        let mut out: Vec<(usize, u64, u64)> = Vec::new();
+        for c in &track.clips {
+            for (k, p) in self.pointer_paths.iter().enumerate() {
+                if let Some((x, y)) = c.times_of(p.from, p.to).filter(|(x, y)| x < y) {
+                    out.push((k, x, y));
+                }
+            }
+        }
+        out.sort_unstable_by_key(|v| (v.1, v.0));
+        out
     }
 
     /// Whether the pointer is hidden at `src` of the screen's recording.
@@ -1940,6 +1994,7 @@ mod tests {
             frame: Default::default(),
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
         }
     }
 

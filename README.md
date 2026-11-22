@@ -204,7 +204,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows
   what's round it twice as large. With a stretch chosen, Hide It in the Chosen Stretch (or the
   screen track's right button) hides it there, clicks and all; a dashed line on the screen's row
-  shows where, and it stays hidden over what the screen showed there through later edits.
+  shows where, and it stays hidden over what the screen showed there through later edits. Its
+  Pointer list draws another in its place: a white or black arrow, a hand, a dot or a ring. Edit
+  Its Path in the Chosen Stretch puts points along its way there on the picture (while the
+  playhead is in the stretch): drag them where it should have gone, and it glides through them;
+  Straighten makes it go straight from the first to the last.
 - **The camera's background taken away**, so the screen shows round you (the camera's panel,
   Background): **Remove a colour** for a green screen (choose the colour and how far from it
   still goes; its green glow on you is taken out), or **Remove it** with no green screen: the

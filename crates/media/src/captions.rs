@@ -812,6 +812,7 @@ mod tests {
             frame: Default::default(),
             motion_blur: Default::default(),
             pointer_hidden: Vec::new(),
+            pointer_paths: Vec::new(),
         }
     }
 
