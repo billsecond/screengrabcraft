@@ -246,6 +246,10 @@ pub struct Editor {
     pub(crate) own_stamp_pictures: std::collections::HashMap<String, Raster>,
     /// The open dialog picks a picture to keep as a stamp (not one to open).
     pub(crate) adding_stamp: bool,
+    /// The open dialog picks the watermark's picture (not one to open).
+    pub(crate) choosing_watermark: bool,
+    /// The picture chosen for a watermark, and its name: lent to the session when one is applied.
+    pub(crate) watermark_picture: Option<(String, Raster)>,
     /// The font menu's search.
     pub(crate) font_query: String,
     /// The fonts on the computer, as last asked (none until the font menu is first opened).
@@ -350,6 +354,8 @@ impl Editor {
             own_stamps: None,
             own_stamp_pictures: std::collections::HashMap::new(),
             adding_stamp: false,
+            choosing_watermark: false,
+            watermark_picture: None,
             font_query: String::new(),
             font_list: None,
             egui_fonts: std::collections::HashSet::new(),
@@ -1163,8 +1169,11 @@ impl Editor {
         match answer {
             DialogResult::Opened(files) => {
                 let adding = std::mem::take(&mut self.adding_stamp);
+                let watermark = std::mem::take(&mut self.choosing_watermark);
                 if let Some(f) = files.into_iter().next() {
-                    if adding {
+                    if watermark {
+                        self.watermark_file(ctx, &f);
+                    } else if adding {
                         crate::stamps::add_file(self, ctx, &f);
                     } else {
                         self.open_file(ctx, f);
@@ -1204,6 +1213,7 @@ impl Editor {
             }
             DialogResult::Cancelled => {
                 self.adding_stamp = false;
+                self.choosing_watermark = false;
                 self.saving = None;
                 self.saving_project = false;
                 self.saving_transcript = None;
@@ -1774,27 +1784,128 @@ impl Editor {
     /// The Effects menu's items (in the menu bar; the Effects pane has them too, with their settings).
     pub(crate) fn effects_menu(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        for (label, d) in [
-            ("Border…", Dialog::border()),
-            ("Drop Shadow…", Dialog::shadow()),
-            ("Torn Edge…", Dialog::torn()),
-            ("Round Corners…", Dialog::round()),
-            ("Brightness and Contrast…", Dialog::brightness()),
-        ] {
-            if ui.button(label).clicked() {
-                self.dialog = Some(d);
-                ui.close();
+        let groups: [&[(&str, fn() -> Dialog)]; 3] = [
+            &[
+                ("Brightness and Contrast…", Dialog::brightness),
+                ("Hue, Saturation and Gamma…", Dialog::hue),
+                ("Sharpen…", Dialog::sharpen),
+                ("Blur…", Dialog::blur),
+            ],
+            &[
+                ("Border…", Dialog::border),
+                ("Drop Shadow…", Dialog::shadow),
+                ("Round Corners…", Dialog::round),
+                ("Torn Edge…", Dialog::torn),
+                ("Wavy Edge…", Dialog::wavy),
+                ("Faded Edge…", Dialog::faded),
+                ("Bevel…", Dialog::bevel),
+                ("Perspective…", Dialog::perspective),
+                ("Page Curl…", Dialog::curl),
+                ("Reflection…", Dialog::reflection),
+            ],
+            &[("Watermark…", Dialog::watermark), ("Capture Details…", Dialog::details)],
+        ];
+        for (i, group) in groups.into_iter().enumerate() {
+            for (label, make) in group {
+                if ui.button(*label).clicked() {
+                    let mut d = make();
+                    if let (Dialog::Watermark { picture, words, .. }, Some((name, _))) = (&mut d, &self.watermark_picture) {
+                        *picture = Some(name.clone());
+                        *words = false;
+                    }
+                    self.dialog = Some(d);
+                    ui.close();
+                }
+            }
+            if i == 0 {
+                ui.separator();
+                for (label, id) in [("Grayscale", "effect.grayscale"), ("Sepia", "effect.sepia"), ("Invert Colors", "effect.invert")] {
+                    if ui.button(label).clicked() {
+                        self.apply_effect(&ctx, id, json!({}));
+                        ui.close();
+                    }
+                }
+            }
+            ui.separator();
+        }
+        let area = if self.area.is_some() { "the selected area" } else { "the whole picture" };
+        ui.label(egui::RichText::new(format!("Colour changes, Sharpen and Blur: {area}")).small().color(Tokens::get(ui.ctx()).muted));
+    }
+
+    /// Runs an effect's command: the colour changes kept to the selected area if there is one,
+    /// a watermark's picture lent, the capture's details filled in from what is known of it.
+    /// Whether it worked.
+    pub(crate) fn apply_effect(&mut self, ctx: &egui::Context, id: &str, mut params: Value) -> bool {
+        if Dialog::takes_area(id)
+            && let Some((x, y, w, h)) = self.area_pixels()
+        {
+            params["area"] = json!({"x": x, "y": y, "w": w, "h": h});
+        }
+        if id == "effect.watermark" && params.get("picture").is_some() {
+            match &self.watermark_picture {
+                Some((_, pic)) => self.session.lent = vec![pic.clone()],
+                None => {
+                    self.error(ctx, "Choose a picture for the watermark first");
+                    return false;
+                }
             }
         }
-        ui.separator();
-        if ui.button("Grayscale").clicked() {
-            self.run(&ctx, "effect.grayscale", json!({}));
-            ui.close();
+        if id == "effect.captureDetails" {
+            if params.get("time") == Some(&Value::Bool(true)) {
+                params["time"] = self.capture_time().map_or(Value::Bool(true), Value::String);
+            }
+            if params.get("program") == Some(&Value::Bool(true)) {
+                params["program"] = self.capture_source().map_or(Value::Bool(false), Value::String);
+            }
         }
-        if ui.button("Invert Colors").clicked() {
-            self.run(&ctx, "effect.invert", json!({}));
-            ui.close();
+        let done = self.run(ctx, id, params).is_some();
+        self.session.lent.clear();
+        if done {
+            // A border, a shadow, a reflection or a tilt changes the picture's size.
+            self.view.fit_pending = true;
         }
+        done
+    }
+
+    /// Asks for the watermark's picture (it comes back through the open dialog).
+    pub(crate) fn choose_watermark(&mut self) {
+        self.choosing_watermark = true;
+        self.services.request_open();
+    }
+
+    /// A picture file picked for the watermark.
+    pub(crate) fn watermark_file(&mut self, ctx: &egui::Context, f: &OpenedFile) {
+        match screengrabcraft_render::decode(&f.bytes) {
+            Ok(pic) => {
+                self.effects.watermark_chosen(&f.name);
+                if let Some(Dialog::Watermark { picture, words, .. }) = &mut self.dialog {
+                    *picture = Some(f.name.clone());
+                    *words = false;
+                }
+                self.watermark_picture = Some((f.name.clone(), pic));
+            }
+            Err(e) => self.error(ctx, format!("{} can't be used as a watermark: {e}", f.name)),
+        }
+    }
+
+    /// When the picture was captured, as far as is known: what the document says, else the time
+    /// of its file in the captures.
+    pub(crate) fn capture_time(&self) -> Option<String> {
+        if let Some(t) = &self.session.doc.meta.captured {
+            return Some(screengrabcraft_render::marks::readable_time(t));
+        }
+        let path = self.picture_path.as_deref()?;
+        let item = self.recent.iter().find(|r| r.path == path)?;
+        let when = format!("{} {}", item.day, item.time);
+        (!when.trim().is_empty()).then(|| when.trim().to_string())
+    }
+
+    /// What the picture is of (a window's or a program's name), if that is known: not merely the
+    /// name of the file it was opened from.
+    pub(crate) fn capture_source(&self) -> Option<String> {
+        let source = self.session.doc.meta.source.clone()?;
+        let file = self.picture_path.as_deref().map(file_name);
+        (Some(source.as_str()) != file.as_deref() && !source.trim().is_empty()).then_some(source)
     }
 
     fn tool_bar(&mut self, ui: &mut Ui) {

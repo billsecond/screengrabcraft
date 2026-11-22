@@ -781,3 +781,91 @@ fn text_takes_a_font_from_the_computer() {
     assert_eq!((o.shape.text(), o.style.font.as_str()), (Some("iiii"), "Test Mono"));
     shot(&mut h, "font-text");
 }
+
+/// The effects added later are in the pane too: the colour changes keep to the area selected on
+/// the picture, perspective tilts it, a watermark of words or of a chosen picture, the capture's
+/// details.
+#[test]
+fn more_effects_in_the_pane_and_the_colours_keep_to_an_area() {
+    use screengrabcraft_model::{Document, ImageFormat, Raster};
+    let mut ed = editor();
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::rgb(200, 40, 40)).unwrap()));
+    ed.session.doc.meta.source = Some("A window".into());
+    // Effects with most of the height, so an opened one is in sight.
+    ed.settings.properties_share = Some(0.2);
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1080.0));
+    h.run_steps(4);
+    for name in [
+        "Brightness and Contrast",
+        "Hue, Saturation and Gamma",
+        crate::effects::COLOURS,
+        "Sharpen",
+        "Blur",
+        "Border",
+        "Drop Shadow",
+        "Round Corners",
+        "Torn Edge",
+        "Wavy Edge",
+        "Faded Edge",
+        "Bevel",
+        "Perspective",
+        "Page Curl",
+        "Reflection",
+        "Watermark",
+        "Capture Details",
+    ] {
+        h.get_by_label(name);
+    }
+    // An area selected: Sepia browns it alone.
+    h.state_mut().area = Some(Rect::new(20.0, 20.0, 100.0, 80.0));
+    click(&mut h, crate::effects::COLOURS);
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-area");
+    click(&mut h, "Sepia");
+    let base = h.state().session.doc.base.clone();
+    assert_eq!(h.state().session.undo_label(), Some("Sepia"));
+    assert_ne!(base.pixel(50, 50), Some(Color::rgb(200, 40, 40)), "in the area");
+    assert_eq!(base.pixel(300, 200), Some(Color::rgb(200, 40, 40)), "not outside it");
+    click(&mut h, crate::effects::COLOURS);
+    h.state_mut().area = None;
+    // A watermark of words, at its settings as they start.
+    click(&mut h, "Watermark");
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-watermark");
+    click(&mut h, "Apply Watermark");
+    assert_eq!(h.state().session.undo_label(), Some("Watermark"));
+    // Of a picture: chosen, it is named in the section and used.
+    let logo = Raster::filled(20, 20, Color::rgb(0, 0, 255)).unwrap();
+    let bytes = screengrabcraft_render::encode(&logo, ImageFormat::Png, 92).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().watermark_file(&ctx, &crate::services::OpenedFile { name: "logo.png".into(), path: None, bytes });
+    h.run_steps(3);
+    h.get_by_label("logo.png");
+    let before = h.state().session.doc.base.pixel(200, 150).unwrap();
+    click(&mut h, "Apply Watermark");
+    assert!(h.state().session.lent.is_empty(), "lent only while it is applied");
+    let mid = h.state().session.doc.base.pixel(200, 150).unwrap();
+    assert!(mid.b > before.b + 30 && mid.r < before.r, "the blue picture is in the middle: {before:?} → {mid:?}");
+    click(&mut h, "Watermark");
+    // The capture's details, with what the picture is of.
+    click(&mut h, "Capture Details");
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-details");
+    click(&mut h, "Apply Capture Details");
+    assert_eq!(h.state().session.undo_label(), Some("Capture Details"));
+    click(&mut h, "Capture Details");
+    // Perspective changes the picture's size.
+    click(&mut h, "Perspective");
+    h.run_steps(20);
+    click(&mut h, "Apply Perspective");
+    assert!(h.state().session.doc.width() < 400);
+    click(&mut h, "Perspective");
+    h.run_steps(10);
+    shot(&mut h, "effects-applied");
+    // The Effects menu has them all.
+    click(&mut h, "Effects");
+    for name in ["Hue, Saturation and Gamma…", "Sepia", "Wavy Edge…", "Page Curl…", "Reflection…", "Watermark…", "Capture Details…"] {
+        h.get_by_label(name);
+    }
+    shot(&mut h, "effects-menu");
+}

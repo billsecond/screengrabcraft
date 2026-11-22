@@ -665,3 +665,100 @@ fn every_stamp_is_added_by_its_name() {
         assert!(matches!(s.doc.get(id).unwrap().shape, Shape::Stamp { stamp, .. } if stamp == k));
     }
 }
+
+/// The colour effects keep to an area when given one, each in one undo step.
+#[test]
+fn colour_effects_change_the_whole_picture_or_an_area() {
+    // Red with a black line across the area (a flat picture stays flat when blurred).
+    let red = || {
+        let mut r = Raster::filled(60, 40, Color::rgb(220, 30, 30)).unwrap();
+        for x in 10..30 {
+            let i = (15 * 60 + x) * 4;
+            r.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+        }
+        Session::new(Document::new(r))
+    };
+    let area = json!({"x": 10, "y": 10, "w": 20, "h": 10});
+    for (id, params) in [
+        ("effect.grayscale", json!({})),
+        ("effect.invert", json!({})),
+        ("effect.sepia", json!({})),
+        ("effect.brightness", json!({"brightness": 40})),
+        ("effect.hueSaturation", json!({"hue": 120})),
+        ("effect.hueSaturation", json!({"gamma": 2})),
+        ("effect.blur", json!({"radius": 3})),
+    ] {
+        let mut s = red();
+        let before = s.doc.base.clone();
+        s.execute(id, &params).unwrap();
+        assert_ne!(s.doc.base.pixels(), before.pixels(), "{id} on all of it");
+        assert!(s.can_undo());
+        let mut s = red();
+        let mut with_area = params.clone();
+        with_area["area"] = area.clone();
+        let before = s.doc.base.clone();
+        s.execute(id, &with_area).unwrap();
+        assert_ne!(s.doc.base.pixel(15, 14), before.pixel(15, 14), "{id} in the area");
+        assert_eq!(s.doc.base.pixel(50, 35), before.pixel(50, 35), "{id} not outside it");
+        assert_eq!(s.doc.base.pixel(5, 5), before.pixel(5, 5), "{id} not outside it");
+    }
+    // An area off the picture, or nonsense, changes nothing.
+    let mut s = red();
+    assert!(s.execute("effect.sepia", &json!({"area": {"x": 100, "y": 100, "w": 5, "h": 5}})).is_err());
+    assert!(s.execute("effect.sepia", &json!({"area": "all"})).is_err());
+    assert!(!s.can_undo());
+}
+
+/// Perspective moves the annotations with the picture; a reflection and details below grow it.
+#[test]
+fn shape_effects_and_what_they_do_to_the_annotations() {
+    let mut s = session();
+    let a = add(&mut s, json!({"type": "rect", "rect": {"x": 150, "y": 10, "w": 40, "h": 20}}));
+    let was = s.doc.get(a).unwrap().shape.rect().unwrap();
+    let out = s.execute("effect.perspective", &json!({"horizontal": 60})).unwrap();
+    assert!(out["width"].as_u64().unwrap() < 200);
+    let now = s.doc.get(a).unwrap().shape.rect().unwrap();
+    assert!(now.x < was.x && now.y > was.y, "it moved with the far side: {was:?} → {now:?}");
+    for (id, params) in [
+        ("effect.wavyEdge", json!({"top": true})),
+        ("effect.fadedEdge", json!({})),
+        ("effect.bevel", json!({})),
+        ("effect.pageCurl", json!({"corner": "topLeft"})),
+        ("effect.sharpen", json!({})),
+    ] {
+        let mut s = session();
+        let before = s.doc.base.clone();
+        s.execute(id, &params).unwrap();
+        assert!(!s.doc.base.same_pixels(&before) && (s.doc.width(), s.doc.height()) == (200, 100), "{id}");
+    }
+    assert!(session().execute("effect.pageCurl", &json!({"corner": "middle"})).is_err());
+    let mut s = session();
+    s.execute("effect.reflection", &json!({"height": 50, "gap": 10})).unwrap();
+    assert_eq!((s.doc.width(), s.doc.height()), (200, 160));
+}
+
+/// A watermark of words or of a lent picture; capture details from the document or as given.
+#[test]
+fn watermarks_and_capture_details() {
+    let mut s = session();
+    assert!(s.execute("effect.watermark", &json!({})).is_err(), "nothing to make it of");
+    assert!(s.execute("effect.watermark", &json!({"picture": 0})).is_err(), "no picture lent");
+    s.execute("effect.watermark", &json!({"text": "DRAFT", "color": "#FF0000", "opacity": 100, "place": "tiled", "angle": -30})).unwrap();
+    assert!(s.doc.base.pixels().as_chunks::<4>().0.iter().any(|p| p[1] < 200), "drawn");
+    let mut s = session();
+    s.lent = vec![Raster::filled(10, 10, Color::rgb(0, 0, 255)).unwrap()];
+    s.execute("effect.watermark", &json!({"picture": 0, "opacity": 100, "size": 50})).unwrap();
+    assert_eq!(s.doc.base.pixel(100, 50), Some(Color::rgb(0, 0, 255)));
+    assert!(s.execute("effect.watermark", &json!({"picture": 1})).is_err());
+    // Details: what the document knows, or what is given.
+    let mut s = session();
+    s.doc.meta.captured = Some("2026-11-21T14:05:09+01:00".into());
+    s.doc.meta.source = Some("Notepad".into());
+    let out = s.execute("effect.captureDetails", &json!({})).unwrap();
+    assert_eq!(out["text"], "2026-11-21 14:05  ·  Notepad  ·  200 × 100 pixels");
+    let out = s.execute("effect.captureDetails", &json!({"time": false, "program": "A window", "size": false, "place": "below"})).unwrap();
+    assert_eq!(out["text"], "A window");
+    assert!(s.doc.height() > 100, "a strip below");
+    let nothing = json!({"time": false, "program": false, "size": false});
+    assert!(session().execute("effect.captureDetails", &nothing).is_err());
+}

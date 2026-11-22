@@ -4,7 +4,7 @@
 //! screengrabcraft-cli capture [--screen N | --all | --area X,Y,W,H | --window TITLE] [--delay S] [-o FILE] [--clipboard]
 //! screengrabcraft-cli monitors | windows
 //! screengrabcraft-cli render IN [-o OUT]                 a project or picture flattened to a picture
-//! screengrabcraft-cli run IN --cmd ID[=JSON]... [--model FILE] [-o OUT]
+//! screengrabcraft-cli run IN --cmd ID[=JSON]... [--model FILE] [--picture FILE]... [-o OUT]
 //!                                                      editing commands, as the editor runs them
 //! screengrabcraft-cli commands                            every editing command, as JSON
 //! screengrabcraft-cli stitch FRAME... -o OUT              join the frames of a scrolling page
@@ -31,14 +31,15 @@ const USAGE: &str = "usage:
   screengrabcraft-cli windows
   screengrabcraft-cli render IN [-o OUT]
   screengrabcraft-cli text IN [--json]
-  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [-o OUT]
+  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [--picture FILE]... [-o OUT]
   screengrabcraft-cli commands
   screengrabcraft-cli stitch FRAME... -o OUT
   screengrabcraft-cli service install|uninstall|status
   screengrabcraft-cli --version
 
 Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft (a project).
---model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).";
+--model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).
+--picture FILE: a picture lent to the commands, the first as {\"picture\": 0} (effect.watermark).";
 
 type R<T> = Result<T, String>;
 
@@ -259,7 +260,7 @@ fn cmd_text(args: &[String]) -> R<()> {
 }
 
 fn cmd_run(args: &[String]) -> R<()> {
-    let ins = positional(args, &["-o", "--output", "--cmd", "--model"]);
+    let ins = positional(args, &["-o", "--output", "--cmd", "--model", "--picture"]);
     let input = PathBuf::from(ins.first().ok_or("run needs an input file")?);
     let mut session = Session::new(read_doc(&input)?);
     // image.removeBackground's model: the one given, else the one installed (read only if used).
@@ -268,6 +269,14 @@ fn cmd_run(args: &[String]) -> R<()> {
         None => screengrabcraft_desktop::models::background_model().ok(),
     };
     session.background.set_model(model);
+    // Pictures lent to the commands that take one (a watermark's), in the order given.
+    for (i, a) in args.iter().enumerate() {
+        if a == "--picture" {
+            let path = args.get(i + 1).ok_or("--picture needs a file")?;
+            let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+            session.lent.push(screengrabcraft_render::decode(&bytes).map_err(|e| format!("{path}: {e}"))?);
+        }
+    }
     let mut i = 0;
     while let Some(pos) = args.iter().skip(i).position(|a| a == "--cmd") {
         let at = i + pos + 1;

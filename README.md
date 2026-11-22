@@ -209,10 +209,14 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   move with the picture. An area chosen with the Selection tool can be cut out from its right-click
   menu too.
 - **Properties and Effects, docked at the right**: Properties (the quick styles and the tool
-  properties) over Effects (border, drop shadow, torn edge, round corners, brightness and
-  contrast, each opened with its settings and Apply; greyscale and invert under Colours). Drag
-  the panes' left edge to make them wider, and the bar between them to give either more room
-  (a double click puts it back). The Effects menu has them too.
+  properties) over Effects (brightness and contrast; hue, saturation and gamma; sharpen; blur;
+  border, drop shadow, round corners; torn, wavy and faded edges, a bevel; perspective, a page
+  curl, a reflection; a watermark of words or a picture, over the picture or under its words and
+  lines; the capture's details written on it; each opened with its settings and Apply;
+  greyscale, sepia and invert under Colours). The colour changes, sharpen and blur keep to an
+  area selected on the picture. Drag the panes' left edge to make them wider, and the bar
+  between them to give either more room (a double click puts it back). The Effects menu has
+  them too.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen draws over things); its handles take hold even when the press is a little off.
@@ -231,6 +235,7 @@ The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 screengrabcraft-cli capture --all -o desktop.png
 screengrabcraft-cli capture --window Notepad --clipboard
 screengrabcraft-cli run shot.png --cmd 'object.add={"object":{"type":"arrow","from":{"x":20,"y":20},"to":{"x":200,"y":120}}}' --cmd 'effect.shadow' -o shot.sgcraft
+screengrabcraft-cli run shot.png --picture logo.png --cmd 'effect.watermark={"picture":0,"place":"bottomRight"}' -o marked.png
 screengrabcraft-cli render shot.sgcraft -o shot.png
 screengrabcraft-cli text shot.png
 screengrabcraft-cli commands

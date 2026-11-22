@@ -36,6 +36,10 @@ pub struct Session {
     pending: Option<Snapshot>,
     /// What `image.removeBackground` works with. It isn't part of the document or its history.
     pub background: Background,
+    /// Pictures the host lent for commands that take one from outside (a watermark's), by
+    /// place: `effect.watermark` with `{"picture": 0}` uses the first. Not part of the document
+    /// or its history; at most [`crate::fx::MAX_LENT`].
+    pub lent: Vec<Raster>,
 }
 
 /// What `image.removeBackground` works with: a model the host lent the session, and a matte
@@ -91,6 +95,7 @@ impl Session {
             revision: 1,
             pending: None,
             background: Background::default(),
+            lent: Vec::new(),
         }
     }
 
