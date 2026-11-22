@@ -530,7 +530,10 @@ mod tests {
         let none = |_: &str| false;
         assert_eq!(out_path("C:/shots/Login.png", "{name} changed", 1, ImageFormat::Png, at, &none), "C:/shots/Login changed.png");
         assert_eq!(out_path("shots/a.png", "{name}-{n} {date}", 3, ImageFormat::Jpeg, at, &none), "shots/a-3 2026-11-21.jpg");
-        assert_eq!(out_path(r"C:\shots\a.png", "{name}", 1, ImageFormat::Webp, at, &none), r"C:\shots\a.webp");
+        // A backslash parts folders only on Windows; elsewhere it's part of a file's name.
+        if cfg!(windows) {
+            assert_eq!(out_path(r"C:\shots\a.png", "{name}", 1, ImageFormat::Webp, at, &none), r"C:\shots\a.webp");
+        }
         // The same name and format as the original: never over it.
         assert_eq!(out_path("shots/a.png", "{name}", 1, ImageFormat::Png, at, &none), "shots/a (2).png");
         let taken = |p: &str| p == "shots/a small.png" || p == "shots/a small (2).png";
