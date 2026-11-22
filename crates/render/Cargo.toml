@@ -16,6 +16,7 @@ ab_glyph = { workspace = true }
 image = { workspace = true }
 gif = { workspace = true }
 flate2 = { workspace = true }
+crc32fast = { workspace = true }
 rqrr = { workspace = true }
 qrcode = { workspace = true }
 base64 = { workspace = true }

@@ -1,6 +1,6 @@
 //! The how-to guide window: the steps a step capture took, each its number, its picture (the
 //! click marked on it) and its words, to put in order, take out and reword; then saved as a PDF,
-//! a web page or Markdown. Every change is a guide command (`guide.*`); the host (the capture
+//! a word-processor document, slides, a web page or Markdown. Every change is a guide command (`guide.*`); the host (the capture
 //! service) reads and writes the files.
 
 use std::collections::HashMap;
@@ -17,24 +17,44 @@ use crate::widgets;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuideFormat {
     Pdf,
+    /// A word-processor document (`.docx`).
+    Document,
+    /// Slides (`.pptx`).
+    Slides,
     Html,
     Markdown,
 }
 
 impl GuideFormat {
-    pub const ALL: [GuideFormat; 3] = [GuideFormat::Pdf, GuideFormat::Html, GuideFormat::Markdown];
+    pub const ALL: [GuideFormat; 5] = [GuideFormat::Pdf, GuideFormat::Document, GuideFormat::Slides, GuideFormat::Html, GuideFormat::Markdown];
 
+    /// Its button's words, after "Save as".
     pub fn label(self) -> &'static str {
         match self {
-            GuideFormat::Pdf => "Save as PDF",
-            GuideFormat::Html => "Save as Web Page",
-            GuideFormat::Markdown => "Save as Markdown",
+            GuideFormat::Pdf => "PDF",
+            GuideFormat::Document => "Document",
+            GuideFormat::Slides => "Slides",
+            GuideFormat::Html => "Web Page",
+            GuideFormat::Markdown => "Markdown",
+        }
+    }
+
+    /// What it makes, for its button's tip.
+    pub fn tip(self) -> &'static str {
+        match self {
+            GuideFormat::Pdf => "A PDF, a page a step",
+            GuideFormat::Document => "A word-processor document (.docx): the steps one after another, their pictures in it",
+            GuideFormat::Slides => "Slides (.pptx): the title, then a slide a step",
+            GuideFormat::Html => "A web page, its pictures in a folder beside it",
+            GuideFormat::Markdown => "Markdown, its pictures in a folder beside it",
         }
     }
 
     pub fn extension(self) -> &'static str {
         match self {
             GuideFormat::Pdf => "pdf",
+            GuideFormat::Document => "docx",
+            GuideFormat::Slides => "pptx",
             GuideFormat::Html => "html",
             GuideFormat::Markdown => "md",
         }
@@ -120,11 +140,13 @@ pub fn show(view: &mut GuideView, ui: &mut Ui) -> Option<GuideAction> {
                     action = Some(GuideAction::ShowFolder);
                 }
                 let any = !view.guide.steps.is_empty();
+                ui.add_space(6.0);
                 for f in GuideFormat::ALL.into_iter().rev() {
-                    if ui.add_enabled(any, egui::Button::new(f.label())).clicked() {
+                    if ui.add_enabled(any, egui::Button::new(f.label())).on_hover_text(f.tip()).clicked() {
                         action = Some(GuideAction::Export(f));
                     }
                 }
+                ui.label(egui::RichText::new("Save as").color(t.muted));
             });
         });
         if let Some((words, error)) = &view.message {
@@ -250,7 +272,7 @@ mod tests {
     }
 
     #[test]
-    fn steps_are_reordered_taken_out_and_saved_as_a_pdf_a_web_page_or_markdown() {
+    fn steps_are_reordered_taken_out_and_saved_in_every_format() {
         let mut h = harness();
         h.get_by_label("The picture is missing");
         if let Ok(dir) = std::env::var("SGC_SHOTS")

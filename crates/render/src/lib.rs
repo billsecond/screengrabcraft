@@ -26,6 +26,7 @@ pub mod qr;
 pub mod stamp;
 pub mod stitch;
 pub mod text;
+pub mod zip;
 
 pub use codec::{CodecError, decode, encode};
 pub use draw::{Options, Renderer, render};

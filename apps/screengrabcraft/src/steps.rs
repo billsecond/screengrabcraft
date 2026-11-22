@@ -244,11 +244,11 @@ fn collect(run: &mut Run) {
 fn export(w: &mut Window, format: GuideFormat) -> Result<PathBuf, String> {
     let out = w.file.with_extension(format.extension());
     let folder_name = w.folder.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let pictures = || -> Vec<Option<Raster>> { w.view.guide.steps.iter().map(|s| w.view.picture(&s.picture).cloned()).collect() };
     let bytes = match format {
-        GuideFormat::Pdf => {
-            let pictures: Vec<Option<Raster>> = w.view.guide.steps.iter().map(|s| w.view.picture(&s.picture).cloned()).collect();
-            screengrabcraft_render::guide::pdf(&w.view.guide, &pictures).map_err(|e| e.to_string())?
-        }
+        GuideFormat::Pdf => screengrabcraft_render::guide::pdf(&w.view.guide, &pictures()).map_err(|e| e.to_string())?,
+        GuideFormat::Document => screengrabcraft_render::guide::docx(&w.view.guide, &pictures()).map_err(|e| e.to_string())?,
+        GuideFormat::Slides => screengrabcraft_render::guide::pptx(&w.view.guide, &pictures()).map_err(|e| e.to_string())?,
         GuideFormat::Html => screengrabcraft_render::guide::html(&w.view.guide, &folder_name).into_bytes(),
         GuideFormat::Markdown => screengrabcraft_render::guide::markdown(&w.view.guide, &folder_name).into_bytes(),
     };

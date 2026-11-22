@@ -85,8 +85,9 @@ captures folder; one where nothing has changed since the last is skipped. Stop t
 **How-to guides** (Record Steps, on the Capture page or in the tray): while it runs, each click takes
 a picture of the window clicked with a red ring where the click was (a small bar at the top counts
 the steps and stops it). Stop, and the guide window lists the numbered steps to put in order, take
-out and word, and saves the guide as a PDF, a web page or Markdown, the pictures in a folder beside
-it. The guide itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
+out and word, and saves the guide as a PDF, a word-processor document (`.docx`), slides (`.pptx`, a slide
+a step), a web page or Markdown (the last two with the pictures in a folder beside them). The guide
+itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
 opens it again).
 
 A recording (a GIF, a video, Video Production) starts after a **countdown** shown over the area, 3 seconds
