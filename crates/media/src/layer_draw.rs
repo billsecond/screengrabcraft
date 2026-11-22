@@ -655,6 +655,7 @@ mod tests {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            camera_full: Vec::new(),
         }
     }
 

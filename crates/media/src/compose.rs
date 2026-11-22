@@ -121,7 +121,16 @@ impl Composer {
         {
             // Mirrored: flipped left to right, as the owner sees themself.
             let cam = if timeline.camera.mirror { screengrabcraft_render::effects::flip(&cam, true).unwrap_or(cam) } else { cam };
-            if screen_shown {
+            if screen_shown && timeline.camera_full_at(src) {
+                // Swapped: the camera fills the picture, the screen in the camera's place.
+                let screen = std::mem::replace(&mut out, black());
+                fill_camera(&mut out, &cam);
+                let mut layout = timeline.camera;
+                if layout.shape == CameraShape::Circle {
+                    layout.shape = CameraShape::Rounded;
+                }
+                overlay_picture(&mut out, &screen, &layout);
+            } else if screen_shown {
                 overlay_camera(&mut out, &cam, timeline);
             } else {
                 // Recorded (or shown) without the screen: the camera is the picture.
@@ -398,7 +407,13 @@ pub fn camera_rect(layout: &crate::timeline::CameraLayout, aspect: f32, ow: f32,
 
 /// Draws the camera's picture in its place on `out`, in its shape.
 pub fn overlay_camera(out: &mut Raster, cam: &Raster, timeline: &Timeline) {
-    let layout = timeline.camera;
+    overlay_picture(out, cam, &timeline.camera);
+}
+
+/// Draws a picture (the camera's, or the screen's while the camera fills the picture) in the
+/// camera's place on `out`, in its shape, with its border.
+pub fn overlay_picture(out: &mut Raster, cam: &Raster, layout: &crate::timeline::CameraLayout) {
+    let layout = *layout;
     let (ow, oh) = (out.width() as f32, out.height() as f32);
     let aspect = cam.width() as f32 / cam.height().max(1) as f32;
     let (x0, y0, cw, ch) = camera_rect(&layout, aspect, ow, oh);
@@ -792,6 +807,51 @@ mod tests {
         tl.set_muted(screen, false).unwrap();
         let f = c.frame(&tl, 6_000_000);
         assert_eq!(count(&f, &is_grey), 0);
+    }
+
+    #[test]
+    fn the_camera_full_screen_puts_the_screen_in_its_corner() {
+        // A white screen and a grey camera for 2 s; the camera full screen for the first second.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 100, height: 60, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 32, height: 24, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(100, 60, Color::WHITE).unwrap()).unwrap();
+        let grey = Color::rgb(128, 128, 128);
+        let jpeg = screengrabcraft_render::encode(&Raster::filled(40, 30, grey).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 90).unwrap();
+        for t in 0..20u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(2_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        tl.set_camera_full(0, 1_000_000, true).unwrap();
+        tl.camera.corner = Corner::TopLeft;
+        tl.camera.shape = CameraShape::Circle;
+        let mut c = Composer::new(r.clone(), &tl, 100, 60);
+        let count = |f: &Raster, pick: &dyn Fn(&[u8; 4]) -> bool| f.pixels().as_chunks::<4>().0.iter().filter(|p| pick(p)).count();
+        let is_grey = |p: &[u8; 4]| (100..160).contains(&p[0]);
+        let is_white = |p: &[u8; 4]| p[0] > 230;
+        // Swapped: grey over most of it, the white screen small at the top left (not a circle).
+        let f = c.frame(&tl, 500_000);
+        assert!(count(&f, &is_grey) > 3000, "{}", count(&f, &is_grey));
+        assert!(count(&f, &is_white) > 100 && count(&f, &is_white) < 1000, "{}", count(&f, &is_white));
+        assert!(f.pixel(8, 6).is_some_and(|p| p.r > 230) && f.pixel(80, 50).is_some_and(|p| (100..160).contains(&p.r)));
+        // After it: the screen again, the camera in its corner.
+        let f = c.frame(&tl, 1_500_000);
+        assert!(count(&f, &is_white) > 4000 && count(&f, &is_grey) < 1000);
+        // Saved and read back, made safe for the recording: kept; off the camera's end, cut short.
+        tl.camera_full.push([1_900_000, 9_000_000]);
+        let back = serde_json::from_str::<Timeline>(&serde_json::to_string(&tl).unwrap()).unwrap().checked(&r);
+        assert_eq!(back.camera_full, vec![[0, 1_000_000], [1_900_000, 2_000_000]]);
+        // Junk read from a file: put in order, joined, kept inside, or dropped.
+        let mut junk = Timeline::new(&r);
+        junk.camera_full = vec![[5, 1], [500_000, 700_000], [0, 600_000], [u64::MAX - 1, u64::MAX], [3, 4]];
+        assert_eq!(junk.checked(&r).camera_full, vec![[0, 700_000]]);
+        // A recording without a camera keeps none.
+        let mut none = Timeline::new(&rec());
+        none.camera_full = vec![[0, 1_000_000]];
+        assert!(none.checked(&rec()).camera_full.is_empty());
     }
 
     #[test]

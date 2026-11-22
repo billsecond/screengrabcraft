@@ -838,8 +838,17 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
             keys.draw = d;
             changed = true;
         }
+        let mut f = keys.camera_full.clone();
+        if hotkey_row(ui, screengrabcraft_model::settings::CAMERA_FULL_LABEL, &mut f, defaults.camera_full.clone()) {
+            keys.camera_full = f;
+            changed = true;
+        }
     });
-    ui.label(RichText::new("Pause, Stop and Draw are only taken from other programs while a recording runs.").size(12.0).color(t.muted));
+    ui.label(
+        RichText::new("Pause, Stop, Draw and the camera full screen are only taken from other programs while a recording runs.")
+            .size(12.0)
+            .color(t.muted),
+    );
     if changed {
         svc.settings.hotkeys = keys;
         svc.apply_settings();

@@ -20,6 +20,8 @@ pub enum Target {
     Stop,
     /// While recording: draw on the screen, or stop drawing.
     Draw,
+    /// While recording: the camera full screen, the screen in its corner, or back.
+    CameraFull,
     /// A capture preset, by its place in the settings' list.
     Preset(usize),
 }
@@ -127,8 +129,8 @@ pub fn logo_name() -> &'static str {
 pub struct Registered {
     manager: Option<GlobalHotKeyManager>,
     active: Vec<(HotKey, Target)>,
-    /// Pause and Stop, registered only while a recording runs (F9 and F10 are other programs'
-    /// the rest of the time).
+    /// Pause, Stop, Draw and the camera full screen, registered only while a recording runs (F7
+    /// to F10 are other programs' the rest of the time).
     during: Vec<(HotKey, Target)>,
     pub problems: Vec<String>,
 }
@@ -156,7 +158,12 @@ impl Registered {
         if !on {
             return;
         }
-        for (key, target) in [(keys.pause.as_ref(), Target::Pause), (keys.stop.as_ref(), Target::Stop), (keys.draw.as_ref(), Target::Draw)] {
+        for (key, target) in [
+            (keys.pause.as_ref(), Target::Pause),
+            (keys.stop.as_ref(), Target::Stop),
+            (keys.draw.as_ref(), Target::Draw),
+            (keys.camera_full.as_ref(), Target::CameraFull),
+        ] {
             let Some(hk) = key.and_then(to_system) else { continue };
             if self.active.iter().chain(&self.during).any(|(k, _)| *k == hk) {
                 log::warn!("{} is already a shortcut; it isn't the recording's too", key.map(|k| k.display(logo_name())).unwrap_or_default());
@@ -175,6 +182,7 @@ impl Registered {
             Target::Pause => keys.pause.as_ref(),
             Target::Stop => keys.stop.as_ref(),
             Target::Draw => keys.draw.as_ref(),
+            Target::CameraFull => keys.camera_full.as_ref(),
             _ => None,
         };
         k.map(|k| k.display(logo_name()))

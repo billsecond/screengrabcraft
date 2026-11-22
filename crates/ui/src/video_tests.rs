@@ -159,6 +159,54 @@ fn the_camera_is_mirrored_and_given_a_border_of_its_own_colour() {
     assert!(cam(&h).mirror);
 }
 
+/// A chosen stretch made the camera's alone: the camera fills the picture, the screen in its
+/// corner; listed in the camera's panel, gone again with Remove.
+#[test]
+fn the_camera_is_made_full_screen_for_a_stretch_and_the_stretch_removed() {
+    let mut h = harness();
+    let full = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera_full.clone();
+    assert!(full(&h).is_empty());
+    h.get_by_label("Camera Full Screen for the Stretch");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = Some((1_000_000, 3_000_000));
+        v.playhead = 2_000_000;
+    }
+    h.run_steps(2);
+    h.get_by_label("Camera Full Screen for the Stretch").scroll_to_me();
+    h.run_steps(4);
+    h.get_by_label("Camera Full Screen for the Stretch").click();
+    h.run_steps(3);
+    assert_eq!(full(&h), vec![[1_000_000, 3_000_000]]);
+    h.get_by_label("0:01.0 to 0:03.0");
+    // The picture: the camera's teal fills it, the white screen in the camera's corner.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.range = None;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-camera-full-screen");
+    let r = h.state().video.as_ref().unwrap().camera_on_screen().expect("the camera's place is on the picture");
+    let img = h.render().unwrap();
+    let at = |x: f32, y: f32| {
+        let p = img.get_pixel(x as u32, y as u32);
+        [p[0], p[1], p[2]]
+    };
+    let teal = |p: [u8; 3]| p[0] < 80 && p[1] > 120 && p[2] > 100;
+    let white = |p: [u8; 3]| p.iter().all(|v| *v > 220);
+    assert!(teal(at(r.min.x - r.width(), r.center().y)), "{:?}", at(r.min.x - r.width(), r.center().y));
+    assert!(white(at(r.min.x + r.width() * 0.1, r.max.y - r.height() * 0.1)), "{r:?}");
+    // Removed: the screen again, with the camera in its corner.
+    h.get_by_label("Remove").scroll_to_me();
+    h.run_steps(4);
+    shot(&mut h, "video-camera-full-screen-list");
+    h.get_by_label("Remove").click();
+    h.run_steps(3);
+    assert!(full(&h).is_empty());
+    let img = h.render().unwrap();
+    let p = img.get_pixel((r.min.x - r.width()) as u32, r.center().y as u32);
+    assert!(!teal([p[0], p[1], p[2]]));
+    h.get_by_label_contains("While recording, the camera button");
+}
+
 #[test]
 fn deleting_a_selected_clip_leaves_a_gap_on_its_track_only() {
     let mut h = harness();

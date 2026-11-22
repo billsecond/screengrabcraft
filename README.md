@@ -124,7 +124,8 @@ own. Turn each input on or off: the screen,
 the camera, the microphone (with a level meter once you turn it on or press Test) and the
 computer's sound. With the screen off the camera's picture is the video. Under the camera's picture,
 **Mirror** flips it left to right and **Border** puts a line of your colour round it (the video
-editor can change both after). Press the red **Record**;
+editor can change both after). While it records, the camera button on the controls (or F7, or the tray)
+puts the camera full screen with the screen in its corner, and back. Press the red **Record**;
 the Recorder remembers every choice. The recording file (`.sgvideo`) has a track for each source
 and opens in the video editor, where you cut and edit it, then Export Video makes the MP4 beside it. The
 computer's sound can be recorded on Windows; the camera on Windows and macOS. Record Video's
@@ -169,7 +170,9 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - Each track and layer has a switch to **hide or mute** it, and arrows to **move it up or down**
   (a layer higher up is in front); **double-click its name to rename it** (or use the right
   button). Each sound track has a volume slider; the camera's corner, size and shape (square,
-  rounded, circle), its border (how wide, its colour) and Mirror are on the right.
+  rounded, circle), its border (how wide, its colour) and Mirror are on the right, with the
+  stretches the camera fills the picture: choose a stretch and Camera Full Screen for the Stretch,
+  or Remove one.
 - **Transcript** (the tool bar, or View) opens a pane at the right with everything said, line by
   line: when, who and what. Words from the microphone are **You**, from the computer's sound
   **Others**, and from a sound or video you added, its layer's name; rename any of them (the pencil,

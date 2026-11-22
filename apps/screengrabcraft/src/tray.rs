@@ -49,6 +49,8 @@ pub enum Item {
     ToggleBorder,
     /// Drawing on the screen over the area, on or off.
     ToggleDrawing,
+    /// The camera full screen with the screen in its corner, or back.
+    ToggleCameraFull,
     /// Stop and throw it away.
     DiscardRecording,
     /// Captures on a timer: their settings (the Capture page), or stop them while they run.
@@ -77,6 +79,10 @@ pub struct RecordingState {
     pub drawing: bool,
     pub can_draw: bool,
     pub draw_key: Option<String>,
+    /// The camera fills the picture; whether it can; the shortcut that does it.
+    pub camera_full: bool,
+    pub can_swap: bool,
+    pub camera_full_key: Option<String>,
 }
 
 /// One entry of the menu shown while a recording runs.
@@ -106,6 +112,9 @@ pub fn recording_entries(s: &RecordingState) -> Vec<RecordingEntry> {
     e.push(E::Item(label("Take a Screenshot", s.shot_key.clone()), Item::Capture(CaptureMode::Region)));
     if s.can_draw {
         e.push(E::Check(label("Draw on the Screen", s.draw_key.clone()), Item::ToggleDrawing, s.drawing));
+    }
+    if s.can_swap {
+        e.push(E::Check(label("Camera Full Screen", s.camera_full_key.clone()), Item::ToggleCameraFull, s.camera_full));
     }
     e.push(E::Separator);
     let controls = if s.controls { "Hide the Controls in the Tray" } else { "Show the Controls" };
@@ -507,6 +516,15 @@ mod tests {
             d.iter()
                 .any(|e| matches!(e, RecordingEntry::Check(t, Item::ToggleDrawing, true) if t.starts_with("Draw on the Screen") && t.contains("F8"))),
             "{d:?}"
+        );
+        // The camera full screen only where the camera can fill the picture, ticked while it does.
+        assert!(!r.iter().any(|e| matches!(e, RecordingEntry::Check(_, Item::ToggleCameraFull, _))));
+        let c = recording_entries(&RecordingState { can_swap: true, camera_full: true, camera_full_key: Some("F7".into()), ..s.clone() });
+        assert!(
+            c.iter().any(
+                |e| matches!(e, RecordingEntry::Check(t, Item::ToggleCameraFull, true) if t.starts_with("Camera Full Screen") && t.contains("F7"))
+            ),
+            "{c:?}"
         );
         let m = menu();
         // The Image Editor at the end of the pictures, the Video Editor under Video Production.

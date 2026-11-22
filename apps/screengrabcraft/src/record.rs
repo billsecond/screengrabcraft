@@ -70,6 +70,10 @@ pub struct Recording {
     /// Whether it can be drawn on: one area or one monitor, on Windows (which keeps the drawing
     /// window out of the recording).
     pub drawable: bool,
+    /// The camera fills the picture just now, the screen in its corner (the owner's switch).
+    pub camera_full: Arc<AtomicBool>,
+    /// Whether that can be: a video of the screen with the camera asked for.
+    pub can_swap: bool,
     /// Making the video after the recording stopped: 0 not yet, then 1 to 1001 (its progress + 1).
     pub saving: Arc<AtomicU32>,
     /// How loud the computer's sound and the microphone are just now (`f32` bits, 0 to 1).
@@ -111,6 +115,16 @@ impl Recording {
             self.paused_before += at.elapsed();
         }
         self.paused.store(paused, Ordering::SeqCst);
+    }
+
+    /// Whether the camera can fill the picture now: a video of the screen whose camera started
+    /// and wasn't let go.
+    pub fn swappable(&self) -> bool {
+        let sources = self.sources.lock().map(|s| s.clone()).unwrap_or_default();
+        self.can_swap
+            && !self.stopping()
+            && sources.iter().any(|s| s.starts_with("Camera:"))
+            && !sources.iter().any(|s| s.starts_with("No camera:") || s.starts_with("No camera was found"))
     }
 
     /// Whether it has been asked to stop and is finishing.
@@ -203,6 +217,8 @@ pub fn start(
         lost,
         by_itself,
         drawable: kind == Kind::Gif && cfg!(target_os = "windows"),
+        camera_full: Arc::default(),
+        can_swap: false,
         ink,
         saving: Arc::default(),
         levels: Arc::default(),
@@ -549,6 +565,8 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         by_itself: Arc::default(),
         ink: crate::ink::SharedInk::default(),
         drawable: cfg!(target_os = "windows") && matches!(plan.screen, Screen::Part { .. } | Screen::Monitor { .. }),
+        camera_full: Arc::default(),
+        can_swap: plan.options.camera && !matches!(plan.screen, Screen::Off),
         saving: Arc::default(),
         levels: Arc::default(),
         sources: Arc::default(),
@@ -559,9 +577,11 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
         (r.stop.clone(), r.cancel.clone(), r.progress.clone(), r.saving.clone(), r.levels.clone(), r.sources.clone(), r.begun.clone());
     let paused = r.paused.clone();
     let ink = r.ink.clone();
+    let camera_full = r.camera_full.clone();
     let handle = std::thread::Builder::new()
         .name("video".into())
         .spawn(move || {
+            let swaps = Mutex::new(Swaps::default());
             let shared = Shared {
                 stop: &stop,
                 cancel: &cancel,
@@ -572,6 +592,8 @@ pub fn start_video(plan: VideoPlan, wake: egui::Context) -> Result<Recording, St
                 sources: &sources,
                 begun: &begun,
                 ink: &ink,
+                camera_full: &camera_full,
+                swaps: &swaps,
                 wake: &wake,
             };
             let out = video(&plan, &shared);
@@ -594,7 +616,57 @@ struct Shared<'a> {
     begun: &'a Mutex<Option<Instant>>,
     /// What the owner draws on the screen, drawn into the screen's frames.
     ink: &'a crate::ink::SharedInk,
+    /// The owner's switch for the camera full screen, and the stretches it was on.
+    camera_full: &'a AtomicBool,
+    swaps: &'a Mutex<Swaps>,
     wake: &'a egui::Context,
+}
+
+/// The stretches the camera filled the picture (the owner's switch on), in the recording's time
+/// (µs, the pauses left out, as the camera's pictures are placed): they become the recording's
+/// edits, which the video editor can change.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Swaps {
+    done: Vec<[u64; 2]>,
+    /// The one going on, since when.
+    since: Option<u64>,
+}
+
+impl Swaps {
+    /// Follows the switch, at `now` in the recording.
+    fn follow(&mut self, on: bool, now: u64) {
+        match (on, self.since) {
+            (true, None) => self.since = Some(now),
+            (false, Some(from)) => {
+                if now > from && self.done.len() < screengrabcraft_media::timeline::MAX_CAMERA_FULL {
+                    self.done.push([from, now]);
+                }
+                self.since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Those so far, the one going on to the end of the recording.
+    fn so_far(&self) -> Vec<[u64; 2]> {
+        let mut v = self.done.clone();
+        v.extend(self.since.map(|s| [s, u64::MAX]));
+        v
+    }
+
+    /// All of them, the one going on ended at `end`.
+    fn end(&mut self, end: u64) -> Vec<[u64; 2]> {
+        self.follow(false, end);
+        std::mem::take(&mut self.done)
+    }
+}
+
+/// The edits Record Video's MP4 is made with: every track whole, the camera full screen where
+/// it was switched on.
+fn made_with(rec: &recording::Recording, full: Vec<[u64; 2]>) -> Timeline {
+    let mut tl = Timeline::new(rec);
+    tl.camera_full = full;
+    tl
 }
 
 impl Shared<'_> {
@@ -1072,8 +1144,9 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let mut pauses = Pauses::default();
     // The mouse pointer, kept apart from the pictures (drawn on the video after).
     let mut pointer_feed = screen.as_ref().and_then(|src| PointerFeed::start(&plan.screen, src.size, started));
+    let camera_recorded = d.camera.is_some();
     let (frames, live) = std::thread::scope(|scope| {
-        let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding)));
+        let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding, s.swaps)));
         let frames = record_screen(plan, s, &mut d, &tx, &waiting, started, screen.as_mut(), &mut pauses, pointer_feed.as_mut());
         feeding.store(false, Ordering::SeqCst);
         let live = feeder.and_then(|h| h.join().ok()).flatten();
@@ -1083,6 +1156,8 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let end = started.elapsed();
     pauses.follow(false, end);
     let duration = end.saturating_sub(pauses.total(end)).as_micros() as u64;
+    // The camera full screen switched on and off: its stretches, the last one ended here.
+    let full = if camera_recorded { s.swaps.lock().map(|mut w| w.end(duration)).unwrap_or_default() } else { Vec::new() };
     if let Some(p) = &mut pointer_feed {
         p.end();
         p.pass_on(&tx, &pauses);
@@ -1104,7 +1179,14 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         }
     }
     drop(tx);
-    let writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
+    let mut writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
+    // The stretches the camera filled the picture become its edits, with the camera's look.
+    if !full.is_empty() {
+        let mut edits = camera_look(&plan.options).unwrap_or_default();
+        edits.camera_full = full.clone();
+        writer.edit(&edits).map_err(|e| e.to_string())?;
+        log::info!("the camera filled the picture {} time(s)", full.len());
+    }
     writer.finish(duration).map_err(|e| e.to_string())?;
     if s.cancel.load(Ordering::SeqCst) || frames.is_err() {
         let _ = std::fs::remove_file(&file_path);
@@ -1117,8 +1199,8 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     s.saving.store(1, Ordering::SeqCst);
     s.wake.request_repaint();
     let made = match live {
-        Some((ex, cancel)) => finish_live(ex, &cancel, &file_path, s),
-        None => make_mp4(plan, &file_path, s),
+        Some((ex, cancel)) => finish_live(ex, &cancel, &file_path, s, full),
+        None => make_mp4(plan, &file_path, s, full),
     };
     let _ = std::fs::remove_file(&file_path);
     if s.cancel.load(Ordering::SeqCst) {
@@ -1318,6 +1400,12 @@ fn record_screen(
         pauses.follow(s.paused.load(Ordering::SeqCst), at);
         // While paused the screen isn't taken; the devices go on, and what they send is left out.
         let place = pauses.place(at);
+        // The camera full screen, switched on or off now (nothing changes while paused).
+        if let Some(pts) = place
+            && let Ok(mut w) = s.swaps.lock()
+        {
+            w.follow(s.camera_full.load(Ordering::SeqCst), pts.as_micros() as u64);
+        }
         if let Some(p) = pointer_feed.as_deref_mut() {
             p.pass_on(tx, pauses);
         }
@@ -1426,7 +1514,13 @@ fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Export
 
 /// While recording: every second, what's been written is read again and every stretch it
 /// has got past is made. None if that went wrong (the video is then made after).
-fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, feeding: &AtomicBool) -> Option<(Exporter, Arc<AtomicBool>)> {
+fn feed_live(
+    mut ex: Exporter,
+    cancel: Arc<AtomicBool>,
+    file: &std::path::Path,
+    feeding: &AtomicBool,
+    swaps: &Mutex<Swaps>,
+) -> Option<(Exporter, Arc<AtomicBool>)> {
     let mut next = Instant::now() + Duration::from_secs(1);
     while feeding.load(Ordering::SeqCst) {
         if Instant::now() < next {
@@ -1440,7 +1534,8 @@ fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, 
             continue;
         };
         let rec = Arc::new(rec);
-        let tl = Arc::new(Timeline::new(&rec));
+        let full = swaps.lock().map(|w| w.so_far()).unwrap_or_default();
+        let tl = Arc::new(made_with(&rec, full));
         // Half a second's margin: the sound comes in a little after the pictures.
         let ready = rec.duration_us.saturating_sub(500_000);
         if let Err(e) = ex.feed(rec, tl, ready) {
@@ -1452,10 +1547,10 @@ fn feed_live(mut ex: Exporter, cancel: Arc<AtomicBool>, file: &std::path::Path, 
 }
 
 /// The recording is over: the stretches not made yet are made, and the MP4 is put in place.
-fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Shared) -> Result<u64, String> {
+fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Shared, full: Vec<[u64; 2]>) -> Result<u64, String> {
     let source = FileSource::open(file).map_err(|e| e.to_string())?;
     let rec = Arc::new(recording::Recording::open(Box::new(source)).map_err(|e| e.to_string())?);
-    let tl = Arc::new(Timeline::new(&rec));
+    let tl = Arc::new(made_with(&rec, full));
     let progress = AtomicU32::new(0);
     let done = std::thread::scope(|scope| {
         let relay = scope.spawn(|| {
@@ -1483,10 +1578,10 @@ fn finish_live(ex: Exporter, cancel: &AtomicBool, file: &std::path::Path, s: &Sh
 }
 
 /// Record Video's MP4, made from the recording file. How long it is, in µs.
-fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared) -> Result<u64, String> {
+fn make_mp4(plan: &VideoPlan, file_path: &std::path::Path, s: &Shared, full: Vec<[u64; 2]>) -> Result<u64, String> {
     let source = FileSource::open(file_path).map_err(|e| e.to_string())?;
     let rec = Arc::new(recording::Recording::open(Box::new(source)).map_err(|e| e.to_string())?);
-    let tl = Timeline::new(&rec);
+    let tl = made_with(&rec, full);
     let settings = ExportSettings { max_width: plan.max_size.0, max_height: plan.max_size.1, fps: plan.fps, ..ExportSettings::default() };
     // The export counts 0 to 1000; the control window reads it + 1 (0 is "not saving").
     let progress = AtomicU32::new(0);
@@ -1833,6 +1928,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn the_camera_full_screen_switch_makes_stretches_of_the_recording() {
+        let mut w = Swaps::default();
+        w.follow(false, 100);
+        w.follow(true, 1_000);
+        w.follow(true, 1_500);
+        assert_eq!(w.so_far(), vec![[1_000, u64::MAX]], "going on: to the end for now");
+        w.follow(false, 3_000);
+        w.follow(true, 5_000);
+        w.follow(true, 5_000);
+        // Stopped with it on: it ends where the recording does.
+        assert_eq!(w.end(8_000), vec![[1_000, 3_000], [5_000, 8_000]]);
+        // On and off at once: nothing.
+        let mut w = Swaps::default();
+        w.follow(true, 10);
+        assert!(w.end(10).is_empty());
+        // Written as the recording's edits at its end, with the camera's look: read back so.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Cam".into(), width: 64, height: 48, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let o = VideoOptions { camera_mirror: true, ..VideoOptions::production() };
+        w.edit(&camera_look(&o).unwrap()).unwrap();
+        w.video_frame(0, 0, &Raster::filled(64, 48, Color::BLACK).unwrap()).unwrap();
+        let mut edits = camera_look(&o).unwrap();
+        edits.camera_full = vec![[200_000, 600_000]];
+        w.edit(&edits).unwrap();
+        let rec = recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
+        let tl = rec.timeline.clone().unwrap();
+        assert!(tl.camera.mirror);
+        assert_eq!(tl.camera_full, vec![[200_000, 600_000]]);
+        assert_eq!(made_with(&rec, vec![[1, 2]]).camera_full, vec![[1, 2]]);
     }
 
     #[test]

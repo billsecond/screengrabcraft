@@ -526,6 +526,7 @@ impl Service {
                     Some(Item::ToggleControls) => self.controls_hidden = !self.controls_hidden,
                     Some(Item::ToggleBorder) => self.toggle_border(),
                     Some(Item::ToggleDrawing) => self.toggle_drawing(),
+                    Some(Item::ToggleCameraFull) => self.toggle_camera_full(),
                     Some(Item::DiscardRecording) => self.stop_recording(true),
                     Some(Item::TimedCaptures) => self.open_home(),
                     Some(Item::StopTimed) => crate::timed::stop(self),
@@ -557,6 +558,7 @@ impl Service {
                 Some(Target::Pause) => self.toggle_pause(),
                 Some(Target::Stop) => self.stop_recording(false),
                 Some(Target::Draw) => self.toggle_drawing(),
+                Some(Target::CameraFull) => self.toggle_camera_full(),
                 Some(Target::Capture(CaptureMode::Gif)) if self.recording.is_some() => self.stop_recording(false),
                 Some(Target::Capture(CaptureMode::Scrolling | CaptureMode::Video | CaptureMode::Production)) if self.recording.is_some() => {
                     self.stop_recording(false)
@@ -1141,6 +1143,9 @@ impl Service {
             drawing: self.drawing,
             can_draw: r.drawable && !r.stopping(),
             draw_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::Draw),
+            camera_full: r.camera_full.load(std::sync::atomic::Ordering::SeqCst),
+            can_swap: r.swappable(),
+            camera_full_key: crate::hotkeys::Registered::recording_label(&self.settings.hotkeys, Target::CameraFull),
             shot_key: self.keys.label(&self.settings.hotkeys, CaptureMode::Region),
         });
         if let Some(t) = &mut self.tray {
@@ -1178,6 +1183,28 @@ impl Service {
             }
         }
         log::info!("drawing on the screen: {}", if self.drawing { "on" } else { "off" });
+        self.sync_tray();
+    }
+
+    /// The camera full screen with the screen in its corner, or back, from now on in the
+    /// recording. Where there's no camera or no screen, the owner is told why.
+    pub fn toggle_camera_full(&mut self) {
+        let Some(r) = self.recording.as_ref() else { return };
+        if r.stopping() {
+            return;
+        }
+        if !r.swappable() {
+            let why = if r.can_swap {
+                "The camera couldn't be had for this recording."
+            } else {
+                "It works on a video of the screen with the camera on (the Recorder's Camera)."
+            };
+            self.notify("The camera can't fill this recording", why, None, None, true);
+            return;
+        }
+        let on = !r.camera_full.load(std::sync::atomic::Ordering::SeqCst);
+        r.camera_full.store(on, std::sync::atomic::Ordering::SeqCst);
+        log::info!("the camera full screen: {}", if on { "on" } else { "off" });
         self.sync_tray();
     }
 
