@@ -260,9 +260,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Just the sound (M4A, WAV)** | Has | File › Export Sound: WAV everywhere, M4A (AAC) by Windows' own encoder, so on Windows only |
 | **A frame saved as a picture** | Has | at the recording's own size, in the captures folder; it opens in the picture editor |
 | **Just the chosen stretch** | Has | Export Video with a stretch chosen: its captions and chapters with it |
-| See-through video (WebM) | Missing | |
+| **See-through video** | Has | Export Video's See-through video: a QuickTime MOV of PNG pictures (written by ScreenGrabCraft's own code; no other codec), clear wherever there's nothing: the screen's track hidden, the camera's background taken away, round titles and callouts. No sound in it (Export Sound makes it apart); not WebM |
 | **A watermark** | Has | Export Video's window: words, or a picture from the Media Bin, in a corner, as see-through and as large as asked; on the preview too |
-| Several at once (batch) | Missing | |
+| **Several at once (batch)** | Has | File › Make Videos of Several Recordings: recordings chosen together, each made as it was edited (its layers' media read where they are), beside it under its own name, one format for all, the captions in the picture or beside it; one after another, the window saying how each is getting on |
 | Templates and themes of your own | Missing | |
 | Uploads to video sites, an online editor, an online asset store | Not planned | needs a network service |
 
@@ -305,6 +305,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 28. Words that write themselves on; a region of the screen frozen while the rest plays on (#120).
 29. A pointer of another look drawn in its place; the pointer's path redrawn through points dragged on the picture (#121).
 30. The camera's background blurred or replaced by a picture; captions lit up word by word (word times estimated) (#122).
+31. A see-through video (a MOV of PNG pictures); several recordings made into videos at once.
 
 **Still to build, in this order**
 
@@ -324,4 +325,4 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 15. Print; batch changes; captures on a timer or at a set time.
-16. The rest: see-through video, HDR, QR codes, measuring, spell check.
+16. The rest: HDR, QR codes, measuring, spell check.

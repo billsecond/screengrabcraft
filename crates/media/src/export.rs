@@ -669,6 +669,68 @@ pub fn export_gif(
     Ok(Exported { width: w, height: h, frames, bytes: std::fs::metadata(out)?.len(), duration_us: length })
 }
 
+/// A see-through video of the recording as edited: a QuickTime movie of PNG pictures (see
+/// [`crate::mov`]), see-through wherever there's nothing (the screen hidden, the camera's
+/// background taken away, round the titles and callouts), no sound. Captions (in timeline time)
+/// are burned in if given. Written beside `out` first, then put in place; `progress` goes from 0
+/// to 1000; setting `cancel` stops it and leaves nothing behind.
+#[allow(clippy::too_many_arguments)]
+pub fn export_mov(
+    rec: Arc<Recording>,
+    timeline: &Timeline,
+    captions: Option<Arc<Vec<Cue>>>,
+    media: Arc<dyn MediaStore>,
+    out: &Path,
+    s: ExportSettings,
+    progress: &AtomicU32,
+    cancel: &AtomicBool,
+) -> Result<Exported, MediaError> {
+    let length = timeline.length();
+    if length == 0 {
+        return Err(MediaError::Encode("there's nothing left to make a video of".to_string()));
+    }
+    let (w, h) = video_size(&rec, &s);
+    let fps = u64::from(s.fps.clamp(1, 60));
+    let frames = length.saturating_mul(fps).div_ceil(1_000_000);
+    let part = out.with_extension("mov.part");
+    let mut mov = crate::mov::MovWriter::new(BufWriter::new(File::create(&part)?), w, h, fps as u32)?;
+    let mut composer = Composer::new(rec, timeline, w, h);
+    composer.see_through = true;
+    composer.set_captions(captions);
+    composer.set_media(media);
+    let mut stopped = None;
+    for f in 0..frames {
+        if cancel.load(Ordering::SeqCst) {
+            stopped = Some(MediaError::Encode("cancelled".to_string()));
+            break;
+        }
+        let pic = composer.frame(timeline, f.saturating_mul(1_000_000) / fps);
+        let png = match screengrabcraft_render::encode(&pic, screengrabcraft_model::ImageFormat::Png, 100) {
+            Ok(p) => p,
+            Err(e) => {
+                stopped = Some(MediaError::Encode(e.to_string()));
+                break;
+            }
+        };
+        if let Err(e) = mov.push(&png) {
+            stopped = Some(MediaError::Io(e));
+            break;
+        }
+        progress.store((f.saturating_mul(1000) / frames.max(1)).min(999) as u32, Ordering::SeqCst);
+    }
+    let written = mov.finish().and_then(|file| {
+        let file = file.into_inner().map_err(|e| e.into_error())?;
+        file.sync_all()
+    });
+    if let Some(e) = stopped.or(written.err().map(MediaError::Io)) {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
+    }
+    std::fs::rename(&part, out)?;
+    progress.store(1000, Ordering::SeqCst);
+    Ok(Exported { width: w, height: h, frames, bytes: std::fs::metadata(out)?.len(), duration_us: length })
+}
+
 #[cfg(test)]
 mod tests {
     use screengrabcraft_model::{Color, Raster};
@@ -813,6 +875,42 @@ mod tests {
         assert_eq!(crate::mp4::chapters_of(&bytes), vec![(0, "Start".to_string()), (2_000_000, "Second half".to_string())], "chapters put in");
         assert!(!has(b"av01") && !has(b"Opus"));
         assert!(!out.with_extension("mp4.part").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_see_through_movie_is_made_of_png_pictures_clear_where_nothing_is() {
+        let rec = recording(3);
+        let mut tl = Timeline::new(&rec);
+        // The screen hidden, a title over nothing.
+        tl.set_muted(0, true).unwrap();
+        tl.place(crate::layers::template("title-box").unwrap().item, None, 0).unwrap();
+        let dir = dir("mov");
+        let out = dir.join("title.mov");
+        let progress = AtomicU32::new(0);
+        let s = ExportSettings { fps: 5, ..ExportSettings::default() };
+        let done = export_mov(rec.clone(), &tl, None, Arc::new(crate::layer_draw::NoMedia), &out, s, &progress, &AtomicBool::new(false)).unwrap();
+        assert_eq!((done.width, done.height, done.frames), (96, 60, 20), "to the end of the title");
+        assert_eq!(progress.load(Ordering::SeqCst), 1000);
+        assert!(!out.with_extension("mov.part").exists());
+        let bytes = std::fs::read(&out).unwrap();
+        let top: Vec<[u8; 4]> = crate::mov::boxes(&bytes).iter().map(|b| b.0).collect();
+        assert_eq!(top, vec![*b"ftyp", *b"mdat", *b"moov"]);
+        // A picture from the middle: clear round the title, the title solid.
+        let (_, at, _) = crate::mov::boxes(&bytes)[1];
+        let first = bytes.get(at..).unwrap();
+        assert!(first.starts_with(&[0x89, b'P', b'N', b'G']));
+        let pngs: Vec<usize> =
+            (0..bytes.len().saturating_sub(8)).filter(|i| bytes[*i..].starts_with(&[0x89, b'P', b'N', b'G', 13, 10, 26, 10])).collect();
+        assert_eq!(pngs.len(), 20);
+        let mid = screengrabcraft_render::decode(&bytes[pngs[8]..]).unwrap();
+        let clear = mid.pixels().chunks(4).filter(|p| p[3] == 0).count();
+        let solid = mid.pixels().chunks(4).filter(|p| p[3] == 255).count();
+        assert!(clear > 1000 && solid > 50, "{clear} {solid}");
+        // Cancelled: nothing left behind.
+        let gone = dir.join("gone.mov");
+        assert!(export_mov(rec, &tl, None, Arc::new(crate::layer_draw::NoMedia), &gone, s, &AtomicU32::new(0), &AtomicBool::new(true)).is_err());
+        assert!(!gone.exists() && !gone.with_extension("mov.part").exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

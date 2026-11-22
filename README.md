@@ -189,7 +189,11 @@ the picture editor to the video editor. Its timeline has a row for each track:
   video players list.
 - **Export more than the video**: with a stretch chosen, Export Video can make **just that
   stretch** (its captions and chapters with it). File › **Export Sound** makes just the sound, as
-  heard: a WAV, or a smaller M4A (AAC, made by Windows' own encoder, so on Windows only). File ›
+  heard: a WAV, or a smaller M4A (AAC, made by Windows' own encoder, so on Windows only). Export
+  Video's **See-through video** makes a MOV of PNG pictures, clear wherever there's nothing (hide
+  the screen's track to keep just the camera without its background, titles and callouts), to put
+  over another video; it has no sound. File › **Make Videos of Several Recordings** makes each
+  recording chosen into a video as it was edited, beside it, with one setting for all. File ›
   **Save the Frame as a Picture** (Ctrl+Shift+S, or the ruler's right button) saves the picture at
   the playhead, at the recording's own size, in the captures folder and opens it in the picture
   editor.

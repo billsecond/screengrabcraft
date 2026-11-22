@@ -47,6 +47,8 @@ pub enum DialogResult {
     Transcribe(Vec<String>),
     /// A subtitle file (`.srt`, `.vtt`) to bring into the video editor as captions, read.
     Subtitles(Vec<OpenedFile>),
+    /// Video recordings to make videos of, together (paths).
+    Batch(Vec<String>),
     Cancelled,
 }
 
@@ -89,6 +91,10 @@ pub enum VideoFormat {
     Mp4Av1,
     /// An animated GIF: no sound, smaller pictures; for short clips.
     Gif,
+    /// A see-through video: a QuickTime movie of PNG pictures, clear wherever there's nothing
+    /// (the screen hidden, the camera's background taken away); no sound. For putting over
+    /// another video in a video editor.
+    Mov,
     /// Just the sound, as M4A (AAC): small, every player opens it (Windows' own encoder makes it).
     M4a,
     /// Just the sound, as WAV: as heard, not compressed.
@@ -98,13 +104,14 @@ pub enum VideoFormat {
 impl VideoFormat {
     /// Every kind there is, as the Export window lists them (those this computer can't make are
     /// greyed out there).
-    pub const ALL: [VideoFormat; 5] = [VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::M4a, VideoFormat::Wav];
+    pub const ALL: [VideoFormat; 6] = [VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov, VideoFormat::M4a, VideoFormat::Wav];
 
     pub fn label(self) -> &'static str {
         match self {
             VideoFormat::Mp4 => "MP4 video: plays everywhere (H.264)",
             VideoFormat::Mp4Av1 => "MP4 video: smaller, newer players only (AV1)",
             VideoFormat::Gif => "Animated GIF: no sound, for short clips",
+            VideoFormat::Mov => "See-through video: MOV of PNG pictures, no sound",
             VideoFormat::M4a => "Just the sound: M4A (AAC, small)",
             VideoFormat::Wav => "Just the sound: WAV (as heard, not compressed)",
         }
@@ -123,6 +130,7 @@ impl VideoFormat {
         match self {
             VideoFormat::Mp4 | VideoFormat::Mp4Av1 => "mp4",
             VideoFormat::Gif => "gif",
+            VideoFormat::Mov => "mov",
             VideoFormat::M4a => "m4a",
             VideoFormat::Wav => "wav",
         }
@@ -133,6 +141,7 @@ impl VideoFormat {
         match self {
             VideoFormat::Mp4 | VideoFormat::Mp4Av1 => ("MP4 video", &["mp4"]),
             VideoFormat::Gif => ("Animated GIF", &["gif"]),
+            VideoFormat::Mov => ("QuickTime movie", &["mov"]),
             VideoFormat::M4a => ("M4A sound", &["m4a"]),
             VideoFormat::Wav => ("WAV sound", &["wav"]),
         }
@@ -140,7 +149,7 @@ impl VideoFormat {
 
     /// Whether it has a sound track (and so whether subtitles beside it make sense).
     pub fn has_sound(self) -> bool {
-        self != VideoFormat::Gif
+        !matches!(self, VideoFormat::Gif | VideoFormat::Mov)
     }
 
     /// Whether it has pictures (and so whether captions can be put on them).
@@ -377,6 +386,10 @@ pub trait Services {
     fn auto_captions(&self) -> bool {
         false
     }
+
+    /// Asks for video recordings to make videos of, together; the answer comes through
+    /// [`Services::poll_dialog`] as [`DialogResult::Batch`].
+    fn request_batch(&self) {}
 
     /// Asks for video or sound files to transcribe; the answer comes through
     /// [`Services::poll_dialog`] as [`DialogResult::Transcribe`].

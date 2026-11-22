@@ -552,6 +552,26 @@ impl Services for DesktopServices {
         });
     }
 
+    fn request_batch(&self) {
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        let start = paths::captures_dir(&store::load_settings());
+        let _ = std::thread::Builder::new().name("batch-dialog".into()).spawn(move || {
+            let picked = pollster::block_on(
+                rfd::AsyncFileDialog::new()
+                    .set_title("Make Videos of Several Recordings")
+                    .set_directory(&start)
+                    .add_filter("Video recordings", &[REC])
+                    .pick_files(),
+            );
+            let answer = match picked {
+                Some(files) if !files.is_empty() => DialogResult::Batch(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
+                _ => DialogResult::Cancelled,
+            };
+            let _ = tx.send(answer);
+            ctx.request_repaint();
+        });
+    }
+
     fn request_subtitles(&self) {
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
         let start = paths::captures_dir(&store::load_settings());

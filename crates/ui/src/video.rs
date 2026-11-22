@@ -34,6 +34,7 @@ use screengrabcraft_media::recording::{self, Recording, StreamKind};
 use screengrabcraft_media::timeline::{CameraShape, Corner, Track};
 use serde_json::{Value, json};
 
+pub mod batch;
 mod camera_key;
 mod clips;
 mod export_window;
@@ -235,6 +236,8 @@ pub struct VideoView {
     changed_at: f64,
     /// Export Video's window: choosing, the video being made, or the video made.
     pub export: Option<ExportStep>,
+    /// Several recordings being made into videos at once (see [`batch`]).
+    pub batch: Option<batch::Batch>,
     /// What Export Video was last set to (offered again).
     export_last: Option<(VideoFormat, CaptionsIn)>,
     /// Export Transcript was pressed before there were captions: they're being made, and the
@@ -572,6 +575,7 @@ impl VideoView {
             seen: 0,
             changed_at: 0.0,
             export: None,
+            batch: None,
             export_last: None,
             transcript_after: None,
             library,
@@ -1486,6 +1490,16 @@ impl VideoView {
                         .clicked()
                     {
                         self.open_export_as(ed, &ctx, true);
+                        ui.close();
+                    }
+                    let can_batch = !ed.services.video_formats().is_empty();
+                    if ui
+                        .add_enabled(self.batch.is_none() && can_batch, egui::Button::new("Make Videos of Several Recordings…"))
+                        .on_hover_text("Recordings chosen together, each made into a video as it was edited, beside it, with one setting")
+                        .on_disabled_hover_text("Videos are made by the editor on the desktop")
+                        .clicked()
+                    {
+                        ed.services.request_batch();
                         ui.close();
                     }
                     if ui
@@ -4285,6 +4299,7 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
     v.library_panel(ed, ui);
     v.preview(ed, ui);
     v.export_windows(ed, &ctx);
+    v.batch_window(ed, &ctx);
     // Something else was opened meanwhile (from the strip): this one's edits are written first.
     if ed.video_epoch == epoch && ed.video.is_none() {
         ed.video = Some(v);
