@@ -512,8 +512,8 @@ fn turned_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion, degrees: f32
 }
 
 /// A picture or a video item's picture as its look frames it: what its crop leaves, in `rect`
-/// (before its motion), turned about its middle, its corners rounded, with a border round it and
-/// a soft shadow under it if it has them.
+/// (before its motion), turned about its middle, its corners rounded, with a border round it, a
+/// device round that and a soft shadow under it if it has them.
 fn framed_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion, look: &layers::ItemLook) {
     if m.alpha <= 0.0 || pic.width() == 0 || pic.height() == 0 || rect.w < 1.0 || rect.h < 1.0 {
         return;
@@ -529,19 +529,16 @@ fn framed_at(out: &mut Pixmap, pic: &Pixmap, rect: Rect, m: Motion, look: &layer
     // Its own space, its middle at 0; grown or shrunk, turned, and moved where it goes.
     let k = m.scale.max(0.01);
     let place = Transform::from_scale(k, k).post_rotate(look.rotate).post_translate(cx + m.dx, cy + m.dy);
-    let radius = look.radius * rect.w.min(rect.h);
-    let Some(shape) = draw::rounded_rect(Rect::new(-hw, -hh, rect.w, rect.h), radius) else { return };
+    let radius = look.radius.max(look.device.screen_radius()) * rect.w.min(rect.h);
+    let inner = Rect::new(-hw, -hh, rect.w, rect.h);
+    let Some(shape) = draw::rounded_rect(inner, radius) else { return };
     if look.shadow {
-        // A soft shadow: rounded boxes below and to the right, each larger and fainter.
-        let off = (rect.w.min(rect.h) * 0.04).max(2.0);
-        for step in 0..4 {
-            let grow = off * step as f32 * 0.5;
-            let r = Rect::new(-hw - grow + off, -hh - grow + off, rect.w + 2.0 * grow, rect.h + 2.0 * grow);
-            if let Some(s) = draw::rounded_rect(r, radius + grow) {
-                out.fill_path(&s, &paint(Color::BLACK, 0.12 * m.alpha), FillRule::Winding, place, None);
-            }
-        }
+        // A soft shadow under it (under its device if it has one).
+        let body = look.device.outer(inner);
+        let r = if look.device == crate::frame::Device::None { radius } else { body.w.min(body.h) * 0.04 };
+        crate::frame::shadow(out, body, r, place, m.alpha);
     }
+    crate::frame::draw_device(out, look.device, inner, place, m.alpha);
     // (The picture is placed as the shape is: a shader isn't moved with the path.)
     let to_shape = Transform::from_translate(-kx, -ky).post_scale(rect.w / kw, rect.h / kh).post_translate(-hw, -hh).post_concat(place);
     let fill = Paint {
@@ -866,6 +863,7 @@ mod tests {
             keys: Default::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 
@@ -1047,6 +1045,35 @@ mod tests {
         assert_eq!((wild.mask.x, wild.mask.y, wild.mask.w, wild.mask.h), (0.5, 1.5, 0.05, 1.0));
         tl.set_item(layer, id, |i| i.look = wild.clone()).unwrap();
         let _ = draw(&tl);
+    }
+
+    #[test]
+    fn a_picture_on_a_layer_has_a_device_drawn_round_it() {
+        let mut tl = timeline();
+        let pic = tl
+            .add_media(layers::MediaItem { name: "Tall.png".into(), path: "C:/Tall.png".into(), width: 20, height: 40, ..Default::default() })
+            .unwrap();
+        let red = Raster::filled(20, 40, Color::rgb(200, 0, 0)).unwrap();
+        let item = Item {
+            what: What::Media { id: pic },
+            place: Placement { x: 0.5, y: 0.5, w: 0.2, opacity: 1.0 },
+            intro: layers::Anim { kind: AnimKind::None, len: 0 },
+            look: layers::ItemLook { device: crate::frame::Device::Phone, ..layers::ItemLook::default() },
+            ..Item::default()
+        };
+        tl.place(item, None, 0).unwrap();
+        let mut out = grey(100, 100);
+        draw_layers(&mut out, &tl, &OnePicture(Arc::new(red)), 1_000_000, &mut TextCache::default(), &mut PictureCache::default());
+        // The picture covers 40 to 60 across, 30 to 70 down; the phone's dark body round it, its
+        // thick ends above and below.
+        assert_eq!(out.pixel(50, 50).unwrap(), Color::rgb(200, 0, 0));
+        let body = out.pixel(50, 28).unwrap();
+        assert!(body.r < 60 && body.g < 60, "{body:?}");
+        let side = out.pixel(39, 50).unwrap();
+        assert!(side.r < 60, "{side:?}");
+        assert_eq!(out.pixel(20, 50).unwrap(), Color::rgb(120, 120, 120));
+        // Its corners rounded inside the phone.
+        assert_ne!(out.pixel(40, 30).unwrap(), Color::rgb(200, 0, 0));
     }
 
     #[test]

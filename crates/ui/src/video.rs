@@ -38,6 +38,7 @@ mod camera_key;
 mod clips;
 mod export_window;
 mod library;
+mod screen_frame;
 mod sound;
 pub(crate) mod transcript;
 mod transitions;
@@ -1996,6 +1997,8 @@ impl VideoView {
                     if self.session.timeline.find(StreamKind::Screen).is_some() {
                         section(ui, "Keys Pressed", &mut first);
                         self.keys_section(ed, ui);
+                        section(ui, "Screen Frame", &mut first);
+                        self.screen_frame_section(ed, ui);
                     }
                     if self.session.timeline.tracks.iter().any(|x| !x.kind.is_video()) {
                         section(ui, "Sound Mix", &mut first);

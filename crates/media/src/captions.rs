@@ -808,6 +808,7 @@ mod tests {
             keys: Default::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 

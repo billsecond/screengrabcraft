@@ -15,6 +15,7 @@ pub mod compose;
 pub mod denoise;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod export;
+pub mod frame;
 #[cfg(target_os = "windows")]
 mod h264;
 pub mod keyer;

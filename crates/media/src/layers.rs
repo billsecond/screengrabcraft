@@ -363,10 +363,17 @@ pub struct ItemLook {
     /// Shown only inside a shape, or with a shape cut out of it.
     #[serde(skip_serializing_if = "Mask::is_none")]
     pub mask: Mask,
+    /// A device drawn round it (a picture or a video).
+    #[serde(skip_serializing_if = "no_device")]
+    pub device: crate::frame::Device,
 }
 
 fn is_normal(b: &BlendMode) -> bool {
     *b == BlendMode::Normal
+}
+
+fn no_device(d: &crate::frame::Device) -> bool {
+    *d == crate::frame::Device::None
 }
 
 impl Default for ItemLook {
@@ -380,6 +387,7 @@ impl Default for ItemLook {
             shadow: false,
             blend: BlendMode::Normal,
             mask: Mask::default(),
+            device: crate::frame::Device::None,
         }
     }
 }
@@ -395,6 +403,7 @@ impl ItemLook {
             && !self.shadow
             && self.blend == BlendMode::Normal
             && self.mask.is_none()
+            && self.device == crate::frame::Device::None
     }
 
     /// Drawn on a picture of its own first: masked, or laid on what's under it other than as it is.
@@ -415,6 +424,7 @@ impl ItemLook {
             shadow: self.shadow,
             blend: self.blend,
             mask: self.mask.checked(),
+            device: self.device,
         }
     }
 }
@@ -1451,6 +1461,7 @@ mod tests {
             keys: Default::default(),
             ducking: Default::default(),
             watermark: Default::default(),
+            frame: Default::default(),
         }
     }
 

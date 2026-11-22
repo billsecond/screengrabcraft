@@ -144,6 +144,11 @@ impl Composer {
             let f = w as f32 / vw.max(1.0);
             crate::pointer::draw_view(&mut out, &self.rec.pointer, timeline.pointer, src, (f, left, top), self.arrow.as_ref());
         }
+        // The screen framed: smaller on its background, rounded, a device round it (not while a
+        // zoom is being placed: then the whole screen fills the picture, as its frame is drawn on it).
+        if screen_shown && self.zoom && !timeline.frame.is_plain() {
+            out = crate::frame::frame_screen(out, &timeline.frame);
+        }
         if let Some((i, stream)) = self.camera
             && shown(i)
             && let Some(src) = timeline.source_time(i, t)
@@ -1233,6 +1238,21 @@ mod tests {
         // A crop of the left fifth: what's left, its shape kept, in the middle of it.
         let v = crate::timeline::ClipLook { crop: [200, 0, 0, 0], ..crate::timeline::ClipLook::PLAIN }.view();
         assert!((v.x - 0.2).abs() < 1e-6 && (v.y - 0.1).abs() < 1e-6 && (v.w - 0.8).abs() < 1e-6 && (v.h - 0.8).abs() < 1e-6, "{v:?}");
+    }
+
+    #[test]
+    fn the_screen_framed_is_smaller_on_its_background() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let before = c.frame(&tl, 1_000_000);
+        tl.frame = crate::frame::ScreenFrame { size: 0.75, background: "#00ff00".into(), ..Default::default() };
+        let out = c.frame(&tl, 1_000_000);
+        assert_eq!(out.pixel(1, 1).unwrap(), Color::rgb(0, 255, 0), "the background round it");
+        assert_eq!(out.pixel(32, 24).unwrap(), before.pixel(32, 24).unwrap(), "the screen in the middle");
+        // Hidden, the screen isn't framed: no background either.
+        tl.tracks[0].muted = true;
+        assert_ne!(c.frame(&tl, 1_000_000).pixel(1, 1).unwrap(), Color::rgb(0, 255, 0));
     }
 
     #[test]

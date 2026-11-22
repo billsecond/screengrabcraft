@@ -167,6 +167,7 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         keys: Default::default(),
         ducking: Default::default(),
         watermark: Default::default(),
+        frame: Default::default(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
@@ -938,6 +939,17 @@ impl VideoView {
         if ui.checkbox(&mut shadow, "Shadow").on_hover_text("A soft shadow under it").changed() {
             set(self, json!({"shadow": shadow}), false);
         }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Device round it").size(12.0).color(t.muted));
+            egui::ComboBox::from_id_salt("item-device").width(140.0).selected_text(look.device.label()).show_ui(ui, |ui| {
+                for d in screengrabcraft_media::frame::Device::ALL {
+                    if ui.selectable_label(look.device == d, d.label()).clicked() {
+                        set(self, json!({ "device": d }), false);
+                    }
+                }
+            });
+        });
     }
 
     /// An item's mask (the shape it's shown in, or that's cut out of it: where in it and how
