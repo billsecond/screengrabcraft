@@ -202,7 +202,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Subtitle files brought in** | Has | File › Import Subtitles: SubRip (.srt) or WebVTT (.vtt) timed on the video as it is now, made its captions (instead of those it had); each line follows its speaker's track from then on (`You:` and `Others:` lines theirs, the rest the microphone's) |
 | Items moved and resized on the picture, snapped to its middle and edges | Has | |
 | **Rotate an item; crop a clip** | Has | an item's panel turns it (Turn); a picture's or a video's crops its sides (Frame); a screen or camera clip's panel crops its edges, what's left filling the picture, its shape kept |
-| Pin a picture onto a slanted surface | Missing | |
+| **Pin a picture onto a slanted surface** | Has | a picture or a video on a layer: its panel's Corner Pin, then its four round handles dragged anywhere on the picture; it's drawn in perspective between them (while pinned it isn't turned, rounded or bordered) |
 
 ## Editing a video: motion and effects
 
@@ -212,7 +212,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Zoom into part of the screen and back (zoom and pan)** | Has (0.1.55) | smooth or at once; touching zooms pan from one to the next |
 | **Zoom that follows the clicks by itself** | Has | Zoom on the Clicks (the Library's Zoom and Pan section, or the Edit menu): a zoom for each run of clicks the recording kept, in a little before the first and out a while after the last, those close together panning from one to the next; ordinary zooms, to change or delete |
 | **Keyframe animation (place, size, opacity over time)** | Has | keyframes added at the playhead from the item's panel (Motion), eased from one to the next; moving or resizing it then changes the keyframe there; a zoom's keyframes pan it |
-| Motion along a path | Missing | |
+| **Motion along a path** | Has | an item with two keyframes or more: Along a curved path (its panel's Motion) takes it through their places on a smooth curve without stopping at them, easing out of the first and into the last; while it's chosen its way shows on the picture, a dot at each keyframe's place |
 | Transitions as items (fades, dips, wipes, stingers) | Has | |
 | **Transitions between two clips** | Has | a cross-fade, through black, wipes four ways, a push and a circle where two clips of a track meet, across the cut; sound clips cross-fade. From the clip's panel, the right button, or the Library's Between Clips dropped on the cut |
 | Words that draw themselves on | Part | the highlight and circle do |
@@ -301,6 +301,7 @@ By how much someone using it every day would miss each one. Built ones move to a
     tracks and sound layers mixed to mono (#116).
 25. Pieces of a track joined back together; a clip or an item lined up with another by its sound (#117).
 26. Media replaced keeping its effects; effects copied from a clip or an item and pasted on another (#118).
+27. Motion along a curved path; a picture pinned onto a slanted surface by its corners.
 
 **Still to build, in this order**
 
@@ -320,5 +321,4 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. A picture per click made into a how-to guide.
 14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 15. Print; batch changes; captures on a timer or at a set time.
-16. The rest: pinning onto surfaces, motion paths, see-through video, HDR, QR codes, measuring,
-    spell check.
+16. The rest: see-through video, HDR, QR codes, measuring, spell check.

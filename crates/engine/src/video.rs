@@ -778,14 +778,54 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
         Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`maskCut` must be true or false".to_string()))?),
     };
     let device = device_param(p)?;
-    let silent = match p.get("silent") {
+    let yes_no = |k: &str| -> Result<Option<bool>> {
+        match p.get(k) {
+            None => Ok(None),
+            Some(v) => v.as_bool().map(Some).ok_or_else(|| EngineError::Params(format!("`{k}` must be true or false"))),
+        }
+    };
+    let (silent, path, pinned) = (yes_no("silent")?, yes_no("path")?, yes_no("pinned")?);
+    // A pinned picture's four corners, each moved by [across, down] (shares of the video).
+    let pin = match p.get("pin") {
         None => None,
-        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`silent` must be true or false".to_string()))?),
+        Some(v) => {
+            let corners: Vec<[f32; 2]> = v
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| {
+                            let n: Vec<f32> = c.as_array()?.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect();
+                            match n.as_slice() {
+                                [x, y] => Some([*x, *y]),
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            match corners.as_slice() {
+                [a, b, c, d] => Some([*a, *b, *c, *d]),
+                _ => {
+                    return Err(EngineError::Params(
+                        "`pin` is four corners, [[x, y], …], top left, top right, bottom right, bottom left".to_string(),
+                    ));
+                }
+            }
+        }
     };
     s.timeline
         .set_item(id(p, "layer")?, id(p, "item")?, |i| {
             if let Some(v) = silent {
                 i.silent = v;
+            }
+            if let Some(v) = path {
+                i.path = v;
+            }
+            if let Some(v) = pinned {
+                i.look.pinned = v;
+            }
+            if let Some(v) = pin {
+                i.look.pin = v;
             }
             if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
                 if let Some(v) = title {
@@ -1766,7 +1806,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -1906,6 +1946,25 @@ mod tests {
             json!({"track": 1, "layer": sl, "mono": true}),
         ] {
             assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn an_item_moves_along_a_path_and_a_picture_is_pinned_by_its_corners() {
+        let mut s = session();
+        let a = s.execute("video.addMedia", &json!({"kind": "picture", "name": "A.png", "path": "C:/A.png", "width": 40, "height": 40})).unwrap();
+        let p = s.execute("video.place", &json!({"media": a["id"], "at": 0})).unwrap();
+        let (l, i) = (p["layer"].clone(), p["item"].clone());
+        s.execute("video.setItem", &json!({"layer": l, "item": i, "path": true, "pinned": true, "pin": [[0, 0], [0.1, -0.1], [0, 0], [-5, 9]]}))
+            .unwrap();
+        let it = s.timeline.item(l.as_u64().unwrap() as u32, i.as_u64().unwrap() as u32).unwrap();
+        assert!(it.path && it.look.pinned);
+        assert_eq!(it.look.pin, [[0.0, 0.0], [0.1, -0.1], [0.0, 0.0], [-1.0, 1.0]], "kept within the video's size either way");
+        for bad in [json!({"pin": [[0, 0]]}), json!({"pin": "corners"}), json!({"pin": [[0, 0], [0, 0], [0, 0], [0, "x"]]}), json!({"path": 1})] {
+            let mut q = bad.clone();
+            q["layer"] = l.clone();
+            q["item"] = i.clone();
+            assert!(s.execute("video.setItem", &q).is_err(), "{bad}");
         }
     }
 
