@@ -1055,6 +1055,15 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
     out
 }
 
+/// The edited sound as it's heard playing backwards: the `count` stereo samples before timeline
+/// sample `end`, turned round (the last first), interleaved; fewer near the start.
+pub fn mix_backwards(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_draw::MediaStore, end: u64, count: usize) -> Vec<f32> {
+    let first = end.saturating_sub(count as u64);
+    let n = usize::try_from(end - first).unwrap_or(0);
+    let mixed = mix_with(rec, timeline, media, first, n);
+    mixed.as_chunks::<2>().0.iter().rev().flatten().copied().collect()
+}
+
 /// The edited sound played `rate` times as fast from timeline sample `start` (the playhead), at
 /// its own pitch: `count` stereo samples from sample `first` of what's played, interleaved (-1 to
 /// 1). Asked for [`crate::stretch::FRESH`] samples at a time from a multiple of it, nothing is
@@ -1857,6 +1866,22 @@ mod tests {
         assert_eq!(parts, mix_faster(&r, &tl, &crate::layer_draw::NoMedia, 0, 4.0, 0, step * 2));
         // Junk never panics.
         let _ = mix_faster(&r, &tl, &crate::layer_draw::NoMedia, u64::MAX, f64::NAN, u64::MAX / 2, 5);
+    }
+
+    #[test]
+    fn played_backwards_the_sound_is_turned_round() {
+        let r = rec();
+        let tl = Timeline::new(&r);
+        let ahead = mix_with(&r, &tl, &crate::layer_draw::NoMedia, 30_000, 4_800);
+        let back = mix_backwards(&r, &tl, &crate::layer_draw::NoMedia, 34_800, 4_800);
+        assert_eq!(back.len(), ahead.len());
+        // The last sample first, each side kept on its side.
+        assert_eq!(back[..2], ahead[ahead.len() - 2..]);
+        assert_eq!(back[back.len() - 2..], ahead[..2]);
+        assert!(back.iter().any(|v| v.abs() > 0.01), "there is sound in it");
+        // Near the start, only what's before it.
+        assert_eq!(mix_backwards(&r, &tl, &crate::layer_draw::NoMedia, 100, 4_800).len(), 200);
+        assert!(mix_backwards(&r, &tl, &crate::layer_draw::NoMedia, 0, 4_800).is_empty());
     }
 
     #[test]

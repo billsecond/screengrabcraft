@@ -378,14 +378,15 @@ pub trait Services {
     }
 
     /// Plays the edited sound (the layers' media's too, from `media`) from `from_us`, `rate` times
-    /// as fast as recorded (1, 2, 4 or 8; faster at its own pitch), until it's dropped.
+    /// as fast as recorded (1, 2, 4 or 8; faster at its own pitch), or at -1 backwards (the sound
+    /// turned round), until it's dropped.
     fn play_sound(
         &self,
         _recording: std::sync::Arc<Recording>,
         _timeline: Timeline,
         _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
         _from_us: u64,
-        _rate: u32,
+        _rate: i32,
     ) -> Option<Box<dyn SoundOut>> {
         None
     }

@@ -186,7 +186,8 @@ struct Playing {
     since: f64,
     from: u64,
     /// How fast and which way: 1 as recorded (with its sound), 2, 4 or 8 times as fast, and
-    /// below 0 backwards (J and L); backwards plays without sound, faster at its own pitch.
+    /// below 0 backwards (J and L); backwards as recorded its sound is turned round, faster
+    /// backwards is silent, faster forwards at its own pitch.
     rate: i32,
     /// It started in the chosen stretch: it stops at its end.
     in_range: bool,
@@ -970,13 +971,15 @@ impl VideoView {
     }
 
     /// Plays from the playhead, `rate` times as fast as recorded (below 0, backwards): forwards
-    /// with its sound (faster, at its own pitch), backwards without.
+    /// with its sound (faster, at its own pitch), backwards as recorded with its sound turned
+    /// round, faster backwards without.
     fn play_at_rate(&mut self, ed: &Editor, now: f64, rate: i32) {
         // The sound that was playing stops first.
         self.playing = None;
-        let sound = match u32::try_from(rate) {
-            Ok(r) if r >= 1 => ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead, r),
-            _ => None,
+        let sound = if rate >= 1 || rate == -1 {
+            ed.services.play_sound(self.rec.clone(), self.session.timeline.clone(), self.library.clone(), self.playhead, rate)
+        } else {
+            None
         };
         let in_range = self.range.is_some_and(|(a, b)| (a..b).contains(&self.playhead) || (rate < 0 && self.playhead == b));
         self.playing = Some(Playing { since: now, from: self.playhead, rate, in_range, sound });
@@ -986,7 +989,8 @@ impl VideoView {
     const MOST_RATE: i32 = 8;
 
     /// L (`forward`) or J: plays that way as recorded, or, playing that way already, twice as
-    /// fast (up to 8 times). Backwards it plays without sound; faster, voices keep their pitch.
+    /// fast (up to 8 times). Backwards its sound is turned round (faster backwards, silent);
+    /// faster, voices keep their pitch.
     pub fn shuttle(&mut self, ed: &Editor, now: f64, forward: bool) {
         let rate = match &self.playing {
             Some(p) if (p.rate > 0) == forward => (p.rate * 2).clamp(-Self::MOST_RATE, Self::MOST_RATE),
@@ -1002,11 +1006,15 @@ impl VideoView {
         self.play_at_rate(ed, now, rate);
     }
 
-    /// How fast and which way it's playing, when not as recorded: `2×`, `Backwards 4×`.
+    /// How fast and which way it's playing, when not as recorded: `2×`, `Backwards`, `Backwards 4×`.
     pub fn rate_label(&self) -> Option<String> {
         let rate = self.playing.as_ref().map(|p| p.rate).filter(|r| *r != 1)?;
         let x = rate.unsigned_abs();
-        Some(if rate < 0 { format!("Backwards {x}×") } else { format!("{x}×") })
+        Some(match rate {
+            -1 => "Backwards".to_string(),
+            r if r < 0 => format!("Backwards {x}×"),
+            _ => format!("{x}×"),
+        })
     }
 
     /// The time under the picture: where the playhead is, how long the video is, and how fast
@@ -1302,7 +1310,8 @@ impl VideoView {
                 _ => (0, self.length()),
             };
             if p.rate < 0 {
-                let at = p.from.saturating_sub(gone);
+                // Backwards with its sound: where the speakers have got to.
+                let at = p.sound.as_ref().and_then(|s| s.position_us()).unwrap_or_else(|| p.from.saturating_sub(gone));
                 if at <= start {
                     self.playhead = start;
                     self.playing = None;
@@ -1686,7 +1695,7 @@ impl VideoView {
                     ui.separator();
                     if ui
                         .add(egui::Button::new("Play Backwards").shortcut_text("J"))
-                        .on_hover_text("Again plays faster backwards (2, 4, 8 times); without sound")
+                        .on_hover_text("Its sound turned round; again plays faster backwards (2, 4, 8 times), without sound")
                         .clicked()
                     {
                         self.shuttle(ed, now, false);

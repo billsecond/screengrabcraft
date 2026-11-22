@@ -997,7 +997,7 @@ struct MediaHost {
     ready: std::sync::Arc<std::sync::Mutex<Option<screengrabcraft_media::captions::Captions>>>,
     media_lines: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, (u64, Vec<screengrabcraft_media::captions::Cue>)>>>,
     /// How fast each sound asked for plays (none is played).
-    rates: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+    rates: std::sync::Arc<std::sync::Mutex<Vec<i32>>>,
     /// The sound a sound file brings in (stereo, 48 kHz), instead of a tone.
     sound: std::sync::Arc<std::sync::Mutex<Option<Vec<i16>>>>,
 }
@@ -1009,7 +1009,7 @@ impl crate::services::Services for MediaHost {
         _timeline: screengrabcraft_media::timeline::Timeline,
         _media: std::sync::Arc<dyn screengrabcraft_media::layer_draw::MediaStore>,
         _from_us: u64,
-        rate: u32,
+        rate: i32,
     ) -> Option<Box<dyn crate::services::SoundOut>> {
         self.rates.lock().unwrap().push(rate);
         None
@@ -1299,7 +1299,8 @@ fn a_videos_sound_is_separated_tracks_go_mono_and_faster_playback_asks_for_sound
     h.get_by_label("Mix the track to mono").click();
     h.run_steps(2);
     assert!(tl(&h).tracks[mic].mono);
-    // L, L, L: the sound asked for as recorded, then twice and four times as fast; J: none.
+    // L, L, L: the sound asked for as recorded, then twice and four times as fast; J: backwards
+    // as recorded, turned round; J again (twice as fast backwards): none.
     if let Some(v) = h.state_mut().video.as_mut() {
         v.selected = None;
     }
@@ -1310,7 +1311,12 @@ fn a_videos_sound_is_separated_tracks_go_mono_and_faster_playback_asks_for_sound
     }
     h.key_press(egui::Key::J);
     h.run_steps(1);
-    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4]);
+    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4, -1]);
+    assert_eq!(h.state().video.as_ref().unwrap().rate_label().as_deref(), Some("Backwards"));
+    h.key_press(egui::Key::J);
+    h.run_steps(1);
+    assert_eq!(host.rates.lock().unwrap().as_slice(), [1, 2, 4, -1]);
+    assert_eq!(h.state().video.as_ref().unwrap().rate_label().as_deref(), Some("Backwards 2×"));
 }
 
 #[test]

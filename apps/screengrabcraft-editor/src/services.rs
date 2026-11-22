@@ -478,7 +478,7 @@ impl Services for DesktopServices {
         timeline: Timeline,
         media: Arc<dyn MediaStore>,
         from_us: u64,
-        rate: u32,
+        rate: i32,
     ) -> Option<Box<dyn SoundOut>> {
         match crate::video::Sound::start(recording, timeline, media, from_us, rate) {
             Ok(s) => Some(Box::new(s)),

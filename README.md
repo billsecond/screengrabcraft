@@ -133,8 +133,8 @@ the picture editor to the video editor. Its timeline has a row for each track:
   they stay together; what follows moves up to follow on. Voices keep their pitch, and a clip
   that isn't as recorded says its speed on the timeline.
 - **J, K and L**: L plays on, K pauses, J plays backwards; press J or L again to play that way
-  2, 4 or 8 times as fast (playing on, voices keep their pitch; backwards plays without sound). **Play
-  backwards**: a clip's right button (or Play backwards in its panel) plays it from its end to
+  2, 4 or 8 times as fast (playing on, voices keep their pitch; backwards its sound is turned
+  round, and faster backwards it plays silent). **Play backwards**: a clip's right button (or Play backwards in its panel) plays it from its end to
   its start, the picture and the sound turned round, with the clips grouped with it.
 - **Hold a frame**: H (or Edit, or the ruler's right button) holds the picture at the playhead
   still for a while (2 s; the menus offer 1 to 5): every track waits, the sound is silent
