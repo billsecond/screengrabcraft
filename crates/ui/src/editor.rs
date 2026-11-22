@@ -268,6 +268,8 @@ pub struct Editor {
     pub(crate) grab_text: crate::grab_text::State,
     /// What Grab Text is reading is the selected area (not all of the picture).
     pub(crate) grab_text_area: bool,
+    /// QR codes read, or one being made, in their window.
+    pub(crate) qr: crate::qr::State,
     /// Batch Changes, while its window is open.
     pub(crate) batch: Option<crate::batch::Batch>,
 }
@@ -356,6 +358,7 @@ impl Editor {
             background: crate::background::State::default(),
             grab_text: crate::grab_text::State::default(),
             grab_text_area: false,
+            qr: crate::qr::State::default(),
             batch: None,
         }
     }
@@ -1332,6 +1335,7 @@ impl Editor {
         crate::background::show(self, &ctx);
         crate::batch::show(self, &ctx);
         crate::grab_text::show(self, &ctx);
+        crate::qr::show(self, &ctx);
         self.confirm(&ctx);
         self.save_problem_modal(&ctx);
         self.paint_toast(&ctx);
@@ -1343,6 +1347,7 @@ impl Editor {
             || (self.pending.is_some() && !self.autosaves())
             || self.background.busy()
             || self.grab_text.busy()
+            || self.qr.busy()
             || self.batch.is_some()
         {
             return;
@@ -1737,6 +1742,8 @@ impl Editor {
                     crate::background::menu(self, ui);
                     ui.separator();
                     crate::grab_text::item(self, ui);
+                    crate::qr::read_item(self, ui);
+                    crate::qr::make_item(self, ui);
                 });
                 ui.menu_button("Effects", |ui| self.effects_menu(ui));
                 ui.menu_button("View", |ui| {

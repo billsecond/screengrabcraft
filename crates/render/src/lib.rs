@@ -3,7 +3,7 @@
 //! ([`effects`]), reading and writing pictures ([`codec`], [`pdf`]), the project file
 //! ([`project`]), and the capture helpers that are pure picture work: joining a scrolling
 //! capture ([`stitch`]), writing animated GIFs ([`anim`]) and cutting a capture to its shape
-//! ([`area`]).
+//! ([`area`]); QR codes read and made ([`qr`]).
 //!
 //! Layer L2: Rust only (tiny-skia, ab_glyph, image), no I/O beyond byte buffers, builds for the
 //! browser.
@@ -22,6 +22,7 @@ pub mod matte;
 pub mod pdf;
 pub mod pointer;
 pub mod project;
+pub mod qr;
 pub mod stamp;
 pub mod stitch;
 pub mod text;

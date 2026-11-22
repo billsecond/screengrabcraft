@@ -19,6 +19,7 @@ pub mod icons;
 pub mod overlay;
 pub mod playback;
 pub mod props;
+pub mod qr;
 pub mod quick;
 pub mod recorder;
 pub mod services;

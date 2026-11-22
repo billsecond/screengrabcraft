@@ -576,3 +576,42 @@ fn cut_out_takes_a_strip_out_and_moves_the_annotations_with_the_picture() {
     assert!(s.execute("image.cutOut", &json!({"from": 10, "to": 20, "edge": 3})).is_err());
     assert_eq!((s.doc.width(), s.doc.height()), (200, 100));
 }
+
+#[test]
+fn a_qr_code_made_on_the_picture_is_read_back_and_reading_changes_nothing() {
+    let mut s = Session::new(Document::new(Raster::filled(600, 400, Color::WHITE).unwrap()));
+    let out = s.execute("image.makeQr", &json!({"text": "https://example.com/menu", "size": 180})).unwrap();
+    let id = ObjectId(out["id"].as_u64().unwrap());
+    assert_eq!(s.selected(), vec![id], "selected, to be moved");
+    let o = s.doc.get(id).unwrap();
+    assert_eq!(o.shape.kind(), Kind::Image);
+    let r = o.shape.rect().unwrap();
+    assert!(r.w == r.h && r.w <= 180.0 && r.w >= 120.0, "{r:?}");
+    assert!((r.x + r.w / 2.0 - 300.0).abs() <= 1.0 && (r.y + r.h / 2.0 - 200.0).abs() <= 1.0, "in the middle: {r:?}");
+    assert_eq!(s.undo_label(), Some("Make a QR Code"));
+    // Read from the picture as shown, with where it is; reading is no edit.
+    let doc = s.doc.clone();
+    let read = s.execute("image.readQr", &json!({})).unwrap();
+    assert_eq!(read["codes"][0]["text"], "https://example.com/menu");
+    assert_eq!(read["codes"][0]["link"], true);
+    let x = read["codes"][0]["rect"]["x"].as_f64().unwrap() as f32;
+    assert!(x > r.x && x < r.x + r.w * 0.2, "{x} in {r:?}");
+    assert_eq!(s.doc, doc);
+    assert_eq!(s.undo_label(), Some("Make a QR Code"));
+    // In an area: where it is on the whole picture; an area without it has none.
+    let read = s.execute("image.readQr", &json!({"x": 150, "y": 50, "w": 300, "h": 300})).unwrap();
+    let x2 = read["codes"][0]["rect"]["x"].as_f64().unwrap() as f32;
+    assert!((x2 - x).abs() <= 2.0, "{x2} {x}");
+    let read = s.execute("image.readQr", &json!({"x": 0, "y": 0, "w": 100, "h": 100})).unwrap();
+    assert_eq!(read["codes"].as_array().map(Vec::len), Some(0));
+    // Placed where asked; nothing, too much or a wrong size is refused and changes nothing.
+    let out = s.execute("image.makeQr", &json!({"text": "Table 4", "x": 10, "y": 20, "size": 40})).unwrap();
+    let r = s.doc.get(ObjectId(out["id"].as_u64().unwrap())).unwrap().shape.rect().unwrap();
+    assert_eq!((r.x, r.y), (10.0, 20.0));
+    let before = s.doc.clone();
+    for bad in [json!({}), json!({"text": "  "}), json!({"text": "x".repeat(5000)}), json!({"text": "a", "size": "big"}), json!({"text": 5})] {
+        assert!(s.execute("image.makeQr", &bad).is_err(), "{bad}");
+        assert_eq!(s.doc, before);
+    }
+    assert!(s.execute("image.readQr", &json!({"x": 900, "y": 0, "w": 10, "h": 10})).is_err());
+}

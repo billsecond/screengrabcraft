@@ -205,6 +205,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
   area selected, read on this computer by Windows' own text reader and shown to copy (put anything
   right first). On macOS and Linux it isn't there yet.
+- **QR codes** (Image menu): **Read QR Codes** shows the words in the QR codes in the picture (or
+  the area selected), each to copy; a web address is shown, never opened. **Make a QR Code…** puts
+  a code of your words or web address on the picture, to move and size like any picture. Both on
+  this computer, everywhere.
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.

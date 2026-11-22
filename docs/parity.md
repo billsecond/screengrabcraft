@@ -42,7 +42,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | A whole web page from its address | Missing | |
 | Printing from any program into the editor | Missing | |
 | HDR screens captured in their true colours | Missing | |
-| QR codes made or read | Missing | |
+| QR codes made or read | Has | the Image menu: Read QR Codes (the picture or the area selected) shows each code's words to copy, a web address shown and never opened; Make a QR Code… puts one of your words on the picture as a picture annotation. On this computer, every system |
 | Pictures sent from a phone | Not planned | needs a network service |
 | Capture presets (an area type, effects and where it goes, under one shortcut) | Part | the area (any kind, a shape or a set size), a wait, what happens after and a shortcut of its own, on the Capture page and in the tray; no effects added at capture time, and one captures folder and format for all |
 | After a capture: copy, open in the editor, save, or ask with a bar | Has | |
@@ -286,7 +286,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 11. A multi-page PDF of several captures (#80).
 12. Captures pinned at the front of the Recent strip (#83).
 13. A countdown before a recording; a still from the camera (#84).
-14. A border round the camera, and the camera mirrored.
+14. A border round the camera, and the camera mirrored (#87).
+15. QR codes read and made.
 
 **Still to build, in this order**
 
@@ -314,4 +315,4 @@ By how much someone using it every day would miss each one. Built ones move to a
 21. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
 22. Cutting words from the transcript; filler words taken out.
 23. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
-    backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.
+    backwards, lining up by sound, see-through video, HDR, measuring, spell check.
