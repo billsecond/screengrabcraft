@@ -884,6 +884,8 @@ pub struct Settings {
     /// let go, not the others.
     #[serde(deserialize_with = "readable")]
     pub presets: Vec<CapturePreset>,
+    /// Captures on a timer and at a set time (the Capture page).
+    pub timed: crate::timed::TimedCaptures,
 }
 
 fn on() -> bool {
@@ -924,6 +926,7 @@ impl Default for Settings {
             scroll_by_itself: true,
             scrolling_longest: SCROLLING_LONGEST,
             presets: Vec::new(),
+            timed: crate::timed::TimedCaptures::default(),
         }
     }
 }
@@ -974,6 +977,7 @@ impl Settings {
         self.scrolling_longest = self.scrolling_longest.clamp(SCROLLING_SHORTEST, crate::MAX_SIDE);
         self.presets.truncate(PRESETS_MAX);
         self.presets = std::mem::take(&mut self.presets).into_iter().map(CapturePreset::clamped).collect();
+        self.timed = std::mem::take(&mut self.timed).clamped();
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }

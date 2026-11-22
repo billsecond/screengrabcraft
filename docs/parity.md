@@ -35,7 +35,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Grab Text: the text in an area straight to the clipboard** | Has (0.1.54) | Windows' own text reader, on this computer; Windows only for now |
 | Scrolling capture, scrolled by hand | Has | |
 | **Scrolling capture that scrolls by itself** | Has | Windows: it turns the mouse wheel over the area and stops at the end of the page or at the longest picture; elsewhere, by hand |
-| Captures again and again on a timer (time-lapse), or at a set time | Missing | |
+| Captures again and again on a timer (time-lapse), or at a set time | Has | the Capture page: one every so many seconds of the screen with the pointer, all screens or the last area, skipping those where nothing changed; one at a time of day; saved straight to the captures folder, stopped from the tray |
 | A picture for each click, made into a numbered how-to guide | Missing | |
 | The guide saved as a document, slides, PDF, web page or Markdown | Missing | |
 | A still from the camera | Missing | |
@@ -158,8 +158,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Rotate by any angle | Missing | |
 | Templates: pictures laid out in a frame with words | Missing | |
 | Several pictures combined into one | Missing | |
-| Many pictures changed at once (batch) | Missing | |
-| Print | Missing | |
+| Many pictures changed at once (batch) | Has | Batch Changes (File menu, or All captures for the pictures shown): resize, the effects, grayscale, invert, trim, in order; a format and a name pattern; each saved beside its picture, none written over |
+| Print | Part | the Image Editor's File menu and Ctrl+P, through Windows' own printing window; greyed out elsewhere |
 | Recent captures strip; delete to the bin | Has | |
 | Pin captures in the strip | Missing | |
 | All captures by day, with search | Has | |
@@ -278,8 +278,9 @@ By how much someone using it every day would miss each one. Built ones move to a
 3. Cut Out: take a strip out of a picture and close the gap (0.1.56).
 4. Scrolling capture that scrolls by itself (Windows; #59).
 5. Capture presets; areas of a set size; shapes held while dragging (#62).
-6. Drawing on the screen while recording (Windows).
-7. Tags, favourites, and captures sorted by the program they were taken from.
+6. Drawing on the screen while recording (Windows; #65).
+7. Tags, favourites, and captures sorted by the program they were taken from (#68).
+8. Print; batch changes; captures on a timer or at a set time.
 
 **Still to build, in this order**
 
@@ -306,7 +307,6 @@ By how much someone using it every day would miss each one. Built ones move to a
 20. A picture per click made into a how-to guide.
 21. Groups, pushing later clips along, locked and solo tracks, clip colours.
 22. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-23. Print; batch changes; captures on a timer or at a set time.
-24. Cutting words from the transcript; filler words taken out.
-25. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+23. Cutting words from the transcript; filler words taken out.
+24. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

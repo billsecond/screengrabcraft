@@ -992,6 +992,10 @@ impl Services for Disk {
     fn run_library(&self, id: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
         screengrabcraft_engine::library::run(&mut self.0.borrow_mut().library, id, params).map_err(|e| e.to_string())
     }
+
+    fn file_exists(&self, path: &str) -> bool {
+        self.0.borrow().files.contains_key(path)
+    }
 }
 
 fn png(w: u32, h: u32, color: Color) -> Vec<u8> {
@@ -2111,6 +2115,127 @@ fn a_capture_deleted_from_the_strip_leaves_the_library_too() {
     delete_from_strip(&mut h, "Capture 002.png");
     assert!(disk.0.borrow().library.get("captures/Capture 002.png").is_empty());
     assert!(!disk.0.borrow().library.get("captures/Capture 001.png").is_empty(), "the others stay");
+}
+
+// ---- Print and Batch Changes ----
+
+/// A host with a printer: what it was asked to print.
+#[derive(Clone, Default)]
+struct Printer(Rc<RefCell<Vec<(u32, u32, String)>>>);
+
+impl Services for Printer {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn can_print(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn print(&self, picture: &Raster, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().push((picture.width(), picture.height(), name.to_string()));
+        Ok(())
+    }
+}
+
+fn file_menu_item(h: &mut Harness<'_, Editor>, item: &str) {
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    h.get_by_label_contains(item).click();
+    h.run_steps(3);
+}
+
+#[test]
+fn print_sends_the_picture_as_shown_and_is_greyed_out_where_there_is_no_printing() {
+    let printer = Printer::default();
+    let mut ed = Editor::new(Box::new(printer.clone()), EditorSettings::default());
+    ed.session.replace(Document::new(Raster::filled(320, 200, Color::WHITE).unwrap()));
+    ed.name = "Receipt".into();
+    let mut h = harness(ed);
+    h.run_steps(2);
+    file_menu_item(&mut h, "Print\u{2026}");
+    assert_eq!(printer.0.borrow().as_slice(), [(320, 200, "Receipt".to_string())]);
+    // Ctrl+P too.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert_eq!(printer.0.borrow().len(), 2);
+    // No printing here: greyed out, and the key says why.
+    let mut h = harness(editor());
+    h.run_steps(2);
+    h.get_by_label("File").click();
+    h.run_steps(3);
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label_contains("Print\u{2026}")).is_disabled());
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::P);
+    h.run_steps(2);
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("Printing needs")), "{:?}", h.state().toast_text());
+}
+
+fn decoded(disk: &Disk, path: &str) -> Raster {
+    screengrabcraft_render::decode(&disk.get(path).unwrap_or_else(|| panic!("{path} was not written"))).unwrap()
+}
+
+#[test]
+fn batch_changes_resize_and_grey_every_picture_beside_it_and_say_which_could_not_be() {
+    let disk = many_captures(3);
+    disk.put("captures/Broken.png", b"not a picture".to_vec());
+    let originals: Vec<Vec<u8>> = (0..3).map(|i| disk.get(&format!("captures/Capture {i:03}.png")).unwrap()).collect();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    file_menu_item(&mut h, "Batch Changes\u{2026}");
+    let files: Vec<String> = (0..3).map(|i| format!("captures/Capture {i:03}.png")).chain(["captures/Broken.png".to_string()]).collect();
+    h.state_mut().open_batch(files);
+    h.run_steps(2);
+    for change in ["Resize", "Grayscale"] {
+        h.get_by_label("Add a Change").click();
+        h.run_steps(3);
+        h.get_by_label(change).click();
+        h.run_steps(3);
+    }
+    if let Some(b) = h.state_mut().batch.as_mut() {
+        b.pattern = "{name} small".into();
+        b.format = Some(ImageFormat::Png);
+    }
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "batch-changes");
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    crate::quick_tests::shot(&mut h, "batch-done");
+    for i in 0..3 {
+        let out = decoded(&disk, &format!("captures/Capture {i:03} small.png"));
+        assert_eq!((out.width(), out.height()), (4, 3), "half of 8x6");
+        assert_eq!(disk.get(&format!("captures/Capture {i:03}.png")).as_ref(), originals.get(i), "the original stays as it was");
+    }
+    let progress = h.state().batch.as_ref().and_then(|b| b.progress.clone()).unwrap();
+    assert!(progress.done);
+    assert_eq!(progress.written.len(), 3);
+    assert_eq!(progress.failed.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["captures/Broken.png"]);
+    assert_eq!(h.state().toast_text(), Some("Changed 3; 1 couldn't be"));
+    // Again: new names, nothing written over.
+    h.state_mut().batch.as_mut().unwrap().progress = None;
+    h.run_steps(2);
+    h.get_by_label("Change 4 Pictures").click();
+    h.run_steps(12);
+    assert!(disk.get("captures/Capture 000 small (2).png").is_some());
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().batch.is_none());
+}
+
+#[test]
+fn all_captures_hands_the_pictures_shown_to_batch_changes() {
+    let disk = library_disk();
+    let mut h = on_disk(&disk, None);
+    h.run_steps(3);
+    open_all_captures(&mut h);
+    h.get_by_label("Notes (2)").click();
+    h.run_steps(3);
+    h.get_by_label("Batch Change These (2)\u{2026}").click();
+    h.run_steps(3);
+    let files = h.state().batch.as_ref().map(|b| b.files.clone()).unwrap_or_default();
+    assert_eq!(files.len(), 2);
+    assert!(files.contains(&"captures/Capture 000.png".to_string()) && files.contains(&"captures/Capture 002.png".to_string()));
 }
 
 // ---- the Selection tool: an area of the picture moved, cut, deleted, cropped to; flatten ----

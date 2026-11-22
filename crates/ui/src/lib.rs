@@ -7,6 +7,7 @@
 
 pub mod autosave;
 pub mod background;
+pub mod batch;
 pub mod canvas;
 pub mod dialogs;
 pub mod editor;

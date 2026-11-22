@@ -28,6 +28,7 @@ mod ink;
 mod popups;
 mod record;
 mod recorder;
+mod timed;
 mod tray;
 mod update;
 

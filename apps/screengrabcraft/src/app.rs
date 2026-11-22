@@ -47,7 +47,6 @@ pub enum Msg {
     TextRead(Result<String, String>),
 }
 
-/// What became of a finished capture.
 /// The window a capture was taken from: its program and its title.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {
@@ -55,6 +54,7 @@ pub struct Window {
     pub title: String,
 }
 
+/// What became of a finished capture.
 pub struct Done {
     pub saved: Option<PathBuf>,
     pub copied: bool,
@@ -173,6 +173,8 @@ pub struct Service {
     pub updates: crate::update::Updates,
     /// Captions of Video Production recordings being made, one at a time, never while recording.
     pub captions: crate::captions::Captioner,
+    /// Captures on a timer and at a set time (`crate::timed`).
+    pub timed: crate::timed::Timed,
 }
 
 impl Service {
@@ -251,6 +253,7 @@ impl Service {
             quit: false,
             updates: crate::update::Updates::new(),
             captions: crate::captions::Captioner::default(),
+            timed: crate::timed::Timed::default(),
         }
     }
 
@@ -445,6 +448,8 @@ impl Service {
                     Some(Item::ToggleBorder) => self.toggle_border(),
                     Some(Item::ToggleDrawing) => self.toggle_drawing(),
                     Some(Item::DiscardRecording) => self.stop_recording(true),
+                    Some(Item::TimedCaptures) => self.open_home(),
+                    Some(Item::StopTimed) => crate::timed::stop(self),
                     Some(Item::Editor) => {
                         if let Err(e) = launch::open_editor(&[]) {
                             self.notify("The editor could not be started", e, None, None, true);
@@ -936,6 +941,17 @@ impl Service {
     }
 
     /// The tray's recording menu as things are now.
+    /// The tray's menu says whether captures on a timer are running.
+    pub fn sync_timed(&mut self) {
+        let running = self.timed.running();
+        if let Some(t) = &mut self.tray
+            && t.timed != running
+        {
+            t.timed = running;
+            t.rebuild(&self.settings, &self.keys);
+        }
+    }
+
     fn sync_tray(&mut self) {
         let state = self.recording.as_ref().map(|r| crate::tray::RecordingState {
             paused: r.is_paused(),
@@ -1144,6 +1160,7 @@ impl Service {
         if self.overlay.as_ref().is_some_and(|o| *o.overlay.outcome() != Outcome::Pending) {
             self.overlay_done();
         }
+        crate::timed::tick(self, ctx);
         self.poll_recording();
         self.captions.tick(self.recording.is_some());
         if let Some(t) = &mut self.tray {
@@ -1496,7 +1513,7 @@ fn keep(
 
 /// The capture written: where it was saved (if it was), and the file for the editor (if it goes
 /// there).
-fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
+pub(crate) fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool, edit: bool) -> Result<(Option<PathBuf>, Option<PathBuf>), String> {
     let name = screengrabcraft_model::settings::expand_name(&s.file_name, screengrabcraft_desktop::time::now(), source, 1);
     let format = if s.format == ImageFormat::Gif || s.format == ImageFormat::Pdf && edit { ImageFormat::Png } else { s.format };
     let mut saved = None;

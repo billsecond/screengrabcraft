@@ -69,6 +69,11 @@ held to a shape (16:9, square…) or of a set size placed with a click, a window
 screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); and a
 shortcut of its own. They're on the Capture page and in the tray menu (Capture Presets).
 
+**Captures on a timer** (the Capture page, or Captures on a Timer in the tray): one every so many
+seconds of the screen with the pointer, all screens or the last area, saved straight to the
+captures folder; one where nothing has changed since the last is skipped. Stop them from the tray.
+"One at" takes a single capture at a time of day.
+
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
 or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes
 on; on Windows the screen frozen to choose the area, and what's said once it's kept, stay out of
@@ -230,6 +235,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   folder, never in the pictures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
   WebP, BMP, GIF or PDF.
+- **Print** (File › Print, Ctrl+P) through Windows' own printing window (greyed out elsewhere).
+- **Batch Changes** (File menu, or Batch Change These in All captures): the same changes (resize,
+  border, shadow, torn edge, round corners, brightness and contrast, grayscale, invert, trim) made
+  to many pictures at once, each saved beside its picture under a name pattern (`{name} changed`).
 
 The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 

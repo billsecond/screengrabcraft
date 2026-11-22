@@ -211,6 +211,25 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
             svc.run_preset_soon(i);
         }
     }
+    ui.add_space(16.0);
+    let waiting = svc.timed.at.map(|_| svc.settings.timed.at.clone());
+    let status = svc.timed.problem.clone().unwrap_or_else(|| svc.timed.status());
+    let (changed, action) = timed_section(ui, &mut svc.settings.timed, svc.timed.running(), &status, waiting.as_deref());
+    if changed {
+        svc.settings.timed = svc.settings.timed.clone().clamped();
+        screengrabcraft_desktop::store::save_settings(&svc.settings);
+    }
+    match action {
+        Some(TimerAction::Start) => crate::timed::start(svc),
+        Some(TimerAction::Stop) => crate::timed::stop(svc),
+        Some(TimerAction::Schedule) => {
+            if let Err(e) = crate::timed::schedule(svc) {
+                svc.notify("No capture was set", e, None, None, true);
+            }
+        }
+        Some(TimerAction::Unschedule) => svc.timed.at = None,
+        None => {}
+    }
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(6.0);
@@ -438,6 +457,82 @@ fn scrolling_options(ui: &mut Ui, s: &mut screengrabcraft_model::Settings, can: 
         let range = screengrabcraft_model::settings::SCROLLING_SHORTEST..=screengrabcraft_model::MAX_SIDE;
         ui.add(egui::DragValue::new(&mut s.scrolling_longest).range(range).speed(100.0).suffix(" px"));
     });
+}
+
+/// What the Capture page's timer section asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimerAction {
+    Start,
+    Stop,
+    /// A capture at the time written.
+    Schedule,
+    /// Not that one after all.
+    Unschedule,
+}
+
+/// Captures on a timer and at a set time, on the Capture page: how often and of what, whether
+/// a capture that would look as the last one did is skipped, Start or Stop with how it's going
+/// (`status`), and one capture at a time of day (`waiting` is the time one waits for). Whether a
+/// setting changed, and what was pressed.
+fn timed_section(
+    ui: &mut Ui,
+    t: &mut screengrabcraft_model::TimedCaptures,
+    running: bool,
+    status: &str,
+    waiting: Option<&str>,
+) -> (bool, Option<TimerAction>) {
+    use screengrabcraft_model::timed::{MAX_EVERY, MIN_EVERY, TimedArea};
+    let tokens = Tokens::get(ui.ctx());
+    let mut changed = false;
+    let mut action = None;
+    ui.label(RichText::new("Captures on a Timer").strong());
+    ui.add_enabled_ui(!running, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("One every");
+            changed |= ui.add(egui::DragValue::new(&mut t.every_secs).range(MIN_EVERY..=MAX_EVERY).suffix(" s")).changed();
+            ui.label("of");
+            egui::ComboBox::from_id_salt("timed-area").selected_text(t.area.label()).show_ui(ui, |ui| {
+                for a in TimedArea::ALL {
+                    changed |= ui.selectable_value(&mut t.area, a, a.label()).changed();
+                }
+            });
+        });
+        changed |= ui.checkbox(&mut t.skip_unchanged, "Skip a capture when nothing has changed").changed();
+    });
+    ui.horizontal(|ui| {
+        if running {
+            if widgets::button(ui, "Stop").clicked() {
+                action = Some(TimerAction::Stop);
+            }
+            ui.label(RichText::new(status).color(tokens.muted));
+        } else if widgets::button(ui, "Start").on_hover_text("Each is saved to the captures folder, nothing coming up over the screen").clicked() {
+            action = Some(TimerAction::Start);
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label("One at");
+        match waiting {
+            Some(at) => {
+                ui.label(RichText::new(format!("{at}, waiting")).color(tokens.muted));
+                if widgets::button(ui, "Cancel").clicked() {
+                    action = Some(TimerAction::Unschedule);
+                }
+            }
+            None => {
+                changed |= ui.add(egui::TextEdit::singleline(&mut t.at).hint_text("14:30").desired_width(56.0)).changed();
+                let ok = screengrabcraft_model::timed::parse_clock(&t.at).is_some();
+                if ui
+                    .add_enabled(ok, egui::Button::new("Take One Then"))
+                    .on_disabled_hover_text("Write the time as hours and minutes, as 14:30")
+                    .clicked()
+                {
+                    action = Some(TimerAction::Schedule);
+                }
+            }
+        }
+    });
+    (changed, action)
 }
 
 /// The capture presets as buttons, each with its shortcut (`key` says it, if it has one). The one
@@ -1069,6 +1164,53 @@ mod tests {
         h.get_by_label("Preset 2").click();
         h.run_steps(1);
         assert_eq!(*h.state(), Some(1));
+    }
+
+    /// The timer section with its settings, whether it runs, and what it last asked for.
+    type TimerState = (screengrabcraft_model::TimedCaptures, bool, Option<TimerAction>, Option<String>);
+
+    #[test]
+    fn the_timer_starts_and_stops_and_one_capture_waits_for_a_set_time() {
+        let mut h = Harness::builder().with_size(vec2(560.0, 220.0)).build_ui_state(
+            |ui, s: &mut TimerState| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let (_, action) = timed_section(ui, &mut s.0, s.1, "3 captures kept", s.3.as_deref());
+                    if action.is_some() {
+                        s.2 = action;
+                    }
+                });
+            },
+            (screengrabcraft_model::TimedCaptures::default(), false, None, None),
+        );
+        h.run_steps(2);
+        assert!(h.state().0.skip_unchanged, "unchanged ones are skipped by default");
+        assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Take One Then")).is_disabled(), "no time written yet");
+        h.get_by_label("Start").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Start));
+        h.state_mut().1 = true;
+        h.run_steps(2);
+        h.get_by_label("3 captures kept");
+        h.get_by_label("Stop").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Stop));
+        h.state_mut().0.at = "7:30".into();
+        h.run_steps(2);
+        h.get_by_label("Take One Then").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Schedule));
+        h.state_mut().3 = Some("7:30".into());
+        h.run_steps(2);
+        h.get_by_label("7:30, waiting");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/home-timer.png"));
+        }
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        assert_eq!(h.state().2, Some(TimerAction::Unschedule));
     }
 
     /// Scrolling by itself is turned off and on where the system can do it, and greyed out with

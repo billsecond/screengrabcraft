@@ -26,7 +26,7 @@ use crate::services::OpenedFile;
 /// How long the document stays unchanged before it is written.
 pub const QUIET_SECS: f64 = 1.0;
 /// The quality a JPEG is written again at.
-const JPEG_QUALITY: u8 = 92;
+pub(crate) const JPEG_QUALITY: u8 = 92;
 
 /// Where the files go when deleted: what Windows and the others call it.
 pub const TRASH: &str = if cfg!(target_os = "windows") { "Recycle Bin" } else { "Trash" };
