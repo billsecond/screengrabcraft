@@ -1054,6 +1054,7 @@ mod tests {
             media: Vec::new(),
             pointer: Default::default(),
             corrected: None,
+            markers: Vec::new(),
         }
     }
 

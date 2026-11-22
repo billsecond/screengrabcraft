@@ -302,6 +302,8 @@ pub struct VideoView {
     pub line_sources: Arc<Vec<Option<usize>>>,
     /// A line's words being put right in the transcript.
     pub(crate) caption_edit: Option<transcript::CaptionEdit>,
+    /// A marker's name being typed in the panel (its place, the words so far).
+    marker_edit: Option<(usize, String)>,
     lines_rev: u64,
     /// The transcript's line the pane last followed while playing.
     transcript_follow: Option<usize>,
@@ -581,6 +583,7 @@ impl VideoView {
             lines: Arc::new(Vec::new()),
             line_sources: Arc::new(Vec::new()),
             caption_edit: None,
+            marker_edit: None,
             lines_rev: 0,
             transcript_follow: None,
             transcript_heights: None,
@@ -996,6 +999,63 @@ impl VideoView {
         self.fix_selection();
     }
 
+    /// Marks a moment (a chapter of the video made), named for its place; a moment already
+    /// marked is said so.
+    pub fn add_marker(&mut self, ed: &mut Editor, ctx: &egui::Context, at: u64) {
+        self.run(ed, ctx, "video.addMarker", json!({"at": at.min(self.length())}));
+    }
+
+    /// The markers: each one's moment (a click goes there), its name to change, and a button to
+    /// delete it; and a way to add one at the playhead.
+    fn markers_section(&mut self, ed: &mut Editor, ui: &mut Ui) {
+        let t = Tokens::get(ui.ctx());
+        let ctx = ui.ctx().clone();
+        let markers = self.session.timeline.markers.clone();
+        let (mut go, mut delete, mut rename) = (None, None, None);
+        for (i, m) in markers.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if ui.button(RichText::new(clock(m.at)).monospace().size(11.5)).on_hover_text("Go there").clicked() {
+                    go = Some(m.at);
+                }
+                let mut words = match &self.marker_edit {
+                    Some((k, w)) if *k == i => w.clone(),
+                    _ => m.name.clone(),
+                };
+                let r = ui.add(egui::TextEdit::singleline(&mut words).desired_width((ui.available_width() - 30.0).max(40.0)));
+                if r.has_focus() {
+                    self.marker_edit = Some((i, words.clone()));
+                }
+                if r.lost_focus() {
+                    self.marker_edit = None;
+                    if words != m.name {
+                        rename = Some((i, words));
+                    }
+                }
+                if crate::icons::button_sized(ui, crate::icons::Icon::Close, &format!("Delete the Marker {}", m.name), false, true, 22.0).clicked() {
+                    delete = Some(i);
+                }
+            });
+        }
+        if markers.is_empty() {
+            ui.label(RichText::new("A marker names a moment; each is a chapter of the video made (MP4).").size(12.0).color(t.muted));
+        }
+        ui.add_space(4.0);
+        if ui.add(egui::Button::new("Add a Marker at the Playhead").shortcut_text("M")).clicked() {
+            self.add_marker(ed, &ctx, self.playhead);
+        }
+        if let Some(at) = go {
+            let now = ctx.input(|i| i.time);
+            self.seek(ed, at, now);
+        }
+        if let Some((i, name)) = rename {
+            self.run(ed, &ctx, "video.renameMarker", json!({"marker": i, "name": name}));
+        }
+        if let Some(i) = delete {
+            self.run(ed, &ctx, "video.removeMarker", json!({"marker": i}));
+        }
+    }
+
     /// The speeds offered, as the buttons say them.
     const SPEEDS: [(f64, &'static str); 8] =
         [(0.25, "0.25×"), (0.5, "0.5×"), (0.75, "0.75×"), (1.0, "1×"), (1.5, "1.5×"), (2.0, "2×"), (4.0, "4×"), (8.0, "8×")];
@@ -1202,6 +1262,9 @@ impl VideoView {
         if plain(Key::T) {
             self.add_text(ed, ctx);
         }
+        if plain(Key::M) {
+            self.add_marker(ed, ctx, self.playhead);
+        }
         if plain(Key::Delete) || plain(Key::Backspace) {
             self.delete(ed, ctx);
         }
@@ -1323,6 +1386,14 @@ impl VideoView {
                     }
                     if ui.add(egui::Button::new("Add Text at the Playhead").shortcut_text("T")).clicked() {
                         self.add_text(ed, &ctx);
+                        ui.close();
+                    }
+                    if ui
+                        .add(egui::Button::new("Add a Marker at the Playhead").shortcut_text("M"))
+                        .on_hover_text("A named moment: a chapter of the video made")
+                        .clicked()
+                    {
+                        self.add_marker(ed, &ctx, self.playhead);
                         ui.close();
                     }
                     let what = if self.item.is_some() {
@@ -1636,6 +1707,8 @@ impl VideoView {
                         note(ui, "Click a clip or an item on the timeline to change it.".to_string());
                         ui.add_space(10.0);
                     }
+                    section(ui, "Markers", &mut first);
+                    self.markers_section(ed, ui);
                     if let Some(track) = camera {
                         section(ui, "Camera", &mut first);
                         self.camera_section(ed, ui, track);
@@ -2581,6 +2654,10 @@ impl VideoView {
                     self.add_text(ed, ctx);
                     ui.close();
                 }
+                if ui.button("Add a Marker Here").on_hover_text("A named moment: a chapter of the video made").clicked() {
+                    self.add_marker(ed, ctx, at);
+                    ui.close();
+                }
                 self.playing_items(ed, ui, at, now);
                 ui.separator();
                 if ui.add(egui::Button::new("Zoom In").shortcut_text("Ctrl++")).clicked() {
@@ -2862,6 +2939,22 @@ impl VideoView {
                     let band = Rect::from_min_max(pos2(x_of(a), full.min.y), pos2(x_of(b), full.max.y));
                     painter.rect_filled(band, 0.0, t.accent.gamma_multiply(0.18));
                     painter.rect_stroke(band, 0.0, Stroke::new(1.0, t.accent), StrokeKind::Inside);
+                }
+                // The markers: a flag on the ruler with its name, a thin line down the rows.
+                let amber = Color32::from_rgb(0xF2, 0xA9, 0x00);
+                for m in &self.session.timeline.markers {
+                    let x = x_of(m.at);
+                    if x < lane.min.x - 1.0 || x > lane.max.x + 1.0 {
+                        continue;
+                    }
+                    painter.line_segment([pos2(x, ruler.max.y), pos2(x, full.max.y)], Stroke::new(1.0, amber.gamma_multiply(0.6)));
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![pos2(x, ruler.min.y + 2.0), pos2(x + 9.0, ruler.min.y + 6.0), pos2(x, ruler.min.y + 10.0)],
+                        amber,
+                        Stroke::NONE,
+                    ));
+                    painter.line_segment([pos2(x, ruler.min.y + 2.0), pos2(x, ruler.max.y)], Stroke::new(1.5, amber));
+                    painter.text(pos2(x + 11.0, ruler.min.y + 1.0), egui::Align2::LEFT_TOP, &m.name, egui::FontId::proportional(10.5), amber);
                 }
                 // The playhead.
                 let px = x_of(self.playhead);

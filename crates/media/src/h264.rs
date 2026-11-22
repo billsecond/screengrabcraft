@@ -294,6 +294,12 @@ pub fn export(
         let _ = std::fs::remove_file(&part);
         return Err(e);
     }
+    // The timeline's markers, as chapters, put into the file Windows made.
+    match crate::mp4::add_chapters_to_file(&part, &timeline.chapters()) {
+        Ok(true) => {}
+        Ok(false) => log::warn!("the chapters couldn't be put in the video (its index wasn't as expected)"),
+        Err(e) => log::warn!("the chapters couldn't be put in the video: {e}"),
+    }
     std::fs::rename(&part, out)?;
     progress.store(1000, Ordering::SeqCst);
     let frames = length.saturating_mul(fps).div_ceil(1_000_000);
