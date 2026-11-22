@@ -254,8 +254,22 @@ fn delete_clip(s: &mut VideoSession, p: &Value) -> Result<Value> {
 }
 
 fn trim_start(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    s.timeline.trim_start(unlocked(s, p)?, index(p, "clip")?, int(p, "to")?).map_err(edit_err)?;
+    let track = unlocked(s, p)?;
+    let source = s.source_len(track);
+    s.timeline.trim_start(track, index(p, "clip")?, int(p, "to")?, source).map_err(edit_err)?;
     Ok(json!({}))
+}
+
+/// A clip (and those grouped with it) played backwards, or forwards again.
+fn reverse(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    let now = s.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).is_some_and(|c| c.reverse);
+    let back = match p.get("reverse") {
+        None | Some(Value::Null) => !now,
+        Some(v) => v.as_bool().ok_or_else(|| EngineError::Params("`reverse` must be true or false".to_string()))?,
+    };
+    let n = s.timeline.set_reverse(track, clip, back).map_err(edit_err)?;
+    Ok(json!({"reverse": back, "clips": n}))
 }
 
 fn trim_end(s: &mut VideoSession, p: &Value) -> Result<Value> {
@@ -967,6 +981,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: speed,
     },
     VideoCommand {
+        id: "video.reverse",
+        label: "Play Backwards",
+        params: r#"{"track": n, "clip": n, "reverse"?: bool}: the clip (and the clips grouped with it) plays its stretch of the recording from its end to its start, the picture and the sound turned round; without `reverse`, the other way from how it plays now. Lines and keys pressed aren't shown on it"#,
+        run: reverse,
+    },
+    VideoCommand {
         id: "video.holdFrame",
         label: "Hold Frame",
         params: r#"{"at": µs, "len": µs}: the picture at that moment held for `len` (up to 10 minutes): every track waits, what follows moves along, the sound is silent meanwhile. Says the stretch held"#,
@@ -1233,6 +1253,30 @@ mod tests {
         assert!(s.execute("video.solo", &json!({"track": 0, "solo": true})).is_err());
         s.execute("video.ungroup", &json!({"track": 0, "clip": 1})).unwrap();
         assert!(s.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| c.group.is_none())));
+    }
+
+    #[test]
+    fn a_clip_is_played_backwards_and_forwards_again_one_undo_step_each() {
+        let mut s = session();
+        let v = s.execute("video.reverse", &json!({"track": 0, "clip": 0})).unwrap();
+        assert_eq!((v["reverse"].as_bool(), v["clips"].as_u64()), (Some(true), Some(1)));
+        assert_eq!(s.undo_label(), Some("Play Backwards"));
+        assert_eq!(s.timeline.source_time(0, 0), Some(4_999_999));
+        // Trimmed at its start, then brought back up to the recording's end.
+        s.execute("video.trimStart", &json!({"track": 0, "clip": 0, "to": 1_000_000})).unwrap();
+        assert_eq!(s.timeline.source_time(0, 1_000_000), Some(3_999_999));
+        s.execute("video.trimStart", &json!({"track": 0, "clip": 0, "to": 0})).unwrap();
+        assert_eq!(s.timeline.source_time(0, 0), Some(4_999_999));
+        // Without `reverse` it turns round again; with it, as said.
+        s.execute("video.reverse", &json!({"track": 0, "clip": 0})).unwrap();
+        assert!(!s.timeline.tracks[0].clips[0].reverse);
+        s.execute("video.reverse", &json!({"track": 1, "clip": 0, "reverse": true})).unwrap();
+        assert!(s.timeline.tracks[1].clips[0].reverse);
+        for bad in [json!({"track": 0, "clip": 5}), json!({"track": 0, "clip": 0, "reverse": "yes"}), json!({"clip": 0})] {
+            assert!(s.execute("video.reverse", &bad).is_err(), "{bad}");
+        }
+        s.execute("video.lock", &json!({"track": 1, "locked": true})).unwrap();
+        assert!(s.execute("video.reverse", &json!({"track": 1, "clip": 0})).is_err(), "locked");
     }
 
     #[test]

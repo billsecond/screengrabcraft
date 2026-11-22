@@ -645,14 +645,25 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
             let n = (b - a) as usize;
             // Where it starts in the recording, the cross-fade's lead in (before the recording's
             // start: silence).
-            let lead_src = c.source_at(lead).saturating_sub(c.from);
+            let lead_src = crate::timeline::Clip { reverse: false, ..*c }.source_at(lead).saturating_sub(c.from);
             let from = i64::try_from(to_samples(c.from)).unwrap_or(i64::MAX / 4) - i64::try_from(to_samples(lead_src)).unwrap_or(0);
-            let sound = if c.speed == crate::timeline::NORMAL_SPEED {
-                source(from.saturating_add_unsigned(a - at), n)
+            // Played backwards: the same samples as played forwards, mirrored about the clip's
+            // middle, and turned round.
+            let first_i = if c.reverse {
+                let whole = i64::try_from(to_samples(c.len.saturating_add(lead.saturating_mul(2)))).unwrap_or(i64::MAX / 4);
+                whole.saturating_sub(i64::try_from((a - at).saturating_add(n as u64)).unwrap_or(0))
+            } else {
+                i64::try_from(a - at).unwrap_or(i64::MAX / 4)
+            };
+            let mut sound = if c.speed == crate::timeline::NORMAL_SPEED {
+                source(from.saturating_add(first_i), n)
             } else {
                 // Faster or slower, at its own pitch.
-                crate::stretch::stretched(&|start, n| source(from.saturating_add(start), n), c.rate(), a - at, n)
+                crate::stretch::stretched(&|start, n| source(from.saturating_add(start), n), c.rate(), u64::try_from(first_i).unwrap_or(0), n)
             };
+            if c.reverse {
+                sound.reverse();
+            }
             let base = (a - first) as usize * 2;
             let faded = c.fade_in > 0 || c.fade_out > 0 || lead > 0 || tail > 0 || shaped;
             let (cs, ce) = (c.at, c.end());
@@ -816,7 +827,8 @@ fn mix_clicks(out: &mut [f32], rec: &Recording, timeline: &Timeline, first: u64,
         let (src_a, src_b) = (c.from, c.from.saturating_add(c.source_len()));
         let from = clicks.partition_point(|k| k.t < src_a);
         for k in clicks.iter().skip(from).take_while(|k| k.t < src_b).take(10_000) {
-            let start = to_samples(c.at.saturating_add(c.played(k.t - src_a)));
+            let Some(at) = c.time_of(k.t) else { continue };
+            let start = to_samples(at);
             if start >= end || start.saturating_add(len) <= first {
                 continue;
             }
@@ -1125,6 +1137,35 @@ mod tests {
             let small = Raster::filled(7, 3, Color::WHITE).unwrap();
             assert_eq!(blend_pictures(&a, &small, kind, f32::NAN).width(), 40);
         }
+    }
+
+    #[test]
+    fn a_clip_played_backwards_shows_and_sounds_from_its_end() {
+        // The microphone rising steadily from silence, a sample at a time.
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 1, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..10u64 {
+            let shade = (t * 20) as u8;
+            w.video_frame(0, t * 100_000, &Raster::filled(64, 48, Color::rgb(shade, 0, 0)).unwrap()).unwrap();
+            w.audio(1, t * 4800, &(0..4800).map(|k| ((t * 4800 + k) / 2) as i16).collect::<Vec<_>>()).unwrap();
+        }
+        let r = Arc::new(Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap());
+        let mut tl = Timeline::new(&r);
+        for track in 0..2 {
+            tl.set_reverse(track, 0, true).unwrap();
+        }
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        // At 0.05 s the last picture (0.9 s), at 0.95 s the first.
+        assert_eq!(c.frame(&tl, 50_000).pixel(3, 3).unwrap().r, 180);
+        assert_eq!(c.frame(&tl, 950_000).pixel(3, 3).unwrap().r, 0);
+        // The sound falls where it rose: near its loudest at the start, near silence at the end.
+        let at = |us: u64| mix(&r, &tl, to_samples(us), 4).iter().step_by(2).copied().collect::<Vec<f32>>();
+        let (start, end) = (at(0), at(999_000));
+        assert!(start[0] > 23_000.0 / 32768.0 && start.windows(2).all(|p| p[1] <= p[0]), "{start:?}");
+        assert!(end[0] < 100.0 / 32768.0, "{end:?}");
     }
 
     #[test]

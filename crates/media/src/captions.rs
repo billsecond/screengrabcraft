@@ -130,7 +130,8 @@ impl Captions {
             }
             for (k, cue) in self.cues.iter().enumerate().filter(|(_, c)| c.speaker == speaker) {
                 let whole = cue.end - cue.start;
-                for clip in &track.clips {
+                // Words played backwards say nothing: no line there.
+                for clip in track.clips.iter().filter(|c| !c.reverse) {
                     let (from, to) = (cue.start.max(clip.from), cue.end.min(clip.from.saturating_add(clip.source_len())));
                     if to <= from {
                         continue;
@@ -563,7 +564,7 @@ fn played_at(timeline: &Timeline, speaker: Speaker, from: u64, to: u64) -> Vec<(
         return Vec::new();
     }
     let mut out = Vec::new();
-    for clip in track.clips.iter().filter(|c| !c.hold) {
+    for clip in track.clips.iter().filter(|c| !c.hold && !c.reverse) {
         let (a, b) = (from.max(clip.from), to.min(clip.from.saturating_add(clip.source_len())));
         if b <= a {
             continue;

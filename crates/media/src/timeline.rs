@@ -75,6 +75,10 @@ pub struct Clip {
     /// The group it's in: the clips of a group move together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<u32>,
+    /// Played backwards: its stretch of the recording from its end to its start (the picture
+    /// reversed, and its sound).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub reverse: bool,
 }
 
 /// How many colours a clip can be given.
@@ -167,7 +171,7 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None, colour: None, group: None }
+        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None, colour: None, group: None, reverse: false }
     }
 
     /// A held frame: the picture recorded at `from`, shown from `at` for `len`.
@@ -179,21 +183,28 @@ impl Clip {
         self.at.saturating_add(self.len)
     }
 
-    /// Its first `len` µs: the rest cut off (and its fade out with it).
+    /// Its first `len` µs: the rest cut off (and its fade out with it). Played backwards, that's
+    /// the end of its stretch of the recording.
     fn head(&self, len: u64) -> Clip {
         if len >= self.len {
             return *self;
         }
+        if self.reverse && !self.hold {
+            let end = self.from.saturating_add(self.source_len());
+            return Clip { len, from: end.saturating_sub(scale(len, self.pace(), 100)).max(self.from), fade_out: 0, ..*self };
+        }
         Clip { len, fade_out: 0, ..*self }
     }
 
-    /// What follows its first `skip` µs, where it was (its fade in left behind).
+    /// What follows its first `skip` µs, where it was (its fade in left behind). Played
+    /// backwards, it plays the start of its stretch of the recording, from where it was.
     fn tail(&self, skip: u64) -> Clip {
         if skip == 0 {
             return *self;
         }
         let skip = skip.min(self.len);
-        Clip { at: self.at.saturating_add(skip), from: self.source_at(skip), len: self.len - skip, fade_in: 0, transition: None, ..*self }
+        let from = if self.reverse { self.from } else { self.source_at(skip) };
+        Clip { at: self.at.saturating_add(skip), from, len: self.len - skip, fade_in: 0, transition: None, ..*self }
     }
 
     /// Where in the recording it would be at timeline time `t`, before its start or after its
@@ -201,11 +212,41 @@ impl Clip {
     pub fn source_beyond(&self, t: u64) -> u64 {
         if self.hold {
             self.from
+        } else if self.reverse {
+            // Before it: what comes after its stretch; after it: what comes before.
+            if t < self.at {
+                self.from.saturating_add(self.source_len()).saturating_add(scale(self.at - t, self.pace(), 100))
+            } else if t - self.at <= self.len {
+                self.source_at(t - self.at)
+            } else {
+                self.from.saturating_sub(scale(t - self.at - self.len, self.pace(), 100))
+            }
         } else if t >= self.at {
             self.source_at(t - self.at)
         } else {
             self.from.saturating_sub(scale(self.at - t, self.pace(), 100))
         }
+    }
+
+    /// Where on the timeline the moments `a..b` of the recording play in it (the part of them
+    /// it plays), earlier first: none if it plays none of them (or holds a frame).
+    pub fn times_of(&self, a: u64, b: u64) -> Option<(u64, u64)> {
+        if self.hold {
+            return None;
+        }
+        let end = self.from.saturating_add(self.source_len());
+        let (a, b) = (a.max(self.from), b.min(end));
+        if b <= a {
+            return None;
+        }
+        let (x, y) = if self.reverse { (end - b, end - a) } else { (a - self.from, b - self.from) };
+        let start = self.at.saturating_add(self.played(x));
+        Some((start, self.at.saturating_add(self.played(y)).min(self.end()).max(start)))
+    }
+
+    /// Where on the timeline the moment `src` of the recording plays in it, if it does.
+    pub fn time_of(&self, src: u64) -> Option<u64> {
+        self.times_of(src, src.saturating_add(1)).map(|(a, _)| a)
     }
 
     /// How loud its sound is `d` µs into it, faded in and out: 0 to 1. Fades longer than the
@@ -245,6 +286,10 @@ impl Clip {
     pub fn source_at(&self, d: u64) -> u64 {
         if self.hold {
             return self.from;
+        }
+        if self.reverse {
+            // From the last moment of its stretch back to its first.
+            return self.from.saturating_add(scale(self.len.saturating_sub(d), self.pace(), 100)).saturating_sub(1).max(self.from);
         }
         self.from.saturating_add(scale(d, self.pace(), 100))
     }
@@ -612,6 +657,7 @@ impl Timeline {
                         transition: c.transition.map(|x| checked_transition(x, sound)),
                         colour: c.colour.filter(|k| *k < CLIP_COLOURS),
                         group: c.group,
+                        reverse: c.reverse,
                     })
                 })
                 .take(10_000)
@@ -894,8 +940,9 @@ impl Timeline {
     }
 
     /// Moves a clip's start to timeline time `to` (later trims it, earlier brings back what was
-    /// trimmed), up to the clip before and the start of the recording.
-    pub fn trim_start(&mut self, track: usize, clip: usize, to: u64) -> Result<(), EditError> {
+    /// trimmed), up to the clip before and the start of the recording (played backwards, its end:
+    /// `source` µs).
+    pub fn trim_start(&mut self, track: usize, clip: usize, to: u64, source: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
         let before = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0);
         if c.hold {
@@ -904,6 +951,16 @@ impl Timeline {
             let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
             if let Some(slot) = clips.get_mut(clip) {
                 *slot = Clip::held(to, c.from, c.end().saturating_sub(to));
+            }
+            return Ok(());
+        }
+        if c.reverse {
+            // Its start plays the end of its stretch: earlier brings back what came after it.
+            let end = c.from.saturating_add(c.source_len());
+            let floor = before.max(c.at.saturating_sub(c.played(source.saturating_sub(end))));
+            let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
+            if let Some(slot) = clips.get_mut(clip) {
+                *slot = Clip { at: to, len: c.end().saturating_sub(to), ..c };
             }
             return Ok(());
         }
@@ -923,11 +980,23 @@ impl Timeline {
     pub fn trim_end(&mut self, track: usize, clip: usize, to: u64, source: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
         let next = clips.get(clip + 1).map(|n| n.at).unwrap_or(u64::MAX);
-        let most = if c.hold { MAX_HOLD_US } else { c.played(source.saturating_sub(c.from)) };
+        // Played backwards, its end plays the start of its stretch: later brings back what came
+        // before it, as far as the recording's start.
+        let end = c.from.saturating_add(c.source_len());
+        let most = if c.hold {
+            MAX_HOLD_US
+        } else if c.reverse {
+            c.played(end)
+        } else {
+            c.played(source.saturating_sub(c.from))
+        };
         let ceiling = next.min(c.at.saturating_add(most));
         let to = to.clamp(c.at + MIN_CLIP_US, ceiling.max(c.at + MIN_CLIP_US));
         if let Some(slot) = clips.get_mut(clip) {
             slot.len = to - c.at;
+            if c.reverse && !c.hold {
+                slot.from = end.saturating_sub(scale(slot.len, c.pace(), 100));
+            }
         }
         Ok(())
     }
@@ -1031,6 +1100,27 @@ impl Timeline {
             c.colour = colour;
         }
         Ok(())
+    }
+
+    /// A clip, and the clips grouped with it, played backwards (or forwards again): each plays its
+    /// stretch of the recording from its end to its start, where it is. How many were changed.
+    pub fn set_reverse(&mut self, track: usize, clip: usize, reverse: bool) -> Result<usize, EditError> {
+        let c = *self.track(track)?.clips.get(clip).ok_or(EditError::NoClip(track, clip))?;
+        if c.hold {
+            return Err(EditError::Invalid("a held frame is one picture: it plays the same either way".to_string()));
+        }
+        let members = self.group_of(track, clip);
+        if members.iter().any(|(ti, _)| self.tracks.get(*ti).is_some_and(|t| t.locked)) {
+            return Err(EditError::Invalid("a clip of a locked track stays as it is: unlock it first".to_string()));
+        }
+        let mut n = 0;
+        for (ti, ci) in members {
+            if let Some(c) = self.tracks.get_mut(ti).and_then(|t| t.clips.get_mut(ci)).filter(|c| !c.hold) {
+                c.reverse = reverse;
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// Locks a track (its clips stay as they are) or lets it go.
@@ -1254,7 +1344,9 @@ impl Timeline {
             let (a, b) = (c.from, c.from.saturating_add(c.source_len()));
             let first = t.points.partition_point(|p| p.at < a);
             for (k, p) in t.points.iter().enumerate().skip(first).take_while(|(_, p)| p.at < b) {
-                out.push((k, c.at.saturating_add(c.played(p.at - a))));
+                if let Some(at) = c.time_of(p.at) {
+                    out.push((k, at));
+                }
             }
         }
         out
@@ -1449,6 +1541,49 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_played_backwards_plays_its_stretch_from_its_end_and_stays_so_through_edits() {
+        let mut t = two_tracks();
+        t.split(4_000_000, None).unwrap();
+        // The screen's first four seconds backwards: 0 s shows the last moment, 3 s the first second.
+        assert_eq!(t.set_reverse(0, 0, true), Ok(1));
+        assert_eq!(t.source_time(0, 0), Some(3_999_999));
+        assert_eq!(t.source_time(0, 3_000_000), Some(999_999));
+        assert_eq!(t.source_time(0, 4_000_000), Some(4_000_000), "the next clip plays on as recorded");
+        let c = t.tracks[0].clips[0];
+        assert_eq!(c.times_of(1_000_000, 2_000_000), Some((2_000_000, 3_000_000)));
+        assert_eq!(c.time_of(3_500_000), Some(499_999));
+        assert_eq!(c.source_beyond(4_500_000), 0, "after it: what came before its stretch (none)");
+        // Split: each half plays its own part backwards, the same moments at the same times.
+        let before: Vec<Option<u64>> = (0..8).map(|k| t.source_time(0, k * 500_000)).collect();
+        t.split(1_000_000, Some(0)).unwrap();
+        assert_eq!((0..8).map(|k| t.source_time(0, k * 500_000)).collect::<Vec<_>>(), before);
+        assert_eq!((t.tracks[0].clips[0].from, t.tracks[0].clips[1].from), (3_000_000, 0));
+        // Trimmed at its end: it stops sooner, still from where it was; brought back, to 0 s again.
+        t.trim_end(0, 1, 3_000_000, 10_000_000).unwrap();
+        assert_eq!(t.source_time(0, 2_500_000), Some(1_499_999), "the same moment as before");
+        assert_eq!(t.tracks[0].clips[1].from, 1_000_000);
+        t.trim_end(0, 1, 9_000_000, 10_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[1].end(), 4_000_000, "as far as the recording's start");
+        // Trimmed at its start: the end of its stretch goes, and comes back up to the recording's end.
+        t.trim_start(0, 0, 500_000, 10_000_000).unwrap();
+        assert_eq!(t.source_time(0, 500_000), Some(3_499_999));
+        t.trim_start(0, 0, 0, 10_000_000).unwrap();
+        assert_eq!(t.source_time(0, 0), Some(3_999_999));
+        // Kept through a file, and turned back.
+        let again: Timeline = serde_json::from_value(serde_json::to_value(&t).unwrap()).unwrap();
+        assert!(again.tracks[0].clips[0].reverse && !again.tracks[0].clips[2].reverse);
+        t.set_reverse(0, 0, false).unwrap();
+        assert_eq!(t.source_time(0, 0), Some(3_000_000));
+        // A held frame has no way round; grouped clips turn together.
+        t.hold_frame(5_000_000, 1_000_000).unwrap();
+        let held = t.tracks[0].clips.iter().position(|c| c.hold).unwrap();
+        assert!(t.set_reverse(0, held, true).is_err());
+        t.group(&[(0, 0), (1, 0)]).unwrap();
+        assert_eq!(t.set_reverse(1, 0, true), Ok(2));
+        assert!(t.tracks[0].clips[0].reverse && t.tracks[1].clips[0].reverse);
+    }
+
+    #[test]
     fn cutting_across_a_gap_and_off_the_end_works() {
         let mut t = two_tracks();
         t.delete_clip(1, 0).unwrap();
@@ -1517,9 +1652,9 @@ mod tests {
         t.split(5_000_000, Some(0)).unwrap();
         t.trim_end(0, 0, 9_000_000, 10_000_000).unwrap();
         assert_eq!(t.tracks[0].clips[0].end(), 5_000_000, "stops at the next clip");
-        t.trim_start(0, 1, 6_000_000).unwrap();
+        t.trim_start(0, 1, 6_000_000, u64::MAX).unwrap();
         assert_eq!(t.tracks[0].clips[1], Clip::new(6_000_000, 6_000_000, 4_000_000));
-        t.trim_start(0, 1, 0).unwrap();
+        t.trim_start(0, 1, 0, u64::MAX).unwrap();
         assert_eq!(t.tracks[0].clips[1].at, 5_000_000, "stops at the clip before");
         t.trim_end(0, 1, 99_000_000, 10_000_000).unwrap();
         assert_eq!(t.tracks[0].clips[1].end(), 10_000_000, "stops where the recording does");
@@ -1668,9 +1803,9 @@ mod tests {
         assert_eq!(t.tracks[0].clips[0].source_len(), 9_000_000);
         t.trim_end(0, 0, 99_000_000, 10_000_000).unwrap();
         assert_eq!(t.tracks[0].clips[0].end(), 20_000_000);
-        t.trim_start(0, 0, 4_000_000).unwrap();
+        t.trim_start(0, 0, 4_000_000, u64::MAX).unwrap();
         assert_eq!(t.tracks[0].clips[0], Clip { speed: 50, ..Clip::new(4_000_000, 2_000_000, 16_000_000) });
-        t.trim_start(0, 0, 0).unwrap();
+        t.trim_start(0, 0, 0, u64::MAX).unwrap();
         assert_eq!(t.tracks[0].clips[0], Clip { speed: 50, ..Clip::new(0, 0, 20_000_000) });
     }
 
@@ -1763,7 +1898,7 @@ mod tests {
         // Sped up, the end piece keeps its fade; trimmed, it stays.
         t.set_speed(6_000_000, 9_000_000, 200, None).unwrap();
         assert_eq!(t.tracks[1].clips.last().map(|c| c.fade_out), Some(3_000_000));
-        t.trim_start(1, 0, 500_000).unwrap();
+        t.trim_start(1, 0, 500_000, u64::MAX).unwrap();
         assert_eq!(t.tracks[1].clips[0].fade_in, 2_000_000);
         assert!(t.set_fade(1, 9, Some(1), None).is_err());
         // How loud: silent at the start, full in the middle.
@@ -1843,7 +1978,7 @@ mod tests {
         assert!(t.set_hold(0, 0, 1_000_000).is_err() && t.set_hold(1, 1, 1_000_000).is_err(), "not a held frame");
         t.trim_end(0, 1, 9_000_000, 10_000_000).unwrap();
         assert_eq!(t.tracks[0].clips[1].end(), 3_500_000, "up to the clip after");
-        t.trim_start(0, 1, 2_000_000).unwrap();
+        t.trim_start(0, 1, 2_000_000, u64::MAX).unwrap();
         assert_eq!(t.tracks[0].clips[1].at, 3_000_000, "up to the clip before");
         // Cut through it, split in it, sped up: a held frame stays held.
         t.split(3_200_000, None).unwrap();
