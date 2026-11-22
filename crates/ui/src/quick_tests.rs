@@ -71,7 +71,7 @@ fn sized(width: f32) -> Harness<'static, Editor> {
 
 #[test]
 fn every_tool_is_on_the_tool_bar_at_full_size_in_the_middle() {
-    let mut h = sized(1600.0);
+    let mut h = sized(1700.0);
     let rects: Vec<egui::Rect> = BAR.iter().map(|l| h.get_by_label(l).rect()).collect();
     for (pair, names) in rects.windows(2).zip(BAR.windows(2)) {
         if let [a, b] = pair {
@@ -83,7 +83,7 @@ fn every_tool_is_on_the_tool_bar_at_full_size_in_the_middle() {
     }
     let (first, last) = (rects.first().unwrap(), rects.last().unwrap());
     let middle = (first.min.x + last.max.x) / 2.0;
-    assert!((middle - 800.0).abs() < 60.0, "centred: {middle}");
+    assert!((middle - 850.0).abs() < 60.0, "centred: {middle}");
     // The files at the left, copying and the zoom at the right, none of them over the tools.
     let save = h.get_by_label("Delete the selection (Del)").rect();
     let copy = h.get_by_label("Copy the picture (Ctrl+C)").rect();
@@ -514,7 +514,7 @@ fn text_overlays_come_outlined_shadowed_on_boxes_and_as_titles() {
 
 #[test]
 fn with_room_to_spare_each_tool_has_its_name_under_it_and_the_name_picks_it() {
-    let mut h = sized(1600.0);
+    let mut h = sized(1700.0);
     let named_top = h.state().view.canvas.min.y;
     // Under the Blur button, its name: a click there picks the tool as the button does.
     let blur = h.get_by_label("Blur (B)").rect();

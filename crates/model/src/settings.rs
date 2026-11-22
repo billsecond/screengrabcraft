@@ -845,6 +845,9 @@ pub struct EditorSettings {
     /// What the Fill tool fills with.
     #[serde(deserialize_with = "or_default")]
     pub fill: FillTool,
+    /// Whether the Measure tool keeps each measurement on the picture, and its colour.
+    #[serde(deserialize_with = "or_default")]
+    pub measure: MeasureTool,
     /// What the Cut Out tool takes out (columns or rows) and how the parts meet.
     #[serde(deserialize_with = "or_default")]
     pub cut_out: CutOutTool,
@@ -876,6 +879,12 @@ pub struct EditorSettings {
     pub properties_share: Option<f32>,
     /// The tools' names left off the tool bar (they are under the icons when there is room).
     pub hide_tool_names: bool,
+    /// Rulers along the top and the left of the picture, and the guides dragged out of them.
+    #[serde(deserialize_with = "or_default")]
+    pub show_rulers: bool,
+    /// What is moved doesn't snap to the guides and to the picture's edges and middle.
+    #[serde(deserialize_with = "or_default")]
+    pub no_snap: bool,
     /// Where a part of the picture moved with the Selection tool was is filled from round it
     /// (rather than left see-through).
     #[serde(deserialize_with = "or_default")]
@@ -898,6 +907,22 @@ pub struct FillTool {
 impl Default for FillTool {
     fn default() -> FillTool {
         FillTool { color: crate::color::Color::RED, tolerance: 32, gradient: crate::object::Gradient::default() }
+    }
+}
+
+/// The Measure tool's settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeasureTool {
+    /// Each measurement kept on the picture as a dimension line and its length (otherwise it
+    /// is shown until the next one).
+    pub keep: bool,
+    pub color: crate::color::Color,
+}
+
+impl Default for MeasureTool {
+    fn default() -> MeasureTool {
+        MeasureTool { keep: false, color: crate::color::Color::RED }
     }
 }
 

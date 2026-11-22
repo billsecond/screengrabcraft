@@ -136,6 +136,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         add_tail
     ),
     cmd!(
+        "object.measure",
+        "Measure",
+        "Annotate",
+        None,
+        r##"{"from": {"x", "y"}, "to": {"x", "y"}, "color"?: "#E53935", "width"?: 2 (1 to 20), "fontSize"?: 16} → {"ids", "length", "text"} — a dimension line between the two points (a bar at each end) and its length in pixels on a label beside it, grouped and selected"##,
+        always,
+        crate::measure::measure
+    ),
+    cmd!(
         "object.removeTail",
         "Remove a Tail",
         "Annotate",

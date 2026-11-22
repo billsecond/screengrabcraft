@@ -34,6 +34,8 @@ pub enum Tool {
     CutOut,
     /// Selects an area of the picture itself, to move, copy, cut, delete or crop to.
     Area,
+    /// Measures a distance on the picture: a line and its length, kept on it or not.
+    Measure,
     /// The starred quick styles of every tool in the panel; the canvas selects and moves, as
     /// the Move tool does, until one is picked.
     Favorites,
@@ -41,7 +43,7 @@ pub enum Tool {
 
 impl Tool {
     /// Every tool with a key: the tool, its icon, its name and its key.
-    pub const ALL: [(Tool, Icon, &'static str, Key); 21] = [
+    pub const ALL: [(Tool, Icon, &'static str, Key); 22] = [
         (Tool::Select, Icon::Move, "Move", Key::V),
         (Tool::Hand, Icon::Hand, "Hand", Key::D),
         (Tool::Area, Icon::Marquee, "Selection", Key::Q),
@@ -63,6 +65,7 @@ impl Tool {
         (Tool::Eraser, Icon::Eraser, "Eraser", Key::E),
         (Tool::Crop, Icon::Crop, "Crop", Key::K),
         (Tool::CutOut, Icon::CutOut, "Cut Out", Key::U),
+        (Tool::Measure, Icon::Measure, "Measure", Key::I),
     ];
 
     /// The tool bar's tools after Favorites, in groups with a gap between them: moving and
@@ -70,7 +73,7 @@ impl Tool {
     /// hiding and pointing out. Each has its own button, at full size. The Shape button stands for
     /// the rectangle and the ellipse.
     pub const BAR_GROUPS: [&'static [Tool]; 4] = [
-        &[Tool::Select, Tool::Hand, Tool::Area, Tool::Crop, Tool::CutOut],
+        &[Tool::Select, Tool::Hand, Tool::Area, Tool::Crop, Tool::CutOut, Tool::Measure],
         &[
             Tool::Draw(Kind::Arrow),
             Tool::Draw(Kind::Line),
@@ -85,12 +88,13 @@ impl Tool {
     ];
 
     /// Every tool on the tool bar after Favorites, in order.
-    pub const BAR: [Tool; 20] = [
+    pub const BAR: [Tool; 21] = [
         Tool::Select,
         Tool::Hand,
         Tool::Area,
         Tool::Crop,
         Tool::CutOut,
+        Tool::Measure,
         Tool::Draw(Kind::Arrow),
         Tool::Draw(Kind::Line),
         Tool::Draw(Kind::Text),
@@ -256,6 +260,16 @@ pub struct Editor {
     pub(crate) stamp_query: String,
     /// A theme of your own being made under the Quick Styles heading.
     pub(crate) theme_draft: Option<crate::quick::ThemeDraft>,
+    /// The guides dragged out of the rulers, in the picture's pixels.
+    pub(crate) guides: Vec<crate::guides::Guide>,
+    /// The last distance measured with the Measure tool, not kept on the picture.
+    pub(crate) measured: Option<(screengrabcraft_model::Pt, screengrabcraft_model::Pt)>,
+    /// The guide being dragged.
+    pub(crate) guide_drag: Option<usize>,
+    /// A move of annotations under way, for snapping.
+    pub(crate) snap: Option<crate::guides::SnapState>,
+    /// The lines what is being moved has snapped to.
+    pub(crate) snap_lines: Vec<crate::guides::Guide>,
     /// A picture of your own the Stamp tool places (by its name), instead of a drawn stamp.
     pub(crate) own_stamp: Option<String>,
     /// The names of the pictures kept as stamps, as last asked of the host.
@@ -389,6 +403,11 @@ impl Editor {
             stamp_query: String::new(),
             own_stamp: None,
             theme_draft: None,
+            guides: Vec::new(),
+            guide_drag: None,
+            measured: None,
+            snap: None,
+            snap_lines: Vec::new(),
             own_stamps: None,
             own_stamp_pictures: std::collections::HashMap::new(),
             adding_stamp: false,
@@ -440,6 +459,12 @@ impl Editor {
             c.translate(shift);
         }
         self.crop = self.crop.map(|c| c.translate(shift));
+        for g in &mut self.guides {
+            g.at += if g.across { shift.y } else { shift.x };
+        }
+        if let Some(st) = &mut self.snap {
+            st.origin = st.origin.translate(shift);
+        }
     }
 
     /// The notice showing at the bottom, if any (for tests).
@@ -477,6 +502,8 @@ impl Editor {
         self.welcome = false;
         self.session.replace(doc);
         self.name = name;
+        self.guides.clear();
+        self.guide_drag = None;
         self.project_path = project;
         self.picture_path = picture;
         self.original = original;
@@ -1865,6 +1892,33 @@ impl Editor {
                     if ui.checkbox(&mut self.settings.show_tray, "Recent Captures").changed() {
                         self.services.save_settings(&self.settings);
                     }
+                    ui.separator();
+                    if ui
+                        .checkbox(&mut self.settings.show_rulers, "Rulers and Guides")
+                        .on_hover_text("Rulers along the top and the left; drag a guide out of one")
+                        .changed()
+                    {
+                        self.services.save_settings(&self.settings);
+                    }
+                    let mut snap = !self.settings.no_snap;
+                    if ui
+                        .checkbox(&mut snap, "Snap to Guides")
+                        .on_hover_text("What is moved snaps its edges and middle to the guides and to the picture's edges and middle")
+                        .changed()
+                    {
+                        self.settings.no_snap = !snap;
+                        self.services.save_settings(&self.settings);
+                    }
+                    if ui.button("Guides at the Middle").on_hover_text("A guide across and one down the middle of the picture").clicked() {
+                        crate::guides::add_middle(self);
+                        self.services.save_settings(&self.settings);
+                        ui.close();
+                    }
+                    if ui.add_enabled(!self.guides.is_empty(), egui::Button::new("Clear Guides")).clicked() {
+                        self.guides.clear();
+                        ui.close();
+                    }
+                    ui.separator();
                     let mut names = !self.settings.hide_tool_names;
                     if ui
                         .checkbox(&mut names, "Tool Names")

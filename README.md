@@ -201,6 +201,11 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   A line bends as an arrow does, by the diamond in its middle.
 - **Highlighter** (H): drag a box over what should stand out; it's tinted as under a marker
   (dark stays dark), and resized by its handles or moved like any shape.
+- **Rulers and guides** (View menu): rulers along the top and the left; drag a guide out of one,
+  drag it to move it, back onto its ruler to take it away. What is moved snaps its edges and
+  middle to the guides and to the picture's edges and middle (View › Snap to Guides).
+- **Measure** (I): drag across the picture for a distance in pixels, across, down and at what
+  angle; keep it on the picture as a dimension line with its length, or keep every one.
 - **Hand** (D): drag the picture round in the window. Space held down, or the middle button,
   does the same with any tool.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
