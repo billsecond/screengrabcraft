@@ -284,7 +284,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 9. A frame saved as a picture; just the chosen stretch; just the sound (WAV, M4A) (#71).
 10. Hold a frame: the picture held while every track waits (#73).
 11. Keys pressed shown in the video: the shortcuts kept while recording, never what's typed (#76).
-12. The camera's background removed, with or without a green screen.
+12. The camera's background removed, with or without a green screen (#79).
 
 **Still to build, in this order**
 
