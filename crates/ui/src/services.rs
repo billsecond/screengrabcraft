@@ -358,6 +358,32 @@ pub trait Services {
     fn text_reader(&self) -> Result<std::sync::Arc<dyn ReadText>, String> {
         Err("Grab Text needs ScreenGrabCraft on the desktop: the browser has no text reader".to_string())
     }
+
+    /// Whether the host keeps pictures of your own as stamps (in the editor's settings folder;
+    /// the browser keeps none).
+    fn keeps_own_stamps(&self) -> bool {
+        false
+    }
+
+    /// The names of the pictures kept as stamps, oldest first.
+    fn own_stamps(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// A picture kept as a stamp, by its name.
+    fn own_stamp(&self, _name: &str) -> Option<Raster> {
+        None
+    }
+
+    /// Keeps a picture (a PNG file's bytes) as a stamp, and answers its name.
+    fn add_own_stamp(&self, _png: &[u8]) -> Result<String, String> {
+        Err("pictures of your own as stamps are kept on the computer: not here".to_string())
+    }
+
+    /// Takes a picture out of the stamps.
+    fn remove_own_stamp(&self, _name: &str) -> Result<(), String> {
+        Err("pictures of your own as stamps are kept on the computer: not here".to_string())
+    }
 }
 
 /// A host with nothing, not even paths (nothing is saved by itself): for tests.

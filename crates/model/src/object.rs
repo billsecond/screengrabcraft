@@ -68,20 +68,103 @@ pub enum StampKind {
     Warning,
     Info,
     Heart,
+    Plus,
+    Minus,
+    ArrowUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    NoEntry,
+    Idea,
+    Pin,
+    Flag,
+    Lock,
+    Clock,
+    Search,
+    Bookmark,
+    Gear,
+    Home,
+    Mail,
+    Pencil,
+    Happy,
+    Laughing,
+    Wink,
+    Neutral,
+    Sad,
+    Surprised,
+    Angry,
+    Love,
+    Cool,
 }
 
 impl StampKind {
-    pub const ALL: [StampKind; 7] =
+    pub const ALL: [StampKind; 34] = [
+        StampKind::Check,
+        StampKind::Cross,
+        StampKind::Star,
+        StampKind::Question,
+        StampKind::Warning,
+        StampKind::Info,
+        StampKind::Heart,
+        StampKind::Plus,
+        StampKind::Minus,
+        StampKind::ArrowUp,
+        StampKind::ArrowDown,
+        StampKind::ArrowLeft,
+        StampKind::ArrowRight,
+        StampKind::NoEntry,
+        StampKind::Idea,
+        StampKind::Pin,
+        StampKind::Flag,
+        StampKind::Lock,
+        StampKind::Clock,
+        StampKind::Search,
+        StampKind::Bookmark,
+        StampKind::Gear,
+        StampKind::Home,
+        StampKind::Mail,
+        StampKind::Pencil,
+        StampKind::Happy,
+        StampKind::Laughing,
+        StampKind::Wink,
+        StampKind::Neutral,
+        StampKind::Sad,
+        StampKind::Surprised,
+        StampKind::Angry,
+        StampKind::Love,
+        StampKind::Cool,
+    ];
+
+    /// The stamps the quick styles offer at once (the rest are in the library).
+    pub const FIRST: [StampKind; 7] =
         [StampKind::Check, StampKind::Cross, StampKind::Star, StampKind::Question, StampKind::Warning, StampKind::Info, StampKind::Heart];
 
     /// The colour a stamp is filled with when it is first placed.
     pub fn color(self) -> Color {
+        const GREEN: Color = Color::rgb(0x2E, 0x9E, 0x4F);
+        const RED: Color = Color::rgb(0xE5, 0x39, 0x35);
+        const BLUE: Color = Color::rgb(0x1E, 0x88, 0xE5);
+        const AMBER: Color = Color::rgb(0xFF, 0xB3, 0x00);
+        const ORANGE: Color = Color::rgb(0xFB, 0x8C, 0x00);
+        const FACE: Color = Color::rgb(0xFF, 0xC8, 0x3D);
+        const GREY: Color = Color::rgb(0x54, 0x6E, 0x7A);
         match self {
-            StampKind::Check => Color::rgb(0x2E, 0x9E, 0x4F),
-            StampKind::Cross | StampKind::Heart => Color::rgb(0xE5, 0x39, 0x35),
-            StampKind::Star => Color::rgb(0xFF, 0xB3, 0x00),
-            StampKind::Question | StampKind::Info => Color::rgb(0x1E, 0x88, 0xE5),
-            StampKind::Warning => Color::rgb(0xFB, 0x8C, 0x00),
+            StampKind::Check | StampKind::Plus => GREEN,
+            StampKind::Cross | StampKind::Heart | StampKind::NoEntry | StampKind::Pin | StampKind::Minus => RED,
+            StampKind::Star | StampKind::Idea => AMBER,
+            StampKind::Question | StampKind::Info | StampKind::ArrowUp | StampKind::ArrowDown | StampKind::ArrowLeft | StampKind::ArrowRight => BLUE,
+            StampKind::Mail | StampKind::Bookmark | StampKind::Search => BLUE,
+            StampKind::Warning | StampKind::Flag | StampKind::Pencil => ORANGE,
+            StampKind::Lock | StampKind::Clock | StampKind::Gear | StampKind::Home => GREY,
+            StampKind::Happy
+            | StampKind::Laughing
+            | StampKind::Wink
+            | StampKind::Neutral
+            | StampKind::Sad
+            | StampKind::Surprised
+            | StampKind::Love
+            | StampKind::Cool => FACE,
+            StampKind::Angry => Color::rgb(0xF4, 0x51, 0x1E),
         }
     }
 
@@ -94,7 +177,97 @@ impl StampKind {
             StampKind::Warning => "Warning",
             StampKind::Info => "Information",
             StampKind::Heart => "Heart",
+            StampKind::Plus => "Plus",
+            StampKind::Minus => "Minus",
+            StampKind::ArrowUp => "Arrow up",
+            StampKind::ArrowDown => "Arrow down",
+            StampKind::ArrowLeft => "Arrow left",
+            StampKind::ArrowRight => "Arrow right",
+            StampKind::NoEntry => "No entry",
+            StampKind::Idea => "Idea",
+            StampKind::Pin => "Pin",
+            StampKind::Flag => "Flag",
+            StampKind::Lock => "Lock",
+            StampKind::Clock => "Clock",
+            StampKind::Search => "Search",
+            StampKind::Bookmark => "Bookmark",
+            StampKind::Gear => "Settings",
+            StampKind::Home => "Home",
+            StampKind::Mail => "Mail",
+            StampKind::Pencil => "Pencil",
+            StampKind::Happy => "Happy face",
+            StampKind::Laughing => "Laughing face",
+            StampKind::Wink => "Winking face",
+            StampKind::Neutral => "Straight face",
+            StampKind::Sad => "Sad face",
+            StampKind::Surprised => "Surprised face",
+            StampKind::Angry => "Angry face",
+            StampKind::Love => "Face in love",
+            StampKind::Cool => "Face with sunglasses",
         }
+    }
+
+    /// Other words it is found by in the library's search.
+    pub fn keywords(self) -> &'static str {
+        match self {
+            StampKind::Check => "yes done ok correct tick right good",
+            StampKind::Cross => "no wrong error bad close x",
+            StampKind::Star => "favourite favorite best rating important",
+            StampKind::Question => "help ask unknown what",
+            StampKind::Warning => "caution alert danger careful attention",
+            StampKind::Info => "information note tip about",
+            StampKind::Heart => "love like favourite",
+            StampKind::Plus => "add more new",
+            StampKind::Minus => "remove less take away",
+            StampKind::ArrowUp => "up top higher increase direction",
+            StampKind::ArrowDown => "down bottom lower decrease direction",
+            StampKind::ArrowLeft => "left back previous direction",
+            StampKind::ArrowRight => "right next forward direction",
+            StampKind::NoEntry => "stop forbidden not allowed blocked",
+            StampKind::Idea => "light bulb tip hint think",
+            StampKind::Pin => "location place map marker here",
+            StampKind::Flag => "mark goal finish report",
+            StampKind::Lock => "secure private password locked safe",
+            StampKind::Clock => "time wait later hour schedule",
+            StampKind::Search => "find magnifier look zoom",
+            StampKind::Bookmark => "save keep remember read later",
+            StampKind::Gear => "gear cog options preferences setup",
+            StampKind::Home => "house start main",
+            StampKind::Mail => "email envelope message letter send",
+            StampKind::Pencil => "edit write change draw",
+            StampKind::Happy => "smile smiley glad emoji",
+            StampKind::Laughing => "laugh joy funny grin emoji",
+            StampKind::Wink => "wink joke playful emoji",
+            StampKind::Neutral => "meh neutral blank emoji",
+            StampKind::Sad => "unhappy sorry frown emoji",
+            StampKind::Surprised => "wow shock amazed emoji",
+            StampKind::Angry => "mad cross annoyed emoji",
+            StampKind::Love => "heart eyes adore emoji",
+            StampKind::Cool => "sunglasses cool emoji",
+        }
+    }
+
+    /// Whether it is a face.
+    pub fn is_face(self) -> bool {
+        matches!(
+            self,
+            StampKind::Happy
+                | StampKind::Laughing
+                | StampKind::Wink
+                | StampKind::Neutral
+                | StampKind::Sad
+                | StampKind::Surprised
+                | StampKind::Angry
+                | StampKind::Love
+                | StampKind::Cool
+        )
+    }
+
+    /// Whether `query` finds it: every word of the query begins a word of its name or keywords
+    /// (any case). An empty query finds them all.
+    pub fn matches(self, query: &str) -> bool {
+        let words: Vec<String> = format!("{} {}", self.label(), self.keywords()).to_lowercase().split_whitespace().map(str::to_string).collect();
+        query.to_lowercase().split_whitespace().all(|q| words.iter().any(|w| w.starts_with(q)))
     }
 }
 
@@ -1557,6 +1730,28 @@ mod tests {
         assert_eq!(serde_json::to_string(&round).unwrap(), r#"{"round":true}"#);
         assert_eq!(Kind::Ellipse.family(), Kind::Rect);
         assert_eq!(Kind::Callout.family(), Kind::Callout);
+    }
+
+    #[test]
+    fn stamps_are_found_by_their_names_and_words() {
+        let found = |q: &str| StampKind::ALL.into_iter().filter(|k| k.matches(q)).collect::<Vec<_>>();
+        assert_eq!(found("").len(), StampKind::ALL.len(), "an empty search finds them all");
+        assert_eq!(found("smile"), vec![StampKind::Happy]);
+        assert!(found("arrow").len() == 4 && found("arrow").iter().all(|k| k.label().starts_with("Arrow")));
+        assert_eq!(found("ARROW LE"), vec![StampKind::ArrowLeft], "every word, any case, word starts");
+        assert!(found("emoji").iter().all(|k| k.is_face()) && found("emoji").len() == 9);
+        assert!(found("teapot").is_empty());
+        assert_eq!(found("ok"), vec![StampKind::Check]);
+        // Names and colours: each name its own, every colour seen.
+        for (i, a) in StampKind::ALL.iter().enumerate() {
+            assert!(StampKind::ALL.iter().skip(i + 1).all(|b| a.label() != b.label()), "{a:?}");
+            assert!(a.color().a == 255);
+        }
+        assert!(StampKind::FIRST.iter().all(|k| StampKind::ALL.contains(k)));
+        // Old files name the first seven as they always did; new ones are read.
+        assert_eq!(serde_json::from_str::<StampKind>(r#""heart""#).unwrap(), StampKind::Heart);
+        assert_eq!(serde_json::from_str::<StampKind>(r#""arrowUp""#).unwrap(), StampKind::ArrowUp);
+        assert_eq!(serde_json::to_string(&StampKind::NoEntry).unwrap(), r#""noEntry""#);
     }
 
     #[test]

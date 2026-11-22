@@ -26,7 +26,7 @@ had before 0.1.19, and what is still missing.
 | Arrows | four head layouts, thickness, dashes, shadow | (curved arrows and other head shapes came later) |
 | Shapes | rectangle, rounded rectangle, ellipse | (triangles, polygons and stars came later; a polygon of clicked points is still missing) |
 | Text | our own fonts, colours, a box behind the text | no outline round the letters, no ready-made overlays (titles, captions on a see-through box) |
-| Stamps | seven stamps drawn in code | (a larger library and your own pictures as stamps: still missing) |
+| Stamps | seven stamps drawn in code | (a library of 34 with a search, faces and your own pictures came later) |
 | Fill | fills an area of the picture, or a shape, with a colour | — |
 
 ## What 0.1.26 changes

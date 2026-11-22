@@ -53,7 +53,7 @@ fn main() -> Result<(), String> {
     e(add(&mut d, Shape::Blur { rect: Rect::new(340.0, 280.0, 200.0, 60.0) }))?;
     e(add(&mut d, Shape::Pixelate { rect: Rect::new(560.0, 270.0, 60.0, 80.0) }))?;
     e(add(&mut d, Shape::Magnify { rect: Rect::new(470.0, 380.0, 110.0, 110.0) }))?;
-    for (i, k) in StampKind::ALL.iter().enumerate() {
+    for (i, k) in StampKind::FIRST.iter().enumerate() {
         let style = Style { fill: screengrabcraft_render::stamp::default_fill(*k), ..Kind::Stamp.default_style() };
         d.add(Shape::Stamp { rect: Rect::new(610.0 + i as f32 * 40.0, 460.0, 34.0, 34.0), stamp: *k }, style).map_err(|e| e.to_string())?;
     }

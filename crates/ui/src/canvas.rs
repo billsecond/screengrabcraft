@@ -717,6 +717,13 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     ed.drag = Some(Drag::Move { ids: vec![id], last: start });
                     return;
                 }
+                // A picture of your own from the stamp library: placed, and moved by the drag.
+                if kind == Kind::Stamp && ed.own_stamp.is_some() {
+                    if let Some(id) = crate::stamps::place(ed, &ctx, start) {
+                        ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+                    }
+                    return;
+                }
                 let step = ed.session.doc.next_step_number(ed.tool_options(Kind::Step).labels.unwrap_or_default());
                 let shape = ed.with_defaults(shape_for(kind, start, start, false, ed.tool_options(kind), step, image_size));
                 let style = ed.tool_style(kind);
@@ -1159,6 +1166,12 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                 return;
             }
             if editing_before {
+                return;
+            }
+            if kind == Kind::Stamp && ed.own_stamp.is_some() && ed.session.doc.bounds().contains(p) {
+                if crate::stamps::place(ed, ctx, p).is_some() {
+                    ed.session.commit();
+                }
                 return;
             }
             let style = ed.tool_style(kind);

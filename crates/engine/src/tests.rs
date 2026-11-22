@@ -651,3 +651,17 @@ fn polygons_stars_and_curved_arrows() {
     assert!(s.execute("object.add", &json!({"object": {"type": "polygon", "rect": {"x": 0, "y": 0, "w": 5, "h": 5}, "sides": "many"}})).is_err());
     assert_eq!(s.doc, before);
 }
+
+/// Every stamp can be added by its name, as `object.add`'s params say.
+#[test]
+fn every_stamp_is_added_by_its_name() {
+    let mut s = session();
+    let doc = crate::registry::find("object.add").map(|c| c.params).unwrap_or_default();
+    for k in screengrabcraft_model::StampKind::ALL {
+        let name = serde_json::to_value(k).unwrap();
+        let name = name.as_str().unwrap();
+        assert!(doc.contains(&format!("\"{name}\"")), "{name} is in object.add's params");
+        let id = add(&mut s, json!({"type": "stamp", "rect": {"x": 10, "y": 10, "w": 40, "h": 40}, "stamp": name}));
+        assert!(matches!(s.doc.get(id).unwrap().shape, Shape::Stamp { stamp, .. } if stamp == k));
+    }
+}

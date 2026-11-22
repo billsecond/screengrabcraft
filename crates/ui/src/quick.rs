@@ -212,7 +212,7 @@ pub(crate) fn preview(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle, s
 
 /// What a tile shows.
 #[derive(Clone, Copy)]
-enum Face {
+pub(crate) enum Face {
     Picture(Option<egui::TextureId>),
     Colour(Color),
 }
@@ -242,7 +242,7 @@ pub(crate) fn paint_star(p: &egui::Painter, c: egui::Pos2, r: f32, filled: bool,
 
 /// A tile: its face, a ring when it is the look in use, and a star when it can be starred.
 /// Returns whether it was clicked, and whether its star was.
-fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, starred: Option<bool>) -> (bool, bool) {
+pub(crate) fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, starred: Option<bool>) -> (bool, bool) {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
@@ -294,25 +294,31 @@ fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, sta
     (resp.clicked() && !star_clicked, star_clicked)
 }
 
-/// The tile size for the width there is.
-fn tile_size(ui: &Ui) -> egui::Vec2 {
-    let w = ((ui.available_width() - GAP * (COLUMNS - 1) as f32) / COLUMNS as f32).floor().max(30.0);
+/// The tile size for the width there is, `columns` to a row.
+fn tile_size(ui: &Ui, columns: usize) -> egui::Vec2 {
+    let w = ((ui.available_width() - GAP * (columns - 1) as f32) / columns as f32).floor().max(30.0);
     vec2(w, (w * 0.74).round())
 }
 
 /// Lays `n` tiles out in rows of four.
-fn grid(ui: &mut Ui, n: usize, mut each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
-    let size = tile_size(ui);
+pub(crate) fn grid(ui: &mut Ui, n: usize, each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
+    grid_of(ui, n, COLUMNS, each);
+}
+
+/// Lays `n` tiles out in rows of `columns`.
+pub(crate) fn grid_of(ui: &mut Ui, n: usize, columns: usize, mut each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
+    let columns = columns.max(1);
+    let size = tile_size(ui, columns);
     let mut i = 0;
     while i < n {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(GAP, GAP);
-            for j in i..(i + COLUMNS).min(n) {
+            for j in i..(i + columns).min(n) {
                 each(ui, j, size);
             }
         });
         ui.add_space(GAP - ui.spacing().item_spacing.y.min(GAP));
-        i += COLUMNS;
+        i += columns;
     }
 }
 
@@ -450,6 +456,10 @@ pub(crate) fn favorite_name(f: &QuickStyle, i: usize) -> String {
 /// that draws it.
 pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
     let look = look.clamped();
+    // A drawn stamp picked: no longer a picture of your own.
+    if look.kind == Kind::Stamp && look.options.stamp.is_some() {
+        ed.own_stamp = None;
+    }
     let family = look.kind;
     let draw = match (family, look.options.round) {
         (Kind::Rect, Some(true)) => Kind::Ellipse,

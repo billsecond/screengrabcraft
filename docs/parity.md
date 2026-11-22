@@ -90,7 +90,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Callout with several tails | Missing | |
 | Rectangle, rounded rectangle, ellipse | Has | |
 | **Polygon, triangle, star** | Part | triangles, diamonds, polygons of 3 to 12 corners and stars of 3 to 12 points, drawn in a box with the Shape tool; not a polygon of points clicked one by one |
-| Stamps | Part | seven drawn stamps; no searchable library, no emoji, no pictures of your own |
+| **Stamps: a library with a search, faces, pictures of your own** | Has | 34 drawn in code (25 symbols and 9 faces); pictures of your own kept in the settings folder (not in the browser) |
 | Fill an area or a shape | Has | |
 | Gradient fills | Missing | |
 | Move, select, nudge, duplicate | Has | |
@@ -278,6 +278,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 3. Cut Out: take a strip out of a picture and close the gap (0.1.56).
 4. Step badges as letters or Roman numerals, and other badge shapes.
 5. Polygons, triangles and stars; curved arrows and more head shapes.
+6. A stamp library with search, faces, and pictures of your own as stamps.
 
 **Still to build, in this order**
 
@@ -286,27 +287,26 @@ By how much someone using it every day would miss each one. Built ones move to a
 3. Edit captions: put a word right, split, join, move.
 4. Scrolling capture that scrolls by itself.
 5. Pointer highlight, spotlight and magnifier; click sounds.
-6. A stamp library with search, emoji, and pictures of your own as stamps.
-7. Markers on the timeline, kept as chapters in the MP4.
-8. A frame saved as a picture; just the chosen stretch; just the sound.
-9. Hold a frame.
-10. Keys pressed shown in the video.
-11. Any font on the computer.
-12. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-13. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+6. Markers on the timeline, kept as chapters in the MP4.
+7. A frame saved as a picture; just the chosen stretch; just the sound.
+8. Hold a frame.
+9. Keys pressed shown in the video.
+10. Any font on the computer.
+11. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
+12. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-14. Rotate, group and align annotations; select all of one kind.
-15. Magic wand, eraser, ellipse and freehand selections.
-16. Camera background removed, or a colour removed.
-17. Transitions between clips; keyframe animation.
-18. Drawing on the screen while recording.
-19. Volume along a clip; music lowered under the voice; levels evened out.
-20. Tags, favourites, and captures sorted by program.
-21. Templates; several pictures combined into one.
-22. A picture per click made into a how-to guide.
-23. Groups, pushing later clips along, locked and solo tracks, clip colours.
-24. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-25. Print; batch changes; captures on a timer or at a set time.
-26. Cutting words from the transcript; filler words taken out.
-27. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+13. Rotate, group and align annotations; select all of one kind.
+14. Magic wand, eraser, ellipse and freehand selections.
+15. Camera background removed, or a colour removed.
+16. Transitions between clips; keyframe animation.
+17. Drawing on the screen while recording.
+18. Volume along a clip; music lowered under the voice; levels evened out.
+19. Tags, favourites, and captures sorted by program.
+20. Templates; several pictures combined into one.
+21. A picture per click made into a how-to guide.
+22. Groups, pushing later clips along, locked and solo tracks, clip colours.
+23. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+24. Print; batch changes; captures on a timer or at a set time.
+25. Cutting words from the transcript; filler words taken out.
+26. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

@@ -193,7 +193,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Step** badges that count themselves, in numbers, capital or small letters, or Roman numerals
   (each way counts on its own, so 1, 2, 3 can have a, b, c beside them), on a circle, a rounded
   or square box, a diamond, a hexagon or a pin (Shape, in the Step tool's properties), and
-  **stamps** (check, cross, star, question, warning, information, heart).
+  **stamps**: a library of 34 drawn in code (check, cross, star, arrows, a pin, a lock, a light
+  bulb, faces and more) with a search, and pictures of your own (a logo, a signature) kept as
+  stamps from a file or the clipboard.
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
 - Colours (a palette that reads well for people who see red and green alike, and any colour),
   thickness, opacity, shadows, dashes.

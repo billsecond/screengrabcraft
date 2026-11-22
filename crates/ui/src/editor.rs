@@ -236,6 +236,16 @@ pub struct Editor {
     pub(crate) saving_transcript: Option<crate::video::TranscriptFormat>,
     /// Export Video's Change… save dialog is open.
     pub(crate) saving_video: bool,
+    /// The stamp library's search.
+    pub(crate) stamp_query: String,
+    /// A picture of your own the Stamp tool places (by its name), instead of a drawn stamp.
+    pub(crate) own_stamp: Option<String>,
+    /// The names of the pictures kept as stamps, as last asked of the host.
+    pub(crate) own_stamps: Option<Vec<String>>,
+    /// Those pictures, as read (a few at most).
+    pub(crate) own_stamp_pictures: std::collections::HashMap<String, Raster>,
+    /// The open dialog picks a picture to keep as a stamp (not one to open).
+    pub(crate) adding_stamp: bool,
     /// Files being transcribed (Transcribe a Video or Sound File…).
     pub transcripts: crate::transcribe::Transcripts,
     /// A recording being read on a thread of its own.
@@ -329,6 +339,11 @@ impl Editor {
             saving_transcript: None,
             transcripts: Default::default(),
             saving_video: false,
+            stamp_query: String::new(),
+            own_stamp: None,
+            own_stamps: None,
+            own_stamp_pictures: std::collections::HashMap::new(),
+            adding_stamp: false,
             opening_video: None,
             toast: None,
             thumbs: std::collections::HashMap::new(),
@@ -1138,8 +1153,13 @@ impl Editor {
         let Some(answer) = self.services.poll_dialog() else { return };
         match answer {
             DialogResult::Opened(files) => {
+                let adding = std::mem::take(&mut self.adding_stamp);
                 if let Some(f) = files.into_iter().next() {
-                    self.open_file(ctx, f);
+                    if adding {
+                        crate::stamps::add_file(self, ctx, &f);
+                    } else {
+                        self.open_file(ctx, f);
+                    }
                 }
             }
             DialogResult::Transcribe(paths) => self.transcribe_files(ctx, &paths),
@@ -1174,6 +1194,7 @@ impl Editor {
                 self.saving_project = false;
             }
             DialogResult::Cancelled => {
+                self.adding_stamp = false;
                 self.saving = None;
                 self.saving_project = false;
                 self.saving_transcript = None;

@@ -634,3 +634,106 @@ fn shapes_draw_triangles_and_stars_and_arrows_bend() {
     h.run_steps(2);
     shot(&mut h, "polygons-and-curved-arrow");
 }
+
+/// A host that keeps pictures of your own as stamps in memory, with a picture on its clipboard.
+#[derive(Clone, Default)]
+struct StampHost(std::rc::Rc<std::cell::RefCell<Vec<(String, screengrabcraft_model::Raster)>>>);
+
+impl crate::services::Services for StampHost {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn paste_image(&self) -> Option<screengrabcraft_model::Raster> {
+        // A small picture of two colours, wider than tall.
+        let mut r = screengrabcraft_model::Raster::filled(60, 30, Color::rgb(0, 120, 200)).ok()?;
+        for px in r.pixels_mut().as_chunks_mut::<4>().0.iter_mut().take(60 * 15) {
+            *px = [250, 200, 0, 255];
+        }
+        Some(r)
+    }
+
+    fn keeps_own_stamps(&self) -> bool {
+        true
+    }
+
+    fn own_stamps(&self) -> Vec<String> {
+        self.0.borrow().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn own_stamp(&self, name: &str) -> Option<screengrabcraft_model::Raster> {
+        self.0.borrow().iter().find(|(n, _)| n == name).map(|(_, r)| r.clone())
+    }
+
+    fn add_own_stamp(&self, png: &[u8]) -> Result<String, String> {
+        let pic = screengrabcraft_render::codec::decode(png).map_err(|e| e.to_string())?;
+        let name = format!("mine-{}", self.0.borrow().len() + 1);
+        self.0.borrow_mut().push((name.clone(), pic));
+        Ok(name)
+    }
+
+    fn remove_own_stamp(&self, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().retain(|(n, _)| n != name);
+        Ok(())
+    }
+}
+
+/// The stamp library: a search finds a face, which is placed in its own colour; the copied
+/// picture is kept as a stamp of your own and placed as a picture; then taken out again.
+#[test]
+fn the_stamp_library_finds_stamps_and_keeps_your_pictures() {
+    use screengrabcraft_model::StampKind;
+    let host = StampHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), screengrabcraft_model::EditorSettings::default());
+    ed.session.replace(screengrabcraft_model::Document::new(screengrabcraft_model::Raster::filled(400, 300, Color::WHITE).unwrap()));
+    ed.view.fit_pending = true;
+    let mut h = ready_tall(ed, Tool::Draw(Kind::Stamp));
+    for name in ["Arrow up", "Sad face", "Pencil", crate::stamps::SEARCH] {
+        h.get_by_label(name);
+    }
+    click(&mut h, crate::stamps::SEARCH);
+    h.event(egui::Event::Text("smile".into()));
+    h.run_steps(3);
+    assert_eq!(h.state().stamp_query, "smile");
+    assert!(h.query_by_label("Sad face").is_none() && h.query_by_label("Arrow up").is_none(), "the search leaves the rest out");
+    shot(&mut h, "stamp-library-search");
+    click(&mut h, "Happy face");
+    assert_eq!(h.state().stamp(), StampKind::Happy);
+    let p = at(&h, 100.0, 100.0);
+    crate::tests::click_at(&mut h, p);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    assert!(matches!(o.shape, Shape::Stamp { stamp: StampKind::Happy, .. }), "{:?}", o.shape);
+    assert_eq!(o.style.fill, StampKind::Happy.color(), "in its own colour");
+    // The copied picture kept, chosen, and placed as a picture, in proportion.
+    // (The search still narrows the stamps, so your pictures are in sight under them.)
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Add the Copied Picture");
+    assert_eq!(crate::services::Services::own_stamps(&host), vec!["mine-1".to_string()]);
+    assert_eq!(h.state().own_stamp.as_deref(), Some("mine-1"));
+    h.get_by_label(&crate::stamps::own_name(0));
+    let p = at(&h, 250.0, 150.0);
+    crate::tests::click_at(&mut h, p);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    let Shape::Image { rect, image } = o.shape else { panic!("a picture: {:?}", o.shape) };
+    assert!((rect.w / rect.h - 2.0).abs() < 0.05 && rect.contains(screengrabcraft_model::Pt::new(250.0, 150.0)), "{rect:?}");
+    assert_eq!(h.state().session.doc.images.get(&image).map(|r| (r.width(), r.height())), Some((60, 30)));
+    assert_eq!(h.state().session.undo_label(), Some("Add Stamp"));
+    shot(&mut h, "stamp-library-own");
+    // Let go of it, then the picture is taken out of the stamps.
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, &crate::stamps::own_name(0));
+    click(&mut h, "Remove");
+    assert!(crate::services::Services::own_stamps(&host).is_empty() && h.state().own_stamp.is_none());
+    assert!(h.query_by_label(&crate::stamps::own_name(0)).is_none());
+}
+
+/// Where the host keeps no files (the browser), your pictures are greyed out with the reason.
+#[test]
+fn stamps_of_your_own_are_greyed_out_without_files() {
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Stamp));
+    h.get_by_label_contains("not in the browser");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Add a Picture…")).is_disabled());
+    shot(&mut h, "stamp-library-browser");
+}
