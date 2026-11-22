@@ -298,7 +298,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch (#112).
 23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart) (#113).
 24. Sound while playing faster (J and L), at its own pitch; a video's sound apart from its picture;
-    tracks and sound layers mixed to mono.
+    tracks and sound layers mixed to mono (#116).
 
 **Still to build, in this order**
 
