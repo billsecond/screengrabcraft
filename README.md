@@ -39,6 +39,7 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 |---|---|---|
 | Print Screen | Ctrl+Shift+C | **Region**: drag out an area, or click a window; adjust it with its handles; Enter keeps it |
 | — (set one in Settings) | — | **Region, adjust first**: drag out an area, or start from the last one, and adjust it with its handles until Enter (or a button of the bar) takes it |
+| — (set one in Settings) | — | **Freehand area**: draw round what to keep with the button held down; what's outside the outline is see-through |
 | Alt+Print Screen | Ctrl+Shift+W | **Window**: click a window |
 | Ctrl+Print Screen | Ctrl+Shift+F | **Full screen**: the monitor under the pointer |
 | — (set one in Settings; Ctrl+Shift+Print Screen is Windows' own) | — | **All screens** in one picture |
@@ -54,7 +55,10 @@ every capture, a delayed capture (3, 5 or 10 s), the editor and the captures fol
 an area the screen is frozen as it was when the key was pressed (open menus and tooltips included),
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
-Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4:3.
+Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4:3. Hold Alt
+(Option on a Mac) as you let go to keep that area and drag out another: the last one without Alt
+(or Enter) keeps them all in one picture, laid out as they were on the screen with the rest
+see-through (Backspace takes the last one out again).
 
 As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
@@ -65,7 +69,7 @@ for just the captures you want to fine-tune. An open editor is hidden while you 
 off too (the video editor never is: it stays as you left it).
 
 **Capture presets** (Settings › Capture presets) are captures of your own making: a region, a region
-held to a shape (16:9, square…) or of a set size placed with a click, a window, the screen, all
+held to a shape (16:9, square…) or of a set size placed with a click, a freehand area, a window, the screen, all
 screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); and a
 shortcut of its own. They're on the Capture page and in the tray menu (Capture Presets).
 

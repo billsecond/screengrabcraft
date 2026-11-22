@@ -26,8 +26,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Windows snap under the pointer | Has | |
 | Open menus and tooltips caught as they were | Part | the screen is frozen when the key is pressed, so open menus are in it; menus aren't found and cut out by themselves |
 | Parts of a window (a button, a pane) snapped to | Missing | |
-| Freehand-shaped area | Missing | |
-| Several areas in one capture | Missing | |
+| Freehand-shaped area | Has | Capture Freehand Area (the tray, the Capture page, a shortcut or a preset): drawn round with the button held down; what's outside the outline is see-through |
+| Several areas in one capture | Has | Alt (Option on a Mac) held as an area is let go keeps it and another is dragged out; the areas of one screen in one picture, laid out as they were, the rest see-through |
 | Fixed size or fixed place area | Has | a capture preset of a set size, placed with a click; the Recorder's fixed sizes for videos |
 | Aspect ratio held while dragging (square, 16:9, 4:3) | Has | Shift, Ctrl, Ctrl+Shift while dragging (the overlay says so); a preset can hold any shape |
 | The program's own windows kept out of the picture | Has | the editor steps aside |
@@ -281,7 +281,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 6. Drawing on the screen while recording (Windows; #65).
 7. Tags, favourites, and captures sorted by the program they were taken from (#68).
 8. Print; batch changes; captures on a timer or at a set time (#72).
-9. A picture per click made into a how-to guide.
+9. A picture per click made into a how-to guide (#74).
+10. Several areas in one capture; a freehand area.
 
 **Still to build, in this order**
 

@@ -148,6 +148,7 @@ pub fn entries(
     let mut e: Vec<Entry> = [
         CaptureMode::Region,
         CaptureMode::Adjust,
+        CaptureMode::Freehand,
         CaptureMode::Window,
         CaptureMode::Screen,
         CaptureMode::AllScreens,
