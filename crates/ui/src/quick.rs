@@ -36,7 +36,8 @@ pub(crate) fn tool_name(kind: Kind) -> &'static str {
 pub(crate) fn tool_look(ed: &Editor, kind: Kind) -> QuickStyle {
     let mut options = ed.tool_options(kind);
     if kind.family() == Kind::Rect {
-        options.round = Some(kind == Kind::Ellipse);
+        // A polygon is said by its corners; round or square says an ellipse or a rectangle.
+        options.round = if kind == Kind::Polygon { None } else { Some(kind == Kind::Ellipse) };
     }
     QuickStyle::new(kind.family(), ed.tool_style(kind), options)
 }
@@ -107,7 +108,7 @@ fn paint_page(base: &mut Raster) {
 }
 
 /// A look drawn on a small made-up picture: what its tool would draw with it.
-pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> Option<Raster> {
+pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind, corners: (u32, bool)) -> Option<Raster> {
     let (w, h) = PREVIEW;
     // A light outline round letters only shows on something darker than paper.
     let light_outline = look.style.has_text_outline() && look.style.text_outline.luminance() > 0.5;
@@ -120,7 +121,13 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
     let mut style = look.style;
     let o = &look.options;
     let shape = match look.kind.family() {
-        Kind::Arrow => Shape::Arrow { from: Pt::new(18.0, 62.0), to: Pt::new(90.0, 18.0), heads: o.heads.unwrap_or_default() },
+        Kind::Arrow => Shape::Arrow {
+            from: Pt::new(18.0, 62.0),
+            to: Pt::new(90.0, 18.0),
+            heads: o.heads.unwrap_or_default(),
+            bend: o.bend.unwrap_or(0.0),
+            head: o.head.unwrap_or_default(),
+        },
         Kind::Line => Shape::Line { from: Pt::new(16.0, 62.0), to: Pt::new(92.0, 18.0) },
         Kind::Pen => Shape::Pen {
             points: (0..=24)
@@ -133,7 +140,15 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
         Kind::Highlight => Shape::highlight(Rect::new(12.0, 20.0, 84.0, 22.0)),
         Kind::Rect => {
             let rect = Rect::new(16.0, 14.0, 76.0, 52.0);
-            if o.round.unwrap_or(shape == Kind::Ellipse) { Shape::Ellipse { rect } } else { Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) } }
+            let round = o.round.unwrap_or(shape == Kind::Ellipse);
+            let polygon = !round && (o.sides.is_some() || (o.round.is_none() && shape == Kind::Polygon));
+            if round {
+                Shape::Ellipse { rect }
+            } else if polygon {
+                Shape::Polygon { rect, sides: o.sides.unwrap_or(corners.0), star: o.star.unwrap_or(corners.1) }
+            } else {
+                Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) }
+            }
         }
         Kind::Text => {
             // A title is drawn bigger than the rest, its outline in step.
@@ -163,7 +178,7 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
         Kind::Pixelate => Shape::Pixelate { rect: Rect::new(10.0, 10.0, 88.0, 60.0) },
         Kind::Spotlight => Shape::Spotlight { rect: Rect::new(32.0, 18.0, 46.0, 40.0), ellipse: o.round.unwrap_or(false) },
         Kind::Magnify => Shape::Magnify { rect: Rect::new(30.0, 12.0, 56.0, 56.0) },
-        Kind::Ellipse | Kind::Image => return None,
+        Kind::Ellipse | Kind::Polygon | Kind::Image => return None,
     };
     doc.add(shape, style.clamped()).ok()?;
     screengrabcraft_render::render(&doc)
@@ -172,14 +187,22 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
 /// A look's preview on the GPU, drawn the first time it is asked for.
 pub(crate) fn preview(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle, shape: Kind) -> Option<egui::TextureId> {
     let stamp = ed.stamp();
-    let key = format!("{shape:?}|{stamp:?}|{}", serde_json::to_string(look).unwrap_or_default());
+    // A polygon's corners: the selected one's, or the tool's.
+    let corners = match selected_of(ed, Kind::Rect).map(|o| &o.shape) {
+        Some(Shape::Polygon { sides, star, .. }) => (*sides, *star),
+        _ => {
+            let t = ed.tool_options(Kind::Polygon);
+            (t.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES), t.star.unwrap_or(false))
+        }
+    };
+    let key = format!("{shape:?}|{stamp:?}|{corners:?}|{}", serde_json::to_string(look).unwrap_or_default());
     if let Some(t) = ed.previews.get(&key) {
         return Some(t.id());
     }
     if ed.previews.len() >= MAX_PREVIEWS {
         ed.previews.clear();
     }
-    let pic = draw_preview(look, shape, stamp)?;
+    let pic = draw_preview(look, shape, stamp, corners)?;
     let image = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
     let handle = ctx.load_texture(format!("quick-style-{}", ed.previews.len()), image, egui::TextureOptions::LINEAR);
     let id = handle.id();
@@ -391,7 +414,11 @@ pub(crate) fn favorites(ed: &mut Editor, ui: &mut Ui) {
     let mut unstar = None;
     grid(ui, favs.len(), |ui, i, size| {
         let Some(f) = favs.get(i) else { return };
-        let shape = if f.options.round == Some(true) { Kind::Ellipse } else { f.kind };
+        let shape = match (f.options.round, f.options.sides) {
+            (Some(true), _) => Kind::Ellipse,
+            (None, Some(_)) => Kind::Polygon,
+            _ => f.kind,
+        };
         let face = Face::Picture(preview(ed, &ctx, f, shape));
         let name = favorite_name(f, i);
         let (clicked, star) = tile(ui, face, &name, size, false, Some(true));
@@ -427,11 +454,12 @@ pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
     let draw = match (family, look.options.round) {
         (Kind::Rect, Some(true)) => Kind::Ellipse,
         (Kind::Rect, Some(false)) => Kind::Rect,
+        (Kind::Rect, None) if look.options.sides.is_some() => Kind::Polygon,
         (Kind::Rect, None) => ed.shape_tool().kind().unwrap_or(Kind::Rect),
         (k, _) => k,
     };
     // The tool keeps the look; its text size stays what it was.
-    let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse] } else { std::slice::from_ref(&family) };
+    let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse, Kind::Polygon] } else { std::slice::from_ref(&family) };
     for k in kinds {
         let size = if look.sized { look.style.font_size } else { ed.tool_style(*k).font_size };
         ed.settings.styles.insert(*k, Style { font_size: size, ..look.style }.clamped());

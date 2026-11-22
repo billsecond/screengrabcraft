@@ -1124,7 +1124,13 @@ fn a_side_file_from_before_still_opens_and_the_picture_is_its_original() {
     // Saved by an older version: no original in it, and the picture beside it never rewritten.
     let mut doc = Document::new(Raster::filled(200, 100, Color::WHITE).unwrap());
     doc.add(
-        Shape::Arrow { from: screengrabcraft_model::Pt::new(5.0, 5.0), to: screengrabcraft_model::Pt::new(50.0, 50.0), heads: Default::default() },
+        Shape::Arrow {
+            from: screengrabcraft_model::Pt::new(5.0, 5.0),
+            to: screengrabcraft_model::Pt::new(50.0, 50.0),
+            heads: Default::default(),
+            bend: 0.0,
+            head: Default::default(),
+        },
         Kind::Arrow.default_style(),
     )
     .unwrap();

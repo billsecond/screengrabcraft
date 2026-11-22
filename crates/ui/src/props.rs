@@ -4,8 +4,9 @@
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
+use screengrabcraft_model::object::{MAX_SIDES, MIN_SIDES};
 use screengrabcraft_model::{
-    ArrowHeads, BadgeShape, CalloutForm, Color, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot, TextAlign,
+    ArrowHeads, BadgeShape, CalloutForm, Color, HeadShape, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot, TextAlign,
 };
 
 use crate::editor::{Editor, Tool};
@@ -16,6 +17,13 @@ use crate::{from_color32, to_color32};
 
 /// How wide the panes are, usually.
 pub const PANEL_WIDTH: f32 = 272.0;
+
+/// The polygons the Shape tool's picker offers: their names, corners (a star's points) and whether
+/// each is a star.
+const POLYGONS: [(&str, u32, bool); 6] =
+    [("Triangle", 3, false), ("Diamond", 4, false), ("Pentagon", 5, false), ("Hexagon", 6, false), ("Octagon", 8, false), ("Star", 5, true)];
+/// How far the arrow picker's curved arrows bow, as a share of their length.
+const CURVE: f32 = 0.3;
 
 /// Copies onto `target` the fields that differ between `old` and `new`.
 fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
@@ -505,7 +513,9 @@ pub(crate) fn how_to(kind: Kind) -> &'static str {
     match kind {
         Kind::Arrow => "Drag on the picture, from where it starts to what it points at. Shift keeps it straight.",
         Kind::Line => "Drag on the picture to draw one. Shift keeps it straight.",
-        Kind::Rect | Kind::Ellipse => "Drag on the picture to draw one. Shift makes it a square or a circle.",
+        Kind::Rect | Kind::Ellipse | Kind::Polygon => {
+            "Drag on the picture to draw one. Shift makes it a square or a circle. Shape picks triangles, polygons and stars."
+        }
         Kind::Text => "Click the picture where the words go, or drag out a box, then type.",
         Kind::Callout => "Click what it's about, or drag out a box, then type. Its tail can be dragged.",
         Kind::Step => "Click the picture: each click puts the next number there. Shape sets letters, Roman numerals or another badge.",
@@ -572,11 +582,12 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         None => ed.tool_style(kind),
     };
     let mut s = old;
-    let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
+    let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
     let outline = !matches!(kind, Kind::Blur | Kind::Pixelate);
-    let picker = matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step);
+    let picker =
+        matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step);
     let shadow = !matches!(kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Highlight);
-    let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Pen | Kind::Callout);
+    let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Pen | Kind::Callout);
     // Text and callouts can have an outline round their letters too.
     let letters = matches!(kind, Kind::Text | Kind::Callout);
     ui.horizontal_wrapped(|ui| {
@@ -587,7 +598,7 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         }
         if outline {
             let (name, caption) = outline_name(kind);
-            let none = !matches!(kind, Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight | Kind::Rect | Kind::Ellipse);
+            let none = !matches!(kind, Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight | Kind::Rect | Kind::Ellipse | Kind::Polygon);
             colour_button(ui, name, caption, &mut s.stroke, none, kind == Kind::Highlight);
         }
         if kind.has_text() {
@@ -803,7 +814,7 @@ fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
 
 pub(crate) fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
     // The tool keeps the look for the next one, too (the Shape tool's two kinds alike).
-    let kinds: &[Kind] = if kind.family() == Kind::Rect { &[Kind::Rect, Kind::Ellipse] } else { std::slice::from_ref(&kind) };
+    let kinds: &[Kind] = if kind.family() == Kind::Rect { &[Kind::Rect, Kind::Ellipse, Kind::Polygon] } else { std::slice::from_ref(&kind) };
     for k in kinds {
         let mut remembered = ed.tool_style(*k);
         apply_changes(old, new, &mut remembered);
@@ -883,17 +894,69 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         }
                     }
                 });
+                ui.add_space(6.0);
+                ui.label(small("Head shape"));
+                ui.horizontal_wrapped(|ui| {
+                    for s in HeadShape::ALL {
+                        if ui.selectable_label(opts.head.unwrap_or_default() == s, s.label()).clicked() {
+                            chosen = Some(ShapeOptions { head: Some(s), ..none });
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(small("Line"));
+                ui.horizontal_wrapped(|ui| {
+                    let bend = opts.bend.unwrap_or(0.0);
+                    for (b, label, name) in [
+                        (0.0, "Straight", "A straight arrow"),
+                        (CURVE, "Curved", "Bowed to the left of the way it points"),
+                        (-CURVE, "Curved the other way", "Bowed to the right of the way it points"),
+                    ] {
+                        let on = if b == 0.0 { bend == 0.0 } else { bend * b > 0.0 };
+                        if ui.selectable_label(on, label).on_hover_text(name).clicked() {
+                            chosen = Some(ShapeOptions { bend: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Drag the diamond in a selected arrow's middle to bend it as you like."));
             }
-            Kind::Rect | Kind::Ellipse => {
-                let ellipse = shown_kind == Kind::Ellipse;
+            Kind::Rect | Kind::Ellipse | Kind::Polygon => {
                 let radius = opts.radius.unwrap_or(0.0);
                 for (label, round, rounded) in [("Rectangle", false, false), ("Rounded rectangle", false, true), ("Ellipse", true, false)] {
-                    let on = ellipse == round && (round || (radius > 0.0) == rounded);
+                    let on = match shown_kind {
+                        Kind::Ellipse => round,
+                        Kind::Rect => !round && (radius > 0.0) == rounded,
+                        _ => false,
+                    };
                     if ui.selectable_label(on, label).clicked() {
                         let r = if rounded { if radius > 0.0 { radius } else { 14.0 } } else { 0.0 };
                         chosen = Some(ShapeOptions { round: Some(round), radius: (!round).then_some(r), ..none });
                         new_tool = Some(Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect }));
                     }
+                }
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (label, sides, star) in POLYGONS {
+                        let on = shown_kind == Kind::Polygon && opts.sides == Some(sides) && opts.star.unwrap_or(false) == star;
+                        if ui.selectable_label(on, label).clicked() {
+                            chosen = Some(ShapeOptions { sides: Some(sides), star: Some(star), ..none });
+                            new_tool = Some(Tool::Draw(Kind::Polygon));
+                        }
+                    }
+                });
+                if shown_kind == Kind::Polygon {
+                    let star = opts.star.unwrap_or(false);
+                    ui.add_space(6.0);
+                    ui.label(small(if star { "Points" } else { "Corners" }));
+                    ui.horizontal_wrapped(|ui| {
+                        for n in MIN_SIDES..=MAX_SIDES {
+                            let name = if star { format!("{n} points") } else { format!("{n} corners") };
+                            if ui.selectable_label(opts.sides == Some(n), n.to_string()).on_hover_text(name).clicked() {
+                                chosen = Some(ShapeOptions { sides: Some(n), star: Some(star), ..none });
+                            }
+                        }
+                    });
                 }
             }
             Kind::Callout => {
@@ -959,6 +1022,10 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
         }
     });
     if let Some(o) = chosen {
+        // A rectangle or an ellipse picked: the Shape tool draws no polygon until one is picked.
+        if o.round.is_some() && kind.family() == Kind::Rect {
+            ed.settings.options.entry(Kind::Rect).or_default().sides = None;
+        }
         // Each stamp starts in its own colour.
         if let Some(k) = o.stamp {
             let mut style = ed.tool_style(Kind::Stamp);

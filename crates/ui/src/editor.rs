@@ -121,9 +121,9 @@ impl Tool {
         matches!(self, Tool::Select | Tool::Favorites)
     }
 
-    /// Whether it is the Shape button's (a rectangle or an ellipse).
+    /// Whether it is the Shape button's (a rectangle, an ellipse or a polygon).
     pub fn is_shape(self) -> bool {
-        matches!(self, Tool::Draw(Kind::Rect | Kind::Ellipse))
+        matches!(self, Tool::Draw(Kind::Rect | Kind::Ellipse | Kind::Polygon))
     }
 }
 
@@ -282,7 +282,8 @@ impl Editor {
     pub fn new(services: Box<dyn Services>, settings: EditorSettings) -> Editor {
         let blank = blank_picture();
         // The drawing tool last picked, if it is still one of the tools.
-        let tool = settings.tool.map(Tool::Draw).filter(|t| Tool::ALL.iter().any(|(b, ..)| b == t)).unwrap_or(Tool::Draw(Kind::Arrow));
+        let tool =
+            settings.tool.map(Tool::Draw).filter(|t| t.is_shape() || Tool::ALL.iter().any(|(b, ..)| b == t)).unwrap_or(Tool::Draw(Kind::Arrow));
         Editor {
             session: Session::new(Document::new(blank.clone())),
             settings,
@@ -1447,9 +1448,12 @@ impl Editor {
             self.area = None;
         }
         self.tool = tool;
-        // The Shape button remembers which of its two it draws.
+        // The Shape button remembers which of its three it draws: round for an ellipse, corners
+        // for a polygon (a triangle unless it had some).
         if tool.is_shape() {
-            self.settings.options.entry(Kind::Rect).or_default().round = Some(tool == Tool::Draw(Kind::Ellipse));
+            let o = self.settings.options.entry(Kind::Rect).or_default();
+            o.round = Some(tool == Tool::Draw(Kind::Ellipse));
+            o.sides = if tool == Tool::Draw(Kind::Polygon) { Some(o.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES)) } else { None };
         }
         // A drawing tool picked is the one the editor starts with next time.
         if let Tool::Draw(kind) = tool
@@ -1959,13 +1963,22 @@ impl Editor {
             });
     }
 
-    /// The tool the Shape button draws with: the rectangle or the ellipse, whichever was used last.
+    /// The tool the Shape button draws with: the rectangle, the ellipse or the polygon, whichever
+    /// was used last.
     pub fn shape_tool(&self) -> Tool {
         if self.tool.is_shape() {
             return self.tool;
         }
-        let round = self.settings.options.get(&Kind::Rect).and_then(|o| o.round) == Some(true);
-        Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect })
+        let kept = self.settings.options.get(&Kind::Rect);
+        let round = kept.and_then(|o| o.round) == Some(true);
+        let corners = kept.and_then(|o| o.sides).is_some();
+        Tool::Draw(if round {
+            Kind::Ellipse
+        } else if corners {
+            Kind::Polygon
+        } else {
+            Kind::Rect
+        })
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {

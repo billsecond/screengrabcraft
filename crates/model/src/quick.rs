@@ -49,6 +49,10 @@ impl QuickStyle {
             && same(o.round, c.round)
             && (o.labels.is_none() || o.labels == c.labels)
             && (o.badge.is_none() || o.badge == c.badge)
+            && (o.bend.is_none() || o.bend == c.bend)
+            && (o.head.is_none() || o.head == c.head)
+            && (o.sides.is_none() || o.sides == c.sides)
+            && (o.star.is_none() || o.star == c.star)
     }
 }
 
@@ -248,7 +252,7 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
                 }
             }
         }
-        Kind::Ellipse | Kind::Image => drop(row),
+        Kind::Ellipse | Kind::Polygon | Kind::Image => drop(row),
     }
     out
 }

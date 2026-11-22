@@ -196,10 +196,15 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
     };
     let line_end = || if shift { area.stop_at_edge(start, snap_angle(start, now)) } else { now };
     match kind {
-        Kind::Arrow => Shape::Arrow { from: start, to: line_end(), heads: ArrowHeads::End },
+        Kind::Arrow => Shape::Arrow { from: start, to: line_end(), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
         Kind::Line => Shape::Line { from: start, to: line_end() },
         Kind::Rect => Shape::Rect { rect: boxed(false), radius: 0.0 },
         Kind::Ellipse => Shape::Ellipse { rect: boxed(false) },
+        Kind::Polygon => Shape::Polygon {
+            rect: boxed(false),
+            sides: opts.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES),
+            star: opts.star.unwrap_or(false),
+        },
         Kind::Pen => Shape::Pen { points: vec![start, now] },
         Kind::Highlight => Shape::highlight(boxed(false)),
         Kind::Text => Shape::Text { rect: boxed(false), text: String::new() },
@@ -904,7 +909,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 
 /// Whether a kind is a shape with an inside to fill.
 fn has_inside(kind: Kind) -> bool {
-    matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
+    matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
 }
 
 /// The strip a Cut Out drag from `start` to `now` takes out: all the way down the picture
@@ -1265,7 +1270,12 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         if selected.len() == 1 {
             for (h, p) in o.shape.handles(&o.style) {
                 let s = ed.view.to_screen(p);
-                if h == Handle::Tail || line_like {
+                if h == Handle::Bend {
+                    // A diamond in the arrow's middle: dragged, it bends the arrow.
+                    let d = HANDLE * 0.75;
+                    let corners = vec![pos2(s.x, s.y - d), pos2(s.x + d, s.y), pos2(s.x, s.y + d), pos2(s.x - d, s.y)];
+                    painter.add(egui::Shape::convex_polygon(corners, t.handle, Stroke::new(1.5, Color32::WHITE)));
+                } else if h == Handle::Tail || line_like {
                     painter.circle_filled(s, HANDLE * 0.6, Color32::WHITE);
                     painter.circle_stroke(s, HANDLE * 0.6, Stroke::new(1.5, t.handle));
                 } else {

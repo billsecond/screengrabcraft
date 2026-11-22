@@ -25,6 +25,37 @@ pub enum ArrowHeads {
     None,
 }
 
+/// What an arrow's heads look like.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HeadShape {
+    /// A filled point with a notch at its back.
+    #[default]
+    Notched,
+    /// A filled triangle.
+    Triangle,
+    /// Two lines meeting at the point.
+    Open,
+    /// A round dot.
+    Dot,
+    /// A short line across the end.
+    Bar,
+}
+
+impl HeadShape {
+    pub const ALL: [HeadShape; 5] = [HeadShape::Notched, HeadShape::Triangle, HeadShape::Open, HeadShape::Dot, HeadShape::Bar];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HeadShape::Notched => "Notched",
+            HeadShape::Triangle => "Solid",
+            HeadShape::Open => "Open V",
+            HeadShape::Dot => "Dot",
+            HeadShape::Bar => "Bar",
+        }
+    }
+}
+
 /// Stamps: small pictograms drawn in code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -384,6 +415,14 @@ pub enum Shape {
         to: Pt,
         #[serde(default)]
         heads: ArrowHeads,
+        /// How far it bows out of a straight line at its middle, as a share of its length: to
+        /// the left of the way it points (on the picture), or to the right when below nought.
+        /// Nought is straight, and isn't written.
+        #[serde(default, skip_serializing_if = "is_straight")]
+        bend: f32,
+        /// What its heads look like.
+        #[serde(default, skip_serializing_if = "is_notched")]
+        head: HeadShape,
     },
     Line {
         from: Pt,
@@ -396,6 +435,15 @@ pub enum Shape {
     },
     Ellipse {
         rect: Rect,
+    },
+    /// A polygon with `sides` corners standing on its base (a triangle, a diamond, a pentagon…),
+    /// or a star with `sides` points, filling its box.
+    Polygon {
+        rect: Rect,
+        #[serde(default = "three")]
+        sides: u32,
+        #[serde(default)]
+        star: bool,
     },
     /// A freehand line.
     Pen {
@@ -474,6 +522,7 @@ pub enum Kind {
     Line,
     Rect,
     Ellipse,
+    Polygon,
     Pen,
     Highlight,
     Text,
@@ -488,11 +537,12 @@ pub enum Kind {
 }
 
 impl Kind {
-    pub const ALL: [Kind; 15] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Arrow,
         Kind::Line,
         Kind::Rect,
         Kind::Ellipse,
+        Kind::Polygon,
         Kind::Pen,
         Kind::Highlight,
         Kind::Text,
@@ -512,6 +562,7 @@ impl Kind {
             Kind::Line => "Line",
             Kind::Rect => "Rectangle",
             Kind::Ellipse => "Ellipse",
+            Kind::Polygon => "Polygon",
             Kind::Pen => "Pen",
             Kind::Highlight => "Highlighter",
             Kind::Text => "Text",
@@ -526,11 +577,11 @@ impl Kind {
         }
     }
 
-    /// The tool a kind is drawn with: rectangles and ellipses are both the Shape tool's, and
-    /// share its looks.
+    /// The tool a kind is drawn with: rectangles, ellipses and polygons are all the Shape
+    /// tool's, and share its looks.
     pub fn family(self) -> Kind {
         match self {
-            Kind::Ellipse => Kind::Rect,
+            Kind::Ellipse | Kind::Polygon => Kind::Rect,
             k => k,
         }
     }
@@ -551,7 +602,7 @@ impl Kind {
         match self {
             Kind::Arrow => Style { width: 6.0, shadow: true, ..base },
             Kind::Line => Style { width: 4.0, ..base },
-            Kind::Rect | Kind::Ellipse => Style { width: 4.0, shadow: true, ..base },
+            Kind::Rect | Kind::Ellipse | Kind::Polygon => Style { width: 4.0, shadow: true, ..base },
             Kind::Pen => Style { width: 4.0, ..base },
             Kind::Highlight => Style { stroke: Color::YELLOW.with_alpha(120), width: 22.0, ..base },
             Kind::Text => Style { stroke: Color::TRANSPARENT, text_color: Color::RED, font_size: 28.0, bold: true, shadow: false, ..base },
@@ -705,12 +756,35 @@ pub struct ShapeOptions {
     /// A step badge's outline.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub badge: Option<BadgeShape>,
+    /// How far an arrow bows out of a straight line (see [`Shape::Arrow`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bend: Option<f32>,
+    /// A polygon's corners, or a star's points. Said of a rectangle or an ellipse (and not
+    /// `round`), it makes it a polygon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sides: Option<u32>,
+    /// A star rather than a polygon.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub star: Option<bool>,
+    /// What an arrow's heads look like.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub head: Option<HeadShape>,
 }
 
 impl ShapeOptions {
     /// The same options with every number in its range (NaN is dropped).
     pub fn clamped(self) -> ShapeOptions {
-        ShapeOptions { radius: self.radius.filter(|r| r.is_finite()).map(|r| r.clamp(0.0, MAX_RADIUS)), ..self }
+        ShapeOptions {
+            radius: self.radius.filter(|r| r.is_finite()).map(|r| r.clamp(0.0, MAX_RADIUS)),
+            bend: self.bend.filter(|b| b.is_finite()).map(clamp_bend),
+            sides: self.sides.map(|n| n.clamp(MIN_SIDES, MAX_SIDES)),
+            ..self
+        }
+    }
+
+    /// A polygon of these options in `rect`: their corners (three unless they say) and star.
+    fn polygon(&self, rect: Rect, sides: u32, star: bool) -> Shape {
+        Shape::Polygon { rect, sides: self.sides.unwrap_or(sides), star: self.star.unwrap_or(star) }
     }
 
     /// Whether these options say nothing.
@@ -722,10 +796,15 @@ impl ShapeOptions {
     pub fn applied(&self, shape: Shape) -> Shape {
         let o = self.clamped();
         match shape {
-            Shape::Arrow { from, to, heads } => Shape::Arrow { from, to, heads: o.heads.unwrap_or(heads) },
-            Shape::Rect { rect, .. } if o.round == Some(true) => Shape::Ellipse { rect },
+            Shape::Arrow { from, to, heads, bend, head } => {
+                Shape::Arrow { from, to, heads: o.heads.unwrap_or(heads), bend: o.bend.unwrap_or(bend), head: o.head.unwrap_or(head) }
+            }
+            // Round makes an ellipse, square a rectangle; corners (and neither) a polygon.
+            Shape::Rect { rect, .. } | Shape::Polygon { rect, .. } if o.round == Some(true) => Shape::Ellipse { rect },
+            Shape::Rect { rect, .. } | Shape::Ellipse { rect } if o.round.is_none() && o.sides.is_some() => o.polygon(rect, MIN_SIDES, false),
             Shape::Rect { rect, radius } => Shape::Rect { rect, radius: o.radius.unwrap_or(radius) },
-            Shape::Ellipse { rect } if o.round == Some(false) => Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) },
+            Shape::Ellipse { rect } | Shape::Polygon { rect, .. } if o.round == Some(false) => Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) },
+            Shape::Polygon { rect, sides, star } => o.polygon(rect, sides, star),
             Shape::Callout { rect, tail, text, form } => {
                 let form = o.form.unwrap_or(form);
                 let tail = o.tail.map(|s| s.place(form, rect)).unwrap_or(tail);
@@ -744,9 +823,10 @@ impl ShapeOptions {
     pub fn of(shape: &Shape) -> ShapeOptions {
         let none = ShapeOptions::default();
         match shape {
-            Shape::Arrow { heads, .. } => ShapeOptions { heads: Some(*heads), ..none },
+            Shape::Arrow { heads, bend, head, .. } => ShapeOptions { heads: Some(*heads), bend: Some(*bend), head: Some(*head), ..none },
             Shape::Rect { radius, .. } => ShapeOptions { radius: Some(*radius), round: Some(false), ..none },
             Shape::Ellipse { .. } => ShapeOptions { round: Some(true), ..none },
+            Shape::Polygon { sides, star, .. } => ShapeOptions { sides: Some(*sides), star: Some(*star), ..none },
             Shape::Callout { form, .. } => ShapeOptions { form: Some(*form), ..none },
             Shape::Stamp { stamp, .. } => ShapeOptions { stamp: Some(*stamp), ..none },
             Shape::Spotlight { ellipse, .. } => ShapeOptions { round: Some(*ellipse), ..none },
@@ -766,6 +846,10 @@ impl ShapeOptions {
             round: other.round.or(self.round),
             labels: other.labels.or(self.labels),
             badge: other.badge.or(self.badge),
+            bend: other.bend.or(self.bend),
+            sides: other.sides.or(self.sides),
+            star: other.star.or(self.star),
+            head: other.head.or(self.head),
         }
     }
 }
@@ -774,6 +858,121 @@ impl ShapeOptions {
 pub fn arrow_head(width: f32) -> (f32, f32) {
     let w = width.max(1.0);
     (w * 3.0 + 8.0, w * 1.7 + 5.0)
+}
+
+/// The most an arrow bends: how far its middle bows out of the straight line, as a share of its
+/// length.
+pub const MAX_BEND: f32 = 1.5;
+/// How many straight pieces a curved arrow is measured in (for its bounds and hit testing).
+pub const CURVE_PIECES: usize = 48;
+/// The fewest and most corners (or points, for a star) a polygon has.
+pub const MIN_SIDES: u32 = 3;
+pub const MAX_SIDES: u32 = 12;
+
+fn three() -> u32 {
+    3
+}
+
+fn is_straight(bend: &f32) -> bool {
+    *bend == 0.0
+}
+
+fn is_notched(head: &HeadShape) -> bool {
+    *head == HeadShape::Notched
+}
+
+/// A bend in range: finite, at most [`MAX_BEND`] either way.
+pub fn clamp_bend(bend: f32) -> f32 {
+    if bend.is_finite() { bend.clamp(-MAX_BEND, MAX_BEND) } else { 0.0 }
+}
+
+/// The side to the left of the way from `from` to `to` (on a picture, whose y grows downwards),
+/// one long; none when the two are the same point.
+fn left_of(from: Pt, to: Pt) -> Option<(Pt, f32)> {
+    let d = to.sub(from);
+    let len = d.length();
+    if !(len > 0.001 && len.is_finite()) {
+        return None;
+    }
+    Some((Pt::new(d.y / len, -d.x / len), len))
+}
+
+/// The middle of an arrow from `from` to `to` bowed by `bend`: where its bend handle is.
+pub fn bend_middle(from: Pt, to: Pt, bend: f32) -> Pt {
+    let mid = from.lerp(to, 0.5);
+    match left_of(from, to) {
+        Some((n, len)) => mid.add(n.scale(clamp_bend(bend) * len)).finite(),
+        None => mid,
+    }
+}
+
+/// The control point of the curve from `from` to `to` through [`bend_middle`].
+pub fn bend_control(from: Pt, to: Pt, bend: f32) -> Pt {
+    let mid = from.lerp(to, 0.5);
+    let m = bend_middle(from, to, bend);
+    m.scale(2.0).sub(mid).finite()
+}
+
+/// Points along an arrow bowed by `bend`, from `from` to `to`, in `pieces` straight pieces (just
+/// the two ends when it is straight).
+pub fn bent_points(from: Pt, to: Pt, bend: f32, pieces: usize) -> Vec<Pt> {
+    if clamp_bend(bend) == 0.0 || left_of(from, to).is_none() {
+        return vec![from, to];
+    }
+    let c = bend_control(from, to, bend);
+    let n = pieces.clamp(2, 256);
+    (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let u = 1.0 - t;
+            Pt::new(u * u * from.x + 2.0 * u * t * c.x + t * t * to.x, u * u * from.y + 2.0 * u * t * c.y + t * t * to.y)
+        })
+        .collect()
+}
+
+/// How far from the straight line through `from` and `to` a point `p` is, to its left, as a share
+/// of the line's length: the bend that puts the arrow's middle level with `p`.
+pub fn bend_through(from: Pt, to: Pt, p: Pt) -> f32 {
+    let Some((n, len)) = left_of(from, to) else { return 0.0 };
+    let off = p.sub(from.lerp(to, 0.5));
+    let along = off.x * n.x + off.y * n.y;
+    // Close to straight is straight.
+    if along.abs() < 3.0 { 0.0 } else { clamp_bend(along / len) }
+}
+
+/// The corners of a polygon with `sides` corners (a star with `sides` points) standing on its
+/// base, made to fill `rect`.
+pub fn polygon_points(rect: Rect, sides: u32, star: bool) -> Vec<Pt> {
+    let n = sides.clamp(MIN_SIDES, MAX_SIDES) as usize;
+    let inner = if n <= 5 { 0.4 } else { 0.58 };
+    let count = if star { n * 2 } else { n };
+    let step = std::f32::consts::TAU / count as f32;
+    let unit: Vec<Pt> = (0..count)
+        .map(|i| {
+            let a = -std::f32::consts::FRAC_PI_2 + i as f32 * step;
+            let r = if star && i % 2 == 1 { inner } else { 1.0 };
+            Pt::new(a.cos() * r, a.sin() * r)
+        })
+        .collect();
+    let b = Rect::bounding(&unit);
+    let (sx, sy) = (if b.w > 0.0 { rect.w / b.w } else { 0.0 }, if b.h > 0.0 { rect.h / b.h } else { 0.0 });
+    unit.iter().map(|p| Pt::new(rect.x + (p.x - b.x) * sx, rect.y + (p.y - b.y) * sy).finite()).collect()
+}
+
+/// Whether `p` is inside the closed outline through `points` (even-odd).
+pub fn inside_polygon(p: Pt, points: &[Pt]) -> bool {
+    let mut inside = false;
+    let n = points.len();
+    for i in 0..n {
+        let (Some(a), Some(b)) = (points.get(i), points.get((i + n - 1) % n)) else { continue };
+        if (a.y > p.y) != (b.y > p.y) {
+            let x = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+            if p.x < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 /// The radius of a step badge with this font size.
@@ -795,6 +994,8 @@ pub enum Handle {
     Start,
     End,
     Tail,
+    /// The middle of an arrow, dragged to bend it.
+    Bend,
 }
 
 impl Handle {
@@ -812,7 +1013,7 @@ impl Handle {
             Handle::Bottom => Pt::new(c.x, r.bottom()),
             Handle::BottomLeft => Pt::new(r.x, r.bottom()),
             Handle::Left => Pt::new(r.x, c.y),
-            Handle::Start | Handle::End | Handle::Tail => c,
+            Handle::Start | Handle::End | Handle::Tail | Handle::Bend => c,
         }
     }
 
@@ -829,7 +1030,7 @@ impl Handle {
             Handle::Bottom => y1 = p.y,
             Handle::BottomLeft => (x0, y1) = (p.x, p.y),
             Handle::Left => x0 = p.x,
-            Handle::Start | Handle::End | Handle::Tail => return r,
+            Handle::Start | Handle::End | Handle::Tail | Handle::Bend => return r,
         }
         let corner = matches!(self, Handle::TopLeft | Handle::TopRight | Handle::BottomRight | Handle::BottomLeft);
         if keep_aspect && corner && r.w > 0.0 && r.h > 0.0 {
@@ -865,6 +1066,7 @@ impl Shape {
             Shape::Line { .. } => Kind::Line,
             Shape::Rect { .. } => Kind::Rect,
             Shape::Ellipse { .. } => Kind::Ellipse,
+            Shape::Polygon { .. } => Kind::Polygon,
             Shape::Pen { .. } => Kind::Pen,
             Shape::Highlight { .. } => Kind::Highlight,
             Shape::Text { .. } => Kind::Text,
@@ -884,6 +1086,7 @@ impl Shape {
         match self {
             Shape::Rect { rect, .. }
             | Shape::Ellipse { rect }
+            | Shape::Polygon { rect, .. }
             | Shape::Highlight { rect, .. }
             | Shape::Text { rect, .. }
             | Shape::Callout { rect, .. }
@@ -901,6 +1104,7 @@ impl Shape {
         match self {
             Shape::Rect { rect, .. }
             | Shape::Ellipse { rect }
+            | Shape::Polygon { rect, .. }
             | Shape::Highlight { rect, .. }
             | Shape::Text { rect, .. }
             | Shape::Callout { rect, .. }
@@ -933,9 +1137,9 @@ impl Shape {
     pub fn bounds(&self, style: &Style) -> Rect {
         let half = style.width.max(0.0) / 2.0;
         match self {
-            Shape::Arrow { from, to, heads } => {
+            Shape::Arrow { from, to, heads, bend, .. } => {
                 let grow = if *heads == ArrowHeads::None { half } else { arrow_head(style.width).1.max(half) };
-                Rect::from_points(*from, *to).inflate(grow)
+                Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)).inflate(grow)
             }
             Shape::Line { from, to } => Rect::from_points(*from, *to).inflate(half),
             Shape::Pen { points } => Rect::bounding(points).inflate(half),
@@ -950,7 +1154,8 @@ impl Shape {
     /// The area its own points cover, without its line width or arrow heads.
     pub fn extent(&self) -> Rect {
         match self {
-            Shape::Arrow { from, to, .. } | Shape::Line { from, to } => Rect::from_points(*from, *to),
+            Shape::Arrow { from, to, bend, .. } => Rect::bounding(&bent_points(*from, *to, *bend, CURVE_PIECES)),
+            Shape::Line { from, to } => Rect::from_points(*from, *to),
             Shape::Pen { points } => Rect::bounding(points),
             Shape::Step { center, .. } => Rect::new(center.x, center.y, 0.0, 0.0),
             Shape::Callout { rect, tail, .. } => rect.union(Rect::new(tail.x, tail.y, 0.0, 0.0)),
@@ -962,7 +1167,10 @@ impl Shape {
     pub fn hit(&self, style: &Style, p: Pt, tol: f32) -> bool {
         let reach = style.width.max(0.0) / 2.0 + tol;
         match self {
-            Shape::Arrow { from, to, .. } | Shape::Line { from, to } => distance_to_segment(p, *from, *to) <= reach.max(arrow_reach(self, style)),
+            Shape::Arrow { from, to, bend, .. } => {
+                distance_to_polyline(p, &bent_points(*from, *to, *bend, CURVE_PIECES)) <= reach.max(arrow_reach(self, style))
+            }
+            Shape::Line { from, to } => distance_to_segment(p, *from, *to) <= reach,
             Shape::Pen { points } => distance_to_polyline(p, points) <= reach,
             Shape::Rect { rect, .. } => {
                 if !style.fill.is_transparent() {
@@ -981,6 +1189,12 @@ impl Shape {
                 let d = (dx * dx + dy * dy).sqrt();
                 if !style.fill.is_transparent() { d <= 1.0 + reach / rx.min(ry) } else { (d - 1.0).abs() * rx.min(ry) <= reach }
             }
+            Shape::Polygon { rect, sides, star } => {
+                let corners = polygon_points(*rect, *sides, *star);
+                let mut ring = corners.clone();
+                ring.extend(corners.first().copied());
+                distance_to_polyline(p, &ring) <= reach || (!style.fill.is_transparent() && inside_polygon(p, &corners))
+            }
             Shape::Step { center, badge, .. } => badge.hit(*center, step_radius(style.font_size), p, reach),
             Shape::Callout { rect, tail, .. } => rect.inflate(reach).contains(p) || distance_to_segment(p, rect.center(), *tail) <= reach.max(6.0),
             _ => self.rect().is_some_and(|r| r.inflate(tol).contains(p)),
@@ -990,7 +1204,8 @@ impl Shape {
     /// Where it can be dragged by.
     pub fn handles(&self, style: &Style) -> Vec<(Handle, Pt)> {
         match self {
-            Shape::Arrow { from, to, .. } | Shape::Line { from, to } => vec![(Handle::Start, *from), (Handle::End, *to)],
+            Shape::Arrow { from, to, bend, .. } => vec![(Handle::Start, *from), (Handle::End, *to), (Handle::Bend, bend_middle(*from, *to, *bend))],
+            Shape::Line { from, to } => vec![(Handle::Start, *from), (Handle::End, *to)],
             Shape::Step { .. } => Vec::new(),
             Shape::Pen { .. } => {
                 let b = self.bounds(style);
@@ -1014,6 +1229,7 @@ impl Shape {
         match (self, handle) {
             (Shape::Arrow { from, .. } | Shape::Line { from, .. }, Handle::Start) => *from = p,
             (Shape::Arrow { to, .. } | Shape::Line { to, .. }, Handle::End) => *to = p,
+            (Shape::Arrow { from, to, bend, .. }, Handle::Bend) => *bend = bend_through(*from, *to, p),
             (Shape::Callout { tail, .. }, Handle::Tail) => *tail = p,
             (shape @ Shape::Pen { .. }, h) => {
                 let old = shape.bounds(style).inflate(-style.width.max(0.0) / 2.0);
@@ -1044,7 +1260,19 @@ impl Shape {
     /// normalized again, so a turn or a flip stays a box).
     pub fn map_points(&mut self, f: &dyn Fn(Pt) -> Pt) {
         match self {
-            Shape::Arrow { from, to, .. } | Shape::Line { from, to } => {
+            Shape::Arrow { from, to, bend, .. } => {
+                // A mirror (a flip) turns the bow the other way round the line; a turn doesn't.
+                if let Some((n, _)) = left_of(*from, *to) {
+                    let (a, b, side) = (f(*from), f(*to), f(from.add(n)));
+                    let (d, s) = (b.sub(a), side.sub(a));
+                    if d.x * s.y - d.y * s.x > 0.0 {
+                        *bend = -*bend;
+                    }
+                }
+                *from = f(*from).finite();
+                *to = f(*to).finite();
+            }
+            Shape::Line { from, to } => {
                 *from = f(*from).finite();
                 *to = f(*to).finite();
             }
@@ -1105,6 +1333,8 @@ impl Shape {
             }
             Shape::Text { text, .. } | Shape::Callout { text, .. } => truncate_text(text, MAX_TEXT),
             Shape::Step { number, .. } => *number = (*number).min(9_999),
+            Shape::Arrow { bend, .. } => *bend = clamp_bend(*bend),
+            Shape::Polygon { sides, .. } => *sides = (*sides).clamp(MIN_SIDES, MAX_SIDES),
             _ => {}
         }
         self
@@ -1145,7 +1375,7 @@ mod tests {
     fn json_shape_is_tagged_and_flat() {
         let o = Object {
             id: ObjectId(3),
-            shape: Shape::Arrow { from: Pt::new(1.0, 2.0), to: Pt::new(3.0, 4.0), heads: ArrowHeads::Both },
+            shape: Shape::Arrow { from: Pt::new(1.0, 2.0), to: Pt::new(3.0, 4.0), heads: ArrowHeads::Both, bend: 0.0, head: HeadShape::Notched },
             style: style(),
         };
         let v = serde_json::to_value(&o).unwrap();
@@ -1191,9 +1421,9 @@ mod tests {
         // Dragging past the opposite side turns the box round rather than making it negative.
         r.drag_handle(&s, Handle::Left, Pt::new(60.0, 0.0), false);
         assert_eq!(r.rect(), Some(Rect::new(50.0, 10.0, 10.0, 30.0)));
-        let mut a = Shape::Arrow { from: Pt::ZERO, to: Pt::new(5.0, 5.0), heads: ArrowHeads::End };
+        let mut a = Shape::Arrow { from: Pt::ZERO, to: Pt::new(5.0, 5.0), heads: ArrowHeads::End, bend: 0.0, head: HeadShape::Notched };
         a.drag_handle(&s, Handle::End, Pt::new(9.0, 1.0), false);
-        assert_eq!(a, Shape::Arrow { from: Pt::ZERO, to: Pt::new(9.0, 1.0), heads: ArrowHeads::End });
+        assert_eq!(a, Shape::Arrow { from: Pt::ZERO, to: Pt::new(9.0, 1.0), heads: ArrowHeads::End, bend: 0.0, head: HeadShape::Notched });
         // Keep aspect on a corner.
         let r = Handle::BottomRight.drag_rect(Rect::new(0.0, 0.0, 20.0, 10.0), Pt::new(40.0, 5.0), true);
         assert_eq!(r, Rect::new(0.0, 0.0, 40.0, 20.0));
@@ -1327,6 +1557,107 @@ mod tests {
         assert_eq!(serde_json::to_string(&round).unwrap(), r#"{"round":true}"#);
         assert_eq!(Kind::Ellipse.family(), Kind::Rect);
         assert_eq!(Kind::Callout.family(), Kind::Callout);
+    }
+
+    #[test]
+    fn polygons_and_stars_fill_their_box_and_are_hit_inside_when_filled() {
+        let r = Rect::new(10.0, 20.0, 100.0, 80.0);
+        for sides in MIN_SIDES..=MAX_SIDES {
+            for star in [false, true] {
+                let pts = polygon_points(r, sides, star);
+                assert_eq!(pts.len(), sides as usize * if star { 2 } else { 1 });
+                let b = Rect::bounding(&pts);
+                assert!(
+                    (b.x - r.x).abs() < 0.01 && (b.w - r.w).abs() < 0.01 && (b.y - r.y).abs() < 0.01 && (b.h - r.h).abs() < 0.01,
+                    "{sides} {star} {b:?}"
+                );
+            }
+        }
+        // A triangle stands on its base, its point at the top middle.
+        let tri = polygon_points(r, 3, false);
+        assert!(tri.first().is_some_and(|p| p.distance(Pt::new(60.0, 20.0)) < 0.01), "{tri:?}");
+        assert!(tri.iter().skip(1).all(|p| (p.y - 100.0).abs() < 0.01));
+        // Nonsense corners are kept in range, and an empty box gives finite points.
+        assert_eq!(polygon_points(r, 0, false).len(), 3);
+        assert_eq!(polygon_points(r, 99, true).len(), 24);
+        assert!(polygon_points(Rect::new(f32::NAN, 0.0, 0.0, 0.0), 5, true).iter().all(|p| p.x.is_finite() && p.y.is_finite()));
+        let shape = Shape::Polygon { rect: r, sides: 3, star: false };
+        let s = style();
+        assert!(shape.hit(&s, Pt::new(60.0, 21.0), 2.0), "on its point");
+        assert!(!shape.hit(&s, Pt::new(60.0, 70.0), 2.0), "inside an unfilled one");
+        assert!(shape.hit(&Style { fill: Color::WHITE, ..s }, Pt::new(60.0, 70.0), 2.0), "inside a filled one");
+        assert!(!shape.hit(&Style { fill: Color::WHITE, ..s }, Pt::new(14.0, 24.0), 2.0), "a corner of its box is not in it");
+        assert_eq!(shape.handles(&s).len(), Handle::BOX.len());
+        // From a file: three corners unless it says, kept in range.
+        let p: Shape = serde_json::from_str(r#"{"type":"polygon","rect":{"x":0,"y":0,"w":5,"h":5}}"#).unwrap();
+        assert_eq!(p, Shape::Polygon { rect: Rect::new(0.0, 0.0, 5.0, 5.0), sides: 3, star: false });
+        let p: Shape = serde_json::from_str(r#"{"type":"polygon","rect":{"x":0,"y":0,"w":5,"h":5},"sides":4000,"star":true}"#).unwrap();
+        assert!(matches!(p.sanitized(1.0), Shape::Polygon { sides: 12, star: true, .. }));
+    }
+
+    #[test]
+    fn shape_options_turn_boxes_into_polygons_and_back() {
+        let r = Rect::new(0.0, 0.0, 50.0, 40.0);
+        let star = ShapeOptions { sides: Some(5), star: Some(true), ..ShapeOptions::default() };
+        assert_eq!(star.applied(Shape::Rect { rect: r, radius: 3.0 }), Shape::Polygon { rect: r, sides: 5, star: true });
+        assert_eq!(star.applied(Shape::Ellipse { rect: r }), Shape::Polygon { rect: r, sides: 5, star: true });
+        let six = ShapeOptions { sides: Some(6), ..ShapeOptions::default() };
+        assert_eq!(six.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Polygon { rect: r, sides: 6, star: true });
+        let round = ShapeOptions { round: Some(true), sides: Some(6), ..ShapeOptions::default() };
+        assert_eq!(round.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Ellipse { rect: r }, "round wins");
+        let square = ShapeOptions { round: Some(false), ..ShapeOptions::default() };
+        assert_eq!(square.applied(Shape::Polygon { rect: r, sides: 5, star: true }), Shape::Rect { rect: r, radius: 0.0 });
+        // A look that says nothing of corners leaves a rectangle a rectangle.
+        assert_eq!(ShapeOptions::default().applied(Shape::Rect { rect: r, radius: 0.0 }), Shape::Rect { rect: r, radius: 0.0 });
+        assert_eq!(ShapeOptions::of(&Shape::Polygon { rect: r, sides: 7, star: false }).sides, Some(7));
+        assert_eq!(Kind::Polygon.family(), Kind::Rect);
+    }
+
+    #[test]
+    fn arrows_bend_by_their_middle_and_keep_their_bend() {
+        let s = style();
+        let (from, to) = (Pt::new(0.0, 100.0), Pt::new(200.0, 100.0));
+        let mut a = Shape::Arrow { from, to, heads: ArrowHeads::End, bend: 0.0, head: HeadShape::Notched };
+        let handles = a.handles(&s);
+        assert_eq!(handles.last(), Some(&(Handle::Bend, Pt::new(100.0, 100.0))), "the bend handle is in the middle");
+        // Dragged up by 50: bowed to the left of the way it points (up, for one pointing right), a quarter of its length.
+        a.drag_handle(&s, Handle::Bend, Pt::new(100.0, 50.0), false);
+        let Shape::Arrow { bend, .. } = a else { panic!("an arrow") };
+        assert!((bend - 0.25).abs() < 1e-5, "{bend}");
+        assert!(a.hit(&s, Pt::new(100.0, 50.0), 2.0), "hit along its curve");
+        assert!(!a.hit(&s, Pt::new(100.0, 100.0), 2.0), "not where the straight line was");
+        assert!(a.bounds(&s).y <= 50.0 && a.extent().y <= 50.5);
+        // A handle dragged back near the line straightens it.
+        let mut b = a.clone();
+        b.drag_handle(&s, Handle::Bend, Pt::new(80.0, 101.0), false);
+        assert!(matches!(b, Shape::Arrow { bend, .. } if bend == 0.0));
+        // Moving an end keeps the bow's share: the curve keeps its shape.
+        a.drag_handle(&s, Handle::End, Pt::new(400.0, 100.0), false);
+        assert_eq!(a.handles(&s).last().map(|h| h.1), Some(Pt::new(200.0, 0.0)));
+        // Out of reach, or nonsense, is kept in range.
+        assert_eq!(bend_through(from, to, Pt::new(100.0, -1e9)), MAX_BEND);
+        assert_eq!(clamp_bend(f32::NAN), 0.0);
+        assert_eq!(bent_points(from, from, 0.5, 10), vec![from, from], "no length, no curve");
+        // A straight arrow is written as before, and an old one reads straight.
+        let straight = Shape::Arrow { from, to, heads: ArrowHeads::End, bend: 0.0, head: HeadShape::Notched };
+        assert!(serde_json::to_value(&straight).unwrap().get("bend").is_none());
+        let bent = serde_json::to_value(&a).unwrap();
+        assert_eq!(bent["bend"].as_f64().map(|b| b as f32), Some(0.25));
+        assert_eq!(serde_json::from_value::<Shape>(bent).unwrap(), a);
+        // Head shapes: notched unless it says, and written only when not.
+        assert!(serde_json::to_value(&straight).unwrap().get("head").is_none());
+        let open = ShapeOptions { head: Some(HeadShape::Open), ..ShapeOptions::default() }.applied(straight.clone());
+        let v = serde_json::to_value(&open).unwrap();
+        assert_eq!(v["head"], "open");
+        assert_eq!(serde_json::from_value::<Shape>(v).unwrap(), open);
+        assert_eq!(ShapeOptions::of(&open).head, Some(HeadShape::Open));
+        // A quarter turn keeps the bow on the same side; a flip turns it round.
+        let mut turned = a.clone();
+        turned.map_points(&|p| Pt::new(500.0 - p.y, p.x));
+        assert!(matches!(turned, Shape::Arrow { bend, .. } if bend == 0.25));
+        let mut flipped = a.clone();
+        flipped.map_points(&|p| Pt::new(500.0 - p.x, p.y));
+        assert!(matches!(flipped, Shape::Arrow { bend, .. } if bend == -0.25));
     }
 
     #[test]

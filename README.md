@@ -177,8 +177,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
   **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
   these and the rest. Copy with annotations selected copies just them.
-- **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
-  or an ellipse) and **pen**; Shift draws at 45° and makes squares and circles.
+- **Arrow** (one or two heads, notched, solid, an open V, a dot or a bar, any thickness; straight
+  or curved: drag the diamond in a selected arrow's middle to bend it), **line**, **shape** (a
+  rectangle, rounded or not, an ellipse, a triangle, a diamond, a polygon of up to 12 corners or a
+  star, picked in its Shape options) and **pen**; Shift draws at 45° and makes squares and circles.
 - **Highlighter** (H): drag a box over what should stand out; it's tinted as under a marker
   (dark stays dark), and resized by its handles or moved like any shape.
 - **Hand** (D): drag the picture round in the window. Space held down, or the middle button,

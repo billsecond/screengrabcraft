@@ -104,7 +104,10 @@ fn callout_on_plain_colour() -> Result<Raster, String> {
         },
         Kind::Callout.default_style(),
     ))?;
-    e(d.add(Shape::Arrow { from: Pt::new(720.0, 420.0), to: Pt::new(590.0, 330.0), heads: ArrowHeads::End }, Kind::Arrow.default_style()))?;
+    e(d.add(
+        Shape::Arrow { from: Pt::new(720.0, 420.0), to: Pt::new(590.0, 330.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+        Kind::Arrow.default_style(),
+    ))?;
     let stamp = Style { fill: screengrabcraft_render::stamp::default_fill(StampKind::Check), ..Kind::Stamp.default_style() };
     e(d.add(Shape::Stamp { rect: Rect::new(470.0, 100.0, 48.0, 48.0), stamp: StampKind::Check }, stamp))?;
     screengrabcraft_render::render(&d).ok_or_else(|| "render failed".to_string())
