@@ -38,11 +38,16 @@ fn free(path: &Path) -> PathBuf {
 
 /// What this computer can make, the one every player opens first.
 pub fn formats() -> Vec<VideoFormat> {
-    let mut f = Vec::with_capacity(3);
+    let mut f = Vec::with_capacity(5);
     if Codec::H264.available() {
         f.push(VideoFormat::Mp4);
     }
     f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif]);
+    // Just the sound: M4A where Windows' own encoder makes it, WAV everywhere.
+    if export::m4a_available() {
+        f.push(VideoFormat::M4a);
+    }
+    f.push(VideoFormat::Wav);
     f
 }
 
@@ -64,6 +69,8 @@ pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String>
                 VideoFormat::Mp4 | VideoFormat::Mp4Av1 => {
                     export::export_with(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel)
                 }
+                VideoFormat::Wav => export::export_wav(job.recording, &job.timeline, job.media.clone(), &out, &progress, &cancel),
+                VideoFormat::M4a => export::export_m4a(job.recording, &job.timeline, job.media.clone(), &out, &progress, &cancel),
             }));
             let result = match made {
                 Ok(Ok(e)) => {

@@ -132,6 +132,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
   flag on the ruler. The Markers section of the panel names them, goes to them and deletes them;
   they move with cuts and speed changes, and Export Video makes them the MP4's chapters, which
   video players list.
+- **Export more than the video**: with a stretch chosen, Export Video can make **just that
+  stretch** (its captions and chapters with it). File › **Export Sound** makes just the sound, as
+  heard: a WAV, or a smaller M4A (AAC, made by Windows' own encoder, so on Windows only). File ›
+  **Save the Frame as a Picture** (Ctrl+Shift+S, or the ruler's right button) saves the picture at
+  the playhead, at the recording's own size, in the captures folder and opens it in the picture
+  editor.
 - **The pointer**, in a recording that has it: the Pointer section of the panel at the right shows
   it larger or smoother, rings its clicks and lets them be heard (a click made in code), and puts a
   yellow highlight under it, a spotlight round it (the rest dimmed) or a lens on it that shows

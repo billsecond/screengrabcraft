@@ -464,6 +464,25 @@ impl Timeline {
         Ok(())
     }
 
+    /// A copy of the edits with only `from..to` left, starting at 0: what a video of just that
+    /// stretch is made from. The markers in it stay (moved up with it); those outside it go.
+    pub fn stretch(&self, from: u64, to: u64) -> Result<Timeline, EditError> {
+        let to = to.min(self.length());
+        if to <= from {
+            return Err(EditError::Invalid("the stretch is empty".to_string()));
+        }
+        let mut t = self.clone();
+        t.markers.retain(|m| (from..to).contains(&m.at));
+        let end = t.length();
+        if end > to {
+            t.cut(to, end)?;
+        }
+        if from > 0 {
+            t.cut(0, from)?;
+        }
+        Ok(t)
+    }
+
     /// Takes `from..to` out of one track (or every track) and leaves the gap: silence, or no
     /// picture, there; nothing after it moves, so the other tracks stay in time with it.
     pub fn lift(&mut self, from: u64, to: u64, track: Option<usize>) -> Result<(), EditError> {
@@ -1113,6 +1132,30 @@ mod tests {
         // Saved and read back.
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn a_stretch_is_a_copy_with_only_it_left_from_the_start() {
+        use crate::layers::Item;
+        let mut t = two_tracks();
+        t.add_marker(1_000_000, Some("Before")).unwrap();
+        t.add_marker(4_000_000, Some("In it")).unwrap();
+        t.add_marker(8_000_000, Some("After")).unwrap();
+        let (layer, title) = t.place(Item { len: 2_000_000, ..Item::default() }, None, 2_000_000).unwrap();
+        let s = t.stretch(3_000_000, 6_000_000).unwrap();
+        assert_eq!(s.length(), 3_000_000);
+        // At 0.5 s it plays what was at 3.5 s, on both tracks.
+        assert_eq!((s.source_time(0, 500_000), s.source_time(1, 500_000)), (Some(3_500_000), Some(3_500_000)));
+        assert_eq!(s.markers, vec![Marker { at: 1_000_000, name: "In it".into() }]);
+        // The title from 2 s to 4 s: its last second is left, from the start.
+        assert_eq!(s.item(layer, title).map(|i| (i.at, i.len)), Some((0, 1_000_000)));
+        // The edits themselves are as they were.
+        assert_eq!(t.length(), 10_000_000);
+        assert_eq!(t.markers.len(), 3);
+        // To the end, past it, from the start; nothing there is an error.
+        assert_eq!(t.stretch(0, 99_000_000).unwrap().length(), 10_000_000);
+        assert_eq!(t.stretch(9_000_000, u64::MAX).unwrap().length(), 1_000_000);
+        assert!(t.stretch(5, 5).is_err() && t.stretch(20_000_000, 30_000_000).is_err());
     }
 
     #[test]

@@ -183,12 +183,14 @@ struct Job {
     captions: Option<usize>,
     burn: bool,
     subtitles: bool,
+    /// How long the video made is.
+    length: u64,
 }
 
 impl crate::services::Services for CaptionHost {
     fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
         use crate::services::VideoFormat;
-        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif]
+        vec![VideoFormat::Mp4, VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Wav]
     }
     fn open_folder(&self, path: Option<&str>) {
         self.shown.lock().unwrap().push(format!("folder:{}", path.unwrap_or("")));
@@ -225,6 +227,7 @@ impl crate::services::Services for CaptionHost {
             captions: job.captions.as_ref().map(Vec::len),
             burn: job.burn,
             subtitles: job.subtitles,
+            length: job.timeline.length(),
         });
         let x = crate::services::VideoExport::default();
         *self.making.lock().unwrap() = Some(x.clone());
@@ -430,7 +433,15 @@ fn export_video_asks_where_and_how_shows_its_progress_then_play_and_show_in_fold
     let job = host.jobs.lock().unwrap().pop().unwrap();
     assert_eq!(
         job,
-        Job { out: "D:/Videos/Demo.mp4".into(), replace: true, format: VideoFormat::Mp4, captions: Some(2), burn: false, subtitles: true }
+        Job {
+            out: "D:/Videos/Demo.mp4".into(),
+            replace: true,
+            format: VideoFormat::Mp4,
+            captions: Some(2),
+            burn: false,
+            subtitles: true,
+            length: 4_000_000
+        }
     );
     // Being made: a window with its progress and Cancel; the tool bar has no Show in folder.
     let making = host.making.lock().unwrap().clone().unwrap();
@@ -494,6 +505,168 @@ fn a_gif_has_no_subtitles_and_cancelling_says_so() {
     *making.done.lock().unwrap() = Some(Err("cancelled".into()));
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().export.is_none());
+}
+
+#[test]
+fn just_the_chosen_stretch_is_made_with_its_own_captions_and_just_the_sound_as_a_wav() {
+    use crate::services::VideoFormat;
+    use crate::video::{CaptionsIn, ExportStep};
+    let mut bytes = meeting();
+    bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+    let host = CaptionHost::default();
+    let mut h = caption_harness(bytes, host.clone());
+    // A stretch chosen: the window offers it alone, the whole video still as it was.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.choose_stretch(1_000_000, 2_000_000);
+    }
+    h.run_steps(1);
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    for label in ["What", "The whole video (0:04.0)", "Just the chosen stretch: 0:01.0 to 0:02.0 (0:01.0)"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Just the chosen stretch: 0:01.0 to 0:02.0 (0:01.0)").click();
+    h.run_steps(1);
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/export-stretch.png"));
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    // A second long; your line (0.2 s to 1.8 s) is in it, the others' (from 2 s) isn't.
+    assert_eq!((job.length, job.captions, job.subtitles), (1_000_000, Some(1), true));
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.mp4".into()));
+    h.run_steps(2);
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    // File, Export Sound…: just the sound, a WAV here (M4A is greyed out on this host).
+    h.get_by_label("File").click();
+    h.run_steps(1);
+    h.get_by_label("Export Sound…").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => {
+            assert_eq!((c.format, c.captions, c.path.as_str()), (VideoFormat::Wav, CaptionsIn::Off, "C:/Captures/Production.wav"));
+        }
+        _ => panic!("the Export window is open"),
+    }
+    // Captions can't go on a picture it hasn't got; beside it, they can.
+    h.get_by_label("On the picture (always shown)").click();
+    h.run_steps(1);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!(c.captions, CaptionsIn::Off),
+        _ => panic!("the Export window is open"),
+    }
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/export-sound.png"));
+    }
+    h.get_by_label("Export").click();
+    h.run_steps(2);
+    let job = host.jobs.lock().unwrap().pop().unwrap();
+    assert_eq!((job.format, job.burn, job.length, job.out.as_str()), (VideoFormat::Wav, false, 4_000_000, "C:/Captures/Production.wav"));
+    *host.making.lock().unwrap().as_ref().unwrap().done.lock().unwrap() = Some(Ok("C:/Captures/Production.wav".into()));
+    h.run_steps(2);
+    for label in ["Play Sound", "Show in Folder"] {
+        assert!(h.query_all_by_label(label).next().is_some(), "{label}");
+    }
+    h.get_by_label("Play Sound").click();
+    h.run_steps(2);
+    assert_eq!(host.shown.lock().unwrap().last().map(String::as_str), Some("open:C:/Captures/Production.wav"));
+    // A name ending .wav picked for a video makes the sound; .mp4 a video again.
+    h.get_by_label("Export Video").click();
+    h.run_steps(2);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("D:/Sound/Talk.wav");
+    }
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!((c.format, c.path.as_str()), (VideoFormat::Wav, "D:/Sound/Talk.wav")),
+        _ => panic!("the Export window is open"),
+    }
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.export_saved_to("D:/Sound/Talk.mp4");
+    }
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert_eq!(c.format, VideoFormat::Mp4),
+        _ => panic!("the Export window is open"),
+    }
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    // The chosen stretch's panel has Export the Stretch…: the window set to make just it.
+    h.get_by_label("Export the Stretch…").click();
+    h.run_steps(2);
+    match &h.state().video.as_ref().unwrap().export {
+        Some(ExportStep::Choose(c)) => assert!(c.only_stretch && c.stretch == Some((1_000_000, 2_000_000))),
+        _ => panic!("the Export window is open"),
+    }
+}
+
+/// A host that saves pictures in a made-up captures folder, and has the Image Editor's window
+/// beside this one.
+#[derive(Clone, Default)]
+struct FrameHost {
+    written: std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>,
+    handed: std::sync::Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+}
+
+impl crate::services::Services for FrameHost {
+    fn new_picture_path(&self, source: &str) -> Result<String, String> {
+        Ok(format!("C:/Captures/{source}.png"))
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.written.lock().unwrap().push((path.to_string(), bytes.to_vec()));
+        Ok(())
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+    fn open_in_other_editor(&self, path: &str, video: bool) -> bool {
+        self.handed.lock().unwrap().push((path.to_string(), video));
+        true
+    }
+}
+
+#[test]
+fn a_frame_is_saved_as_a_picture_and_opened_in_the_image_editor() {
+    let host = FrameHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // At 1.5 s the box is at x = 90 to 140.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(1);
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::S);
+    h.run_steps(2);
+    let (path, png) = host.written.lock().unwrap().pop().expect("a picture was written");
+    assert_eq!(path, "C:/Captures/Production 0.01.5.png");
+    let pic = screengrabcraft_render::decode(&png).unwrap();
+    assert_eq!((pic.width(), pic.height()), (320, 180), "at the recording's own size");
+    let p = pic.pixel(110, 60).unwrap();
+    assert_eq!((p.r, p.g, p.b), (0x4E, 0x3C, 0xA8), "the box where it was then");
+    assert_eq!(pic.pixel(20, 60).unwrap(), Color::WHITE);
+    assert_eq!(host.handed.lock().unwrap().as_slice(), [(path.clone(), false)], "handed to the Image Editor");
+    assert!(h.state().toast_text().is_some_and(|t| t.contains("opened in the Image Editor")), "{:?}", h.state().toast_text());
+    // From the ruler's right button, at that moment: three quarters of the way along.
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.75, lane.min.y + 8.0));
+    h.get_by_label("Save This Frame as a Picture").click();
+    h.run_steps(2);
+    let (path, _) = host.written.lock().unwrap().pop().expect("a second picture was written");
+    assert!(path.starts_with("C:/Captures/Production 0.0"), "{path}");
+    assert!(h.state().video.as_ref().unwrap().playhead.abs_diff(3_000_000) < 150_000, "the playhead went there");
 }
 
 #[test]
