@@ -854,6 +854,10 @@ pub struct EditorSettings {
     pub options: std::collections::BTreeMap<Kind, ShapeOptions>,
     /// The quick styles' theme, by name (the first theme when it isn't one).
     pub quick_theme: String,
+    /// Themes of the owner's own, shown after the built-in ones. One that can't be read is let
+    /// go, not the others.
+    #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
+    pub own_themes: Vec<crate::quick::OwnTheme>,
     /// The looks starred as favourites, in the order they were starred. One that can't be read
     /// is let go, not the others.
     #[serde(deserialize_with = "readable")]
@@ -875,18 +879,21 @@ pub struct EditorSettings {
 }
 
 /// The Fill tool's settings.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FillTool {
     /// The colour it fills with; a transparent one clears the area.
     pub color: crate::color::Color,
     /// How close (0 to 255 a channel) a colour must be to the one clicked to be filled too.
     pub tolerance: u8,
+    /// The colour going on to a second one across what is filled (none for one colour).
+    #[serde(skip_serializing_if = "crate::object::Gradient::is_none")]
+    pub gradient: crate::object::Gradient,
 }
 
 impl Default for FillTool {
     fn default() -> FillTool {
-        FillTool { color: crate::color::Color::RED, tolerance: 32 }
+        FillTool { color: crate::color::Color::RED, tolerance: 32, gradient: crate::object::Gradient::default() }
     }
 }
 
@@ -990,7 +997,51 @@ impl EditorSettings {
         if self.quick_theme.len() > 64 {
             self.quick_theme.clear();
         }
+        // Own themes with a name to keep, none named as a built-in one or as one before it.
+        let mut kept: Vec<crate::quick::OwnTheme> = Vec::new();
+        for t in std::mem::take(&mut self.own_themes) {
+            let Some(name) = crate::quick::theme_name(&t.name) else { continue };
+            if crate::quick::is_built_in(&name) || kept.iter().any(|k| k.name.eq_ignore_ascii_case(&name)) {
+                continue;
+            }
+            if kept.len() < crate::quick::MAX_OWN_THEMES {
+                kept.push(crate::quick::OwnTheme { name, colors: t.colors });
+            }
+        }
+        self.own_themes = kept;
         self
+    }
+
+    /// The quick styles' theme in use.
+    pub fn quick_theme(&self) -> crate::quick::QuickTheme {
+        crate::quick::theme(&self.quick_theme, &self.own_themes)
+    }
+
+    /// Keeps a theme of the owner's own (one of the same name is replaced) and puts it in use;
+    /// its name as kept, or why it can't be.
+    pub fn keep_theme(&mut self, name: &str, colors: [crate::color::Color; 4]) -> Result<String, String> {
+        let name = crate::quick::theme_name(name).ok_or_else(|| "Give the theme a name.".to_string())?;
+        if crate::quick::is_built_in(&name) {
+            return Err(format!("{name} is a built-in theme's name."));
+        }
+        let theme = crate::quick::OwnTheme { name: name.clone(), colors };
+        if let Some(t) = self.own_themes.iter_mut().find(|t| t.name.eq_ignore_ascii_case(&name)) {
+            *t = theme;
+        } else if self.own_themes.len() >= crate::quick::MAX_OWN_THEMES {
+            return Err(format!("{} themes of your own are kept at most; delete one first.", crate::quick::MAX_OWN_THEMES));
+        } else {
+            self.own_themes.push(theme);
+        }
+        self.quick_theme = name.clone();
+        Ok(name)
+    }
+
+    /// Lets a theme of the owner's own go; the first built-in one is used if it was in use.
+    pub fn forget_theme(&mut self, name: &str) {
+        self.own_themes.retain(|t| !t.name.eq_ignore_ascii_case(name));
+        if self.quick_theme.eq_ignore_ascii_case(name) {
+            self.quick_theme.clear();
+        }
     }
 
     /// What a tool sets about the shapes it draws: what it was last given, over its defaults.
@@ -1369,7 +1420,7 @@ mod tests {
         assert_eq!((odd.side_width, odd.properties_share), (None, Some(0.4)));
         assert_eq!(fresh.options(Kind::Arrow).heads, Some(ArrowHeads::End));
         assert_eq!(fresh.options(Kind::Callout).tail, Some(TailSpot::DownLeft));
-        let look = crate::quick::presets(Kind::Callout, crate::quick::theme("Bold")).into_iter().nth(8).map(|p| p.look).unwrap();
+        let look = crate::quick::presets(Kind::Callout, &crate::quick::theme("Bold", &[])).into_iter().nth(8).map(|p| p.look).unwrap();
         let mut e = EditorSettings { quick_theme: "Soft".into(), side_width: Some(320.0), ..EditorSettings::default() };
         assert!(e.toggle_favorite(&look));
         assert!(e.is_favorite(&look));
@@ -1397,7 +1448,10 @@ mod tests {
     #[test]
     fn the_fill_tool_keeps_its_colour_and_a_bad_one_spoils_nothing() {
         assert_eq!(EditorSettings::from_json("{}").fill, FillTool::default(), "a file from before has the default");
-        let e = EditorSettings { fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90 }, ..EditorSettings::default() };
+        let e = EditorSettings {
+            fill: FillTool { color: crate::color::Color::YELLOW, tolerance: 90, ..FillTool::default() },
+            ..EditorSettings::default()
+        };
         assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()), e);
         for bad in [
             r#"{"fill":{"color":"teapot","tolerance":9},"showTray":true}"#,
@@ -1408,5 +1462,38 @@ mod tests {
             assert_eq!(e.fill, FillTool::default(), "{bad}");
             assert!(e.show_tray, "the rest is still read: {bad}");
         }
+        // Its gradient is kept too.
+        let g = crate::object::Gradient { kind: crate::object::GradientKind::Radial, to: crate::color::Color::BLACK, angle: 90.0 };
+        let e = EditorSettings { fill: FillTool { gradient: g, ..FillTool::default() }, ..EditorSettings::default() };
+        assert_eq!(EditorSettings::from_json(&serde_json::to_string(&e).unwrap()).fill.gradient, g);
+    }
+
+    /// Themes of your own are kept by name and put in use; a built-in name, an empty one or one
+    /// too many isn't; one of the same name is replaced; one that can't be read is let go alone.
+    #[test]
+    fn own_themes_are_kept_by_name() {
+        use crate::color::Color;
+        let mut e = EditorSettings::default();
+        let colours = [Color::RED, Color::BLACK, Color::WHITE, Color::YELLOW];
+        assert_eq!(e.keep_theme("  Brand ", colours), Ok("Brand".to_string()));
+        assert_eq!((e.quick_theme.as_str(), e.quick_theme().name.as_ref()), ("Brand", "Brand"));
+        assert!(e.keep_theme("mono", colours).is_err(), "a built-in name");
+        assert!(e.keep_theme(" ", colours).is_err());
+        let other = [Color::BLACK; 4];
+        assert!(e.keep_theme("BRAND", other).is_ok());
+        assert_eq!((e.own_themes.len(), e.own_themes.first().map(|t| t.colors)), (1, Some(other)), "replaced");
+        for i in 1..crate::quick::MAX_OWN_THEMES {
+            assert!(e.keep_theme(&format!("Theme {i}"), colours).is_ok());
+        }
+        assert!(e.keep_theme("One more", colours).is_err(), "too many");
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back.own_themes, e.own_themes);
+        e.forget_theme(&e.quick_theme.clone());
+        assert_eq!((e.own_themes.len(), e.quick_theme().name.as_ref()), (crate::quick::MAX_OWN_THEMES - 1, "Bold"));
+        let text = r##"{"ownThemes":[{"name":"Ok","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},{"name":"Bad","colors":["#FF0000"]},{"name":"Vivid","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},{"name":"ok","colors":["#FF0000","#00FF00","#0000FF","#FFFFFF"]},4],"showTray":true}"##;
+        let e = EditorSettings::from_json(text);
+        assert_eq!(e.own_themes.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Ok"], "short, built-in and twice-named ones let go");
+        assert!(e.show_tray);
+        assert!(!serde_json::to_string(&EditorSettings::default()).unwrap().contains("ownThemes"));
     }
 }

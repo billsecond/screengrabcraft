@@ -1119,10 +1119,16 @@ fn cut_strip(ed: &mut Editor, ctx: &egui::Context, start: Pt, now: Pt) {
 fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
     let fill = ed.settings.fill;
     let colour = fill.color.to_hex();
+    // The gradient goes too (none takes a shape's away).
+    let gradient = serde_json::to_value(fill.gradient).unwrap_or(serde_json::Value::Null);
     if let Some(id) = ed.fillable_under(p) {
-        ed.run(ctx, "object.update", serde_json::json!({"id": id.0, "style": {"fill": colour}}));
+        ed.run(ctx, "object.update", serde_json::json!({"id": id.0, "style": {"fill": colour, "gradient": gradient}}));
     } else if ed.session.doc.bounds().contains(p) {
-        ed.run(ctx, "image.fill", serde_json::json!({"x": p.x.floor(), "y": p.y.floor(), "color": colour, "tolerance": fill.tolerance}));
+        let mut params = serde_json::json!({"x": p.x.floor(), "y": p.y.floor(), "color": colour, "tolerance": fill.tolerance});
+        if !fill.gradient.is_none() {
+            params["gradient"] = gradient;
+        }
+        ed.run(ctx, "image.fill", params);
     }
 }
 

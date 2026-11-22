@@ -4,7 +4,7 @@
 //! Each returns a new raster; the engine moves the annotations to match.
 
 use image::RgbaImage;
-use screengrabcraft_model::{Color, Raster, RasterError, Rect};
+use screengrabcraft_model::{Color, Gradient, Pt, Raster, RasterError, Rect};
 
 use crate::canvas;
 
@@ -257,6 +257,12 @@ fn colour_distance(a: Color, b: Color) -> u8 {
 /// replaced by `colour`, so a transparent one clears the area. Also how many pixels changed (none
 /// when the point is outside the picture or the area is that colour already).
 pub fn fill(r: &Raster, x: u32, y: u32, colour: Color, tolerance: u8) -> Result<(Raster, u64), RasterError> {
+    fill_with(r, x, y, colour, Gradient::default(), tolerance)
+}
+
+/// [`fill`], the colour going on to the gradient's second one across what is filled (the
+/// gradient laid over the box round it) when it has a gradient.
+pub fn fill_with(r: &Raster, x: u32, y: u32, colour: Color, gradient: Gradient, tolerance: u8) -> Result<(Raster, u64), RasterError> {
     let Some(seed) = r.pixel(x, y) else { return Ok((r.clone(), 0)) };
     let n = screengrabcraft_model::raster::checked_len(r.width(), r.height())? / 4;
     let px = r.pixels();
@@ -266,15 +272,38 @@ pub fn fill(r: &Raster, x: u32, y: u32, colour: Color, tolerance: u8) -> Result<
     };
     let mut taken = vec![0u8; n];
     crate::matte::flood(r.width() as usize, r.height() as usize, &[(x as usize, y as usize)], &near, &mut taken);
-    let new = [colour.r, colour.g, colour.b, colour.a];
-    let changes = taken.iter().zip(px.as_chunks::<4>().0).filter(|(t, p)| **t != 0 && **p != new).count() as u64;
+    let w = (r.width() as usize).max(1);
+    let spot = |i: usize| (i % w, i / w);
+    // The box round what is taken, for a gradient to be laid over.
+    let mut reach: Option<(usize, usize, usize, usize)> = None;
+    if !gradient.is_none() {
+        for (i, _) in taken.iter().enumerate().filter(|(_, t)| **t != 0) {
+            let (px_, py_) = spot(i);
+            reach = Some(match reach {
+                None => (px_, py_, px_, py_),
+                Some((x0, y0, x1, y1)) => (x0.min(px_), y0.min(py_), x1.max(px_), y1.max(py_)),
+            });
+        }
+    }
+    let area = reach.map(|(x0, y0, x1, y1)| Rect::new(x0 as f32, y0 as f32, (x1 - x0 + 1) as f32, (y1 - y0 + 1) as f32));
+    let colour_at = |i: usize| -> [u8; 4] {
+        let c = match area {
+            Some(area) => {
+                let (cx, cy) = spot(i);
+                colour.mix(gradient.to, gradient.share(area, Pt::new(cx as f32 + 0.5, cy as f32 + 0.5)))
+            }
+            None => colour,
+        };
+        [c.r, c.g, c.b, c.a]
+    };
+    let changes = taken.iter().zip(px.as_chunks::<4>().0).enumerate().filter(|(i, (t, p))| **t != 0 && **p != colour_at(*i)).count() as u64;
     if changes == 0 {
         return Ok((r.clone(), 0));
     }
     let mut out = r.clone();
-    for (p, t) in out.pixels_mut().as_chunks_mut::<4>().0.iter_mut().zip(&taken) {
+    for (i, (p, t)) in out.pixels_mut().as_chunks_mut::<4>().0.iter_mut().zip(&taken).enumerate() {
         if *t != 0 {
-            *p = new;
+            *p = colour_at(i);
         }
     }
     Ok((out, changes))
@@ -429,5 +458,24 @@ mod tests {
         assert_eq!(fill(&r, u32::MAX, u32::MAX, Color::RED, 255).unwrap().1, 0);
         // Everything is within the largest tolerance.
         assert_eq!(fill(&r, 0, 0, Color::RED, 255).unwrap().1, 60);
+    }
+
+    /// A gradient fill goes across the area filled (the box round it), not the whole picture.
+    #[test]
+    fn a_gradient_fill_goes_across_the_area() {
+        use screengrabcraft_model::GradientKind;
+        let r = halves();
+        let g = Gradient { kind: GradientKind::Linear, to: Color::rgb(0, 0, 255), angle: 0.0 };
+        let (out, n) = fill_with(&r, 2, 3, Color::rgb(255, 0, 0), g, 20).unwrap();
+        assert_eq!(n, 5 * 6);
+        let (left, right) = (out.pixel(0, 3).unwrap(), out.pixel(4, 3).unwrap());
+        assert!(left.r > 200 && left.b < 60, "{left:?}");
+        assert!(right.b > 160 && right.r < 100, "the far side of the area, not of the picture: {right:?}");
+        assert_eq!(out.pixel(5, 3), Some(Color::BLACK), "the line stays");
+        assert_eq!(out.pixel(8, 3), Some(Color::WHITE));
+        // Radial: the middle of the area is the first colour.
+        let radial = Gradient { kind: GradientKind::Radial, ..g };
+        let (out, _) = fill_with(&r, 2, 3, Color::RED, radial, 20).unwrap();
+        assert!(out.pixel(2, 3).unwrap().r > out.pixel(0, 0).unwrap().r);
     }
 }

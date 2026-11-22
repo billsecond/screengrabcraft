@@ -92,7 +92,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Polygon, triangle, star** | Has | triangles, diamonds, polygons of 3 to 12 corners and stars of 3 to 12 points, drawn in a box with the Shape tool; and polygons of points clicked one by one (Shape options › Points clicked: a double click or Enter closes it), moved and resized as a box |
 | **Stamps: a library with a search, faces, pictures of your own** | Has | 34 drawn in code (25 symbols and 9 faces); pictures of your own kept in the settings folder (not in the browser) |
 | Fill an area or a shape | Has | |
-| Gradient fills | Missing | |
+| **Gradient fills** | Has | linear at any angle or radial, from the fill colour to a second one: shapes, callouts, text boxes and step badges (the Fill menu), and the Fill tool on the picture or on a shape; a gradient quick style for shapes |
 | Move, select, nudge, duplicate | Has | |
 | Selection tool: move, copy, cut, delete or crop to an area | Has | |
 | **Ellipse, polygon or freehand selection; invert** | Has | the Selection tool's Box, Ellipse and Freehand (any outline, a polygon drawn round); Invert (Ctrl+Shift+I); moving, copying, deleting, cropping and the colour effects keep to the shape |
@@ -114,7 +114,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | **Grab Text from the picture or an area** | Has (0.1.54) | Image menu, right-click, Ctrl+Shift+T |
 | The captured pointer moved or deleted | Missing | |
 | Quick styles in themes, favourites | Has | |
-| Themes of your own | Missing | |
+| **Themes of your own** | Has | the theme menu's "New theme from the current colours…": four colours (the ones in use first, each changeable) and a name, kept in the editor's settings and listed after the built-in four; deleted from the same menu |
 | Effect presets | Missing | |
 | Undo and redo, also after closing | Has | |
 | Flatten selected, flatten all | Has | |
@@ -289,6 +289,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 13. Simplify; a part of the picture lifted and moved, filled where it was.
 14. Edit text in the picture: a line read covered and typed over in its size and colour (Windows).
 15. Polygons of points clicked one by one; bent lines; callouts with several tails.
+16. Gradient fills; themes of your own for the quick styles.
 
 **Still to build, in this order**
 

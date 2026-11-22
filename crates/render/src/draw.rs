@@ -3,10 +3,12 @@
 //! a blur hides an arrow drawn before it and not one drawn after.
 
 use screengrabcraft_model::object::{PIN_POINT, arrow_head, bent_points, polygon_outline, step_radius};
-use screengrabcraft_model::{ArrowHeads, BadgeShape, CalloutForm, Color, Document, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::{
+    ArrowHeads, BadgeShape, CalloutForm, Color, Document, Gradient, GradientKind, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, Style,
+};
 use tiny_skia::{
-    BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
-    Transform,
+    BlendMode, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint,
+    RadialGradient, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use crate::canvas;
@@ -300,7 +302,8 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let all: Vec<Pt> = std::iter::once(*tail).chain(tails.iter().copied()).collect();
             with_style(canvas, bounds, &style, &|c, t| {
                 for path in callout_paths_with(rect, &all, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
-                    fill_and_stroke(c, &path, &style, t);
+                    // One gradient over the box: its tails (a cloud's bubbles) take the colour where they are.
+                    fill_and_stroke_over(c, &path, &style, t, rect);
                 }
                 draw_text_centered(c, t, form.text_area(rect), body, &style);
             });
@@ -345,9 +348,53 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
     }
 }
 
+/// What fills an inside: the fill colour, or the style's gradient laid over `area`.
+fn fill_paint(style: &Style, area: Rect) -> Paint<'static> {
+    let mut p = paint(style.fill);
+    let g = style.gradient;
+    if g.is_none() {
+        return p;
+    }
+    let stops = vec![GradientStop::new(0.0, skia_color(style.fill, 1.0)), GradientStop::new(1.0, skia_color(g.to, 1.0))];
+    let shader = match g.kind {
+        GradientKind::None => None,
+        GradientKind::Linear => {
+            let (a, z) = g.ends(area);
+            LinearGradient::new(skia_point(a), skia_point(z), stops, SpreadMode::Pad, Transform::identity())
+        }
+        GradientKind::Radial => {
+            // A circle of radius 1 stretched to the area's own reach across and down.
+            let (rx, ry) = Gradient::radii(area);
+            let c = area.center();
+            let place = Transform::from_translate(c.x, c.y).pre_scale(rx, ry);
+            let o = tiny_skia::Point::from_xy(0.0, 0.0);
+            RadialGradient::new(o, 0.0, o, 1.0, stops, SpreadMode::Pad, place)
+        }
+    };
+    if let Some(shader) = shader {
+        p.shader = shader;
+    }
+    p
+}
+
+fn skia_point(p: Pt) -> tiny_skia::Point {
+    tiny_skia::Point::from_xy(p.x, p.y)
+}
+
+/// The bounds of a path, as a rectangle.
+fn path_area(path: &Path) -> Rect {
+    let b = path.bounds();
+    Rect::new(b.x(), b.y(), b.width(), b.height())
+}
+
 fn fill_and_stroke(c: &mut Pixmap, path: &Path, style: &Style, t: Transform) {
-    if visible(style.fill) {
-        c.fill_path(path, &paint(style.fill), FillRule::Winding, t, None);
+    fill_and_stroke_over(c, path, style, t, path_area(path));
+}
+
+/// A path filled and outlined, its gradient (if it has one) laid over `area`.
+fn fill_and_stroke_over(c: &mut Pixmap, path: &Path, style: &Style, t: Transform, area: Rect) {
+    if style.has_fill() {
+        c.fill_path(path, &fill_paint(style, area), FillRule::Winding, t, None);
     }
     if style.width > 0.0 && visible(style.stroke) {
         c.stroke_path(path, &paint(style.stroke), &stroke_of(style.width, style.dashed, LineCap::Round), t, None);
@@ -488,7 +535,7 @@ fn open_line(points: &[Pt]) -> Option<Path> {
 
 fn draw_text_box(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, style: &Style) {
     let pad = text::padding(style);
-    if (visible(style.fill) || (style.width > 0.0 && visible(style.stroke)))
+    if (style.has_fill() || (style.width > 0.0 && visible(style.stroke)))
         && let Some(bg) = rounded_rect(rect, pad.min(10.0))
     {
         fill_and_stroke(c, &bg, style, t);
@@ -581,7 +628,8 @@ pub fn badge_path(badge: BadgeShape, center: Pt, r: f32) -> Option<Path> {
 fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, label: &str, badge: BadgeShape, style: &Style) {
     let r = step_radius(style.font_size);
     let Some(outline) = badge_path(badge, center, r) else { return };
-    c.fill_path(&outline, &paint(if visible(style.fill) { style.fill } else { Color::RED }), FillRule::Winding, t, None);
+    let inside = if style.has_fill() { fill_paint(style, path_area(&outline)) } else { paint(Color::RED) };
+    c.fill_path(&outline, &inside, FillRule::Winding, t, None);
     if style.width > 0.0 && visible(style.stroke) {
         c.stroke_path(&outline, &paint(style.stroke), &stroke_of(style.width, false, LineCap::Round), t, None);
     }
@@ -932,6 +980,54 @@ mod tests {
 
     fn px(r: &Raster, x: u32, y: u32) -> Color {
         r.pixel(x, y).unwrap()
+    }
+
+    /// A gradient fill goes from the fill colour to its second one across a box, or out from its
+    /// middle; a callout's is laid over its box, a step badge's over the badge.
+    #[test]
+    fn gradients_fill_shapes_callouts_and_badges() {
+        use screengrabcraft_model::{Gradient, GradientKind};
+        let linear = Gradient { kind: GradientKind::Linear, to: Color::rgb(0, 0, 255), angle: 0.0 };
+        let style =
+            Style { fill: Color::rgb(255, 0, 0), stroke: Color::TRANSPARENT, width: 0.0, shadow: false, gradient: linear, ..Style::default() };
+        let mut d = doc();
+        d.add(Shape::Rect { rect: Rect::new(20.0, 20.0, 160.0, 40.0), radius: 0.0 }, style).unwrap();
+        let out = render(&d).unwrap();
+        let (left, mid, right) = (px(&out, 22, 40), px(&out, 100, 40), px(&out, 177, 40));
+        assert!(left.r > 240 && left.b < 15, "red at the left: {left:?}");
+        assert!(right.b > 240 && right.r < 15, "blue at the right: {right:?}");
+        assert!((100..156).contains(&mid.r) && (100..156).contains(&mid.b), "between in the middle: {mid:?}");
+        assert_eq!(px(&out, 100, 70), Color::WHITE, "only inside");
+        // Turned down: the top is red, the bottom blue, the same all along.
+        let mut d = doc();
+        d.add(Shape::Ellipse { rect: Rect::new(20.0, 10.0, 160.0, 100.0) }, Style { gradient: Gradient { angle: 90.0, ..linear }, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        assert!(px(&out, 100, 14).r > px(&out, 100, 105).r && px(&out, 100, 105).b > 200);
+        // Radial: the fill colour in the middle, the second colour towards the corners.
+        let mut d = doc();
+        let radial = Gradient { kind: GradientKind::Radial, ..linear };
+        d.add(Shape::Rect { rect: Rect::new(20.0, 20.0, 160.0, 80.0), radius: 0.0 }, Style { gradient: radial, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        let (middle, corner) = (px(&out, 100, 60), px(&out, 21, 21));
+        assert!(middle.r > 240 && corner.b > 200 && corner.r < 60, "{middle:?} {corner:?}");
+        // A callout's gradient is over its box; a badge's over the badge.
+        let mut d = doc();
+        let callout = Shape::Callout {
+            rect: Rect::new(20.0, 10.0, 160.0, 50.0),
+            tail: Pt::new(40.0, 110.0),
+            text: String::new(),
+            form: CalloutForm::Cloud,
+            tails: Vec::new(),
+        };
+        d.add(callout, style).unwrap();
+        let out = render(&d).unwrap();
+        assert!(px(&out, 30, 35).r > px(&out, 170, 35).r && px(&out, 170, 35).b > 200, "across the box");
+        let mut d = doc();
+        let step = Shape::Step { center: Pt::new(100.0, 60.0), number: 1, labels: Default::default(), badge: BadgeShape::Square };
+        d.add(step, Style { font_size: 40.0, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        let r = step_radius(40.0) as u32;
+        assert!(px(&out, 100 - r + 2, 60 - r + 2).r > 200 && px(&out, 100 + r - 2, 60 + r - 2).b > 200, "the badge from red to blue");
     }
 
     #[test]

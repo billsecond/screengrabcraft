@@ -6,8 +6,8 @@ use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
 use screengrabcraft_model::object::{MAX_SIDES, MIN_SIDES};
 use screengrabcraft_model::{
-    ArrowHeads, BadgeShape, CalloutForm, Color, FontName, HeadShape, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot,
-    TextAlign,
+    ArrowHeads, BadgeShape, CalloutForm, Color, FontName, Gradient, GradientKind, HeadShape, Kind, Object, Pt, Rect, Shape, ShapeOptions, StampKind,
+    StepLabels, Style, TailSpot, TextAlign,
 };
 
 use crate::editor::{Editor, Tool};
@@ -47,7 +47,8 @@ fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
         strength,
         text_outline,
         text_outline_width,
-        font
+        font,
+        gradient
     );
 }
 
@@ -138,7 +139,7 @@ fn prop_button(ui: &mut Ui, name: &str, caption: &str, face: &dyn Fn(&egui::Pain
 }
 
 /// A colour button and its menu.
-fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
+pub(crate) fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
     let mut changed = false;
     // A colour taken from the picture with this button's eyedropper.
     if let Some(p) = crate::eyedropper::take(ui.ctx(), name) {
@@ -161,6 +162,95 @@ fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_no
         ui.label(egui::RichText::new(name).strong());
         ui.add_space(4.0);
         changed |= colour_choices(ui, name, c, allow_none, keep_alpha);
+    });
+    changed
+}
+
+/// What the gradient's second colour is called (its button and its eyedropper).
+pub const GRADIENT_TO: &str = "Gradient's second colour";
+
+/// A fill, `from` going on to the gradient's second colour as it does in a shape, painted in `r`.
+fn paint_gradient(p: &egui::Painter, r: egui::Rect, from: Color, g: Gradient) {
+    if g.is_none() {
+        paint_colour(p, r, from);
+        return;
+    }
+    p.rect_filled(r, 4.0, Color32::WHITE);
+    let area = Rect::new(r.left(), r.top(), r.width(), r.height());
+    let at = |q: egui::Pos2| crate::to_color32(from.mix(g.to, g.share(area, Pt::new(q.x, q.y))));
+    // A fan of triangles from the middle: exact for a linear gradient, near enough for a radial one.
+    let ring = [r.left_top(), r.center_top(), r.right_top(), r.right_center(), r.right_bottom(), r.center_bottom(), r.left_bottom(), r.left_center()];
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(r.center(), at(r.center()));
+    for q in ring {
+        mesh.colored_vertex(q, at(q));
+    }
+    for i in 0..ring.len() as u32 {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % ring.len() as u32);
+    }
+    p.add(egui::Shape::mesh(mesh));
+}
+
+/// How a fill's gradient goes: one colour, linear or radial, its angle, and its two colours
+/// swapped. `from` is the fill colour, which a gradient starts from. True when it changed.
+fn gradient_choices(ui: &mut Ui, from: &mut Color, g: &mut Gradient, stroke: Color) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let before = (*from, *g);
+    ui.label(egui::RichText::new("Gradient").size(12.0).color(t.muted));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        for kind in GradientKind::ALL {
+            let name = match kind {
+                GradientKind::None => "One colour",
+                GradientKind::Linear => "Linear gradient",
+                GradientKind::Radial => "Radial gradient",
+            };
+            if ui.selectable_label(g.kind == kind, kind.label()).on_hover_text(name).clicked() {
+                g.kind = kind;
+            }
+        }
+    });
+    if !g.is_none() && before.1.is_none() && from.a == 0 {
+        // A gradient from nothing would hardly show: it starts in the outline's colour.
+        *from = if stroke.a > 0 { stroke.with_alpha(255) } else { PALETTE.get(4).copied().unwrap_or(Color::BLACK) };
+    }
+    if g.kind == GradientKind::Linear {
+        ui.add_space(2.0);
+        slider(ui, "Angle", &mut g.angle, 0.0..=359.0, 1.0, "°");
+    }
+    if !g.is_none() && ui.button("Swap the two colours").on_hover_text("The gradient the other way round").clicked() {
+        std::mem::swap(from, &mut g.to);
+    }
+    (*from, *g) != before
+}
+
+/// The fill colour's button, its face showing the gradient when there is one, and its menu: the
+/// colours, then how the gradient goes.
+fn fill_button(ui: &mut Ui, name: &str, caption: &str, s: &mut Style) -> bool {
+    let mut changed = false;
+    if let Some(p) = crate::eyedropper::take(ui.ctx(), name) {
+        s.fill = p;
+        changed = true;
+    }
+    let (shown, g) = (s.fill, s.gradient);
+    let picking = crate::eyedropper::for_button(ui.ctx()).is_some_and(|b| b == name);
+    let resp = prop_button(ui, name, caption, &|p, r| {
+        paint_gradient(p, r, shown, g);
+        p.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_black_alpha(50)), StrokeKind::Inside);
+    });
+    if picking {
+        let t = Tokens::get(ui.ctx());
+        ui.painter().rect_stroke(resp.rect.shrink2(vec2(0.0, 8.0)).translate(vec2(0.0, -8.0)), 5.0, Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_width(204.0);
+        ui.label(egui::RichText::new(name).strong());
+        ui.add_space(4.0);
+        changed |= colour_choices(ui, name, &mut s.fill, true, false);
+        ui.add_space(4.0);
+        ui.separator();
+        let stroke = s.stroke;
+        changed |= gradient_choices(ui, &mut s.fill, &mut s.gradient, stroke);
     });
     changed
 }
@@ -631,7 +721,15 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
         if fill {
             let (name, caption) = if kind == Kind::Text { ("Background colour", "Fill") } else { ("Fill colour", "Fill") };
-            colour_button(ui, name, caption, &mut s.fill, true, false);
+            if kind == Kind::Stamp {
+                // A stamp's fill is its colour: one colour.
+                colour_button(ui, name, caption, &mut s.fill, true, false);
+            } else {
+                fill_button(ui, name, caption, &mut s);
+                if !s.gradient.is_none() {
+                    colour_button(ui, GRADIENT_TO, "To", &mut s.gradient.to, true, false);
+                }
+            }
         }
         if outline {
             let (name, caption) = outline_name(kind);
@@ -879,8 +977,13 @@ fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
     let mut f = ed.settings.fill;
     ui.horizontal(|ui| {
         colour_button(ui, "Fill colour", "Colour", &mut f.color, true, false);
+        if !f.gradient.is_none() {
+            colour_button(ui, GRADIENT_TO, "To", &mut f.gradient.to, true, false);
+        }
     });
     ui.label(egui::RichText::new("None makes the area see-through.").size(12.0).color(t.muted));
+    ui.add_space(8.0);
+    gradient_choices(ui, &mut f.color, &mut f.gradient, Color::TRANSPARENT);
     ui.add_space(8.0);
     let mut pct = (f32::from(f.tolerance) / 2.55).round();
     ui.label(egui::RichText::new("Tolerance").size(12.0).color(t.muted));
