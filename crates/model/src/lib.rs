@@ -20,8 +20,8 @@ pub use object::{ArrowHeads, CalloutForm, Handle, Kind, Object, ObjectId, Shape,
 pub use quick::QuickStyle;
 pub use raster::{MAX_PIXELS, MAX_SIDE, Raster, RasterError};
 pub use settings::{
-    AfterCapture, CaptureMode, EditorSettings, FillTool, Hotkey, Hotkeys, ImageFormat, MonitorChoice, RecordArea, RecorderOptions, Settings, Stamp,
-    Theme,
+    AfterCapture, CaptureMode, CapturePreset, EditorSettings, FillTool, Hotkey, Hotkeys, ImageFormat, MonitorChoice, PresetArea, RecordArea,
+    RecorderOptions, Settings, Stamp, Theme,
 };
 
 /// The program's name, as people see it.

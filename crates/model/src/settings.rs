@@ -673,6 +673,137 @@ pub const HOTKEYS_VERSION: u32 = 1;
 pub const SCROLLING_LONGEST: u32 = 30_000;
 pub const SCROLLING_SHORTEST: u32 = 1_000;
 
+/// The shapes an area can be held to (`w` wide for every `h` tall), as presets offer them.
+pub const SHAPES: [(u32, u32); 7] = [(1, 1), (4, 3), (3, 2), (16, 10), (16, 9), (21, 9), (9, 16)];
+/// The largest number either side of a shape.
+pub const SHAPE_MAX: u32 = 100;
+
+/// What a capture preset takes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PresetArea {
+    /// Drag out an area (or click a window).
+    #[default]
+    Region,
+    /// Drag out an area held to a shape: `w` wide for every `h` tall.
+    Shape { w: u32, h: u32 },
+    /// An area of a set size in pixels, placed with a click.
+    Fixed { w: u32, h: u32 },
+    /// Click a window.
+    Window,
+    /// The monitor under the pointer.
+    Screen,
+    /// Every monitor in one picture.
+    AllScreens,
+    /// A long page joined into one picture.
+    Scrolling,
+}
+
+impl PresetArea {
+    /// One of each kind, as the preset's list offers them.
+    pub const KINDS: [PresetArea; 7] = [
+        PresetArea::Region,
+        PresetArea::Shape { w: 16, h: 9 },
+        PresetArea::Fixed { w: 1280, h: 720 },
+        PresetArea::Window,
+        PresetArea::Screen,
+        PresetArea::AllScreens,
+        PresetArea::Scrolling,
+    ];
+
+    /// The capture it starts.
+    pub fn mode(self) -> CaptureMode {
+        match self {
+            PresetArea::Region | PresetArea::Shape { .. } | PresetArea::Fixed { .. } => CaptureMode::Region,
+            PresetArea::Window => CaptureMode::Window,
+            PresetArea::Screen => CaptureMode::Screen,
+            PresetArea::AllScreens => CaptureMode::AllScreens,
+            PresetArea::Scrolling => CaptureMode::Scrolling,
+        }
+    }
+
+    /// Its kind, as the list says it.
+    pub fn label(self) -> &'static str {
+        match self {
+            PresetArea::Region => "Region",
+            PresetArea::Shape { .. } => "Region of a set shape",
+            PresetArea::Fixed { .. } => "Region of a set size",
+            PresetArea::Window => "Window",
+            PresetArea::Screen => "Full screen",
+            PresetArea::AllScreens => "All screens",
+            PresetArea::Scrolling => "Scrolling",
+        }
+    }
+
+    /// Whether it's the same kind as `other`, whatever its numbers.
+    pub fn same_kind(self, other: PresetArea) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
+
+    /// What it takes, in a few words (`Region, 16:9`, `800 × 600`).
+    pub fn describe(self) -> String {
+        match self {
+            PresetArea::Shape { w, h } => format!("Region, {w}:{h}"),
+            PresetArea::Fixed { w, h } => format!("{w} × {h}"),
+            other => other.label().to_string(),
+        }
+    }
+
+    /// Its numbers in their ranges.
+    pub fn clamped(self) -> PresetArea {
+        match self {
+            PresetArea::Shape { w, h } => PresetArea::Shape { w: w.clamp(1, SHAPE_MAX), h: h.clamp(1, SHAPE_MAX) },
+            PresetArea::Fixed { w, h } => PresetArea::Fixed { w: w.clamp(FIXED_MIN, FIXED_MAX), h: h.clamp(FIXED_MIN, FIXED_MAX) },
+            other => other,
+        }
+    }
+}
+
+/// The most presets kept, and the longest name one has.
+pub const PRESETS_MAX: usize = 30;
+pub const PRESET_NAME_MAX: usize = 60;
+
+/// A capture of the owner's own making: what it takes, after how long, what happens to it, and a
+/// shortcut of its own.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CapturePreset {
+    pub name: String,
+    #[serde(deserialize_with = "or_default")]
+    pub area: PresetArea,
+    /// Seconds to wait first (a countdown shows them); 0 is at once.
+    pub delay_secs: u32,
+    /// What happens to the picture (instead of the default in After a capture).
+    #[serde(deserialize_with = "or_default")]
+    pub after: AfterCapture,
+    /// Its own shortcut, if it has one.
+    #[serde(deserialize_with = "or_none")]
+    pub hotkey: Option<Hotkey>,
+}
+
+impl Default for CapturePreset {
+    fn default() -> CapturePreset {
+        CapturePreset { name: "New preset".to_string(), area: PresetArea::Region, delay_secs: 0, after: AfterCapture::default(), hotkey: None }
+    }
+}
+
+impl CapturePreset {
+    /// Every number in its range, and a name of one line no longer than [`PRESET_NAME_MAX`] (left
+    /// as typed otherwise: it's kept as it's being typed).
+    pub fn clamped(mut self) -> CapturePreset {
+        self.name = self.name.chars().filter(|c| !c.is_control()).take(PRESET_NAME_MAX).collect();
+        self.area = self.area.clamped();
+        self.delay_secs = self.delay_secs.min(60);
+        self
+    }
+
+    /// Its name as menus show it, the `n`th of the list: `Preset n` when it has none.
+    pub fn title(&self, n: usize) -> String {
+        let name = self.name.trim();
+        if name.is_empty() { format!("Preset {n}") } else { name.to_string() }
+    }
+}
+
 /// The capture service's settings (`settings.json`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -742,6 +873,10 @@ pub struct Settings {
     pub scroll_by_itself: bool,
     /// The longest a scrolling capture's picture gets, in pixels.
     pub scrolling_longest: u32,
+    /// Captures of the owner's own making, in the order they're listed. One that can't be read is
+    /// let go, not the others.
+    #[serde(deserialize_with = "readable")]
+    pub presets: Vec<CapturePreset>,
 }
 
 fn on() -> bool {
@@ -781,6 +916,7 @@ impl Default for Settings {
             recording_border: true,
             scroll_by_itself: true,
             scrolling_longest: SCROLLING_LONGEST,
+            presets: Vec::new(),
         }
     }
 }
@@ -829,10 +965,40 @@ impl Settings {
         self.video_max_mins = self.video_max_mins.clamp(1, 240);
         self.recorder = self.recorder.clamped();
         self.scrolling_longest = self.scrolling_longest.clamp(SCROLLING_SHORTEST, crate::MAX_SIDE);
+        self.presets.truncate(PRESETS_MAX);
+        self.presets = std::mem::take(&mut self.presets).into_iter().map(CapturePreset::clamped).collect();
         if self.file_name.trim().is_empty() || self.file_name.len() > 200 {
             self.file_name = Settings::default().file_name;
         }
         self
+    }
+
+    /// Pairs of actions that share a shortcut (only one of each pair can have it), the presets'
+    /// among them.
+    pub fn clashes(&self) -> Vec<(String, String)> {
+        let mut out = self.hotkeys.clashes();
+        let keys = &self.hotkeys;
+        let presets: Vec<(String, &Hotkey)> =
+            self.presets.iter().enumerate().filter_map(|(i, p)| p.hotkey.as_ref().map(|k| (p.title(i + 1), k))).collect();
+        let others = [("Open the Image Editor", &keys.editor), ("Pause or Resume Recording", &keys.pause), ("Stop Recording", &keys.stop)];
+        for (i, (a, ka)) in presets.iter().enumerate() {
+            for m in CaptureMode::ALL {
+                if keys.get(m) == Some(*ka) {
+                    out.push((m.label().to_string(), a.clone()));
+                }
+            }
+            for (name, k) in others {
+                if k.as_ref() == Some(*ka) {
+                    out.push((name.to_string(), a.clone()));
+                }
+            }
+            for (b, kb) in presets.iter().skip(i + 1) {
+                if ka == kb {
+                    out.push(((*a).to_string(), (*b).to_string()));
+                }
+            }
+        }
+        out
     }
 }
 
@@ -1102,6 +1268,89 @@ pub fn expand_name(template: &str, at: Stamp, source: &str, n: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presets_are_kept_and_read_back_and_a_bad_one_is_let_go() {
+        let mut s = Settings::default();
+        assert!(s.presets.is_empty(), "none to start with");
+        s.presets = vec![
+            CapturePreset {
+                name: "Docs shot".into(),
+                area: PresetArea::Fixed { w: 800, h: 600 },
+                delay_secs: 3,
+                after: AfterCapture { show_bar: false, open_editor: false, copy: true, save: false },
+                hotkey: Some(Hotkey::new(true, true, false, false, "D")),
+            },
+            CapturePreset { name: "Wide".into(), area: PresetArea::Shape { w: 16, h: 9 }, ..CapturePreset::default() },
+            CapturePreset { name: "Page".into(), area: PresetArea::Scrolling, ..CapturePreset::default() },
+        ];
+        let text = serde_json::to_string(&s).unwrap();
+        assert_eq!(Settings::from_json(&text).presets, s.presets);
+        // One that can't be read is let go; one with a bad part keeps the rest.
+        let text = text.replacen(r#""name":"Wide""#, r#""name":12"#, 1).replacen(r#""area":"scrolling""#, r#""area":"teleport""#, 1);
+        let back = Settings::from_json(&text).presets;
+        assert_eq!(back.len(), 2, "{back:?}");
+        assert_eq!(back[0].name, "Docs shot");
+        assert_eq!((back[1].name.as_str(), back[1].area), ("Page", PresetArea::Region), "an area that can't be read is a region");
+    }
+
+    #[test]
+    fn presets_are_brought_into_range() {
+        let wild =
+            CapturePreset { name: "  \u{7}".into(), area: PresetArea::Fixed { w: 0, h: u32::MAX }, delay_secs: 9999, ..CapturePreset::default() };
+        let mut s = Settings { presets: vec![wild; PRESETS_MAX + 5], ..Settings::default() };
+        s.presets[1].area = PresetArea::Shape { w: 0, h: 500 };
+        s.presets[2].name = "x".repeat(500);
+        let s = s.clamped();
+        assert_eq!(s.presets.len(), PRESETS_MAX);
+        assert_eq!(s.presets[0].name, "  ", "kept as typed, but on one line");
+        assert_eq!(s.presets[0].title(1), "Preset 1", "a name to show");
+        assert_eq!(CapturePreset { name: " Wide ".into(), ..CapturePreset::default() }.title(4), "Wide");
+        assert_eq!(s.presets[0].area, PresetArea::Fixed { w: FIXED_MIN, h: FIXED_MAX });
+        assert_eq!(s.presets[0].delay_secs, 60);
+        assert_eq!(s.presets[1].area, PresetArea::Shape { w: 1, h: SHAPE_MAX });
+        assert_eq!(s.presets[2].name.chars().count(), PRESET_NAME_MAX);
+    }
+
+    #[test]
+    fn a_preset_starts_the_capture_of_its_kind() {
+        let modes: Vec<CaptureMode> = PresetArea::KINDS.iter().map(|a| a.mode()).collect();
+        assert_eq!(
+            modes,
+            [
+                CaptureMode::Region,
+                CaptureMode::Region,
+                CaptureMode::Region,
+                CaptureMode::Window,
+                CaptureMode::Screen,
+                CaptureMode::AllScreens,
+                CaptureMode::Scrolling
+            ]
+        );
+        assert!(PresetArea::Shape { w: 1, h: 1 }.same_kind(PresetArea::Shape { w: 16, h: 9 }));
+        assert!(!PresetArea::Shape { w: 1, h: 1 }.same_kind(PresetArea::Fixed { w: 1, h: 1 }));
+        assert_eq!(PresetArea::Fixed { w: 800, h: 600 }.describe(), "800 × 600");
+        assert_eq!(PresetArea::Shape { w: 16, h: 9 }.describe(), "Region, 16:9");
+    }
+
+    #[test]
+    fn a_presets_shortcut_that_another_has_is_said() {
+        let mut s = Settings::default();
+        let region = s.hotkeys.region.clone();
+        let own = Some(Hotkey::new(true, true, false, false, "D"));
+        s.presets = vec![
+            CapturePreset { name: "A".into(), hotkey: region, ..CapturePreset::default() },
+            CapturePreset { name: "B".into(), hotkey: own.clone(), ..CapturePreset::default() },
+            CapturePreset { name: "C".into(), hotkey: own, ..CapturePreset::default() },
+            CapturePreset { name: "D".into(), hotkey: None, ..CapturePreset::default() },
+        ];
+        s.hotkeys.editor = Some(Hotkey::new(true, true, false, false, "D"));
+        let clashes = s.clashes();
+        assert!(clashes.contains(&("Capture Region".to_string(), "A".to_string())), "{clashes:?}");
+        assert!(clashes.contains(&("Open the Image Editor".to_string(), "B".to_string())), "{clashes:?}");
+        assert!(clashes.contains(&("B".to_string(), "C".to_string())), "{clashes:?}");
+        assert!(!clashes.iter().any(|(a, b)| a == "D" || b == "D"));
+    }
 
     #[test]
     fn only_still_pictures_are_taken_while_recording() {

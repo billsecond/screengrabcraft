@@ -21,6 +21,8 @@ use crate::hotkeys::Registered;
 pub enum Item {
     Capture(CaptureMode),
     Delayed(u32),
+    /// A capture preset, by its place in the settings' list.
+    Preset(usize),
     Editor,
     /// The video editor: the editor's window for recordings.
     VideoEditor,
@@ -101,6 +103,8 @@ pub enum Entry {
     Marked(String, Item),
     /// The submenu of captures after a delay.
     Delays,
+    /// The submenu of the capture presets: each one's words (its name and shortcut), in order.
+    Presets(Vec<String>),
     Separator,
 }
 
@@ -111,8 +115,8 @@ pub const IMAGE_EDITOR_ITEM: &str = "Open Image Editor";
 pub const VIDEO_EDITOR_ITEM: &str = "Open Video Editor";
 
 /// The menu's entries, top to bottom: `shortcut` is a capture's shortcut as the menu shows it,
-/// `update` the update waiting.
-pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<&str>) -> Vec<Entry> {
+/// `presets` the capture presets' names and shortcuts, `update` the update waiting.
+pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, presets: &[(String, Option<String>)], update: Option<&str>) -> Vec<Entry> {
     let capture = |m: CaptureMode| Entry::Item(label(m.label(), shortcut(m)), Item::Capture(m));
     let mut e: Vec<Entry> = [
         CaptureMode::Region,
@@ -129,6 +133,9 @@ pub fn entries(shortcut: &dyn Fn(CaptureMode) -> Option<String>, update: Option<
     .map(capture)
     .collect();
     e.push(Entry::Delays);
+    if !presets.is_empty() {
+        e.push(Entry::Presets(presets.iter().map(|(name, key)| label(name, key.clone())).collect()));
+    }
     // The pictures' editor, at the end of the pictures.
     e.push(Entry::Item(IMAGE_EDITOR_ITEM.to_string(), Item::Editor));
     // Video, a section of its own, with its own editor.
@@ -250,7 +257,9 @@ impl Tray {
         self.stoppers.clear();
         self.production = None;
         let shortcut = |m: CaptureMode| keys.label(&settings.hotkeys, m);
-        for entry in entries(&shortcut, self.update.as_deref()) {
+        let presets: Vec<(String, Option<String>)> =
+            settings.presets.iter().enumerate().map(|(i, p)| (p.title(i + 1), keys.preset_label(p))).collect();
+        for entry in entries(&shortcut, &presets, self.update.as_deref()) {
             match entry {
                 Entry::Item(text, item) => {
                     let mi = MenuItem::new(&text, true, None);
@@ -288,6 +297,15 @@ impl Tray {
                         let _ = delayed.append(&mi);
                     }
                     let _ = menu.append(&delayed);
+                }
+                Entry::Presets(names) => {
+                    let presets = Submenu::new("Capture Presets", true);
+                    for (i, name) in names.iter().enumerate() {
+                        let mi = MenuItem::new(name, true, None);
+                        self.items.push((mi.id().clone(), Item::Preset(i)));
+                        let _ = presets.append(&mi);
+                    }
+                    let _ = menu.append(&presets);
                 }
                 Entry::Separator => {
                     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -454,13 +472,13 @@ mod tests {
 
     fn menu() -> Vec<Entry> {
         let shortcut = |m: CaptureMode| (m == CaptureMode::Video).then(|| "Ctrl+Alt+Shift+PrintScreen".to_string());
-        entries(&shortcut, None)
+        entries(&shortcut, &[], None)
     }
 
     fn words(e: &Entry) -> Option<&str> {
         match e {
             Entry::Item(t, _) | Entry::Marked(t, _) => Some(t.as_str()),
-            Entry::Delays | Entry::Separator => None,
+            Entry::Delays | Entry::Presets(_) | Entry::Separator => None,
         }
     }
 
@@ -496,8 +514,20 @@ mod tests {
 
     #[test]
     fn an_update_waiting_has_its_item_with_the_settings() {
-        let m = entries(&|_| None, Some("Install Update 9.9.9"));
+        let m = entries(&|_| None, &[], Some("Install Update 9.9.9"));
         let settings = m.iter().position(|e| words(e) == Some("Settings…")).unwrap();
         assert_eq!(m.get(settings + 1), Some(&Entry::Item("Install Update 9.9.9".to_string(), Item::InstallUpdate)));
+    }
+
+    #[test]
+    fn the_capture_presets_have_a_submenu_after_the_delays_when_there_are_any() {
+        assert!(!menu().iter().any(|e| matches!(e, Entry::Presets(_))), "none without presets");
+        let presets = [("Docs shot".to_string(), Some("Ctrl+Alt+D".to_string())), ("Wide".to_string(), None)];
+        let m = entries(&|_| None, &presets, None);
+        let delays = m.iter().position(|e| *e == Entry::Delays).unwrap();
+        let Some(Entry::Presets(names)) = m.get(delays + 1) else { panic!("{m:?}") };
+        assert_eq!(names.len(), 2);
+        assert!(names[0].starts_with("Docs shot") && names[0].contains("Ctrl+Alt+D"), "{names:?}");
+        assert_eq!(names[1], "Wide");
     }
 }

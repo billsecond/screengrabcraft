@@ -8,7 +8,8 @@ use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, vec2};
 use screengrabcraft_desktop::{launch, paths, service};
 use screengrabcraft_model::settings::KEYS;
 use screengrabcraft_model::settings::VideoOptions;
-use screengrabcraft_model::{CaptureMode, Hotkey, Hotkeys, ImageFormat, Theme};
+use screengrabcraft_model::settings::{FIXED_MAX, FIXED_MIN, PRESETS_MAX, SHAPES};
+use screengrabcraft_model::{CaptureMode, CapturePreset, Hotkey, Hotkeys, ImageFormat, PresetArea, Theme};
 use screengrabcraft_ui::icons::{self, Icon};
 use screengrabcraft_ui::theme::Tokens;
 use screengrabcraft_ui::widgets::{self, FooterButton};
@@ -21,6 +22,7 @@ pub enum Tab {
     #[default]
     Capture,
     After,
+    Presets,
     Video,
     Shortcuts,
     General,
@@ -126,6 +128,7 @@ fn contents(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match home.tab {
             Tab::Capture => capture_tab(svc, home, ui, close),
             Tab::After => after_tab(svc, ui),
+            Tab::Presets => presets_tab(svc, ui, close),
             Tab::Video => video_tab(svc, home, ui),
             Tab::Shortcuts => shortcuts_tab(svc, ui),
             Tab::General => general_tab(svc, home, ui),
@@ -153,6 +156,7 @@ fn nav(ui: &mut Ui, tab: &mut Tab) {
             for (page, label) in [
                 (Tab::Capture, "Capture"),
                 (Tab::After, "After a capture"),
+                (Tab::Presets, "Capture presets"),
                 (Tab::Video, "Recording"),
                 (Tab::Shortcuts, "Shortcuts"),
                 (Tab::General, "General"),
@@ -199,6 +203,14 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
     ui.heading("Capture");
     ui.add_space(8.0);
     let chosen = capture_buttons(ui, &mut home.delay, &|mode| svc.keys.label(&svc.settings.hotkeys, mode).unwrap_or_default());
+    if !svc.settings.presets.is_empty() {
+        ui.add_space(16.0);
+        if let Some(i) = preset_buttons(ui, &svc.settings.presets, &|p| svc.keys.preset_label(p)) {
+            // The window goes first, so it isn't in the picture.
+            *close = true;
+            svc.run_preset_soon(i);
+        }
+    }
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(6.0);
@@ -224,6 +236,7 @@ fn capture_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui, close: &mut bool
         } else if delay > 0 {
             svc.start(mode, delay);
         } else {
+            svc.preset = None;
             svc.after_countdown = Some((mode, Instant::now() + Duration::from_millis(300)));
         }
     }
@@ -427,7 +440,164 @@ fn scrolling_options(ui: &mut Ui, s: &mut screengrabcraft_model::Settings, can: 
     });
 }
 
+/// The capture presets as buttons, each with its shortcut (`key` says it, if it has one). The one
+/// pressed.
+fn preset_buttons(ui: &mut Ui, presets: &[CapturePreset], key: &dyn Fn(&CapturePreset) -> Option<String>) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new("Your presets").strong());
+    ui.label(RichText::new("Made on the Capture presets page.").size(12.0).color(t.muted));
+    ui.add_space(4.0);
+    let mut pressed = None;
+    ui.horizontal_wrapped(|ui| {
+        for (i, p) in presets.iter().enumerate() {
+            let words = match key(p) {
+                Some(k) => format!("{}  ({k})", p.title(i + 1)),
+                None => p.title(i + 1),
+            };
+            if widgets::button(ui, &words).on_hover_text(p.area.describe()).clicked() {
+                pressed = Some(i);
+            }
+        }
+    });
+    pressed
+}
+
+fn presets_tab(svc: &mut Service, ui: &mut Ui, close: &mut bool) {
+    let t = Tokens::get(ui.ctx());
+    ui.heading("Capture presets");
+    ui.label(
+        RichText::new(
+            "A capture of your own: what it takes, after how long, what happens to it, and a shortcut of its own. They're on the Capture page and in the tray menu too.",
+        )
+        .color(t.muted),
+    );
+    ui.add_space(10.0);
+    let mut presets = svc.settings.presets.clone();
+    let run = presets_editor(ui, &mut presets);
+    if presets != svc.settings.presets {
+        svc.settings.presets = presets;
+        svc.apply_settings();
+    }
+    ui.add_space(6.0);
+    let named: Vec<String> = svc.settings.presets.iter().enumerate().map(|(i, p)| p.title(i + 1)).collect();
+    for (a, b) in svc.settings.clashes() {
+        if named.contains(&a) || named.contains(&b) {
+            ui.label(RichText::new(format!("{a} and {b} have the same shortcut.")).color(t.danger));
+        }
+    }
+    if let Some(i) = run {
+        // The window goes first, so it isn't in the picture.
+        *close = true;
+        svc.run_preset_soon(i);
+    }
+}
+
+/// Each preset on a card of its own (its name, what it takes, the wait, what happens after, its
+/// shortcut, Capture and Remove), and a button that adds one. The preset whose Capture was pressed.
+fn presets_editor(ui: &mut Ui, presets: &mut Vec<CapturePreset>) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    let mut run = None;
+    let mut remove = None;
+    for (i, p) in presets.iter_mut().enumerate() {
+        egui::Frame::NONE
+            .fill(t.window)
+            .stroke(egui::Stroke::new(1.0, t.border))
+            .corner_radius(widgets::CONTROL_RADIUS)
+            .inner_margin(egui::Margin::same(12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut p.name)
+                            .id_salt(("preset-name", i))
+                            .desired_width(260.0)
+                            .hint_text(format!("Preset {}", i + 1)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if widgets::button(ui, "Remove").on_hover_text("Remove this preset").clicked() {
+                            remove = Some(i);
+                        }
+                        if widgets::primary_button(ui, "Capture").on_hover_text("Take this capture now").clicked() {
+                            run = Some(i);
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::Grid::new(("preset", i)).num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
+                    ui.label("Area");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("preset-area", i)).width(190.0).selected_text(p.area.label()).show_ui(ui, |ui| {
+                            for kind in PresetArea::KINDS {
+                                if ui.selectable_label(p.area.same_kind(kind), kind.label()).clicked() && !p.area.same_kind(kind) {
+                                    p.area = kind;
+                                }
+                            }
+                        });
+                        match &mut p.area {
+                            PresetArea::Shape { w, h } => {
+                                egui::ComboBox::from_id_salt(("preset-shape", i)).width(80.0).selected_text(format!("{w}:{h}")).show_ui(ui, |ui| {
+                                    for (sw, sh) in SHAPES {
+                                        if ui.selectable_label((*w, *h) == (sw, sh), format!("{sw}:{sh}")).clicked() {
+                                            (*w, *h) = (sw, sh);
+                                        }
+                                    }
+                                });
+                            }
+                            PresetArea::Fixed { w, h } => {
+                                ui.add(egui::DragValue::new(w).range(FIXED_MIN..=FIXED_MAX).suffix(" px"));
+                                ui.label("×");
+                                ui.add(egui::DragValue::new(h).range(FIXED_MIN..=FIXED_MAX).suffix(" px"));
+                            }
+                            _ => {}
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Wait first");
+                    ui.add(egui::DragValue::new(&mut p.delay_secs).range(0..=60).suffix(" s"));
+                    ui.end_row();
+                    ui.label("Then");
+                    ui.horizontal_wrapped(|ui| {
+                        ui.checkbox(&mut p.after.copy, "Copy it");
+                        ui.checkbox(&mut p.after.open_editor, "Open it in the Image Editor");
+                        ui.checkbox(&mut p.after.save, "Save it");
+                        if p.area.mode() == CaptureMode::Region || p.area.mode() == CaptureMode::Window {
+                            ui.checkbox(&mut p.after.show_bar, "Stop first, with the bar");
+                        }
+                    });
+                    ui.end_row();
+                    hotkey_row_in(ui, "Shortcut", ("preset-key", i), &mut p.hotkey, None);
+                });
+            });
+        ui.add_space(8.0);
+    }
+    if let Some(i) = remove
+        && i < presets.len()
+    {
+        presets.remove(i);
+    }
+    let full = presets.len() >= PRESETS_MAX;
+    let add = ui.add_enabled_ui(!full, |ui| widgets::button(ui, "Add a preset")).inner;
+    if add.on_disabled_hover_text(format!("{PRESETS_MAX} presets at most")).clicked() {
+        presets.push(CapturePreset { name: format!("Preset {}", presets.len() + 1), ..CapturePreset::default() });
+    }
+    if presets.is_empty() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("For example: a 1280 × 720 area copied straight to the clipboard, or a window saved after 3 seconds.")
+                .size(12.0)
+                .color(t.muted),
+        );
+    }
+    run
+}
+
 fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
+    hotkey_row_in(ui, label, label, key, default)
+}
+
+/// A shortcut's row of a grid: its label, on or off, the keys held with it and the key; `salt` keeps
+/// its list of keys apart from another row's with the same label.
+fn hotkey_row_in(ui: &mut Ui, label: &str, salt: impl std::hash::Hash + std::fmt::Debug, key: &mut Option<Hotkey>, default: Option<Hotkey>) -> bool {
     let mut changed = false;
     ui.label(label);
     ui.horizontal(|ui| {
@@ -441,7 +611,7 @@ fn hotkey_row(ui: &mut Ui, label: &str, key: &mut Option<Hotkey>, default: Optio
             changed |= ui.toggle_value(&mut k.alt, if cfg!(target_os = "macos") { "Option" } else { "Alt" }).changed();
             changed |= ui.toggle_value(&mut k.shift, "Shift").changed();
             changed |= ui.toggle_value(&mut k.logo, logo_name()).changed();
-            egui::ComboBox::from_id_salt(("key", label)).width(110.0).selected_text(k.key.clone()).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt(("key", salt)).width(110.0).selected_text(k.key.clone()).show_ui(ui, |ui| {
                 for name in KEYS {
                     if ui.selectable_label(k.key == *name, *name).clicked() {
                         k.key = (*name).to_string();
@@ -501,7 +671,7 @@ fn shortcuts_tab(svc: &mut Service, ui: &mut Ui) {
         svc.apply_settings();
     }
     ui.add_space(10.0);
-    for (a, b) in svc.settings.hotkeys.clashes() {
+    for (a, b) in svc.settings.clashes() {
         ui.label(RichText::new(format!("{a} and {b} have the same shortcut.")).color(t.danger));
     }
     for p in &svc.keys.problems {
@@ -727,7 +897,7 @@ fn video_tab(svc: &mut Service, home: &mut Home, ui: &mut Ui) {
 mod tests {
     use egui_kittest::Harness;
     use egui_kittest::kittest::Queryable as _;
-    use screengrabcraft_model::Theme;
+    use screengrabcraft_model::{AfterCapture, Theme};
 
     use super::*;
 
@@ -816,6 +986,84 @@ mod tests {
             h.run_steps(2);
             assert_eq!(h.state().1, Some((CaptureMode::Region, 5)));
         }
+    }
+
+    /// The presets' page: one is added, made a picture of a set size copied straight away, given
+    /// a wait, and captured; another is removed.
+    #[test]
+    fn a_preset_is_added_set_up_captured_and_removed() {
+        let mut h = Harness::builder().with_size(vec2(620.0, 760.0)).build_ui_state(
+            |ui, (presets, run): &mut (Vec<CapturePreset>, Option<usize>)| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Dark);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if let Some(i) = presets_editor(ui, presets) {
+                        *run = Some(i);
+                    }
+                });
+            },
+            (Vec::new(), None),
+        );
+        h.run_steps(2);
+        h.get_by_label_contains("For example");
+        h.get_by_label("Add a preset").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 1);
+        assert_eq!(h.state().0[0].name, "Preset 1");
+        // A picture of a set size, copied and nothing else.
+        h.get_by_value("Region").click();
+        h.run_steps(2);
+        h.get_by_label("Region of a set size").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0[0].area, PresetArea::Fixed { w: 1280, h: 720 });
+        for what in ["Open it in the Image Editor", "Save it"] {
+            h.get_by_label(what).click();
+            h.run_steps(1);
+        }
+        assert_eq!(h.state().0[0].after, AfterCapture { show_bar: false, open_editor: false, copy: true, save: false });
+        h.get_by_label("Add a preset").click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 2);
+        h.run_steps(3);
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/home-presets.png"));
+        }
+        // Capture the first; remove the second.
+        let captures = h.get_all_by_label("Capture").map(|n| n.rect()).collect::<Vec<_>>();
+        assert_eq!(captures.len(), 2);
+        h.get_all_by_label("Capture").next().unwrap().click();
+        h.run_steps(2);
+        assert_eq!(h.state().1, Some(0));
+        h.get_all_by_label("Remove").nth(1).unwrap().click();
+        h.run_steps(2);
+        assert_eq!(h.state().0.len(), 1);
+        assert_eq!(h.state().0[0].area, PresetArea::Fixed { w: 1280, h: 720 }, "the first is left");
+    }
+
+    #[test]
+    fn the_capture_page_shows_the_presets_with_their_shortcuts() {
+        let presets = vec![
+            CapturePreset { name: "Docs shot".into(), area: PresetArea::Fixed { w: 800, h: 600 }, ..CapturePreset::default() },
+            CapturePreset { name: " ".into(), area: PresetArea::Window, ..CapturePreset::default() },
+        ];
+        let mut h = Harness::builder().with_size(vec2(560.0, 200.0)).build_ui_state(
+            move |ui, pressed: &mut Option<usize>| {
+                screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let key = |p: &CapturePreset| (p.name == "Docs shot").then(|| "Ctrl+Alt+D".to_string());
+                    if let Some(i) = preset_buttons(ui, &presets, &key) {
+                        *pressed = Some(i);
+                    }
+                });
+            },
+            None,
+        );
+        h.run_steps(2);
+        h.get_by_label("Docs shot  (Ctrl+Alt+D)");
+        h.get_by_label("Preset 2").click();
+        h.run_steps(1);
+        assert_eq!(*h.state(), Some(1));
     }
 
     /// Scrolling by itself is turned off and on where the system can do it, and greyed out with

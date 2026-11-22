@@ -54,6 +54,7 @@ every capture, a delayed capture (3, 5 or 10 s), the editor and the captures fol
 an area the screen is frozen as it was when the key was pressed (open menus and tooltips included),
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click, and the area's size. Arrows nudge the area; Shift+arrows resize it.
+Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4:3.
 
 As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
@@ -62,6 +63,11 @@ settings. Turn the capture bar on to stop first, adjust the area, and pick Copy 
 or Save, for every capture; or use **Capture Region, Adjust First** (tray menu, or a shortcut of your own)
 for just the captures you want to fine-tune. An open editor is hidden while you capture, which you can turn
 off too (the video editor never is: it stays as you left it).
+
+**Capture presets** (Settings › Capture presets) are captures of your own making: a region, a region
+held to a shape (16:9, square…) or of a set size placed with a click, a window, the screen, all
+screens or a scrolling capture; a wait first; what happens after (copy, edit, save, the bar); and a
+shortcut of its own. They're on the Capture page and in the tray menu (Capture Presets).
 
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
 or Repeat, by their shortcuts or the recording's tray menu (Take a Screenshot). The recording goes

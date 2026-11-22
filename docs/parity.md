@@ -28,8 +28,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Parts of a window (a button, a pane) snapped to | Missing | |
 | Freehand-shaped area | Missing | |
 | Several areas in one capture | Missing | |
-| Fixed size or fixed place area | Part | the Recorder has fixed sizes for videos; still pictures don't |
-| Aspect ratio held while dragging (square, 16:9, 4:3) | Missing | |
+| Fixed size or fixed place area | Has | a capture preset of a set size, placed with a click; the Recorder's fixed sizes for videos |
+| Aspect ratio held while dragging (square, 16:9, 4:3) | Has | Shift, Ctrl, Ctrl+Shift while dragging (the overlay says so); a preset can hold any shape |
 | The program's own windows kept out of the picture | Has | the editor steps aside |
 | The mouse pointer in the picture | Part | drawn into the picture when Settings say so; not a separate object to move or delete later |
 | **Grab Text: the text in an area straight to the clipboard** | Has (0.1.54) | Windows' own text reader, on this computer; Windows only for now |
@@ -44,7 +44,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | HDR screens captured in their true colours | Missing | |
 | QR codes made or read | Missing | |
 | Pictures sent from a phone | Not planned | needs a network service |
-| Capture presets (an area type, effects and where it goes, under one shortcut) | Missing | one default for every capture (Settings, After a capture) |
+| Capture presets (an area type, effects and where it goes, under one shortcut) | Part | the area (any kind, a shape or a set size), a wait, what happens after and a shortcut of its own, on the Capture page and in the tray; no effects added at capture time, and one captures folder and format for all |
 | After a capture: copy, open in the editor, save, or ask with a bar | Has | |
 | Every shortcut changed or turned off | Has | |
 
@@ -276,7 +276,8 @@ By how much someone using it every day would miss each one. Built ones move to a
    (0.1.54; Windows).
 2. Zoom and pan in the video editor: zoom into part of the screen and back (0.1.55).
 3. Cut Out: take a strip out of a picture and close the gap (0.1.56).
-4. Scrolling capture that scrolls by itself (Windows).
+4. Scrolling capture that scrolls by itself (Windows; #59).
+5. Capture presets; areas of a set size; shapes held while dragging.
 
 **Still to build, in this order**
 
@@ -292,21 +293,20 @@ By how much someone using it every day would miss each one. Built ones move to a
 10. Hold a frame.
 11. Keys pressed shown in the video.
 12. Any font on the computer.
-13. Capture presets; fixed-size picture areas; aspect ratios held while dragging.
-14. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
+13. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
     curl, reflection, watermark, capture details.
-15. Rotate, group and align annotations; select all of one kind.
-16. Magic wand, eraser, ellipse and freehand selections.
-17. Camera background removed, or a colour removed.
-18. Transitions between clips; keyframe animation.
-19. Drawing on the screen while recording.
-20. Volume along a clip; music lowered under the voice; levels evened out.
-21. Tags, favourites, and captures sorted by program.
-22. Templates; several pictures combined into one.
-23. A picture per click made into a how-to guide.
-24. Groups, pushing later clips along, locked and solo tracks, clip colours.
-25. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-26. Print; batch changes; captures on a timer or at a set time.
-27. Cutting words from the transcript; filler words taken out.
-28. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
+14. Rotate, group and align annotations; select all of one kind.
+15. Magic wand, eraser, ellipse and freehand selections.
+16. Camera background removed, or a colour removed.
+17. Transitions between clips; keyframe animation.
+18. Drawing on the screen while recording.
+19. Volume along a clip; music lowered under the voice; levels evened out.
+20. Tags, favourites, and captures sorted by program.
+21. Templates; several pictures combined into one.
+22. A picture per click made into a how-to guide.
+23. Groups, pushing later clips along, locked and solo tracks, clip colours.
+24. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
+25. Print; batch changes; captures on a timer or at a set time.
+26. Cutting words from the transcript; filler words taken out.
+27. The rest: device frames, pinning onto surfaces, motion paths, blend modes, playing
     backwards, lining up by sound, see-through video, HDR, QR codes, measuring, spell check.

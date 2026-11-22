@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use egui::{ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_capture::{Frozen, Monitor};
 use screengrabcraft_desktop::{clipboard, cloak, graphics, instance, launch, paths, store};
-use screengrabcraft_model::{AfterCapture, CaptureMode, IRect, ImageFormat, Raster, RecordArea, RecorderOptions, Settings};
+use screengrabcraft_model::{
+    AfterCapture, CaptureMode, CapturePreset, IRect, ImageFormat, PresetArea, Raster, RecordArea, RecorderOptions, Settings,
+};
 use screengrabcraft_ui::overlay::{Action, Outcome, Overlay, OverlayMonitor, OverlayWindow, Purpose};
 
 use crate::hotkeys::{Registered, Target};
@@ -108,6 +110,9 @@ pub struct Service {
     /// Recorder (and the editor, if it steps aside) has left the screen. True once the editor has
     /// been asked aside.
     production_at: Option<(Instant, bool)>,
+    /// The capture preset the capture going on was started from: its area, and what happens to
+    /// the picture.
+    pub preset: Option<CapturePreset>,
     pub overlay: Option<OverlayRun>,
     pub countdown: Option<Countdown>,
     /// A countdown just ended: the capture starts once its window has gone.
@@ -160,7 +165,7 @@ impl Service {
     pub fn new(ctx: egui::Context, guard: instance::Guard, settings: Settings) -> Service {
         let (tx, rx) = channel();
         let mut keys = Registered::new();
-        keys.apply(&settings.hotkeys);
+        keys.apply(&settings.hotkeys, &settings.presets);
         let tray = Tray::new(&settings, &keys);
         // The tray, the menu and the shortcuts are answered here, and wake the window's loop.
         let (t, c) = (tx.clone(), ctx.clone());
@@ -204,6 +209,7 @@ impl Service {
             home: None,
             recorder: None,
             production_at: None,
+            preset: None,
             overlay: None,
             countdown: None,
             after_countdown: None,
@@ -249,7 +255,7 @@ impl Service {
     pub fn apply_settings(&mut self) {
         self.settings = self.settings.clone().clamped();
         store::save_settings(&self.settings);
-        self.keys.apply(&self.settings.hotkeys);
+        self.keys.apply(&self.settings.hotkeys, &self.settings.presets);
         if let Some(t) = &mut self.tray {
             t.rebuild(&self.settings, &self.keys);
         }
@@ -415,6 +421,7 @@ impl Service {
                 match item {
                     Some(Item::Capture(m)) => self.start(m, 0),
                     Some(Item::Delayed(s)) => self.start(CaptureMode::Region, s),
+                    Some(Item::Preset(i)) => self.run_preset(i),
                     Some(Item::StopRecording) => self.stop_recording(false),
                     Some(Item::PauseRecording) => self.toggle_pause(),
                     Some(Item::RestartRecording) => self.restart_recording(),
@@ -451,6 +458,7 @@ impl Service {
                     self.stop_recording(false)
                 }
                 Some(Target::Capture(m)) => self.start(m, 0),
+                Some(Target::Preset(i)) => self.run_preset(i),
                 Some(Target::Editor) => {
                     let _ = launch::open_editor(&[]);
                 }
@@ -504,6 +512,29 @@ impl Service {
 
     /// Starts a capture of `mode`, after `delay` seconds.
     pub fn start(&mut self, mode: CaptureMode, delay: u32) {
+        self.start_with(mode, delay, None);
+    }
+
+    /// Starts the capture preset at `i` in the settings' list (its delay counted down first).
+    pub fn run_preset(&mut self, i: usize) {
+        let Some(p) = self.settings.presets.get(i).cloned() else { return };
+        log::info!("capture preset {} ({})", i + 1, p.area.describe());
+        self.start_with(p.area.mode(), p.delay_secs, Some(p));
+    }
+
+    /// The same from the service's own window, which goes first so it isn't in the picture.
+    pub fn run_preset_soon(&mut self, i: usize) {
+        let Some(p) = self.settings.presets.get(i).cloned() else { return };
+        if p.delay_secs > 0 {
+            self.start_with(p.area.mode(), p.delay_secs, Some(p));
+        } else {
+            self.after_countdown = Some((p.area.mode(), Instant::now() + Duration::from_millis(300)));
+            self.preset = Some(p);
+        }
+    }
+
+    /// Starts a capture of `mode` after `delay` seconds, from `preset` if it's one.
+    fn start_with(&mut self, mode: CaptureMode, delay: u32, preset: Option<CapturePreset>) {
         if self.overlay.is_some() || self.freezing.is_some() || self.countdown.is_some() || self.after_countdown.is_some() || self.chosen.is_some() {
             return;
         }
@@ -518,6 +549,7 @@ impl Service {
             );
             return;
         }
+        self.preset = preset;
         // Video Production starts at its Recorder, where the area and the inputs are chosen.
         if mode == CaptureMode::Production {
             self.open_recorder();
@@ -537,7 +569,10 @@ impl Service {
         if mode == CaptureMode::Repeat {
             match self.settings.last_region {
                 Some(r) => self.repeat(r),
-                None => self.start(CaptureMode::Region, delay),
+                None => {
+                    let preset = self.preset.take();
+                    self.start_with(CaptureMode::Region, delay, preset);
+                }
             }
             return;
         }
@@ -641,13 +676,18 @@ impl Service {
                 }
             }
             _ => {
+                // A preset's area of a set size.
+                let fixed = match self.preset.as_ref().map(|p| p.area) {
+                    Some(PresetArea::Fixed { w, h }) => Some((w, h)),
+                    _ => None,
+                };
                 let purpose = match mode {
                     CaptureMode::Window => Purpose::Window,
                     CaptureMode::Gif => Purpose::Gif,
                     CaptureMode::Scrolling => Purpose::Scrolling,
                     CaptureMode::Video => Purpose::Video,
                     CaptureMode::Production => production_purpose(&self.settings.recorder),
-                    _ => Purpose::Picture,
+                    _ => fixed.map_or(Purpose::Picture, |(w, h)| Purpose::PictureFixed(w, h)),
                 };
                 let monitors: Vec<Monitor> = frozen.monitors.iter().map(|(m, _)| m.clone()).collect();
                 let pointer = frozen.pointer;
@@ -658,7 +698,7 @@ impl Service {
                     .map(|w| OverlayWindow { rect: w.rect, title: if w.title.is_empty() { w.app } else { w.title } })
                     .collect();
                 let mut overlay = Overlay::new(om, ow, purpose);
-                let after = &self.settings.after_capture;
+                let after = &self.after();
                 // Grab Text reads the area at once: there is nothing to choose on a bar.
                 overlay.preview = after.show_bar && mode != CaptureMode::Text;
                 if mode == CaptureMode::Adjust {
@@ -671,6 +711,10 @@ impl Service {
                 overlay.enter = enter_button(after);
                 overlay.magnifier = self.settings.magnifier;
                 overlay.crosshair = self.settings.crosshair;
+                // A preset's shape: every area dragged out is held to it.
+                if let Some(PresetArea::Shape { w, h }) = self.preset.as_ref().map(|p| p.area) {
+                    overlay.shape = Some((w, h));
+                }
                 let opening = graphics::Opening::start();
                 self.overlay = Some(OverlayRun { overlay, mode, monitors, pointer, frames: 0, seen: false, opening });
             }
@@ -698,6 +742,7 @@ impl Service {
         let Some(mut run) = self.overlay.take() else { return };
         run.opening.opened();
         let Outcome::Chosen { monitor, area, desktop, action, title } = run.overlay.outcome().clone() else {
+            self.preset = None;
             // Choosing the area for Video Production was cancelled: back to the Recorder, as it was.
             if run.mode == CaptureMode::Production {
                 self.open_recorder();
@@ -765,8 +810,15 @@ impl Service {
 
     /// Keeps a capture: saved, copied and/or opened in the editor, as the action and the
     /// settings say. The file work is done on a worker thread.
+    /// What happens to the capture going on: as its preset says, else the default.
+    fn after(&self) -> AfterCapture {
+        self.preset.as_ref().map_or(self.settings.after_capture, |p| p.after)
+    }
+
     pub fn finish(&mut self, pic: Raster, source: &str, action: Action) {
-        let (save, copy, edit) = what_to_keep(action, &self.settings.after_capture);
+        let after = self.after();
+        self.preset = None;
+        let (save, copy, edit) = what_to_keep(action, &after);
         // While recording, nothing comes up over the screen being recorded: the capture is saved
         // (and copied, if it's to be), and opened in the editor once the recording is over.
         let (save, edit, held) = held_while_recording(save, edit, self.recording.is_some() || self.restarting.is_some());
@@ -1025,7 +1077,9 @@ impl Service {
             && Instant::now() >= at
         {
             self.after_countdown = None;
-            self.start(mode, 0);
+            // A preset's capture goes on as the preset says.
+            let preset = self.preset.take();
+            self.start_with(mode, 0, preset);
         }
         if let Some((at, aside)) = self.production_at
             && Instant::now() >= at
