@@ -186,9 +186,86 @@ impl VideoView {
         }
     }
 
-    /// The right button's clip items: its colour, and its group.
+    /// What a sound can be lined up with: every other sound track with clips, and every item heard
+    /// (not `moving` itself), by name, with how it's said in a command.
+    pub(super) fn sounds_to_line_up_with(&self, moving: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
+        let tl = &self.session.timeline;
+        let mut out: Vec<(String, serde_json::Value)> = tl
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(i, t)| !t.kind.is_video() && !t.clips.is_empty() && moving.get("track").and_then(serde_json::Value::as_u64) != Some(*i as u64))
+            .map(|(i, t)| {
+                let name =
+                    t.name.clone().or_else(|| self.rec.stream(t.stream).map(|s| s.kind.label().to_string())).unwrap_or_else(|| "Track".to_string());
+                (name, json!({"track": i}))
+            })
+            .collect();
+        for l in &tl.layers {
+            for it in l.items.iter().filter(|it| it.plays_sound(&tl.media)) {
+                let me = moving.get("layer").and_then(serde_json::Value::as_u64) == Some(u64::from(l.id))
+                    && moving.get("item").and_then(serde_json::Value::as_u64) == Some(u64::from(it.id));
+                if !me {
+                    out.push((format!("{} ({})", it.label(&tl.media), l.name), json!({"layer": l.id, "item": it.id})));
+                }
+            }
+        }
+        out.truncate(40);
+        out
+    }
+
+    /// Line Up by Sound: a menu of what `moving` (a clip or an item, as said in a command) can be
+    /// lined up with; it then moves so its sound is in step with that one's.
+    pub(super) fn line_up_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, moving: serde_json::Value) {
+        let others = self.sounds_to_line_up_with(&moving);
+        ui.add_enabled_ui(!others.is_empty(), |ui| {
+            ui.menu_button("Line Up by Sound With", |ui| {
+                ui.label(
+                    egui::RichText::new("It moves so the two sound in step (the same voice recorded twice)").size(11.5).color(Tokens::get(ctx).muted),
+                );
+                for (name, with) in others {
+                    if ui.button(name).clicked() {
+                        let mut p = moving.clone();
+                        if let Some(o) = p.as_object_mut() {
+                            o.insert("with".into(), with);
+                        }
+                        match self.session.execute("video.lineUp", &p) {
+                            Ok(v) => {
+                                let us = v.get("moved").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                                let words = match us {
+                                    0 => "Lined up: it was in step already".to_string(),
+                                    u if u > 0 => format!("Lined up: moved {:.2} s later", u as f64 / 1e6),
+                                    u => format!("Lined up: moved {:.2} s earlier", -u as f64 / 1e6),
+                                };
+                                ed.toast(ctx, words);
+                            }
+                            Err(e) => ed.error(ctx, e.to_string()),
+                        }
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_disabled_hover_text("There's no other sound to line it up with");
+        });
+    }
+
+    /// The right button's clip items: joined with the next, lined up by sound, its colour, and its
+    /// group.
     pub(super) fn clip_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, ti: usize, ci: usize) {
         let Some(clip) = self.session.timeline.tracks.get(ti).and_then(|t| t.clips.get(ci)).copied() else { return };
+        if ui
+            .add_enabled(self.session.timeline.joinable(ti, ci), egui::Button::new("Join with the Next Clip"))
+            .on_hover_text("The two made one clip again: the next goes on from where this one stops")
+            .on_disabled_hover_text("Only a clip and the next, going on from where it stops (split apart), are joined")
+            .clicked()
+        {
+            self.run(ed, ctx, "video.join", json!({"track": ti, "clip": ci}));
+            ui.close();
+        }
+        if self.session.timeline.tracks.get(ti).is_some_and(|t| !t.kind.is_video()) {
+            self.line_up_menu(ed, ui, ctx, json!({"track": ti, "clip": ci}));
+        }
         if !clip.hold {
             let words = if clip.reverse { "Play Forwards Again" } else { "Play Backwards" };
             if ui

@@ -546,6 +546,9 @@ impl VideoView {
         let measured = rec.clone();
         session.set_measure(Box::new(move |tl, i| compose::loudness(&measured, tl, i)));
         let library = Arc::new(screengrabcraft_media::media_store::MediaLibrary::default());
+        // What a track or an item plays on its own, for lining sounds up.
+        let (heard, media) = (rec.clone(), library.clone());
+        session.set_listen(Box::new(move |tl, part, from, n| compose::heard_alone(&heard, tl, media.as_ref(), part, from, n)));
         let mut composer = Composer::new(rec.clone(), &session.timeline, w, h);
         composer.set_media(library.clone());
         VideoView {
@@ -2947,6 +2950,16 @@ impl VideoView {
                     self.split_at(ed, ctx, at, None, now);
                     ui.close();
                 }
+                let pieces = (0..track.clips.len()).any(|k| self.session.timeline.joinable(i, k));
+                if ui
+                    .add_enabled(pieces && !track.locked, egui::Button::new("Join This Track's Pieces"))
+                    .on_hover_text("Clips split apart that still go on from each other made one again")
+                    .on_disabled_hover_text("No two clips of it go on from each other")
+                    .clicked()
+                {
+                    self.run(ed, ctx, "video.joinAll", json!({"track": i}));
+                    ui.close();
+                }
                 ui.separator();
                 if let Some((_, c)) = self.selected.filter(|(tr, _)| *tr == i)
                     && let Some(clip) = track.clips.get(c).copied()
@@ -3102,6 +3115,9 @@ impl VideoView {
                         self.separate_sound(ed, ctx, id, item);
                         ui.close();
                     }
+                    if it.plays_sound(&self.session.timeline.media) {
+                        self.line_up_menu(ed, ui, ctx, json!({"layer": id, "item": item}));
+                    }
                     ui.separator();
                 }
                 if layer.kind == screengrabcraft_media::layers::LayerKind::Sound
@@ -3168,6 +3184,17 @@ impl VideoView {
                     .clicked()
                 {
                     self.remove_stretch(ed, ctx, None);
+                    ui.close();
+                }
+                let tl = &self.session.timeline;
+                let pieces = tl.tracks.iter().enumerate().any(|(i, t)| !t.locked && (0..t.clips.len()).any(|k| tl.joinable(i, k)));
+                if ui
+                    .add_enabled(pieces, egui::Button::new("Join the Pieces Back Together"))
+                    .on_hover_text("On every track, clips split apart that still go on from each other made one again")
+                    .on_disabled_hover_text("No two clips of a track go on from each other")
+                    .clicked()
+                {
+                    self.run(ed, ctx, "video.joinAll", json!({}));
                     ui.close();
                 }
                 self.speed_menu(ed, ui, ctx);

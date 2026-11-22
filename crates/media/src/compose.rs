@@ -841,6 +841,57 @@ pub fn mix_faster(
     crate::stretch::stretched(&read, rate, first, count).into_iter().flatten().collect()
 }
 
+/// What one part of the edits plays on its own, wherever it's placed now and whatever its volume
+/// (or muting): `count` mono samples at [`crate::align::RATE`] from timeline time `from` (µs). For
+/// lining sounds up.
+pub fn heard_alone(
+    rec: &Recording,
+    timeline: &Timeline,
+    media: &dyn crate::layer_draw::MediaStore,
+    part: crate::align::Part,
+    from: u64,
+    count: usize,
+) -> Vec<f32> {
+    use crate::align::Part;
+    let mut t = timeline.clone();
+    t.ducking.on = false;
+    t.pointer.click_sound = false;
+    for (k, tr) in t.tracks.iter_mut().enumerate() {
+        tr.solo = false;
+        if part == Part::Track(k) {
+            (tr.muted, tr.volume) = (false, 1.0);
+        } else {
+            tr.clips.clear();
+        }
+    }
+    match part {
+        Part::Track(_) => t.layers.clear(),
+        Part::Item { layer, item } => {
+            t.layers.retain(|l| l.id == layer);
+            for l in &mut t.layers {
+                (l.hidden, l.volume, l.mono) = (false, 1.0, false);
+                l.items.retain(|i| i.id == item);
+            }
+        }
+    }
+    // At 48 kHz, a second at a time, then every six samples (both sides) made one.
+    let k = (RATE / crate::align::RATE) as usize;
+    let mut out = Vec::with_capacity(count);
+    let first = to_samples(from);
+    while out.len() < count {
+        let n = (count - out.len()).min(crate::align::RATE as usize);
+        let at = first.saturating_add((out.len() * k) as u64);
+        let mixed = mix_with(rec, &t, media, at, n * k);
+        out.extend(mixed.chunks(2 * k).map(|c| c.iter().sum::<f32>() / c.len().max(1) as f32));
+        out.resize(out.len().min(count), 0.0);
+        if mixed.is_empty() {
+            break;
+        }
+    }
+    out.resize(count, 0.0);
+    out
+}
+
 /// The track whose voice lowers the rest, when the rest is lowered under the voice: the
 /// microphone, if it's heard.
 pub fn voice_track(timeline: &Timeline) -> Option<usize> {
@@ -1490,6 +1541,27 @@ mod tests {
         assert!((s[0] - 1000.0 / 32768.0).abs() < 1e-6 && s[0] == s[1]);
         assert!(tl.set_mono(0, true).is_err());
         assert!(tl.clone().checked(&r).tracks[2].mono, "kept");
+    }
+
+    #[test]
+    fn a_part_is_heard_alone_wherever_it_is_and_however_loud() {
+        use crate::align::Part;
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        // Muted and quiet, the microphone is still heard alone, as recorded.
+        tl.set_muted(1, true).unwrap();
+        tl.set_volume(1, 0.1).unwrap();
+        let mic = heard_alone(&r, &tl, &crate::layer_draw::NoMedia, Part::Track(1), 500_000, 4_000);
+        assert_eq!(mic.len(), 4_000);
+        assert!(mic.iter().all(|v| (v - 1000.0 / 32768.0).abs() < 1e-5), "{:?}", &mic[..4]);
+        // Moved along by a second, it's heard from then.
+        tl.lift(0, 1_000_000, Some(1)).unwrap();
+        let moved = heard_alone(&r, &tl, &crate::layer_draw::NoMedia, Part::Track(1), 500_000, 8_000);
+        assert!(moved[..3_900].iter().all(|v| *v == 0.0) && moved[4_100..].iter().all(|v| *v > 0.02));
+        // The screen has no sound; an item that isn't there, none either.
+        assert!(heard_alone(&r, &tl, &crate::layer_draw::NoMedia, Part::Track(0), 0, 100).iter().all(|v| *v == 0.0));
+        assert!(heard_alone(&r, &tl, &crate::layer_draw::NoMedia, Part::Item { layer: 9, item: 9 }, 0, 100).iter().all(|v| *v == 0.0));
+        assert!(heard_alone(&r, &tl, &crate::layer_draw::NoMedia, Part::Track(1), u64::MAX, 3).len() == 3);
     }
 
     #[test]

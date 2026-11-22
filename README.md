@@ -155,6 +155,13 @@ the picture editor to the video editor. Its timeline has a row for each track:
   Mix section of the panel **evens out the levels** (each sound track's volume set so they're about
   as loud, measured on this computer) and **lowers the rest under the voice**: the computer's
   sound, music and media go down while the microphone is heard, and back up after.
+- **Join pieces back together**: a clip's right button joins it with the next one when that goes
+  on from where it stops (pieces of a split, not moved apart); a track's right button joins all
+  its pieces, and the ruler's every track's.
+- **Line up by sound**: a sound clip's or a sound item's right button (or the item's panel) has
+  Line Up by Sound With, listing the other sounds: it moves so the two sound in step, for the same
+  voice recorded twice (by the computer and by another recorder). They're compared on this
+  computer, at every shift within 5 seconds.
 - **A video's sound apart, and mono**: a video put on a layer has Separate the Sound in its panel
   (or its right button): its sound goes onto a sound layer of its own at the same moment and the
   video goes silent, so each can be moved, trimmed or deleted on its own. **Mix to Mono** (a sound
