@@ -292,7 +292,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 17. J, K and L playback keys; a clip played backwards, its sound too (#97).
 18. Subtitle files brought in as captions; a watermark on the video (#102).
 19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop (#106).
-20. Masks and blend modes for layer items; ready-made colour looks for a clip.
+20. Masks and blend modes for layer items; ready-made colour looks for a clip (#109).
 
 **Still to build, in this order**
 
