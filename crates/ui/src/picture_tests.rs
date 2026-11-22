@@ -137,3 +137,81 @@ fn a_theme_of_your_own_is_made_from_the_current_colours() {
     click(&mut h, "Cancel");
     assert!(h.state().theme_draft.is_none());
 }
+
+/// The editor on a plain picture, with the Effects pane given most of the height.
+fn effects_editor() -> Harness<'static, Editor> {
+    let mut ed = editor();
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::rgb(200, 40, 40)).unwrap()));
+    ed.settings.properties_share = Some(0.2);
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1080.0));
+    h.run_steps(4);
+    h
+}
+
+/// The ready-made presets are at the top of the Effects pane, each applied with one click as one
+/// undo step; an effect's settings are kept as a preset of your own, applied and deleted.
+#[test]
+fn effect_presets_apply_with_one_click_and_are_kept_by_name() {
+    let mut h = effects_editor();
+    click(&mut h, crate::effects::PRESETS);
+    h.run_steps(10);
+    shot(&mut h, "effect-presets");
+    click(&mut h, "Photo Frame");
+    let ed = h.state();
+    assert!(ed.session.doc.width() > 400 + 28 && ed.session.doc.height() > 300 + 28, "a border, then a shadow");
+    let mid = ed.session.doc.width() / 2;
+    assert!((0..60).any(|y| ed.session.doc.base.pixel(mid, y) == Some(Color::WHITE)), "the white frame");
+    assert_eq!(ed.session.undo_label(), Some("Effect Preset"));
+    assert!(h.state_mut().session.undo());
+    assert_eq!(h.state().session.doc.width(), 400, "one step");
+    // A border of your own, kept and applied.
+    click(&mut h, "Border");
+    h.run_steps(10);
+    click_first(&mut h, crate::effects::KEEP_PRESET);
+    click(&mut h, crate::effects::PRESET_NAME);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Thick red".into()));
+    h.run_steps(2);
+    click(&mut h, "Keep");
+    let kept = h.state().settings.effect_presets.first().cloned().unwrap();
+    assert_eq!((kept.name.as_str(), kept.steps.first().map(|s| s.effect.as_str())), ("Thick red", Some("effect.border")));
+    shot(&mut h, "effect-preset-kept");
+    click(&mut h, "Thick red");
+    assert!(h.state().session.doc.width() > 400);
+    assert_eq!(h.state().session.undo_label(), Some("Effect Preset"));
+    // A ready-made name isn't taken.
+    click_first(&mut h, crate::effects::KEEP_PRESET);
+    click(&mut h, crate::effects::PRESET_NAME);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.event(egui::Event::Text("Old Photo".into()));
+    h.run_steps(2);
+    click(&mut h, "Keep");
+    assert_eq!(h.state().settings.effect_presets.len(), 1);
+    click(&mut h, "Cancel");
+    // A right-click deletes one of your own.
+    h.get_by_label("Thick red").click_secondary();
+    h.run_steps(3);
+    click(&mut h, "Delete Thick red");
+    assert!(h.state().settings.effect_presets.is_empty());
+}
+
+/// Image › Rotate by an Angle… turns the picture by any angle, the corners see-through, the
+/// annotations with it.
+#[test]
+fn the_picture_rotates_by_any_angle() {
+    let mut ed = square_picture();
+    ed.session.doc.add(Shape::Rect { rect: Rect::new(160.0, 110.0, 80.0, 80.0), radius: 0.0 }, Kind::Rect.default_style()).unwrap();
+    let mut h = ready_tall(ed, Tool::Select);
+    click(&mut h, "Image");
+    click(&mut h, "Rotate by an Angle…");
+    h.get_by_label("Angle");
+    shot(&mut h, "rotate-any");
+    click(&mut h, "Apply");
+    let ed = h.state();
+    assert!(ed.session.doc.width() > 400 && ed.session.doc.height() > 300, "grown to hold it");
+    assert_eq!(ed.session.doc.base.pixel(0, 0).map(|c| c.a), Some(0), "see-through corners");
+    assert!(ed.session.doc.objects.first().is_some_and(|o| (o.rotation - 15.0).abs() < 1e-3), "the box turned with it");
+    assert!(ed.dialog.is_none());
+    h.run_steps(4);
+    shot(&mut h, "rotated");
+}

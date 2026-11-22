@@ -7,6 +7,8 @@
 use egui::Ui;
 use serde_json::{Value, json};
 
+use screengrabcraft_model::presets::{self, EffectPreset, EffectStep};
+
 use crate::dialogs::{self, Dialog};
 use crate::editor::Editor;
 use crate::theme::Tokens;
@@ -24,6 +26,10 @@ enum Section {
 #[derive(Clone, Debug)]
 pub struct Effects {
     sections: Vec<Section>,
+    /// The effect whose settings are being kept as a preset (its title), and the name typed.
+    keeping: Option<(&'static str, String)>,
+    /// Why the last preset couldn't be kept.
+    problem: Option<String>,
 }
 
 impl Default for Effects {
@@ -50,6 +56,8 @@ impl Default for Effects {
                 e(Dialog::watermark()),
                 e(Dialog::details()),
             ],
+            keeping: None,
+            problem: None,
         }
     }
 }
@@ -68,6 +76,10 @@ impl Effects {
 
 /// What the colour section is called.
 pub const COLOURS: &str = "Colours";
+/// What the presets' section, the button keeping an effect's settings and the name box are called.
+pub const PRESETS: &str = "Presets";
+pub const KEEP_PRESET: &str = "Keep as Preset…";
+pub const PRESET_NAME: &str = "Preset name";
 
 pub fn pane(ed: &mut Editor, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
@@ -83,6 +95,8 @@ pub fn pane(ed: &mut Editor, ui: &mut Ui) {
     ui.add_space(6.0);
     let mut apply: Option<(&'static str, Value)> = None;
     let mut choose = false;
+    presets(ed, ui);
+    let mut keep: Option<(String, &'static str, Value)> = None;
     for section in &mut ed.effects.sections {
         match section {
             Section::Effect(d) => {
@@ -91,10 +105,14 @@ pub fn pane(ed: &mut Editor, ui: &mut Ui) {
                     ui.add_space(2.0);
                     let cmd = dialogs::body(d, ui);
                     ui.add_space(6.0);
-                    if let Some(cmd) = cmd
-                        && apply_button(ui, &t, &format!("Apply {title}")).clicked()
-                    {
-                        apply = Some(cmd);
+                    if let Some(cmd) = cmd {
+                        if apply_button(ui, &t, &format!("Apply {title}")).clicked() {
+                            apply = Some(cmd.clone());
+                        }
+                        ui.add_space(4.0);
+                        if let Some(name) = keep_row(ui, &t, &mut ed.effects.keeping, &mut ed.effects.problem, title) {
+                            keep = Some((name, cmd.0, cmd.1));
+                        }
                     }
                     ui.add_space(4.0);
                 });
@@ -124,8 +142,111 @@ pub fn pane(ed: &mut Editor, ui: &mut Ui) {
     if choose {
         ed.choose_watermark();
     }
+    if let Some((name, id, params)) = keep {
+        match ed.settings.keep_preset(&name, vec![EffectStep { effect: id.to_string(), params }]) {
+            Ok(_) => {
+                ed.effects.keeping = None;
+                ed.effects.problem = None;
+                ed.services.save_settings(&ed.settings);
+            }
+            Err(why) => ed.effects.problem = Some(why),
+        }
+    }
     if let Some((id, params)) = apply {
         ed.apply_effect(&ctx, id, params);
+    }
+}
+
+/// Under an effect's Apply: Keep as Preset…, or, once clicked, the name to keep it under with
+/// Keep and Cancel. The name, when Keep is clicked.
+fn keep_row(
+    ui: &mut Ui,
+    t: &Tokens,
+    keeping: &mut Option<(&'static str, String)>,
+    problem: &mut Option<String>,
+    title: &'static str,
+) -> Option<String> {
+    let mut kept = None;
+    match keeping {
+        Some((which, name)) if *which == title => {
+            let field = egui::TextEdit::singleline(name).hint_text(PRESET_NAME).char_limit(presets::MAX_PRESET_NAME).desired_width(f32::INFINITY);
+            ui.add(field).widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, PRESET_NAME));
+            if let Some(p) = problem.as_ref() {
+                ui.label(egui::RichText::new(p.as_str()).size(12.0).color(t.danger));
+            }
+            let mut cancel = false;
+            ui.horizontal(|ui| {
+                if ui.button("Keep").on_hover_text("Keep these settings under this name, with the presets").clicked() {
+                    kept = Some(name.clone());
+                }
+                cancel = ui.button("Cancel").clicked();
+            });
+            if cancel {
+                *keeping = None;
+                *problem = None;
+            }
+        }
+        _ => {
+            if ui.small_button(KEEP_PRESET).on_hover_text("Keep these settings under a name, to apply with one click").clicked() {
+                *keeping = Some((title, title.to_string()));
+                *problem = None;
+            }
+        }
+    }
+    kept
+}
+
+/// What a preset does, for its tooltip: its effects' names, in order.
+fn describe(p: &EffectPreset) -> String {
+    let names: Vec<&str> = p.steps.iter().map(|s| screengrabcraft_engine::registry::find(&s.effect).map_or(s.effect.as_str(), |c| c.label)).collect();
+    names.join(", then ")
+}
+
+/// The presets: the ready-made ones, then the owner's own (a right-click deletes one), each
+/// applied with a click.
+fn presets(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    let own = ed.settings.effect_presets.clone();
+    let mut apply = None;
+    let mut forget = None;
+    egui::CollapsingHeader::new(egui::RichText::new(PRESETS).strong()).id_salt(("effect", PRESETS)).show(ui, |ui| {
+        ui.add_space(2.0);
+        ui.horizontal_wrapped(|ui| {
+            for p in presets::ready_made() {
+                if ui.button(p.name.as_str()).on_hover_text(describe(&p)).clicked() {
+                    apply = Some(p);
+                }
+            }
+        });
+        if own.is_empty() {
+            ui.label(egui::RichText::new("Your own: open an effect below, set it, then Keep as Preset.").size(12.0).color(t.muted));
+        } else {
+            ui.add_space(2.0);
+            ui.label(egui::RichText::new("Your own").size(12.0).color(t.muted));
+            ui.horizontal_wrapped(|ui| {
+                for p in &own {
+                    let resp = ui.button(p.name.as_str()).on_hover_text(format!("{} (right-click to delete)", describe(p)));
+                    if resp.clicked() {
+                        apply = Some(p.clone());
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button(format!("Delete {}", p.name)).clicked() {
+                            forget = Some(p.name.clone());
+                            ui.close();
+                        }
+                    });
+                }
+            });
+        }
+        ui.add_space(4.0);
+    });
+    if let Some(p) = apply {
+        ed.apply_preset(&ctx, &p);
+    }
+    if let Some(name) = forget {
+        ed.settings.forget_preset(&name);
+        ed.services.save_settings(&ed.settings);
     }
 }
 

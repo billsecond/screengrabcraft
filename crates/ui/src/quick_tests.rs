@@ -799,7 +799,7 @@ fn more_effects_in_the_pane_and_the_colours_keep_to_an_area() {
     ed.session.doc.meta.source = Some("A window".into());
     // Effects with most of the height, so an opened one is in sight.
     ed.settings.properties_share = Some(0.2);
-    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1080.0));
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1200.0));
     h.run_steps(4);
     for name in [
         "Brightness and Contrast",

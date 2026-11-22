@@ -290,7 +290,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         always,
         canvas
     ),
-    cmd!("image.rotate", "Rotate", "Image", None, r#"{"degrees": 90|180|270}"#, always, rotate),
+    cmd!(
+        "image.rotate",
+        "Rotate",
+        "Image",
+        None,
+        r##"{"degrees": 90 (clockwise, any angle), "color"?: "#FFFFFF" (the corners round a picture turned by other than quarter turns; see-through when not given)} — the annotations turn with it"##,
+        always,
+        rotate
+    ),
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
     cmd!(
@@ -470,6 +478,15 @@ pub static COMMANDS: &[CommandSpec] = &[
         r##"{"time"?: true|false|"…", "program"?: true|false|"…", "size"?: true, "place"?: "bottomRight"|"bottomLeft"|"topRight"|"topLeft"|"below", "fontSize"?: 14, "color"?: "#FFFFFF", "background"?: "#000000A0"} — writes when it was captured, what of, and its size on it (true: as the document knows them; text: written as given); "below" adds a strip under the picture → {"text"}"##,
         always,
         fx::capture_details
+    ),
+    cmd!(
+        "effect.preset",
+        "Effect Preset",
+        "Effects",
+        None,
+        r#"{"steps": [{"effect": "effect.border", "params"?: {…}}, …] (up to 8 of the picture's effects, one after another) or {"name": "Soft Shadow"} (a ready-made preset: Soft Shadow, Photo Frame, Rounded Card, Torn Paper, Old Photo, Faded Edges, Thin Line, Black and White)} → {"applied": n} — one undo step"#,
+        always,
+        apply_preset
     ),
     CommandSpec {
         id: "doc.info",
@@ -1038,11 +1055,25 @@ fn canvas(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn rotate(s: &mut Session, p: &Value) -> Result<Value> {
-    let deg = int(p, "degrees", 90, -36_000, 36_000)?;
-    if deg % 90 != 0 {
-        return Err(EngineError::Params("`degrees` is a multiple of 90".to_string()));
+    let deg = match p.get("degrees") {
+        None | Some(Value::Null) => 90.0,
+        Some(_) => num(p, "degrees").ok_or_else(|| EngineError::Params("`degrees` is how far to turn it, clockwise".to_string()))?,
     }
-    let quarters = (deg / 90).rem_euclid(4) as u32;
+    .rem_euclid(360.0);
+    let colour = color(p, "color", Color::TRANSPARENT)?;
+    let quarter = (deg / 90.0).round();
+    if (deg - quarter * 90.0).abs() > 0.001 {
+        // Any other angle: the picture grows to hold the turned one, and every annotation turns
+        // round its middle with it.
+        let c = s.doc.bounds().center();
+        let (picture, shift) = effects::rotate_by(&s.doc.base, deg, colour)?;
+        let ids: Vec<ObjectId> = s.doc.objects.iter().map(|o| o.id).collect();
+        s.doc.rotate_objects(&ids, deg, c);
+        s.doc.map_objects(&|q| q.add(shift), 1.0);
+        s.doc.base = picture;
+        return Ok(Value::Null);
+    }
+    let quarters = (quarter as i64).rem_euclid(4) as u32;
     let (w, h) = (s.doc.width() as f32, s.doc.height() as f32);
     s.doc.base = effects::rotate(&s.doc.base, quarters)?;
     let f: Box<dyn Fn(Pt) -> Pt> = match quarters {
@@ -1053,6 +1084,45 @@ fn rotate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     s.doc.map_objects(&*f, 1.0);
     Ok(Value::Null)
+}
+
+/// Several effects one after another, as one step: the steps given, or a ready-made preset's.
+fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
+    use screengrabcraft_model::presets::{self, EffectStep, MAX_STEPS};
+    let steps: Vec<EffectStep> = match (p.get("steps"), p.get("name").and_then(Value::as_str)) {
+        (Some(Value::Array(list)), _) => list
+            .iter()
+            .map(|v| serde_json::from_value::<EffectStep>(v.clone()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| EngineError::Params("each step is {\"effect\": \"effect.…\", \"params\"?: {…}}".to_string()))?,
+        (None | Some(Value::Null), Some(name)) => presets::ready_made()
+            .into_iter()
+            .find(|r| r.name.eq_ignore_ascii_case(name.trim()))
+            .map(|r| r.steps)
+            .ok_or_else(|| EngineError::Params(format!("there is no ready-made preset called {name:?}")))?,
+        _ => return Err(EngineError::Params("give `steps`, or the `name` of a ready-made preset".to_string())),
+    };
+    if steps.is_empty() || steps.len() > MAX_STEPS {
+        return Err(EngineError::Params(format!("a preset has 1 to {MAX_STEPS} steps")));
+    }
+    // Every step is checked before any is run.
+    let mut runs = Vec::with_capacity(steps.len());
+    for step in &steps {
+        let spec = find(&step.effect)
+            .filter(|c| presets::is_effect(c.id))
+            .ok_or_else(|| EngineError::Params(format!("{:?} is not one of the picture's effects", step.effect)))?;
+        let params = match &step.params {
+            Value::Null => json!({}),
+            v @ Value::Object(_) => v.clone(),
+            _ => return Err(EngineError::Params(format!("the parameters of {} are an object", spec.id))),
+        };
+        runs.push((spec, params));
+    }
+    // A step that fails puts the picture back as it was (the session undoes the whole command).
+    for (spec, params) in &runs {
+        (spec.run)(s, params)?;
+    }
+    Ok(json!({ "applied": runs.len() }))
 }
 
 fn flip(s: &mut Session, p: &Value) -> Result<Value> {

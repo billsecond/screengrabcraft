@@ -223,7 +223,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it;
   a linear or radial gradient to a second colour, too.
-- **Crop**, **resize**, canvas size, rotate, flip, trim borders.
+- **Crop**, **resize**, canvas size, rotate (a quarter turn, or any angle with Image › Rotate by an
+  Angle…: the corners see-through or a colour, the annotations turned with it), flip, trim borders.
 - **Cut Out** (U): drag across the picture over what to take out (columns, or rows) and the rest
   is joined, straight or with a saw or a wave and a thin see-through gap. Annotations past the strip
   move with the picture. An area chosen with the Selection tool can be cut out from its right-click
@@ -233,7 +234,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   border, drop shadow, round corners; torn, wavy and faded edges, a bevel; perspective, a page
   curl, a reflection; a watermark of words or a picture, over the picture or under its words and
   lines; the capture's details written on it; each opened with its settings and Apply;
-  greyscale, sepia and invert under Colours). The colour changes, sharpen and blur keep to an
+  greyscale, sepia and invert under Colours). **Presets** at the top apply an effect, or a few one
+  after another (Photo Frame, Rounded Card, Torn Paper, Old Photo...), with one click; Keep as
+  Preset… under an effect keeps its settings under a name of your own. The colour changes, sharpen and blur keep to an
   area selected on the picture. Drag the panes' left edge to make them wider, and the bar
   between them to give either more room (a double click puts it back). The Effects menu has
   them too.

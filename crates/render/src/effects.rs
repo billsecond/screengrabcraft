@@ -6,6 +6,8 @@
 use image::RgbaImage;
 use screengrabcraft_model::{Color, Gradient, Pt, Raster, RasterError, Rect};
 
+use tiny_skia::{FilterQuality, Paint, Pattern, SpreadMode, Transform};
+
 use crate::canvas;
 
 fn image_of(r: &Raster) -> Option<RgbaImage> {
@@ -47,6 +49,50 @@ pub fn rotate(r: &Raster, quarters: u32) -> Result<Raster, RasterError> {
         3 => image::imageops::rotate270(&img),
         _ => img,
     })
+}
+
+/// The picture turned by `degrees` (clockwise) round its middle, on a picture grown to hold all of
+/// it: the corners round it are `corners` (see-through when it is). Also how far the middle moved
+/// (the picture grew by twice that), for the annotations to move with it.
+pub fn rotate_by(r: &Raster, degrees: f32, corners: Color) -> Result<(Raster, Pt), RasterError> {
+    let deg = if degrees.is_finite() { degrees.rem_euclid(360.0) } else { 0.0 };
+    let (w, h) = (r.width() as f32, r.height() as f32);
+    let (s, c) = deg.to_radians().sin_cos();
+    // A hair under the exact size, so a quarter turn's rounding errors don't add a pixel.
+    let nw = (w * c.abs() + h * s.abs() - 0.01).ceil().max(1.0);
+    let nh = (w * s.abs() + h * c.abs() - 0.01).ceil().max(1.0);
+    let (ow, oh) = (nw as u32, nh as u32);
+    screengrabcraft_model::raster::checked_len(ow, oh)?;
+    let src = canvas::to_pixmap(r).ok_or(bad(r.width(), r.height()))?;
+    let mut out = canvas::blank(ow, oh).ok_or(bad(ow, oh))?;
+    let place = Transform::from_translate(nw / 2.0, nh / 2.0).pre_rotate(deg).pre_translate(-w / 2.0, -h / 2.0);
+    // The picture as a pattern in its box, the box's edges smoothed (drawing a pixmap leaves them
+    // jagged once turned).
+    if let Some(rect) = tiny_skia::Rect::from_xywh(0.0, 0.0, w, h) {
+        let pattern = Pattern::new(src.as_ref(), SpreadMode::Pad, FilterQuality::Bicubic, 1.0, Transform::identity());
+        let paint = Paint { shader: pattern, anti_alias: true, ..Paint::default() };
+        out.fill_rect(rect, &paint, place, None);
+    }
+    if corners.a > 0 {
+        // Where the picture's own box lands, soft at its edges; the corners are the rest.
+        let mut cover = canvas::blank(ow, oh).ok_or(bad(ow, oh))?;
+        if let Some(rect) = tiny_skia::Rect::from_xywh(0.0, 0.0, w, h) {
+            let mut white = Paint::default();
+            white.set_color(tiny_skia::Color::WHITE);
+            white.anti_alias = true;
+            cover.fill_rect(rect, &white, place, None);
+        }
+        let a = u32::from(corners.a);
+        let premul = [u32::from(corners.r) * a / 255, u32::from(corners.g) * a / 255, u32::from(corners.b) * a / 255, a];
+        for (o, k) in out.data_mut().as_chunks_mut::<4>().0.iter_mut().zip(cover.data().as_chunks::<4>().0) {
+            let rest = 255 - u32::from(k[3]);
+            for (v, add) in o.iter_mut().zip(premul) {
+                *v = (u32::from(*v) + add * rest / 255).min(255) as u8;
+            }
+        }
+    }
+    let raster = canvas::from_pixmap(&out).ok_or(bad(ow, oh))?;
+    Ok((raster, Pt::new((nw - w) / 2.0, (nh - h) / 2.0)))
 }
 
 /// Mirrored left to right (`horizontal`) or top to bottom.
