@@ -42,7 +42,7 @@ pub fn formats() -> Vec<VideoFormat> {
     if Codec::H264.available() {
         f.push(VideoFormat::Mp4);
     }
-    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif]);
+    f.extend([VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov]);
     // Just the sound: M4A where Windows' own encoder makes it, WAV everywhere.
     if export::m4a_available() {
         f.push(VideoFormat::M4a);
@@ -66,6 +66,7 @@ pub fn export(job: VideoJob, wake: egui::Context) -> Result<VideoExport, String>
             let burned = captions.clone().filter(|_| job.burn).map(Arc::new);
             let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match job.format {
                 VideoFormat::Gif => export::export_gif(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel),
+                VideoFormat::Mov => export::export_mov(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel),
                 VideoFormat::Mp4 | VideoFormat::Mp4Av1 => {
                     export::export_with(job.recording, &job.timeline, burned, job.media.clone(), &out, settings, &progress, &cancel)
                 }

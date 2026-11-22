@@ -58,6 +58,9 @@ pub struct Composer {
     /// Whether the zooms are shown (they are left out while one is being placed, so the whole
     /// screen shows with its frame).
     pub zoom: bool,
+    /// Nothing where there's nothing (no screen shown, the camera's background taken away):
+    /// see-through there rather than black, for a see-through video.
+    pub see_through: bool,
 }
 
 impl Composer {
@@ -85,6 +88,7 @@ impl Composer {
             width: width.max(2),
             height: height.max(2),
             zoom: true,
+            see_through: false,
         }
     }
 
@@ -98,8 +102,8 @@ impl Composer {
     /// screen the camera is the picture.
     pub fn frame(&mut self, timeline: &Timeline, t: u64) -> Raster {
         let (w, h) = (self.width, self.height);
-        let black =
-            || Raster::filled(w, h, screengrabcraft_model::Color::BLACK).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::BLACK));
+        let empty = if self.see_through { screengrabcraft_model::Color::TRANSPARENT } else { screengrabcraft_model::Color::BLACK };
+        let black = || Raster::filled(w, h, empty).unwrap_or_else(|_| Raster::single(empty));
         let shown = |i: usize| timeline.tracks.get(i).is_some_and(|tr| !tr.muted);
         let screen_shown = self.screen.as_ref().is_some_and(|(i, _)| shown(*i));
         // The look of the clips playing (their colours, their crops).
@@ -220,6 +224,10 @@ impl Composer {
                 // Recorded (or shown) without the screen: the camera is the picture (what's
                 // taken away from it is black, unless something's put behind).
                 fill_camera_keyed(&mut out, &cam, &timeline.camera, plate.as_deref(), picture.as_deref());
+                // For a see-through video, what's taken away (with nothing behind) is see-through.
+                if self.see_through && timeline.camera.behind == crate::timeline::Behind::Screen {
+                    clear_taken_away(&mut out, &cam, &timeline.camera, plate.as_deref());
+                }
             }
         }
         // The layers over it (media, titles, overlays, transitions), the shortcuts pressed, the
@@ -629,6 +637,33 @@ pub fn draw_captions_at(out: &mut Raster, lines: &[&Cue], t: Option<u64>) {
     }
     if let Some(dst) = out.pixels_mut().get_mut(from..to) {
         dst.copy_from_slice(canvas.data());
+    }
+}
+
+/// Where [`fill_camera_keyed`] took the camera's background away from `out`, made see-through:
+/// what's kept of each pixel is how much of it shows.
+fn clear_taken_away(out: &mut Raster, cam: &Raster, layout: &crate::timeline::CameraLayout, plate: Option<&crate::keyer::Plate>) {
+    let (ow, oh) = (out.width(), out.height());
+    let f = (f64::from(ow) / f64::from(cam.width().max(1))).min(f64::from(oh) / f64::from(cam.height().max(1)));
+    let cw = ((f64::from(cam.width()) * f).round() as u32).clamp(1, ow.max(1));
+    let ch = ((f64::from(cam.height()) * f).round() as u32).clamp(1, oh.max(1));
+    let Some(mut small) = (if (cw, ch) == (cam.width(), cam.height()) { Some(cam.clone()) } else { scale(cam, cw, ch) }) else { return };
+    let Some(keep) = camera_keep(&mut small, layout, plate) else { return };
+    let (x0, y0) = ((ow.saturating_sub(cw) / 2) as usize, (oh.saturating_sub(ch) / 2) as usize);
+    let (cw, ow) = (cw as usize, ow as usize);
+    let px = out.pixels_mut();
+    for (k, a) in keep.iter().enumerate() {
+        let (x, y) = (x0 + k % cw.max(1), y0 + k / cw.max(1));
+        if let Some(p) = px.get_mut((y * ow + x) * 4..(y * ow + x) * 4 + 4) {
+            // The colour as it was before it was darkened towards black, and how much shows.
+            let s = f32::from(*a) / 255.0;
+            if s > 0.0 {
+                for c in p.iter_mut().take(3) {
+                    *c = (f32::from(*c) / s).round().min(255.0) as u8;
+                }
+            }
+            p[3] = *a;
+        }
     }
 }
 
@@ -2093,6 +2128,12 @@ mod tests {
         tl.set_muted(0, true).unwrap();
         let f = c.frame(&tl, 500_000);
         assert!(count(&f, &green) < 20 && count(&f, &red) > 300);
+        // For a see-through video, see-through there instead (the person solid).
+        c.see_through = true;
+        let f = c.frame(&tl, 500_000);
+        let (clear, solid_red) = (count(&f, &|p| p[3] == 0), count(&f, &|p| p[3] == 255 && p[0] > 180 && p[1] < 80));
+        assert!(clear > 5000 && solid_red > 300, "{clear} {solid_red}");
+        c.see_through = false;
         // A picture of the media bin behind the person instead (the screen shown or not).
         struct Blue;
         impl crate::layer_draw::MediaStore for Blue {

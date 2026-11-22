@@ -1149,6 +1149,13 @@ impl Editor {
                     self.video = Some(v);
                 }
             }
+            // Made into videos together, from the video editor.
+            DialogResult::Batch(paths) => {
+                if let Some(mut v) = self.video.take() {
+                    v.open_batch(self, ctx, &paths);
+                    self.video = Some(v);
+                }
+            }
             // Into the video editor's media bin.
             DialogResult::Import(paths) => {
                 if let Some(mut v) = self.video.take() {

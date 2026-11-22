@@ -426,6 +426,15 @@ impl VideoView {
         if c.format == VideoFormat::Mp4Av1 {
             ui.label(RichText::new("Windows Media Player and older devices can't play these.").small().color(t.muted));
         }
+        if c.format == VideoFormat::Mov {
+            ui.label(
+                RichText::new(
+                    "Clear wherever there's nothing: hide the screen's track (its eye) to keep just the camera with its background taken away, titles and callouts, to put over another video. Large files; no sound (Export Sound makes it apart).",
+                )
+                .small()
+                .color(t.muted),
+            );
+        }
         if !c.format.has_picture() {
             ui.label(RichText::new("The sound of the video as edited: every track and sound you added, mixed.").small().color(t.muted));
         }
@@ -453,7 +462,7 @@ impl VideoView {
         } else {
             for option in [CaptionsIn::Off, CaptionsIn::Picture, CaptionsIn::Subtitles] {
                 let (possible, why) = match option {
-                    CaptionsIn::Subtitles => (c.format.has_sound(), "A GIF has no sound, so it has no subtitles"),
+                    CaptionsIn::Subtitles => (c.format.has_sound(), "A GIF or a see-through video has no sound, so it has no subtitles"),
                     CaptionsIn::Picture => (c.format.has_picture(), "Just the sound has no picture to put them on"),
                     CaptionsIn::Off => (true, ""),
                 };

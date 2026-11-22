@@ -24,6 +24,7 @@ pub mod keys;
 pub mod layer_draw;
 pub mod layers;
 pub mod media_store;
+pub mod mov;
 pub mod mp4;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod opus;

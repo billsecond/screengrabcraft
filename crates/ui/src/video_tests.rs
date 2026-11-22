@@ -862,6 +862,92 @@ impl crate::services::Services for DiskHost {
     }
 }
 
+/// A host with recordings on its disk (in memory), that makes each video at once and keeps what
+/// it was asked for; asked for recordings, it answers with two of them and a picture.
+#[derive(Clone, Default)]
+struct BatchHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    made: std::sync::Arc<std::sync::Mutex<Vec<(String, crate::services::VideoFormat, bool, bool)>>>,
+}
+
+impl crate::services::Services for BatchHost {
+    fn video_formats(&self) -> Vec<crate::services::VideoFormat> {
+        use crate::services::VideoFormat;
+        vec![VideoFormat::Mp4Av1, VideoFormat::Gif, VideoFormat::Mov, VideoFormat::Wav]
+    }
+    fn request_batch(&self) {
+        let paths = ["C:/Captures/Monday.sgvideo", "C:/Captures/Tuesday.sgvideo", "C:/Captures/Logo.png"];
+        *self.answer.lock().unwrap() = Some(crate::services::DialogResult::Batch(paths.map(str::to_string).to_vec()));
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn open_recording(&self, _path: &str) -> Result<Box<dyn screengrabcraft_media::recording::Source>, String> {
+        let mut bytes = meeting();
+        bytes.extend(screengrabcraft_media::recording::captions_bytes(&captions()).unwrap());
+        Ok(Box::new(bytes))
+    }
+    fn export_video(&self, job: crate::services::VideoJob) -> Result<crate::services::VideoExport, String> {
+        self.made.lock().unwrap().push((job.out.clone(), job.format, job.burn, job.subtitles));
+        let x = crate::services::VideoExport::default();
+        *x.done.lock().unwrap() = Some(Ok(job.out));
+        Ok(x)
+    }
+}
+
+#[test]
+fn several_recordings_are_made_into_videos_with_one_setting() {
+    use crate::services::VideoFormat;
+    let host = BatchHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Production.sgvideo".into(), path: None, bytes: recording() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    h.get_by_label("File").click();
+    h.run_steps(2);
+    h.get_by_label("Make Videos of Several Recordings…").click();
+    h.run_steps(3);
+    // The two recordings listed (the picture isn't one), waiting.
+    let batch = |h: &Harness<'_, Editor>| {
+        let b = h.state().video.as_ref().unwrap().batch.as_ref().unwrap();
+        b.items.iter().map(|i| (i.path.clone(), i.state.clone())).collect::<Vec<_>>()
+    };
+    assert_eq!(batch(&h).len(), 2);
+    assert!(h.query_by_label("Monday.sgvideo").is_some() && h.query_by_label("Tuesday.sgvideo").is_some());
+    // One setting for all: see-through, captions in the picture.
+    h.get_by_value(VideoFormat::Mp4Av1.label()).click();
+    h.run_steps(2);
+    h.get_by_label(VideoFormat::Mov.label()).click();
+    h.run_steps(2);
+    h.get_by_label("Captions in the picture").click();
+    h.run_steps(2);
+    shot(&mut h, "video-batch");
+    h.get_by_label("Make Them").click();
+    for _ in 0..60 {
+        h.run_steps(1);
+        if batch(&h).iter().all(|(_, s)| matches!(s, crate::video::batch::BatchState::Done(_))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    let made = host.made.lock().unwrap().clone();
+    assert_eq!(made.len(), 2, "{:?}", batch(&h));
+    assert_eq!(made[0], ("C:/Captures/Monday.mov".to_string(), VideoFormat::Mov, true, false));
+    assert_eq!(made[1].0, "C:/Captures/Tuesday.mov");
+    assert!(h.query_all_by_label("Made").count() >= 2);
+    shot(&mut h, "video-batch-made");
+    h.get_by_label("Close").click();
+    h.run_steps(2);
+    assert!(h.state().video.as_ref().unwrap().batch.is_none());
+}
+
 #[test]
 fn a_recording_from_the_disk_says_its_opening_then_opens() {
     let mut ed = Editor::new(Box::new(DiskHost { recording: meeting() }), EditorSettings::default());
