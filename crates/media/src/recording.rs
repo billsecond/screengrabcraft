@@ -338,6 +338,24 @@ pub fn last_captions(source: &dyn Source, duration_us: u64) -> Option<Captions> 
     found.map(|c| c.checked(duration_us))
 }
 
+/// The longest blank recording made (four hours).
+pub const MOST_BLANK_US: u64 = 4 * 3600 * 1_000_000;
+
+/// A recording of nothing but a black screen `width × height` for `duration_us` (one picture: the
+/// screen never changes), made `created` (`2026-11-02T10:15:30`): what a video made only of
+/// pictures is laid over. The size is kept to 16 × 16 to 3840 × 2160, the length to a second to
+/// four hours.
+pub fn blank(width: u32, height: u32, fps: u32, duration_us: u64, created: &str) -> Result<Vec<u8>, RecordingError> {
+    let (w, h) = (width.clamp(16, 3840), height.clamp(16, 2160));
+    let duration = duration_us.clamp(1_000_000, MOST_BLANK_US);
+    let streams = vec![StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: w, height: h, channels: 0 }];
+    let created: String = created.chars().filter(|c| !c.is_control()).take(40).collect();
+    let mut out = RecordingWriter::new(Vec::new(), &Header { version: 1, created, fps: fps.clamp(1, 60), streams })?;
+    let black = Raster::filled(w, h, screengrabcraft_model::Color::BLACK).map_err(|e| RecordingError::Damaged(e.to_string()))?;
+    out.video_frame(0, 0, &black)?;
+    out.finish(duration)
+}
+
 /// Whether these bytes start like a recording file.
 pub fn sniff(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
@@ -782,6 +800,26 @@ mod tests {
     use screengrabcraft_model::Color;
 
     use super::*;
+
+    #[test]
+    fn a_blank_recording_is_a_black_screen_as_long_as_asked_and_small() {
+        let bytes = blank(1920, 1080, 30, 12_000_000, "2026-11-22T09:30:00").unwrap();
+        assert!(bytes.len() < 200_000, "one picture, compressed: {}", bytes.len());
+        let rec = Recording::open(Box::new(bytes)).unwrap();
+        assert_eq!(rec.header.fps, 30);
+        assert_eq!(rec.header.created, "2026-11-22T09:30:00");
+        assert_eq!(rec.stream_duration(0), 12_000_000);
+        let tl = Timeline::new(&rec);
+        assert_eq!(tl.length(), 12_000_000);
+        let pic = ScreenDecoder::new(0).frame_at(&rec, 11_000_000).unwrap();
+        assert_eq!((pic.width(), pic.height()), (1920, 1080));
+        assert_eq!(pic.pixel(900, 500).unwrap(), Color::BLACK);
+        // Kept in bounds.
+        let tiny = Recording::open(Box::new(blank(0, u32::MAX, 0, u64::MAX, "\u{7}x").unwrap())).unwrap();
+        assert_eq!(tiny.header.streams[0].width, 16);
+        assert_eq!(tiny.stream_duration(0), MOST_BLANK_US);
+        assert_eq!(tiny.header.created, "x");
+    }
 
     fn header() -> Header {
         Header {

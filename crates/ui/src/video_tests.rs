@@ -4292,3 +4292,123 @@ fn without_microphones_narration_is_greyed_out_and_says_why() {
     scroll_side_panel_to(&mut h, "Record Narration");
     assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Record Narration")).is_disabled());
 }
+
+/// A host that makes videos of pictures: files are kept in memory, pictures are made up (a colour
+/// each), and narration has a made-up microphone (none is ever turned on in a test).
+#[derive(Clone, Default)]
+struct PicturesHost {
+    answer: std::sync::Arc<std::sync::Mutex<Option<crate::services::DialogResult>>>,
+    asked: std::sync::Arc<std::sync::Mutex<usize>>,
+    files: std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, Vec<u8>>>>,
+}
+
+impl crate::services::Services for PicturesHost {
+    fn request_pictures_video(&self) {
+        *self.asked.lock().unwrap() += 1;
+    }
+    fn poll_dialog(&self) -> Option<crate::services::DialogResult> {
+        self.answer.lock().unwrap().take()
+    }
+    fn new_recording_path(&self, source: &str) -> Result<String, String> {
+        Ok(format!("C:/Captures/{source} 1.sgvideo"))
+    }
+    fn write_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.files.lock().unwrap().insert(path.to_string(), bytes.to_vec());
+        Ok(())
+    }
+    fn append_file(&self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        self.files.lock().unwrap().entry(path.to_string()).or_default().extend_from_slice(bytes);
+        Ok(())
+    }
+    fn load_media(&self, path: &str) -> Result<screengrabcraft_media::media_store::MediaJob, String> {
+        use screengrabcraft_media::layers::MediaKind;
+        use screengrabcraft_media::media_store::{Content, Loaded};
+        let loaded = if path.ends_with(".png") {
+            // Each its own colour: red, green, blue.
+            let c = if path.contains("One") {
+                Color::rgb(0xE0, 0x20, 0x20)
+            } else if path.contains("Two") {
+                Color::rgb(0x20, 0xC0, 0x40)
+            } else {
+                Color::rgb(0x20, 0x40, 0xE0)
+            };
+            let pic = Raster::filled(160, 90, c).unwrap();
+            Loaded { kind: MediaKind::Picture, duration: 0, width: 160, height: 90, content: Content::Picture(pic) }
+        } else {
+            let voice: Vec<i16> = (0..72_000).flat_map(|i| [((i as f32 * 0.05).sin() * 9_000.0) as i16; 2]).collect();
+            Loaded { kind: MediaKind::Sound, duration: 1_500_000, width: 0, height: 0, content: Content::Sound(voice) }
+        };
+        Ok(std::sync::Arc::new(std::sync::Mutex::new(Some(Ok(loaded)))))
+    }
+    fn can_narrate(&self) -> bool {
+        true
+    }
+    fn record_narration(&self, _mic: Option<&str>, beside: &str) -> Result<Box<dyn crate::services::NarrationTake>, String> {
+        assert_eq!(beside, "C:/Captures/Pictures 1.sgvideo", "beside the new video");
+        Ok(Box::new(MadeUpTake))
+    }
+}
+
+#[test]
+fn a_new_video_is_made_of_pictures_alone_and_narrated() {
+    let host = PicturesHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), EditorSettings::default());
+    ed.kind = crate::EditorKind::Video;
+    let mut h = Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(0.1).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    // From the start page: no recording needed.
+    h.get_by_label("A Video of Pictures…").click();
+    h.run_steps(2);
+    assert_eq!(*host.asked.lock().unwrap(), 1);
+    let picked = ["C:/Pictures/One.png", "C:/Pictures/Two.png", "C:/Pictures/notes.txt", "C:/Pictures/Three.png"];
+    *host.answer.lock().unwrap() = Some(crate::services::DialogResult::PicturesVideo(picked.map(str::to_string).to_vec()));
+    h.run_steps(6);
+    {
+        let v = h.state_mut().video.as_mut().expect("the new video is open");
+        assert_eq!(v.path.as_deref(), Some("C:/Captures/Pictures 1.sgvideo"));
+        let tl = &v.session.timeline;
+        assert_eq!(tl.tracks.len(), 1, "just a blank screen");
+        assert_eq!(tl.length(), 12_000_000, "four seconds for each picture");
+        let l = tl.layers.iter().find(|l| l.name == "Pictures").expect("the pictures' layer");
+        assert_eq!(l.items.iter().map(|i| i.at).collect::<Vec<_>>(), vec![0, 4_000_000, 8_000_000]);
+        assert!(count(&v.frame_at(2_000_000), [0xE0, 0x20, 0x20]) > 1000, "the first picture");
+        assert!(count(&v.frame_at(10_000_000), [0x20, 0x40, 0xE0]) > 1000, "the third");
+    }
+    // Written as an ordinary recording in the captures folder.
+    let written = host.files.lock().unwrap().get("C:/Captures/Pictures 1.sgvideo").cloned().unwrap();
+    assert!(screengrabcraft_media::recording::sniff(&written));
+    shot(&mut h, "video-from-pictures");
+    // Narrated over: the take on its own layer from the start.
+    scroll_side_panel_to(&mut h, "Record Narration");
+    h.get_by_label("Record Narration").click();
+    h.run_steps(3);
+    h.key_press(egui::Key::Space);
+    h.run_steps(3);
+    let v = h.state().video.as_ref().unwrap();
+    let n = v.session.timeline.layers.iter().find(|l| l.name == "Narration").expect("the narration");
+    assert_eq!(n.items[0].at, 0);
+    // From a video already open, the File menu makes another (that one is saved first).
+    h.get_by_label("File").click();
+    h.run_steps(1);
+    h.get_by_label("New Video from Pictures…").click();
+    h.run_steps(1);
+    assert_eq!(*host.asked.lock().unwrap(), 2);
+}
+
+#[test]
+fn without_paths_there_is_no_video_of_pictures() {
+    let (mut h, _) = two_windows(crate::EditorKind::Video);
+    assert!(h.query_by_label("A Video of Pictures…").is_some(), "a desktop host");
+    let mut h2 = harness();
+    h2.get_by_label("File").click();
+    h2.run_steps(1);
+    assert!(h2.query_by_label("New Video from Pictures…").is_none(), "nowhere to keep it");
+    h.run_steps(1);
+}

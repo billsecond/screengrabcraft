@@ -75,7 +75,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Drawing on the screen while recording | Missing | |
 | A recording survives a crash | Part | the recording file is written as it goes |
 | Desktop icons hidden while recording | Missing | |
-| **A narrated video made from pictures** | Part | the Media bin's Put the Pictures in Turn: every picture one after another from the playhead, a few seconds each, as large as fits the video, fading from one to the next. They go over a recording (hide its screen for just them), not into a new empty video; the voice is recorded over them in the editor (Narration) |
+| **A narrated video made from pictures** | Has | File › New Video from Pictures (or the start page's A Video of Pictures): a new recording of nothing but a blank screen as long as the pictures take (1920 × 1080, an ordinary `.sgvideo` in the captures folder), the pictures one after another on a layer over it, four seconds each, as large as fits, fading from one to the next; then Record Narration talks over it. The Media bin's Put the Pictures in Turn does the same over a recording |
 
 ## Editing a picture
 
@@ -309,6 +309,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 32. Templates and themes of your own in the video editor (#124).
 33. The sound turned round while playing backwards (J), as recorded (#125).
 34. Narration recorded over the video in the editor, onto a sound layer of its own (#126).
+35. A narrated video made only of pictures: a new video of them, no screen recording needed.
 
 **Still to build, in this order**
 
