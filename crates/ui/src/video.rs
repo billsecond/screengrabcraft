@@ -38,6 +38,7 @@ mod camera_key;
 mod export_window;
 mod library;
 mod transcript;
+mod transitions;
 pub use library::{LibDrop, LibTab};
 
 pub use export_window::{CaptionsIn, ExportChoice, ExportStep};
@@ -1778,6 +1779,10 @@ impl VideoView {
                         self.speed_buttons(ed, ui);
                         ui.add_space(4.0);
                         note(ui, "Every track plays this stretch at the speed, so they stay together; voices keep their pitch.".to_string());
+                        if let Some((ti, ci)) = self.selected.filter(|(_, ci)| *ci > 0) {
+                            section(ui, if sound { "Cross-fade" } else { "Transition" }, &mut false);
+                            self.transition_section(ed, ui, ti, ci);
+                        }
                         if sound && let Some((ti, ci)) = self.selected {
                             section(ui, "Sound", &mut false);
                             self.sound_section(ed, ui, ti, ci);
@@ -2697,6 +2702,7 @@ impl VideoView {
                         self.run(ed, ctx, "video.deleteClip", json!({"track": i, "clip": c}));
                         ui.close();
                     }
+                    self.transition_menu(ed, ui, ctx, i, c);
                 }
                 let gap = if track.kind.is_video() { "no picture" } else { "silence" };
                 if ui
@@ -3025,6 +3031,15 @@ impl VideoView {
                             egui::FontId::proportional(12.0),
                             t.text,
                         );
+                        // Its keyframes: a diamond at each, along its bottom.
+                        for k in &item.keys {
+                            let x = x_of(item.at.saturating_add(k.at));
+                            if x >= r.min.x - 1.0 && x <= r.max.x + 1.0 {
+                                let (c, s) = (pos2(x, r.max.y - 7.0), 4.5);
+                                let diamond = vec![pos2(c.x, c.y - s), pos2(c.x + s, c.y), pos2(c.x, c.y + s), pos2(c.x - s, c.y)];
+                                painter.add(egui::Shape::convex_polygon(diamond, Color32::WHITE, Stroke::new(1.0, colour)));
+                            }
+                        }
                         if self.item == Some((layer.id, item.id)) {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
                             grips(&painter, r);
@@ -3038,14 +3053,17 @@ impl VideoView {
                         LibDrop::Media(id) => {
                             media.iter().find(|m| m.id == *id).map(|m| if m.duration > 0 { m.duration } else { 5_000_000 }).unwrap_or(3_000_000)
                         }
+                        LibDrop::Blend(_) => 0,
                     };
                     let y = match layer_at(p.y) {
                         Some(_) => any_row(((p.y - rows_top) / ROW_H).floor().max(0.0) as usize),
                         None => band,
                     };
-                    let ghost = Rect::from_min_max(pos2(p.x, y.min.y + 2.0), pos2(x_of(us_of(p.x) + len), y.max.y - 2.0));
-                    painter.rect_filled(ghost, 4.0, t.accent.gamma_multiply(0.25));
-                    painter.rect_stroke(ghost, 4.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
+                    if !matches!(what.as_ref(), LibDrop::Blend(_)) {
+                        let ghost = Rect::from_min_max(pos2(p.x, y.min.y + 2.0), pos2(x_of(us_of(p.x) + len), y.max.y - 2.0));
+                        painter.rect_filled(ghost, 4.0, t.accent.gamma_multiply(0.25));
+                        painter.rect_stroke(ghost, 4.0, Stroke::new(1.5, Color32::WHITE), StrokeKind::Inside);
+                    }
                 }
                 // The rows and their clips.
                 for (i, track) in tracks.iter().enumerate() {
@@ -3118,6 +3136,15 @@ impl VideoView {
                             painter.rect_stroke(r, 4.0, Stroke::new(2.5, t.accent), StrokeKind::Outside);
                             grips(&painter, r);
                         }
+                    }
+                    // Its transitions across the cuts, and (a transition from the library over
+                    // it) the cut it would go to.
+                    transitions::draw(&painter, &self.session.timeline, i, row, &x_of);
+                    if let (Some(LibDrop::Blend(_)), Some(p)) =
+                        (resp.dnd_hover_payload::<LibDrop>().as_deref(), ctx.pointer_hover_pos().filter(|p| lane_row.contains(*p)))
+                        && let Some((cut, _)) = transitions::cuts(track).into_iter().min_by_key(|(cut, _)| cut.abs_diff(us_of(p.x)))
+                    {
+                        transitions::draw_target(&painter, lane_row, x_of(cut), t.accent);
                     }
                 }
                 if caption_row {
@@ -3368,8 +3395,17 @@ impl VideoView {
                 if let Some(what) = resp.dnd_release_payload::<LibDrop>()
                     && let Some(p) = ctx.pointer_interact_pos().or_else(|| ctx.pointer_hover_pos())
                 {
-                    let layer = if in_band(p.y) { None } else { layer_at(p.y) };
-                    self.drop_on_timeline(ed, &ctx, &what, layer, us_of(p.x));
+                    match what.as_ref() {
+                        // A transition: at the cut nearest it on the track under it.
+                        LibDrop::Blend(kind) => match row_at(p.y) {
+                            Some(track) => self.drop_blend(ed, &ctx, *kind, Some(track), us_of(p.x)),
+                            None => ed.error(&ctx, "Drop a transition on a track, where two of its clips meet.".to_string()),
+                        },
+                        _ => {
+                            let layer = if in_band(p.y) { None } else { layer_at(p.y) };
+                            self.drop_on_timeline(ed, &ctx, &what, layer, us_of(p.x));
+                        }
+                    }
                 }
                 // A layer's item taken hold of: moved, or trimmed by an end.
                 let mut item_grabbed = false;

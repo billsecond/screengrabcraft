@@ -2726,3 +2726,136 @@ fn a_zoom_from_the_library_is_placed_on_the_whole_screen_and_zooms_once_let_go()
     h.run_steps(2);
     assert!(h.state().video.as_ref().unwrap().zooms_shown());
 }
+
+#[test]
+fn a_transition_from_the_library_goes_where_two_clips_meet_and_its_panel_changes_it() {
+    use screengrabcraft_media::timeline::Blend;
+    let mut h = harness();
+    // 1.5 s to 2.5 s taken out: every track's two clips meet at 1.5 s.
+    h.state_mut().video.as_mut().unwrap().session.execute("video.cut", &serde_json::json!({"from": 1_500_000, "to": 2_500_000})).unwrap();
+    h.run_steps(2);
+    h.get_by_label("Between Clips").click();
+    h.run_steps(3);
+    for kind in Blend::ALL {
+        assert!(h.query_all_by_label(kind.label()).next().is_some(), "{kind:?}");
+    }
+    // + puts it at the cut nearest the playhead.
+    h.get_by_label("Add Cross-fade").click();
+    h.run_steps(3);
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert_eq!(v.selected, Some((0, 1)), "the clip it leads into is chosen");
+        assert_eq!(v.session.timeline.tracks[0].clips[1].transition.map(|x| (x.kind, x.len)), Some((Blend::CrossFade, 1_000_000)));
+    }
+    // Its panel makes it longer.
+    h.get_by_label("2 s").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[1].transition.map(|x| x.len), Some(2_000_000));
+    // At the cut the picture is the two together: the box recorded at 1.5 s half there.
+    let pic = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let p = pic.pixel(100, 60).unwrap();
+    assert!(p.r > 0x4E + 30 && p.r < 0xFF - 30, "half the box, half the white: {p:?}");
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(3);
+    shot(&mut h, "video-clip-transition");
+    // (The library's cards closed, so the menu's names are the only ones.)
+    h.get_by_label("Between Clips").click();
+    h.run_steps(2);
+    // The right button on the clip: another kind.
+    let (lane, rows_top, pps, scroll) = {
+        let v = h.state().video.as_ref().unwrap();
+        let (lane, top) = v.lane_rect.unwrap();
+        (lane, top, v.pps, v.scrolled())
+    };
+    right_click(&mut h, egui::pos2(lane.min.x + 2.2 * pps - scroll, rows_top + 20.0));
+    h.get_by_label_contains("Transition from the Clip Before").hover();
+    h.run_steps(2);
+    h.get_by_label("Push").click();
+    h.run_steps(2);
+    assert_eq!(h.state().video.as_ref().unwrap().session.timeline.tracks[0].clips[1].transition.map(|x| x.kind), Some(Blend::Push));
+    // Dropped on the microphone's row, it's a cross-fade of its sound.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        v.drop_blend(ed, &ctx, Blend::WipeUp, Some(mic), 1_400_000);
+        assert_eq!(v.session.timeline.tracks[mic].clips[1].transition.map(|x| x.kind), Some(Blend::CrossFade));
+        ed.video = Some(v);
+    }
+}
+
+#[test]
+fn every_transition_card_is_a_picture_of_its_own() {
+    use screengrabcraft_media::timeline::Blend;
+    let cards: Vec<Raster> = Blend::ALL.iter().map(|k| crate::video::VideoView::blend_card_picture(*k).unwrap()).collect();
+    for (i, a) in cards.iter().enumerate() {
+        for b in cards.iter().skip(i + 1) {
+            assert_ne!(a.pixels(), b.pixels());
+        }
+    }
+}
+
+#[test]
+fn keyframes_added_from_the_panel_move_a_title_across_the_picture() {
+    let mut h = media_harness(MediaHost::default());
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.playhead = 0;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.unwrap();
+    let keys = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().keys.clone();
+    scroll_side_panel(&mut h, 12);
+    h.get_by_label("Add Keyframe at the Playhead").click();
+    h.run_steps(2);
+    assert_eq!(keys(&h).len(), 1);
+    // Later, dragged on the picture: a second keyframe there, the first kept.
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 3_000_000;
+    }
+    h.run_steps(3);
+    let (pic, on) = {
+        let v = h.state().video.as_ref().unwrap();
+        (v.picture_rect.unwrap(), v.chosen_on_screen().unwrap())
+    };
+    crate::tests::drag(&mut h, on.center(), on.center() + egui::vec2(pic.width() * 0.3, 0.0));
+    let k = keys(&h);
+    assert_eq!(k.len(), 2, "{k:?}");
+    assert_eq!(k[1].at, 3_000_000);
+    assert!(k[1].place.x > k[0].place.x + 0.2, "{k:?}");
+    // Halfway, it's halfway across.
+    let it = h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    let mid = it.place_at(1_500_000).x;
+    assert!((mid - (k[0].place.x + k[1].place.x) / 2.0).abs() < 0.01);
+    assert_eq!(h.query_all_by_label("Go To").count(), 2);
+    shot(&mut h, "video-keyframes");
+    // One taken away from the panel.
+    scroll_side_panel(&mut h, 12);
+    h.get_all_by_label("Remove").next().unwrap().click();
+    h.run_steps(2);
+    assert_eq!(keys(&h).len(), 1);
+}
+
+/// Scrolls the panel at the right down by `lines` turns of the wheel.
+fn scroll_side_panel(h: &mut Harness<'_, Editor>, lines: usize) {
+    let r = h.ctx.content_rect();
+    h.hover_at(egui::pos2(r.max.x - 120.0, r.min.y + 300.0));
+    h.run_steps(1);
+    for _ in 0..lines {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -3.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(1);
+    }
+    h.run_steps(10);
+}

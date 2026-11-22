@@ -65,6 +65,75 @@ pub struct Clip {
     /// A held frame: the picture at `from` shown for all its length (a picture track only).
     #[serde(default, skip_serializing_if = "is_false")]
     pub hold: bool,
+    /// How the clip before turns into this one where they meet (none: a plain cut). It plays
+    /// across the cut, half before it and half after; it does nothing while they don't meet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition: Option<ClipTransition>,
+}
+
+/// How one clip turns into the next where they meet on a track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Blend {
+    /// The one fades into the other (sound: one fades out as the other comes up).
+    #[default]
+    CrossFade,
+    /// Down to black, and up from it.
+    DipBlack,
+    /// The next comes in from the right, its edge moving to the left.
+    WipeLeft,
+    /// From the left, its edge moving to the right.
+    WipeRight,
+    /// From below.
+    WipeUp,
+    /// From above.
+    WipeDown,
+    /// The next slides in from the right, pushing the other out to the left.
+    Push,
+    /// The next shows in a circle growing from the middle.
+    Circle,
+}
+
+impl Blend {
+    pub const ALL: [Blend; 8] =
+        [Blend::CrossFade, Blend::DipBlack, Blend::WipeLeft, Blend::WipeRight, Blend::WipeUp, Blend::WipeDown, Blend::Push, Blend::Circle];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Blend::CrossFade => "Cross-fade",
+            Blend::DipBlack => "Through black",
+            Blend::WipeLeft => "Wipe to the left",
+            Blend::WipeRight => "Wipe to the right",
+            Blend::WipeUp => "Wipe up",
+            Blend::WipeDown => "Wipe down",
+            Blend::Push => "Push",
+            Blend::Circle => "Circle",
+        }
+    }
+}
+
+/// A transition from the clip before into a clip: what it does, and how long it takes (µs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClipTransition {
+    pub kind: Blend,
+    pub len: u64,
+}
+
+/// The shortest and longest transition between clips, and the one given when none is said.
+pub const MIN_TRANSITION_US: u64 = 100_000;
+pub const MAX_TRANSITION_US: u64 = 5_000_000;
+pub const TRANSITION_US: u64 = 1_000_000;
+
+/// Two clips of a track being turned one into the other at a moment: where each is in its
+/// recording then (the one going, the one coming), how, and how far through (0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Blending {
+    pub going: u64,
+    pub coming: u64,
+    pub kind: Blend,
+    pub p: f32,
+    /// Where the two clips meet: before it the one going plays, from it the one coming.
+    pub cut: u64,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -89,7 +158,7 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false }
+        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None }
     }
 
     /// A held frame: the picture recorded at `from`, shown from `at` for `len`.
@@ -115,7 +184,19 @@ impl Clip {
             return *self;
         }
         let skip = skip.min(self.len);
-        Clip { at: self.at.saturating_add(skip), from: self.source_at(skip), len: self.len - skip, fade_in: 0, ..*self }
+        Clip { at: self.at.saturating_add(skip), from: self.source_at(skip), len: self.len - skip, fade_in: 0, transition: None, ..*self }
+    }
+
+    /// Where in the recording it would be at timeline time `t`, before its start or after its
+    /// end too (what a transition shows of it there): at the recording's start at the earliest.
+    pub fn source_beyond(&self, t: u64) -> u64 {
+        if self.hold {
+            self.from
+        } else if t >= self.at {
+            self.source_at(t - self.at)
+        } else {
+            self.from.saturating_sub(scale(self.at - t, self.pace(), 100))
+        }
     }
 
     /// How loud its sound is `d` µs into it, faded in and out: 0 to 1. Fades longer than the
@@ -349,6 +430,11 @@ pub struct Marker {
 /// The most markers a video has (as many as an MP4's chapter list holds).
 pub const MAX_MARKERS: usize = 255;
 
+/// A transition as it's kept: as long as one can be; on a sound track a cross-fade.
+fn checked_transition(t: ClipTransition, sound: bool) -> ClipTransition {
+    ClipTransition { kind: if sound { Blend::CrossFade } else { t.kind }, len: t.len.clamp(MIN_TRANSITION_US, MAX_TRANSITION_US) }
+}
+
 /// A marker's name as it's kept: one clean line, else "Chapter n".
 fn marker_name(name: &str, n: usize) -> String {
     clean_name(name).unwrap_or_else(|| format!("Chapter {}", n.max(1)))
@@ -413,11 +499,10 @@ impl Timeline {
                     // A held frame: a picture track's, of a moment recorded, not too long.
                     if c.hold {
                         let len = c.len.min(MAX_HOLD_US);
-                        return (!sound && source > 0 && len >= MIN_CLIP_US).then_some(Clip::held(
-                            c.at.min(u64::MAX / 4),
-                            c.from.min(source - 1),
-                            len,
-                        ));
+                        return (!sound && source > 0 && len >= MIN_CLIP_US).then_some(Clip {
+                            transition: c.transition.map(|x| checked_transition(x, sound)),
+                            ..Clip::held(c.at.min(u64::MAX / 4), c.from.min(source - 1), len)
+                        });
                     }
                     let speed = c.speed.clamp(MIN_SPEED, MAX_SPEED);
                     let from = c.from.min(source);
@@ -432,6 +517,7 @@ impl Timeline {
                         fade_in: fade(c.fade_in),
                         fade_out: fade(c.fade_out),
                         hold: false,
+                        transition: c.transition.map(|x| checked_transition(x, sound)),
                     })
                 })
                 .take(10_000)
@@ -895,6 +981,61 @@ impl Timeline {
         Ok(())
     }
 
+    /// The transition from the clip before into clip `clip` of a track (none: a plain cut), as
+    /// long as `len` says (else what it was, or a second). The two must meet; on a sound track
+    /// every transition is a cross-fade.
+    pub fn set_transition(&mut self, track: usize, clip: usize, kind: Option<Blend>, len: Option<u64>) -> Result<(), EditError> {
+        let sound = !self.track(track)?.kind.is_video();
+        let (clips, c) = self.clip_mut(track, clip)?;
+        let Some(kind) = kind else {
+            if let Some(slot) = clips.get_mut(clip) {
+                slot.transition = None;
+            }
+            return Ok(());
+        };
+        let before = clip.checked_sub(1).and_then(|p| clips.get(p)).copied();
+        if before.is_none_or(|b| b.end() != c.at) {
+            return Err(EditError::Invalid("a transition goes where two clips meet: this one and the one before it don't".to_string()));
+        }
+        let len = len.or(c.transition.map(|x| x.len)).unwrap_or(TRANSITION_US);
+        if let Some(slot) = clips.get_mut(clip) {
+            slot.transition = Some(checked_transition(ClipTransition { kind, len }, sound));
+        }
+        Ok(())
+    }
+
+    /// Where the transition into clip `clip` of a track plays on the timeline (across the cut,
+    /// at most half of either clip), and what it is; none if it has none, or the clips don't meet.
+    pub fn transition_span(&self, track: usize, clip: usize) -> Option<(u64, u64, ClipTransition)> {
+        let clips = &self.tracks.get(track)?.clips;
+        let c = clips.get(clip)?;
+        let x = c.transition?;
+        let b = clips.get(clip.checked_sub(1)?)?;
+        if b.end() != c.at {
+            return None;
+        }
+        let half = (x.len.min(MAX_TRANSITION_US) / 2).min(b.len / 2).min(c.len / 2);
+        (half >= 1_000).then_some((c.at - half, c.at.saturating_add(half), x))
+    }
+
+    /// The two clips of track `i` being turned one into the other at `t`, if a transition is
+    /// playing then.
+    pub fn blend_at(&self, i: usize, t: u64) -> Option<Blending> {
+        let clips = &self.tracks.get(i)?.clips;
+        // The clip starting nearest after `t`'s half a transition away, or the one playing.
+        let k = clips.partition_point(|c| c.at <= t);
+        for k in [k, k.saturating_sub(1)] {
+            if let Some((a, b, x)) = self.transition_span(i, k)
+                && (a..b).contains(&t)
+            {
+                let (going, coming) = (clips.get(k - 1)?, clips.get(k)?);
+                let p = (t - a) as f32 / (b - a).max(1) as f32;
+                return Some(Blending { going: going.source_beyond(t), coming: coming.source_beyond(t), kind: x.kind, p, cut: coming.at });
+            }
+        }
+        None
+    }
+
     /// Marks a moment, named (else "Chapter n"): its place among the markers, which stay in order.
     pub fn add_marker(&mut self, at: u64, name: Option<&str>) -> Result<usize, EditError> {
         if self.markers.len() >= MAX_MARKERS {
@@ -1103,6 +1244,46 @@ mod tests {
         assert_eq!(t.tracks[1].clips[0].at, 500_000);
         t.move_clip(1, 0, 9_000_000).unwrap();
         assert_eq!(t.tracks[1].clips[0].end(), 4_000_000);
+    }
+
+    #[test]
+    fn a_transition_stays_with_the_clip_it_leads_into() {
+        let mut t = two_tracks();
+        t.split(4_000_000, Some(0)).unwrap();
+        t.set_transition(0, 1, Some(Blend::WipeUp), Some(99_000_000)).unwrap();
+        assert_eq!(t.tracks[0].clips[1].transition, Some(ClipTransition { kind: Blend::WipeUp, len: MAX_TRANSITION_US }));
+        // At most half of either clip: 4 s before the cut, 6 s after it.
+        assert_eq!(t.transition_span(0, 1).map(|(a, b, _)| (a, b)), Some((2_000_000, 6_000_000)));
+        let b = t.blend_at(0, 4_000_000).unwrap();
+        assert_eq!((b.going, b.coming, b.cut), (4_000_000, 4_000_000, 4_000_000));
+        assert!((b.p - 0.5).abs() < 1e-6);
+        assert_eq!(t.blend_at(0, 7_000_000), None);
+        // Split again inside the clip it leads into: the first part keeps it, the second has none.
+        t.split(8_000_000, Some(0)).unwrap();
+        assert!(t.tracks[0].clips[1].transition.is_some() && t.tracks[0].clips[2].transition.is_none());
+        // Taken away; a missing clip is an error.
+        t.set_transition(0, 1, None, None).unwrap();
+        assert_eq!(t.tracks[0].clips[1].transition, None);
+        assert!(t.set_transition(0, 9, Some(Blend::Push), None).is_err());
+        // From a file: kept in range, a sound track's a cross-fade.
+        let rec = {
+            use crate::recording::{Header, RecordingWriter, StreamInfo};
+            let streams = vec![
+                StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 8, height: 8, channels: 0 },
+                StreamInfo { id: 1, kind: StreamKind::Microphone, name: String::new(), width: 0, height: 0, channels: 1 },
+            ];
+            let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+            for f in 0..40u64 {
+                w.video_frame(0, f * 100_000, &screengrabcraft_model::Raster::filled(8, 8, screengrabcraft_model::Color::BLACK).unwrap()).unwrap();
+                w.audio(1, f * 4800, &[0i16; 4800]).unwrap();
+            }
+            Recording::open(Box::new(w.finish(4_000_000).unwrap())).unwrap()
+        };
+        let junk = r#"{"tracks":[{"stream":0,"kind":"screen","clips":[{"at":0,"from":0,"len":2000000},{"at":2000000,"from":2000000,"len":2000000,"transition":{"kind":"circle","len":99999999999}}]},
+            {"stream":1,"kind":"microphone","clips":[{"at":0,"from":0,"len":2000000},{"at":2000000,"from":2000000,"len":2000000,"transition":{"kind":"push","len":0}}]}]}"#;
+        let checked = serde_json::from_str::<Timeline>(junk).unwrap().checked(&rec);
+        assert_eq!(checked.tracks[0].clips[1].transition, Some(ClipTransition { kind: Blend::Circle, len: MAX_TRANSITION_US }));
+        assert_eq!(checked.tracks[1].clips[1].transition, Some(ClipTransition { kind: Blend::CrossFade, len: MIN_TRANSITION_US }));
     }
 
     #[test]

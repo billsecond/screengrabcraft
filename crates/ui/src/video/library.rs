@@ -35,6 +35,8 @@ const HANDLE: f32 = 10.0;
 pub enum LibDrop {
     Template(&'static str),
     Media(u32),
+    /// A transition between two clips, dropped where they meet.
+    Blend(screengrabcraft_media::timeline::Blend),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,7 +138,7 @@ fn scene(x: f32, y: f32) -> [u8; 3] {
 
 /// The made-up screen as a picture `w × h`, toned down to the middle: white words and dark plates
 /// both read on it.
-fn backdrop(w: u32, h: u32) -> Option<Raster> {
+pub(super) fn backdrop(w: u32, h: u32) -> Option<Raster> {
     let (w, h) = (w.clamp(1, 4096), h.clamp(1, 4096));
     let mut px = Vec::with_capacity(w as usize * h as usize * 4);
     let tone = |c: u8, lift: f32| (f32::from(c) * 0.58 + lift) as u8;
@@ -192,7 +194,7 @@ fn template_thumbnail(t: &layers::Template) -> Option<Raster> {
     screengrabcraft_media::compose::scale(&pic, w / 3, h / 3)
 }
 
-fn texture(ctx: &egui::Context, name: &str, pic: &Raster) -> egui::TextureHandle {
+pub(super) fn texture(ctx: &egui::Context, name: &str, pic: &Raster) -> egui::TextureHandle {
     let img = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
     ctx.load_texture(name, img, egui::TextureOptions::LINEAR)
 }
@@ -301,6 +303,7 @@ impl VideoView {
         let mut p = match what {
             LibDrop::Template(key) => json!({"template": key}),
             LibDrop::Media(id) => json!({"media": id}),
+            LibDrop::Blend(kind) => return self.drop_blend(ed, ctx, *kind, None, at),
         };
         if let Some(o) = p.as_object_mut() {
             o.insert("at".into(), json!(at));
@@ -369,7 +372,8 @@ impl VideoView {
         if !wanted.is_empty() {
             let found: Vec<&layers::Template> =
                 lib.iter().filter(|x| x.name.to_lowercase().contains(&wanted) || x.group.label().to_lowercase().contains(&wanted)).collect();
-            if found.is_empty() {
+            let blends = super::transitions::matching(&wanted);
+            if found.is_empty() && blends.is_empty() {
                 ui.add_space(8.0);
                 ui.label(RichText::new(format!("Nothing in the library is called \u{201c}{}\u{201d}.", self.lib_search.trim())).color(t.muted));
             }
@@ -382,6 +386,7 @@ impl VideoView {
                     }
                 });
             }
+            self.blend_cards(ed, ui, ctx, &blends, super::transitions::GROUP, &mut budget);
             if !hovered {
                 self.lib_hover = None;
             }
@@ -408,6 +413,20 @@ impl VideoView {
                     ui.add_space(6.0);
                 });
             ui.add_space(2.0);
+            // Transitions between clips, after the zooms.
+            if g == Group::Zoom {
+                egui::CollapsingHeader::new(RichText::new(super::transitions::GROUP).size(14.0).strong().color(t.text))
+                    .id_salt(("library-section", super::transitions::GROUP))
+                    .default_open(false)
+                    .show_unindented(ui, |ui| {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Drop one where two clips of a track meet.").size(12.0).color(t.muted));
+                        ui.add_space(4.0);
+                        self.blend_cards(ed, ui, ctx, &screengrabcraft_media::timeline::Blend::ALL, "", &mut budget);
+                        ui.add_space(6.0);
+                    });
+                ui.add_space(2.0);
+            }
         }
         if !hovered {
             self.lib_hover = None;
@@ -549,7 +568,7 @@ impl VideoView {
     /// or + adds it at the playhead (true, with the card's response). A file of the bin can be taken out of it (its id goes
     /// in `remove`).
     #[allow(clippy::too_many_arguments)]
-    fn card(
+    pub(super) fn card(
         &mut self,
         ui: &mut Ui,
         what: LibDrop,
@@ -630,21 +649,33 @@ impl VideoView {
                     ui.label(RichText::new(item.label(&media)).size(16.0).color(t.text));
                     ui.label(RichText::new(format!("{} to {}", super::clock(item.at), super::clock(item.end()))).size(12.0).color(t.muted));
                     ui.add_space(10.0);
+                    // With keyframes, its place, size and opacity are those of the keyframe at the
+                    // playhead (made there if there's none).
+                    let keyed = !item.keys.is_empty();
+                    let (start, end) = (item.at, item.end());
                     let set = |s: &mut VideoView, p: serde_json::Value, dragging: bool| {
                         let mut p = p;
+                        let placing = keyed && ["x", "y", "w", "opacity"].iter().any(|k| p.get(*k).is_some());
                         if let Some(o) = p.as_object_mut() {
                             o.insert("layer".into(), json!(layer));
                             o.insert("item".into(), json!(id));
+                            if placing {
+                                o.insert("at".into(), json!(s.playhead.clamp(start, end)));
+                            }
                         }
+                        let cmd = if placing { "video.keyframe" } else { "video.setItem" };
                         if dragging {
-                            let _ = s.session.drag("video.setItem", &p);
+                            let _ = s.session.drag(cmd, &p);
                         } else {
-                            let _ = s.session.execute("video.setItem", &p);
+                            let _ = s.session.execute(cmd, &p);
                         }
                     };
+                    let place = item.place_at(self.playhead);
                     let mut first = true;
                     if matches!(item.what, What::Zoom) {
-                        self.zoom_panel(ui, &item, &set);
+                        self.zoom_panel(ui, &item, place, &set);
+                        super::section(ui, "Motion", &mut false);
+                        self.motion_section(ed, ui, &ctx, layer, &item);
                         ui.add_space(16.0);
                         if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
                             self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
@@ -696,15 +727,17 @@ impl VideoView {
                     if on_picture {
                         let size_label = if matches!(item.what, What::Text { .. }) { "Size" } else { "Width, as a share of the video's" };
                         let (lo, hi) = if matches!(item.what, What::Text { .. }) { (0.3, 2.5) } else { (0.05, 1.0) };
-                        self.slider(ui, size_label, item.place.w, lo, hi, "w", &set);
-                        self.slider(ui, "Opacity", item.place.opacity, 0.1, 1.0, "opacity", &set);
+                        self.slider(ui, size_label, place.w, lo, hi, "w", &set);
+                        self.slider(ui, "Opacity", place.opacity, 0.1, 1.0, "opacity", &set);
                         super::section(ui, "Position", &mut first);
-                        self.slider(ui, "Across", item.place.x, -0.5, 1.5, "x", &set);
-                        self.slider(ui, "Down", item.place.y, -0.5, 1.5, "y", &set);
+                        self.slider(ui, "Across", place.x, -0.5, 1.5, "x", &set);
+                        self.slider(ui, "Down", place.y, -0.5, 1.5, "y", &set);
                         ui.add_space(2.0);
                         ui.label(
                             RichText::new("Or drag it on the picture: past the edges too. Drag a corner to resize it.").size(12.0).color(t.muted),
                         );
+                        super::section(ui, "Motion", &mut first);
+                        self.motion_section(ed, ui, &ctx, layer, &item);
                         super::section(ui, "Animation", &mut first);
                         egui::Grid::new("item-animation").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                             for (label, key, anim) in [("Entrance", "intro", item.intro), ("Exit", "outro", item.outro)] {
@@ -731,24 +764,16 @@ impl VideoView {
     }
 
     /// A zoom's settings: how close, where, and how it goes in and out.
-    fn zoom_panel(&mut self, ui: &mut Ui, item: &Item, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+    fn zoom_panel(&mut self, ui: &mut Ui, item: &Item, place: layers::Placement, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
         let t = Tokens::get(ui.ctx());
         let mut first = true;
         super::section(ui, "Zoom", &mut first);
         ui.label(RichText::new("While it's chosen the picture shows all of the screen and the zoom's frame: drag the frame to where it zooms, and its corners to zoom closer or less.").size(12.0).color(t.muted));
         ui.add_space(6.0);
-        self.slider(
-            ui,
-            "Shows of the screen",
-            screengrabcraft_media::zoom::share(item.place.w),
-            screengrabcraft_media::zoom::MIN_SHARE,
-            1.0,
-            "w",
-            set,
-        );
+        self.slider(ui, "Shows of the screen", screengrabcraft_media::zoom::share(place.w), screengrabcraft_media::zoom::MIN_SHARE, 1.0, "w", set);
         super::section(ui, "Position", &mut first);
-        self.slider(ui, "Across", item.place.x, 0.0, 1.0, "x", set);
-        self.slider(ui, "Down", item.place.y, 0.0, 1.0, "y", set);
+        self.slider(ui, "Across", place.x, 0.0, 1.0, "x", set);
+        self.slider(ui, "Down", place.y, 0.0, 1.0, "y", set);
         super::section(ui, "Going in and out", &mut first);
         egui::Grid::new("zoom-ease").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
             for (label, key, anim) in [("In", "intro", item.intro), ("Out", "outro", item.outro)] {
@@ -770,6 +795,73 @@ impl VideoView {
         });
         ui.add_space(4.0);
         ui.label(RichText::new("A zoom that starts where another ends pans straight from one to the other.").size(12.0).color(t.muted));
+    }
+
+    /// An item's keyframes: one added at the playhead, each gone to or taken away.
+    fn motion_section(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, layer: u32, item: &Item) {
+        let t = Tokens::get(ctx);
+        let on_it = (item.at..=item.end()).contains(&self.playhead);
+        let what = if matches!(item.what, What::Zoom) { "where it zooms and how close" } else { "where it is, how large and how see-through" };
+        if item.keys.is_empty() {
+            ui.label(
+                RichText::new(format!(
+                    "Keyframes move it: add one where it starts, move the playhead on, then change {what}; it goes there smoothly."
+                ))
+                .size(12.0)
+                .color(t.muted),
+            );
+            ui.add_space(4.0);
+        }
+        let add = ui
+            .add_enabled(on_it, egui::Button::new("Add Keyframe at the Playhead").min_size(vec2(ui.available_width(), 28.0)))
+            .on_hover_text(format!("Keeps {what} at this moment"))
+            .on_disabled_hover_text("Move the playhead onto the item first")
+            .clicked();
+        if add {
+            self.run(ed, ctx, "video.keyframe", json!({"layer": layer, "item": item.id, "at": self.playhead}));
+        }
+        let (mut go, mut remove) = (None, None);
+        for (k, key) in item.keys.iter().enumerate() {
+            let at = item.at.saturating_add(key.at);
+            let here = at.abs_diff(self.playhead) < screengrabcraft_media::timeline::MIN_CLIP_US;
+            ui.horizontal(|ui| {
+                // A diamond, as on the timeline, and when.
+                let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                let (c, s) = (r.center(), 4.5);
+                let colour = if here { t.accent } else { t.text };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    vec![pos2(c.x, c.y - s), pos2(c.x + s, c.y), pos2(c.x, c.y + s), pos2(c.x - s, c.y)],
+                    colour,
+                    Stroke::NONE,
+                ));
+                let words = RichText::new(super::clock(at)).size(12.5);
+                ui.label(if here { words.color(t.accent).strong() } else { words.color(t.text) });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").on_hover_text("Take this keyframe away").clicked() {
+                        remove = Some(k);
+                    }
+                    if ui.small_button("Go To").on_hover_text("Move the playhead to it").clicked() {
+                        go = Some(at);
+                    }
+                });
+            });
+        }
+        if !item.keys.is_empty() {
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("With keyframes, changing it changes the keyframe at the playhead (or adds one there).").size(12.0).color(t.muted),
+            );
+            if ui.button("Remove Every Keyframe").on_hover_text("It stays where the last one had it").clicked() {
+                self.run(ed, ctx, "video.removeKeyframe", json!({"layer": layer, "item": item.id, "all": true}));
+            }
+        }
+        if let Some(at) = go {
+            self.pause();
+            self.playhead = at;
+        }
+        if let Some(k) = remove {
+            self.run(ed, ctx, "video.removeKeyframe", json!({"layer": layer, "item": item.id, "key": k}));
+        }
     }
 
     /// Whether the item chosen is a zoom (the picture then shows all of the screen, to place it).
@@ -818,8 +910,8 @@ impl VideoView {
             Rect::from_min_size(pic.min + vec2(r.x * f, r.y * f), vec2(r.w * f, r.h * f))
         };
         if let Some((layer, id)) = self.item {
-            let item = self.session.timeline.item(layer, id)?;
-            let r = layer_draw::item_rect(item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
+            let item = self.session.timeline.item(layer, id)?.placed_at(self.playhead);
+            let r = layer_draw::item_rect(&item, &self.session.timeline, self.library.as_ref(), vw, vh)?;
             return Some(to_screen(r));
         }
         if self.camera_chosen {
@@ -853,7 +945,7 @@ impl VideoView {
             .filter(|l| l.kind == layers::LayerKind::Picture && !l.hidden)
             .filter_map(|l| {
                 let i = l.items.iter().find(|i| i.at <= t && t < i.end())?;
-                Some((l.id, i.id, layer_draw::item_rect(i, tl, self.library.as_ref(), vw, vh)?))
+                Some((l.id, i.id, layer_draw::item_rect(&i.placed_at(t), tl, self.library.as_ref(), vw, vh)?))
             })
             .collect()
     }
@@ -935,7 +1027,7 @@ impl VideoView {
                 let grab = video_at(p) - centre;
                 let dist = grab.length().max(4.0);
                 if let Some((layer, item)) = self.item {
-                    let place = self.session.timeline.item(layer, item).map(|i| i.place).unwrap_or_default();
+                    let place = self.session.timeline.item(layer, item).map(|i| i.place_at(self.playhead)).unwrap_or_default();
                     let w = place.w;
                     // Moved by as far as the pointer goes, from where it is (a broadcast graphic's
                     // place is how far it is from where it was designed, not its middle).
@@ -972,6 +1064,19 @@ impl VideoView {
             let mut lines = (None, None);
             match d {
                 CanvasDrag::Item { layer, item, grab, resize } => {
+                    // With keyframes, it's the keyframe at the playhead that's moved (made there
+                    // if there's none).
+                    let key_at = self.session.timeline.item(layer, item).filter(|i| !i.keys.is_empty()).map(|i| self.playhead.clamp(i.at, i.end()));
+                    let place = |s: &mut VideoView, mut params: serde_json::Value| {
+                        let cmd = match (key_at, params.as_object_mut()) {
+                            (Some(at), Some(o)) => {
+                                o.insert("at".into(), json!(at));
+                                "video.keyframe"
+                            }
+                            _ => "video.setItem",
+                        };
+                        let _ = s.session.drag(cmd, &params);
+                    };
                     let params = match resize {
                         Some((w0, d0)) => {
                             let centre = self.chosen_rect(pic).map(|r| video_at(r.center())).unwrap_or(v);
@@ -979,13 +1084,13 @@ impl VideoView {
                         }
                         None => json!({"layer": layer, "item": item, "x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh}),
                     };
-                    let _ = self.session.drag("video.setItem", &params);
+                    place(self, params);
                     if resize.is_none() {
                         let (x, y) = catch(self);
                         if x.is_some() || y.is_some() {
                             let (dx, dy) = (x.map_or(0.0, |c| c.0) / f, y.map_or(0.0, |c| c.0) / f);
                             let params = json!({"layer": layer, "item": item, "x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh});
-                            let _ = self.session.drag("video.setItem", &params);
+                            place(self, params);
                             lines = (x.map(|c| c.1), y.map(|c| c.1));
                         }
                     }
@@ -1094,5 +1199,10 @@ impl VideoView {
     /// A template's card picture, as drawn (for tests and the README's pictures).
     pub fn template_card_picture(key: &str) -> Option<Raster> {
         template_thumbnail(&layers::template(key)?)
+    }
+
+    /// A transition's card picture (for tests: each a different picture).
+    pub fn blend_card_picture(kind: screengrabcraft_media::timeline::Blend) -> Option<Raster> {
+        super::transitions::card_picture(kind)
     }
 }
