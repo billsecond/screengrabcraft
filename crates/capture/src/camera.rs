@@ -1,6 +1,7 @@
 //! The camera for a recording, through nokhwa: Media Foundation on Windows, AVFoundation on
-//! macOS (Linux and the BSDs: not yet). Pictures are made at most 640 × 480 and kept as JPEGs: the
-//! camera sits in a corner of the video, so more would only make the recording bigger.
+//! macOS (Linux and the BSDs: not yet). For a recording, pictures are made at most 640 × 480 and
+//! kept as JPEGs: the camera sits in a corner of the video, so more would only make the recording
+//! bigger. A still ([`take_still`]) is kept at the camera's own size, its largest.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -13,10 +14,37 @@ use std::time::{Duration, Instant};
 
 use crate::CaptureError;
 
-/// The largest camera picture kept.
+/// The largest camera picture kept for a recording.
 const MAX_W: u32 = 640;
 const MAX_H: u32 = 480;
+/// The largest still kept, on either side.
+const MAX_STILL: u32 = 4096;
 const QUALITY: u8 = 80;
+/// A still's JPEG quality: it's a picture of its own, not a corner of a video.
+const STILL_QUALITY: u8 = 92;
+
+/// How large the camera's pictures are kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Size {
+    /// For a recording: at most 640 × 480, the camera read at about 1280 × 720.
+    #[default]
+    Recording,
+    /// A still: the camera read at its largest, and kept so (at most 4096 on a side).
+    Full,
+}
+
+impl Size {
+    /// The largest picture kept, and its JPEG quality.
+    fn limits(self) -> (u32, u32, u8) {
+        match self {
+            Size::Recording => (MAX_W, MAX_H, QUALITY),
+            Size::Full => (MAX_STILL, MAX_STILL, STILL_QUALITY),
+        }
+    }
+}
+
+/// What follows the camera's number in a helper's arguments for a still at full size.
+const FULL_ARG: &str = "full";
 
 /// One picture from the camera: when (since the recording started) and the JPEG.
 #[derive(Clone, Debug)]
@@ -131,17 +159,26 @@ impl CameraCapture {
     /// Starts camera `index`; times count from `started`. In a program of its own when one was
     /// given (Windows, [`use_helper`]), else on a thread of this program.
     pub fn start(index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
+        CameraCapture::start_sized(index, started, Size::Recording)
+    }
+
+    /// [`CameraCapture::start`], its pictures kept at `size`.
+    pub fn start_sized(index: u32, started: Instant, size: Size) -> Result<CameraCapture, CaptureError> {
         match HELPER.get() {
-            Some(program) if cfg!(target_os = "windows") => CameraCapture::start_helper(program, index, started),
-            _ => CameraCapture::start_here(index, started),
+            Some(program) if cfg!(target_os = "windows") => CameraCapture::start_helper(program, index, started, size),
+            _ => CameraCapture::start_here(index, started, size),
         }
     }
 
-    /// Starts camera `index` in the program `program` (`<program> --camera-helper <index>`),
-    /// which hands its pictures over through a pipe.
-    fn start_helper(program: &Path, index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
+    /// Starts camera `index` in the program `program` (`<program> --camera-helper <index>`, and
+    /// `full` for pictures at full size), which hands its pictures over through a pipe.
+    fn start_helper(program: &Path, index: u32, started: Instant, size: Size) -> Result<CameraCapture, CaptureError> {
         let mut command = Command::new(program);
-        command.arg(HELPER_ARG).arg(index.to_string()).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        command.arg(HELPER_ARG).arg(index.to_string());
+        if size == Size::Full {
+            command.arg(FULL_ARG);
+        }
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
         #[cfg(target_os = "windows")]
         {
             use std::os::windows::process::CommandExt;
@@ -176,7 +213,7 @@ impl CameraCapture {
                         return;
                     }
                     Ok((PICTURE, data)) => {
-                        if let Some(frame) = picture_from(&data, started.elapsed())
+                        if let Some(frame) = picture_from(&data, started.elapsed(), size)
                             && tx.send(frame).is_err()
                         {
                             return;
@@ -223,7 +260,7 @@ impl CameraCapture {
     }
 
     /// Starts camera `index` on a thread of this program.
-    fn start_here(index: u32, started: Instant) -> Result<CameraCapture, CaptureError> {
+    fn start_here(index: u32, started: Instant, size: Size) -> Result<CameraCapture, CaptureError> {
         let stop = Arc::new(AtomicBool::new(false));
         let trouble = Arc::new(std::sync::Mutex::new(None));
         let (tx, rx) = channel::<CameraFrame>();
@@ -233,10 +270,10 @@ impl CameraCapture {
             .name("camera".into())
             .spawn(move || {
                 #[cfg(any(target_os = "windows", target_os = "macos"))]
-                run(index, started, &tx, &ready_tx, &s, &said);
+                run(index, started, size, &tx, &ready_tx, &s, &said);
                 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
                 {
-                    let _ = (index, started, &tx, &s, &said);
+                    let _ = (index, started, size, &tx, &s, &said);
                     let _ = ready_tx.send(Err("cameras can't be recorded on this system yet".to_string()));
                 }
             })
@@ -336,8 +373,9 @@ const READY: u8 = b'R';
 const FAILED: u8 = b'F';
 const PICTURE: u8 = b'P';
 const TROUBLE: u8 = b'T';
-/// The longest record taken: a picture is a JPEG of at most 640 × 480.
-const MAX_RECORD: usize = 8 << 20;
+/// The longest record taken: a picture is a JPEG of at most 640 × 480, or a still of at most
+/// 4096 × 4096.
+const MAX_RECORD: usize = 32 << 20;
 
 fn write_record(out: &mut impl Write, kind: u8, data: &[u8]) -> std::io::Result<()> {
     let len = u32::try_from(data.len()).map_err(|_| std::io::Error::other("too long"))?;
@@ -368,23 +406,33 @@ fn picture_record(f: &CameraFrame) -> Vec<u8> {
     data
 }
 
-fn picture_from(data: &[u8], at: Duration) -> Option<CameraFrame> {
-    let (size, jpeg) = data.split_at_checked(8)?;
-    let width = u32::from_le_bytes(size.get(..4)?.try_into().ok()?);
-    let height = u32::from_le_bytes(size.get(4..8)?.try_into().ok()?);
-    if width == 0 || height == 0 || width > MAX_W || height > MAX_H || jpeg.is_empty() {
+/// A picture record read back; none when it's larger than `size` keeps, or isn't one.
+fn picture_from(data: &[u8], at: Duration, size: Size) -> Option<CameraFrame> {
+    let (head, jpeg) = data.split_at_checked(8)?;
+    let width = u32::from_le_bytes(head.get(..4)?.try_into().ok()?);
+    let height = u32::from_le_bytes(head.get(4..8)?.try_into().ok()?);
+    let (max_w, max_h, _) = size.limits();
+    if width == 0 || height == 0 || width > max_w || height > max_h || jpeg.is_empty() {
         return None;
     }
     Some(CameraFrame { at, jpeg: jpeg.to_vec(), width, height })
 }
 
-/// The camera's helper: when `args` (the program's, without its name) are `--camera-helper
-/// <camera number>`, runs the camera and hands its pictures to the program that started this one
-/// (on standard output) until that closes standard input; the exit code is returned. None when
-/// these are other arguments.
-pub fn helper_main(args: &[String]) -> Option<u8> {
+/// The camera's number and the size its pictures are kept at, from a helper's arguments
+/// (`--camera-helper <camera number> [full]`); none when they aren't a helper's.
+fn helper_args(args: &[String]) -> Option<(u32, Size)> {
     let at = args.iter().position(|a| a == HELPER_ARG)?;
     let index = args.get(at + 1).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+    let size = if args.get(at + 2).is_some_and(|a| a == FULL_ARG) { Size::Full } else { Size::Recording };
+    Some((index, size))
+}
+
+/// The camera's helper: when `args` (the program's, without its name) are `--camera-helper
+/// <camera number> [full]`, runs the camera and hands its pictures to the program that started
+/// this one (on standard output) until that closes standard input; the exit code is returned.
+/// None when these are other arguments.
+pub fn helper_main(args: &[String]) -> Option<u8> {
+    let (index, size) = helper_args(args)?;
     // Standard input closing (the capture service stopped the camera, or ended) ends this.
     let ended = Arc::new(AtomicBool::new(false));
     let e = ended.clone();
@@ -394,7 +442,7 @@ pub fn helper_main(args: &[String]) -> Option<u8> {
         e.store(true, Ordering::SeqCst);
     });
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    let cap = match CameraCapture::start_here(index, Instant::now()) {
+    let cap = match CameraCapture::start_here(index, Instant::now(), size) {
         Ok(c) => c,
         Err(e) => {
             let _ = write_record(&mut out, FAILED, e.to_string().as_bytes());
@@ -436,6 +484,7 @@ pub fn helper_main(args: &[String]) -> Option<u8> {
 fn run(
     index: u32,
     started: Instant,
+    size: Size,
     tx: &std::sync::mpsc::Sender<CameraFrame>,
     ready: &std::sync::mpsc::SyncSender<Result<String, String>>,
     stop: &AtomicBool,
@@ -447,19 +496,32 @@ fn run(
 
     let _ready = allow();
     let wanted = CameraFormat::new(Resolution::new(1280, 720), FrameFormat::MJPEG, 30);
-    let opened = Camera::new(CameraIndex::Index(index), RequestedFormat::new::<RgbFormat>(RequestedFormatType::Closest(wanted)))
-        .or_else(|_| Camera::new(CameraIndex::Index(index), RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate)));
-    let mut cam = match opened {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = ready.send(Err(format!("the camera could not be opened: {e}")));
-            return;
-        }
-    };
-    if let Err(e) = cam.open_stream() {
-        let _ = ready.send(Err(format!("the camera could not be started: {e}")));
-        return;
+    // A recording: about 1280 × 720 (made smaller after). A still: the camera's largest first.
+    let mut asks = vec![RequestedFormatType::Closest(wanted), RequestedFormatType::AbsoluteHighestFrameRate];
+    if size == Size::Full {
+        asks.insert(0, RequestedFormatType::AbsoluteHighestResolution);
     }
+    let mut cam = None;
+    let mut why = String::new();
+    for ask in asks {
+        match Camera::new(CameraIndex::Index(index), RequestedFormat::new::<RgbFormat>(ask)) {
+            Ok(mut c) => match c.open_stream() {
+                Ok(()) => {
+                    cam = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    log::warn!("the camera didn't start as asked ({ask:?}): {e}");
+                    why = format!("the camera could not be started: {e}");
+                }
+            },
+            Err(e) => why = format!("the camera could not be opened: {e}"),
+        }
+    }
+    let Some(mut cam) = cam else {
+        let _ = ready.send(Err(why));
+        return;
+    };
     let _ = ready.send(Ok(cam.info().human_name()));
     let mut failures = 0;
     while !stop.load(Ordering::SeqCst) {
@@ -475,7 +537,7 @@ fn run(
                     FrameFormat::RAWRGB => Raw::Rgb,
                     FrameFormat::RAWBGR => Raw::Bgr,
                 };
-                match to_jpeg(format, buf.buffer(), res.width(), res.height()) {
+                match to_jpeg_sized(format, buf.buffer(), res.width(), res.height(), size) {
                     Some((jpeg, width, height)) => {
                         failures = 0;
                         if tx.send(CameraFrame { at, jpeg, width, height }).is_err() {
@@ -527,6 +589,13 @@ fn yuv_rgb(y: u8, u: u8, v: u8) -> [u8; 3] {
 /// A camera picture, made no larger than 640 × 480, as a JPEG with its size. None when the data
 /// doesn't fit what the camera said.
 pub fn to_jpeg(format: Raw, data: &[u8], width: u32, height: u32) -> Option<(Vec<u8>, u32, u32)> {
+    to_jpeg_sized(format, data, width, height, Size::Recording)
+}
+
+/// A camera picture, made no larger than `size` keeps, as a JPEG with its size. None when the
+/// data doesn't fit what the camera said.
+pub fn to_jpeg_sized(format: Raw, data: &[u8], width: u32, height: u32, size: Size) -> Option<(Vec<u8>, u32, u32)> {
+    let (max_w, max_h, quality) = size.limits();
     let (w, h) = (width as usize, height as usize);
     if w == 0 || h == 0 || w > 8192 || h > 8192 {
         return None;
@@ -562,7 +631,7 @@ pub fn to_jpeg(format: Raw, data: &[u8], width: u32, height: u32) -> Option<(Vec
             image::RgbImage::from_raw(width, height, data.get(..w * h * 3)?.as_chunks::<3>().0.iter().flat_map(|&[b, g, r]| [r, g, b]).collect())?
         }
     };
-    let f = (f64::from(MAX_W) / f64::from(rgb.width())).min(f64::from(MAX_H) / f64::from(rgb.height())).min(1.0);
+    let f = (f64::from(max_w) / f64::from(rgb.width())).min(f64::from(max_h) / f64::from(rgb.height())).min(1.0);
     let small = if f < 1.0 {
         let (sw, sh) = (((f64::from(rgb.width()) * f) as u32).max(2), ((f64::from(rgb.height()) * f) as u32).max(2));
         image::imageops::resize(&rgb, sw, sh, image::imageops::FilterType::Triangle)
@@ -570,7 +639,7 @@ pub fn to_jpeg(format: Raw, data: &[u8], width: u32, height: u32) -> Option<(Vec
         rgb
     };
     let mut out = Vec::new();
-    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, QUALITY).encode_image(&small).ok()?;
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode_image(&small).ok()?;
     Some((out, small.width(), small.height()))
 }
 
@@ -703,10 +772,10 @@ pub fn still(
 }
 
 /// A still picture from camera `index`: started (in its own program where there is one), given
-/// a moment to settle, its picture kept and the camera let go. At most 640 × 480, as the camera
-/// is read for a recording.
+/// a moment to settle, its picture kept and the camera let go. At the camera's own size: it's
+/// read at its largest (at most 4096 on a side).
 pub fn take_still(index: u32) -> Result<CameraFrame, String> {
-    let cam = CameraCapture::start(index, Instant::now()).map_err(|e| e.to_string())?;
+    let cam = CameraCapture::start_sized(index, Instant::now(), Size::Full).map_err(|e| e.to_string())?;
     let r = still(&mut || cam.take(), &|| cam.trouble(), STILL_SETTLE, STILL_WAIT, &mut |d| std::thread::sleep(d));
     match &r {
         Ok(_) => {
@@ -819,6 +888,35 @@ mod tests {
         assert!(to_jpeg(Raw::Bgr, &vec![9u8; 64 * 48 * 3], 64, 48).is_some());
     }
 
+    /// A still keeps the camera's own size; a recording's picture is made small.
+    #[test]
+    fn a_still_is_kept_at_the_cameras_own_size() {
+        let (w, h) = (1920u32, 1080u32);
+        let rgb: Vec<u8> = (0..w * h).flat_map(|i| [(i % 251) as u8, 90, 200]).collect();
+        let (jpeg, sw, sh) = to_jpeg_sized(Raw::Rgb, &rgb, w, h, Size::Full).unwrap();
+        assert_eq!((sw, sh), (1920, 1080));
+        assert_eq!(image::load_from_memory(&jpeg).unwrap().to_rgb8().dimensions(), (1920, 1080));
+        assert_eq!(to_jpeg_sized(Raw::Rgb, &rgb, w, h, Size::Recording).map(|(_, w, h)| (w, h)), Some((640, 360)));
+        // Larger than a still is kept: made to fit 4096 on its longer side.
+        let wide = vec![7u8; 8000 * 2 * 3];
+        assert_eq!(to_jpeg_sized(Raw::Rgb, &wide, 8000, 2, Size::Full).map(|(_, w, _)| w), Some(4096));
+        // Through the helper's pipe: a still's size comes back whole; a recording's that large
+        // is refused.
+        let frame = CameraFrame { at: Duration::ZERO, jpeg: jpeg.clone(), width: sw, height: sh };
+        let record = picture_record(&frame);
+        assert_eq!(picture_from(&record, Duration::ZERO, Size::Full).map(|f| (f.width, f.height)), Some((1920, 1080)));
+        assert!(picture_from(&record, Duration::ZERO, Size::Recording).is_none());
+        let mut pipe = Vec::new();
+        write_record(&mut pipe, PICTURE, &record).unwrap();
+        assert_eq!(read_record(&mut pipe.as_slice()).unwrap().1, record);
+        // The helper is asked for full size by a word after the camera's number.
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(helper_args(&args(&[HELPER_ARG, "2", FULL_ARG])), Some((2, Size::Full)));
+        assert_eq!(helper_args(&args(&[HELPER_ARG, "1"])), Some((1, Size::Recording)));
+        assert_eq!(helper_args(&args(&[HELPER_ARG, "x", "big"])), Some((0, Size::Recording)));
+        assert_eq!(helper_args(&args(&["--tray"])), None);
+    }
+
     #[test]
     fn the_helpers_records_come_back_as_sent() {
         let frame = CameraFrame { at: Duration::ZERO, jpeg: vec![0xFF, 0xD8, 1, 2, 3], width: 640, height: 360 };
@@ -830,7 +928,7 @@ mod tests {
         assert_eq!(read_record(&mut input).unwrap(), (READY, b"Camera 1".to_vec()));
         let (kind, data) = read_record(&mut input).unwrap();
         assert_eq!(kind, PICTURE);
-        let back = picture_from(&data, Duration::from_millis(40)).unwrap();
+        let back = picture_from(&data, Duration::from_millis(40), Size::Recording).unwrap();
         assert_eq!((back.width, back.height, back.jpeg, back.at), (640, 360, frame.jpeg.clone(), Duration::from_millis(40)));
         assert_eq!(read_record(&mut input).unwrap(), (TROUBLE, b"it's in use".to_vec()));
         // The pipe ended: an error, not a hang or a panic.
@@ -843,10 +941,10 @@ mod tests {
         assert!(read_record(&mut [PICTURE, 9, 0].as_slice()).is_err());
         assert!(read_record(&mut [PICTURE, 10, 0, 0, 0, 1, 2].as_slice()).is_err());
         assert!(read_record(&mut [PICTURE, 0xFF, 0xFF, 0xFF, 0xFF].as_slice()).is_err());
-        assert!(picture_from(&[], Duration::ZERO).is_none());
-        assert!(picture_from(&[1, 0, 0, 0, 1, 0, 0, 0], Duration::ZERO).is_none());
+        assert!(picture_from(&[], Duration::ZERO, Size::Full).is_none());
+        assert!(picture_from(&[1, 0, 0, 0, 1, 0, 0, 0], Duration::ZERO, Size::Full).is_none());
         let huge = CameraFrame { at: Duration::ZERO, jpeg: vec![1], width: 100_000, height: 2 };
-        assert!(picture_from(&picture_record(&huge), Duration::ZERO).is_none());
+        assert!(picture_from(&picture_record(&huge), Duration::ZERO, Size::Full).is_none());
         // Not its arguments: not the helper.
         assert_eq!(helper_main(&["--tray".to_string()]), None);
     }

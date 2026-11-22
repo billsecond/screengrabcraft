@@ -49,7 +49,7 @@ window for a few seconds and keeps a picture of it, and of nothing else on the s
 | — (set one in Settings) | Ctrl+Shift+P | **Video Production**: opens the Recorder; the screen, the camera, the microphone and the computer's sound, each on a track of its own, to edit |
 | Shift+Print Screen | Ctrl+Shift+R | **Repeat** the last area |
 | — (set one in Settings) | — | **Grab Text**: drag out an area (or click a window) and its text goes on the clipboard (Windows) |
-| — (set one in Settings) | — | **Picture from the Camera**: a still from Video Production's camera (Windows, macOS) |
+| — (set one in Settings) | — | **Picture from the Camera**: a still from Video Production's camera, at its own size (Windows, macOS) |
 
 Every shortcut can be changed (or switched off) in the service's settings, and the tray menu has
 every capture, a delayed capture (3, 5 or 10 s), the editor and the captures folder. While choosing
