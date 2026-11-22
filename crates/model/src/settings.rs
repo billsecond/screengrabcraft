@@ -284,6 +284,9 @@ pub struct Hotkeys {
     pub stop: Option<Hotkey>,
     /// While a recording runs: draw on the screen, or stop drawing. F8 by default.
     pub draw: Option<Hotkey>,
+    /// While a recording runs: the camera full screen with the screen in its corner, or back.
+    /// F7 by default.
+    pub camera_full: Option<Hotkey>,
 }
 
 impl Hotkeys {
@@ -312,6 +315,7 @@ impl Hotkeys {
                 pause: k("F9"),
                 stop: k("F10"),
                 draw: k("F8"),
+                camera_full: k("F7"),
             }
         } else {
             Hotkeys {
@@ -333,6 +337,7 @@ impl Hotkeys {
                 pause: Some(Hotkey::new(false, false, false, false, "F9")),
                 stop: Some(Hotkey::new(false, false, false, false, "F10")),
                 draw: Some(Hotkey::new(false, false, false, false, "F8")),
+                camera_full: Some(Hotkey::new(false, false, false, false, "F7")),
             }
         }
     }
@@ -404,6 +409,9 @@ impl Hotkeys {
         if let Some(k) = &self.draw {
             named.push(("Draw on the Screen While Recording", k));
         }
+        if let Some(k) = &self.camera_full {
+            named.push((CAMERA_FULL_LABEL, k));
+        }
         let mut out = Vec::new();
         for (i, (a, ka)) in named.iter().enumerate() {
             for (b, kb) in named.iter().skip(i + 1) {
@@ -415,6 +423,9 @@ impl Hotkeys {
         out
     }
 }
+
+/// The camera full screen shortcut's name, in Settings and where shortcuts clash.
+pub const CAMERA_FULL_LABEL: &str = "Camera Full Screen While Recording";
 
 impl Default for Hotkeys {
     fn default() -> Hotkeys {
@@ -1173,6 +1184,7 @@ impl Settings {
             ("Pause or Resume Recording", &keys.pause),
             ("Stop Recording", &keys.stop),
             ("Draw on the Screen While Recording", &keys.draw),
+            (CAMERA_FULL_LABEL, &keys.camera_full),
         ];
         for (i, (a, ka)) in presets.iter().enumerate() {
             for m in CaptureMode::ALL {

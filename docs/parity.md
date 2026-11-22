@@ -58,7 +58,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | A smaller file format | Has | AV1 and Opus, beside H.264 and AAC on Windows |
 | Microphone and the computer's sound | Has | the computer's sound on Windows only |
 | Camera in a corner: square, rounded, circle | Has | |
-| Camera full screen, swapped with the screen while recording | Part | with the screen off the camera is the video |
+| Camera full screen, swapped with the screen while recording | Has | the camera button on the recording's controls, F7 or the tray: the camera fills the picture, the screen in its corner, and back; kept as stretches the video editor's camera panel lists, adds to and removes (`video.cameraFull`). With the screen off the camera is the video |
 | Camera border, mirrored camera | Has | Mirror and Border (with its colour) under the Recorder's camera picture, shown there as they will be; the video editor's camera panel changes both, and how wide the border is |
 | Camera background blurred or replaced | Missing | |
 | Each source on a track of its own, to edit | Has | |
@@ -290,7 +290,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. QR codes read and made (#91).
 16. Capture presets with effects added as they're taken, a folder and a format of their own, and
     `--preset <name>` (#93).
-17. Open With: a capture in a program of the owner's choosing (Windows).
+17. Open With: a capture in a program of the owner's choosing (Windows; #94).
+18. The camera full screen, swapped with the screen while recording.
 
 **Still to build, in this order**
 

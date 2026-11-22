@@ -1699,6 +1699,53 @@ impl VideoView {
         }
         ui.add_space(4.0);
         ui.label(small("Or drag the camera on the picture to put it anywhere."));
+        // The camera full screen for stretches, the screen in its place.
+        ui.add_space(10.0);
+        ui.label(small("Full screen"));
+        let chosen = self.range;
+        let wide = ui.available_width();
+        let r = ui
+            .add_enabled(chosen.is_some(), egui::Button::new("Camera Full Screen for the Stretch").min_size(vec2(wide, 28.0)))
+            .on_hover_text("The camera fills the picture for the chosen stretch, the screen small in its place")
+            .on_disabled_hover_text("Choose a stretch first: drag a handle out from the playhead on the ruler");
+        if r.clicked()
+            && let Some((a, b)) = chosen
+        {
+            self.run(ed, &ctx, "video.cameraFull", json!({"from": a, "to": b, "full": true}));
+        }
+        let (mut remove, mut go) = (None, None);
+        for k in 0..self.session.timeline.camera_full.len() {
+            let shown = self.session.timeline.camera_full_shown(k);
+            ui.horizontal(|ui| {
+                match shown {
+                    Some((a, b)) => {
+                        if ui.link(format!("{} to {}", clock(a), clock(b))).on_hover_text("Go there").clicked() {
+                            go = Some(a);
+                        }
+                    }
+                    None => {
+                        ui.label(small("Cut out of the video"));
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Clear of the panel's scroll bar.
+                    ui.add_space(8.0);
+                    if ui.small_button("Remove").on_hover_text("The screen back with the camera in its corner here").clicked() {
+                        remove = Some(k);
+                    }
+                });
+            });
+        }
+        if let Some(k) = remove {
+            self.run(ed, &ctx, "video.cameraFull", json!({"stretch": k, "full": false}));
+        }
+        if let Some(at) = go {
+            let now = ui.input(|i| i.time);
+            self.seek(ed, at, now);
+        }
+        if self.session.timeline.camera_full.is_empty() {
+            ui.label(small("While recording, the camera button on the recording's controls (or its shortcut) does the same."));
+        }
         let hidden = self.session.timeline.tracks.get(track).is_some_and(|tr| tr.clips.is_empty());
         if hidden {
             ui.add_space(4.0);

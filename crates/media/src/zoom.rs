@@ -133,6 +133,7 @@ mod tests {
             layers: Vec::new(),
             media: Vec::new(),
             pointer: Default::default(),
+            camera_full: Vec::new(),
         };
         tl.layers.push(Layer { id: 1, name: "Zoom".to_string(), items, ..Layer::default() });
         tl

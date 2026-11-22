@@ -120,6 +120,8 @@ enum RecordingChoice {
     Hide,
     /// Drawing on the screen, on or off.
     Draw,
+    /// The camera full screen with the screen in its corner, or back.
+    CameraFull,
     /// The bar is being dragged somewhere else.
     Drag,
 }
@@ -161,6 +163,10 @@ struct RecordingView {
     can_draw: bool,
     drawing: bool,
     draw_key: Option<String>,
+    /// The camera filling the picture: whether it can, whether it does, and its shortcut.
+    can_swap: bool,
+    camera_full: bool,
+    camera_full_key: Option<String>,
 }
 
 /// A red light that blinks every second and the time, or, paused, an amber pause sign.
@@ -284,6 +290,13 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
             if icons::button(ui, Icon::Restart, "Restart: throw this away and record again", false, true).clicked() {
                 choice = Some(RecordingChoice::Restart);
             }
+            if v.can_swap && matches!(kind, Kind::Video | Kind::Production) {
+                let words =
+                    if v.camera_full { "The screen again, the camera in its corner" } else { "The camera full screen, the screen in its corner" };
+                if icons::button(ui, Icon::Camera, &with_key(words, &v.camera_full_key), v.camera_full, true).clicked() {
+                    choice = Some(RecordingChoice::CameraFull);
+                }
+            }
             if v.can_draw && kind != Kind::Scrolling {
                 let words = if v.drawing { "Stop drawing" } else { "Draw on the screen: arrows, boxes, a pen, steps (they fade)" };
                 if icons::button(ui, Icon::Pen, &with_key(words, &v.draw_key), v.drawing, true).clicked() {
@@ -353,6 +366,9 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         can_draw: rec.drawable,
         drawing: svc.drawing,
         draw_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::Draw),
+        can_swap: rec.swappable(),
+        camera_full: rec.camera_full.load(std::sync::atomic::Ordering::SeqCst),
+        camera_full_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::CameraFull),
     };
     let size = recording_size(kind);
     // Where the owner dragged it; else beside the area, else on a screen that isn't recorded,
@@ -416,6 +432,7 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         Some(RecordingChoice::Restart) => svc.restart_recording(),
         Some(RecordingChoice::Border) => svc.toggle_border(),
         Some(RecordingChoice::Draw) => svc.toggle_drawing(),
+        Some(RecordingChoice::CameraFull) => svc.toggle_camera_full(),
         Some(RecordingChoice::Hide) => svc.controls_hidden = true,
         Some(RecordingChoice::Drag) | None => {}
     }
@@ -895,6 +912,54 @@ mod tests {
             let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
             h.run_steps(2);
             assert!(h.query_by_label_contains("Draw on the screen").is_none(), "{kind:?}");
+        }
+    }
+
+    /// A video of the screen with its camera has a camera button that swaps them, lit while the
+    /// camera fills the picture; any other has none.
+    #[test]
+    fn the_recording_control_swaps_the_camera_and_the_screen_where_it_can() {
+        let tip = "The camera full screen, the screen in its corner (F7)";
+        let full = |kind, can_swap, camera_full| RecordingView {
+            secs: 75,
+            border: true,
+            sound: Some(0.5),
+            mic: Some(0.3),
+            pause_key: Some("F9".into()),
+            stop_key: Some("F10".into()),
+            can_draw: true,
+            draw_key: Some("F8".into()),
+            can_swap,
+            camera_full,
+            camera_full_key: Some("F7".into()),
+            missing: if kind == Kind::Production { vec!["No computer sound".into()] } else { Vec::new() },
+            ..RecordingView::default()
+        };
+        for kind in [Kind::Video, Kind::Production] {
+            let view = full(kind, true, false);
+            let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
+            h.run_steps(2);
+            let r = h.get_by_label(tip).rect();
+            let time = h.get_by_label("01:15").rect();
+            assert!(r.max.x <= recording_size(kind).x + ROOT && r.min.x > time.max.x, "{kind:?} {r:?}");
+            h.get_by_label(tip).click();
+            h.run_steps(1);
+            assert_eq!(*h.state(), Some(RecordingChoice::CameraFull), "{kind:?}");
+        }
+        let view = full(Kind::Production, true, true);
+        let mut h = popup_harness(recording_size(Kind::Production), Theme::Dark, move |ui| recording_ui(ui, Kind::Production, &view));
+        h.run_steps(2);
+        h.get_by_label("The screen again, the camera in its corner (F7)");
+        if let Ok(dir) = std::env::var("SGC_SHOTS")
+            && let Ok(img) = h.render()
+        {
+            let _ = img.save(format!("{dir}/recording-bar-camera-full.png"));
+        }
+        for (kind, can_swap) in [(Kind::Video, false), (Kind::Gif, true), (Kind::Scrolling, true)] {
+            let view = full(kind, can_swap, false);
+            let mut h = popup_harness(recording_size(kind), Theme::Dark, move |ui| recording_ui(ui, kind, &view));
+            h.run_steps(2);
+            assert!(h.query_by_label_contains("The camera full screen").is_none(), "{kind:?}");
         }
     }
 
