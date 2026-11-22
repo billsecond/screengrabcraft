@@ -92,8 +92,15 @@ impl Composer {
             || Raster::filled(w, h, screengrabcraft_model::Color::BLACK).unwrap_or_else(|_| Raster::single(screengrabcraft_model::Color::BLACK));
         let shown = |i: usize| timeline.tracks.get(i).is_some_and(|tr| !tr.muted);
         let screen_shown = self.screen.as_ref().is_some_and(|(i, _)| shown(*i));
-        // The part of the screen shown (a zoom), unless zooms are left out (one being placed).
-        let view = if self.zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
+        // The look of the clips playing (their colours, their crops).
+        let look_of = |i: usize| -> crate::timeline::ClipLook {
+            timeline.clip_at(i, t).and_then(|k| timeline.tracks.get(i)?.clips.get(k)).map(|c| c.look).unwrap_or_default()
+        };
+        let screen_look = self.screen.as_ref().map(|(i, _)| look_of(*i)).unwrap_or_default();
+        // The part of the screen shown: what its clip's crop leaves, and of that a zoom's (unless
+        // zooms are left out, one being placed).
+        let zoom = if self.zoom { crate::zoom::view_at(timeline, t) } else { crate::zoom::View::WHOLE };
+        let view = within(screen_look.view(), zoom);
         let fit = |pic: Raster| {
             if !view.is_whole() {
                 zoomed(&pic, view, w, h)
@@ -123,6 +130,9 @@ impl Composer {
             }
             _ => black(),
         };
+        if screen_shown {
+            adjust_colours(&mut out, screen_look);
+        }
         // The mouse pointer on the screen, as it was then (larger, smoothed, its clicks ringed),
         // zoomed with it.
         if screen_shown
@@ -150,6 +160,15 @@ impl Composer {
                     }
                 }
                 None => cam,
+            };
+            // Its clip's crop and colours.
+            let cam_look = look_of(i);
+            let cam = if cam_look.is_plain() {
+                cam
+            } else {
+                let mut c = if cam_look.crop == [0; 4] { cam } else { zoomed(&cam, cam_look.view(), cam.width(), cam.height()).unwrap_or(cam) };
+                adjust_colours(&mut c, cam_look);
+                c
             };
             let plate = self.rec.plate();
             if screen_shown {
@@ -575,6 +594,34 @@ pub fn overlay_camera_keyed(out: &mut Raster, cam: &Raster, timeline: &Timeline,
                 }
             }
         }
+    }
+}
+
+/// `inner` (a part of a picture) of the part `outer` of a picture: the part of the whole picture.
+fn within(outer: crate::zoom::View, inner: crate::zoom::View) -> crate::zoom::View {
+    crate::zoom::View { x: outer.x + inner.x * outer.w, y: outer.y + inner.y * outer.h, w: inner.w * outer.w, h: inner.h * outer.h }
+}
+
+/// A picture's colours changed as a clip's look says: lighter or darker, more or less contrast,
+/// more or less colour (down to grey).
+pub fn adjust_colours(pic: &mut Raster, look: crate::timeline::ClipLook) {
+    let look = look.checked();
+    if look.brightness == 0 && look.contrast == 0 && look.saturation == 0 {
+        return;
+    }
+    let lift = f32::from(look.brightness) / 100.0 * 128.0;
+    let contrast = 1.0 + f32::from(look.contrast) / 100.0;
+    let colour = 1.0 + f32::from(look.saturation) / 100.0;
+    // Brightness and contrast, for each of the 256 values.
+    let curve: Vec<f32> = (0..256).map(|v| ((v as f32 - 128.0) * contrast + 128.0 + lift).clamp(0.0, 255.0)).collect();
+    let at = |v: u8| curve.get(usize::from(v)).copied().unwrap_or(f32::from(v));
+    for p in pic.pixels_mut().as_chunks_mut::<4>().0 {
+        let [r, g, b] = [at(p[0]), at(p[1]), at(p[2])];
+        let grey = 0.299 * r + 0.587 * g + 0.114 * b;
+        let more = |v: f32| (grey + (v - grey) * colour).round().clamp(0.0, 255.0) as u8;
+        p[0] = more(r);
+        p[1] = more(g);
+        p[2] = more(b);
     }
 }
 
@@ -1139,6 +1186,35 @@ mod tests {
             let small = Raster::filled(7, 3, Color::WHITE).unwrap();
             assert_eq!(blend_pictures(&a, &small, kind, f32::NAN).width(), 40);
         }
+    }
+
+    #[test]
+    fn a_clips_colours_and_crop_change_its_picture() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        assert_eq!(c.frame(&tl, 1_000_000).pixel(3, 3).unwrap(), Color::rgb(100, 0, 0));
+        // Lighter, and grey.
+        tl.set_clip_look(0, 0, |l| {
+            l.brightness = 50;
+            l.saturation = -100;
+        })
+        .unwrap();
+        let p = c.frame(&tl, 1_000_000).pixel(3, 3).unwrap();
+        assert!(p.r == p.g && p.g == p.b && (90..=98).contains(&p.r), "{p:?}");
+        // More contrast: the dark darker.
+        tl.set_clip_look(0, 0, |l| *l = crate::timeline::ClipLook { contrast: 100, ..crate::timeline::ClipLook::PLAIN }).unwrap();
+        assert!(c.frame(&tl, 1_000_000).pixel(3, 3).unwrap().r < 100);
+        // A sound track's clip has no colours; junk is kept in range.
+        assert!(tl.set_clip_look(1, 0, |l| l.contrast = 10).is_err());
+        tl.set_clip_look(0, 0, |l| *l = crate::timeline::ClipLook { brightness: i8::MIN, contrast: i8::MAX, saturation: -128, crop: [9_999; 4] })
+            .unwrap();
+        let l = tl.tracks[0].clips[0].look;
+        assert_eq!((l.brightness, l.contrast, l.saturation, l.crop), (-100, 100, -100, [450; 4]));
+        let _ = c.frame(&tl, 1_000_000);
+        // A crop of the left fifth: what's left, its shape kept, in the middle of it.
+        let v = crate::timeline::ClipLook { crop: [200, 0, 0, 0], ..crate::timeline::ClipLook::PLAIN }.view();
+        assert!((v.x - 0.2).abs() < 1e-6 && (v.y - 0.1).abs() < 1e-6 && (v.w - 0.8).abs() < 1e-6 && (v.h - 0.8).abs() < 1e-6, "{v:?}");
     }
 
     #[test]

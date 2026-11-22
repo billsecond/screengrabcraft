@@ -688,6 +688,24 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
         }
     };
     let (intro, outro) = (anim("intro")?, anim("outro")?);
+    // How it's framed: turned, cut down, bordered, rounded, shadowed.
+    let (rotate, border, radius) = (number(p, "rotate")?, number(p, "border")?, number(p, "radius")?);
+    let border_colour = text(p, "borderColour")?;
+    let shadow = match p.get("shadow") {
+        None => None,
+        Some(v) => Some(v.as_bool().ok_or_else(|| EngineError::Params("`shadow` must be true or false".to_string()))?),
+    };
+    let crop = match p.get("crop") {
+        None => None,
+        Some(v) => {
+            let sides: Vec<f32> =
+                v.as_array().map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f as f32).collect()).unwrap_or_default();
+            match sides.as_slice() {
+                [l, t, r, b] => Some([*l, *t, *r, *b]),
+                _ => return Err(EngineError::Params("`crop` is [left, top, right, bottom], shares of the picture".to_string())),
+            }
+        }
+    };
     let (intro_len, outro_len) = (
         if p.get("introLen").is_some() { Some(int(p, "introLen")?) } else { None },
         if p.get("outroLen").is_some() { Some(int(p, "outroLen")?) } else { None },
@@ -722,6 +740,56 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             if let Some(l) = outro_len {
                 i.outro.len = l.min(10_000_000);
             }
+            let look = &mut i.look;
+            for (slot, v) in [(&mut look.rotate, rotate), (&mut look.border, border), (&mut look.radius, radius)] {
+                if let Some(v) = v {
+                    *slot = v;
+                }
+            }
+            if let Some(c) = crop {
+                look.crop = c;
+            }
+            if let Some(c) = border_colour {
+                look.border_colour = c;
+            }
+            if let Some(v) = shadow {
+                look.shadow = v;
+            }
+            i.look = std::mem::take(&mut i.look).checked();
+        })
+        .map_err(edit_err)?;
+    Ok(json!({}))
+}
+
+/// A picture track's clip's colours and crop.
+fn clip_look(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let level = |key: &str| -> Result<Option<i8>> {
+        match number(p, key)? {
+            None => Ok(None),
+            Some(v) => Ok(Some(v.round().clamp(-100.0, 100.0) as i8)),
+        }
+    };
+    let (brightness, contrast, saturation) = (level("brightness")?, level("contrast")?, level("saturation")?);
+    let crop = match p.get("crop") {
+        None => None,
+        Some(v) => {
+            let sides: Vec<u16> = v
+                .as_array()
+                .map(|a| a.iter().filter_map(Value::as_f64).filter(|f| f.is_finite()).map(|f| f.round().clamp(0.0, 1000.0) as u16).collect())
+                .unwrap_or_default();
+            match sides.as_slice() {
+                [l, t, r, b] => Some([*l, *t, *r, *b]),
+                _ => return Err(EngineError::Params("`crop` is [left, top, right, bottom], thousandths of the picture".to_string())),
+            }
+        }
+    };
+    let (track, clip) = (unlocked(s, p)?, index(p, "clip")?);
+    s.timeline
+        .set_clip_look(track, clip, |l| {
+            l.brightness = brightness.unwrap_or(l.brightness);
+            l.contrast = contrast.unwrap_or(l.contrast);
+            l.saturation = saturation.unwrap_or(l.saturation);
+            l.crop = crop.unwrap_or(l.crop);
         })
         .map_err(edit_err)?;
     Ok(json!({}))
@@ -1015,6 +1083,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: move_clip,
     },
     VideoCommand {
+        id: "video.clipLook",
+        label: "Colour and Crop",
+        params: r#"{"track": n, "clip": n, "brightness"?: -100..100, "contrast"?: -100..100, "saturation"?: -100..100, "crop"?: [left, top, right, bottom] 0..450 thousandths}: a picture track's clip lighter or darker, with more or less contrast and colour, and its edges cut off (what's left fills the picture, its shape kept)"#,
+        run: clip_look,
+    },
+    VideoCommand {
         id: "video.lock",
         label: "Lock Track",
         params: r#"{"track": n, "locked": bool}: its clips stay as they are (cuts, speeds and holds of the whole video still move it)"#,
@@ -1193,7 +1267,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs}"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool} (a picture or a video is cut down, bordered, rounded and shadowed; words and graphics are only turned)"##,
         run: set_item,
     },
     VideoCommand {
@@ -1819,6 +1893,36 @@ mod layer_tests {
             s.execute("edit.undo", &json!({})).unwrap();
         }
         assert!(s.timeline.layers.is_empty() && s.timeline.media.is_empty());
+    }
+
+    #[test]
+    fn an_item_is_turned_and_framed_and_a_clip_coloured_and_cropped() {
+        let mut s = session();
+        let pic =
+            s.execute("video.addMedia", &json!({"kind": "picture", "name": "Logo.png", "path": "C:/Logo.png", "width": 40, "height": 20})).unwrap();
+        let placed = s.execute("video.place", &json!({"media": pic["id"], "at": 0})).unwrap();
+        let (layer, item) = (placed["layer"].as_u64().unwrap() as u32, placed["item"].as_u64().unwrap() as u32);
+        let look = json!({"layer": layer, "item": item, "rotate": 400, "crop": [0.1, 0, 0.6, 0], "border": 0.02, "borderColour": "#FF0000", "radius": 0.2, "shadow": true});
+        s.execute("video.setItem", &look).unwrap();
+        let l = s.timeline.item(layer, item).unwrap().look.clone();
+        assert_eq!(
+            (l.rotate, l.crop, l.border, l.border_colour.as_str(), l.radius, l.shadow),
+            (180.0, [0.1, 0.0, 0.45, 0.0], 0.02, "#ff0000", 0.2, true)
+        );
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "crop": [0.1, 0.2]})).is_err());
+        assert!(s.execute("video.setItem", &json!({"layer": layer, "item": item, "shadow": "yes"})).is_err());
+        // The screen's clip: lighter, cropped; junk refused.
+        s.execute("video.clipLook", &json!({"track": 0, "clip": 0, "brightness": 30.4, "crop": [100, 0, 0, 2000]})).unwrap();
+        assert_eq!(s.undo_label(), Some("Colour and Crop"));
+        let c = s.timeline.tracks[0].clips[0].look;
+        assert_eq!((c.brightness, c.crop), (30, [100, 0, 0, 450]));
+        for bad in
+            [json!({"track": 0, "clip": 0, "crop": [1, 2, 3]}), json!({"track": 0, "clip": 0, "contrast": "more"}), json!({"track": 0, "clip": 9})]
+        {
+            assert!(s.execute("video.clipLook", &bad).is_err(), "{bad}");
+        }
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!(s.timeline.tracks[0].clips[0].look.is_plain());
     }
 
     #[test]

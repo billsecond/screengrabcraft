@@ -731,6 +731,7 @@ impl VideoView {
                         let (lo, hi) = if matches!(item.what, What::Text { .. }) { (0.3, 2.5) } else { (0.05, 1.0) };
                         self.slider(ui, size_label, place.w, lo, hi, "w", &set);
                         self.slider(ui, "Opacity", place.opacity, 0.1, 1.0, "opacity", &set);
+                        self.frame_section(ui, &item, &media, &mut first, &set);
                         super::section(ui, "Position", &mut first);
                         self.slider(ui, "Across", place.x, -0.5, 1.5, "x", &set);
                         self.slider(ui, "Down", place.y, -0.5, 1.5, "y", &set);
@@ -886,6 +887,72 @@ impl VideoView {
 
     /// A number of the item's placement, as a percentage slider (a drag is one undo step).
     #[allow(clippy::too_many_arguments)]
+    /// How an item is framed: turned (anything on the picture), and a picture or a video cut down
+    /// at its sides, with a border, rounded corners and a shadow.
+    fn frame_section(
+        &mut self,
+        ui: &mut Ui,
+        item: &Item,
+        media: &[layers::MediaItem],
+        first: &mut bool,
+        set: &dyn Fn(&mut VideoView, serde_json::Value, bool),
+    ) {
+        let t = Tokens::get(ui.ctx());
+        let look = item.look.clone().checked();
+        let mut deg = look.rotate;
+        let r = super::named_slider(ui, "Turn", &mut deg, -180.0..=180.0, "°");
+        self.look_change(&r, (deg - look.rotate).abs() > 0.4, json!({"rotate": deg.round()}), set);
+        let picture = matches!(&item.what, What::Media { id } if media.iter().any(|m| m.id == *id && m.kind != MediaKind::Sound));
+        if !picture {
+            return;
+        }
+        super::section(ui, "Frame", first);
+        for (k, name) in ["Crop the left", "Crop the top", "Crop the right", "Crop the bottom"].into_iter().enumerate() {
+            let was = look.crop.get(k).copied().unwrap_or(0.0) * 100.0;
+            let mut v = was;
+            let r = super::named_slider(ui, name, &mut v, 0.0..=45.0, "%");
+            let mut crop = look.crop;
+            if let Some(c) = crop.get_mut(k) {
+                *c = v / 100.0;
+            }
+            self.look_change(&r, (v - was).abs() > 0.4, json!({"crop": crop}), set);
+        }
+        let mut border = look.border * 100.0;
+        let r = super::named_slider(ui, "Border, of its width", &mut border, 0.0..=10.0, "%");
+        self.look_change(&r, (border - look.border * 100.0).abs() > 0.05, json!({"border": border / 100.0}), set);
+        if look.border > 0.0 {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Border colour").size(12.0).color(t.muted));
+                let [r, g, b] = layers::color(&look.border_colour, [0xff, 0xff, 0xff]);
+                let mut c = Color32::from_rgb(r, g, b);
+                if egui::color_picker::color_edit_button_srgba(ui, &mut c, egui::color_picker::Alpha::Opaque).changed() {
+                    set(self, json!({"borderColour": format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())}), false);
+                }
+            });
+        }
+        let mut radius = look.radius * 100.0;
+        let r = super::named_slider(ui, "Rounded corners", &mut radius, 0.0..=50.0, "%");
+        self.look_change(&r, (radius - look.radius * 100.0).abs() > 0.4, json!({"radius": radius / 100.0}), set);
+        let mut shadow = look.shadow;
+        if ui.checkbox(&mut shadow, "Shadow").on_hover_text("A soft shadow under it").changed() {
+            set(self, json!({"shadow": shadow}), false);
+        }
+    }
+
+    /// A change of an item's look from a slider: a drag is one undo step. (A slider rounds what
+    /// it's given: only a move is a change.)
+    fn look_change(&mut self, r: &egui::Response, moved: bool, p: serde_json::Value, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        if r.drag_started() {
+            self.session.begin("Change");
+        }
+        if r.changed() && moved {
+            set(self, p, r.dragged());
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+    }
+
     fn slider(&mut self, ui: &mut Ui, label: &str, value: f32, lo: f32, hi: f32, key: &str, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
         let mut v = value * 100.0;
         let r = super::named_slider(ui, label, &mut v, lo * 100.0..=hi * 100.0, "%");

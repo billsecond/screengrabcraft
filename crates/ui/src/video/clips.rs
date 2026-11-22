@@ -79,6 +79,57 @@ fn toggle(ui: &mut Ui, id: (&str, usize), rect: Rect, on: bool, tip: &str, draw:
 }
 
 impl VideoView {
+    /// A picture track's clip's colours (brightness, contrast, colour) and crop (each side).
+    pub(super) fn clip_look_section(&mut self, ed: &mut Editor, ui: &mut Ui, ti: usize, ci: usize) {
+        let ctx = ui.ctx().clone();
+        let Some(look) = self.session.timeline.tracks.get(ti).and_then(|t| t.clips.get(ci)).map(|c| c.look) else { return };
+        for (name, key, value) in
+            [("Brightness", "brightness", look.brightness), ("Contrast", "contrast", look.contrast), ("Colour", "saturation", look.saturation)]
+        {
+            let mut v = f32::from(value);
+            let r = super::named_slider(ui, name, &mut v, -100.0..=100.0, "");
+            self.clip_look_change(ed, &ctx, &r, (v - f32::from(value)).abs() > 0.4, json!({"track": ti, "clip": ci, key: v.round()}));
+        }
+        for (k, name) in ["Crop the left", "Crop the top", "Crop the right", "Crop the bottom"].into_iter().enumerate() {
+            let was = f32::from(look.crop.get(k).copied().unwrap_or(0)) / 10.0;
+            let mut v = was;
+            let r = super::named_slider(ui, name, &mut v, 0.0..=45.0, "%");
+            let mut crop = look.crop;
+            if let Some(c) = crop.get_mut(k) {
+                *c = (v * 10.0).round().clamp(0.0, 450.0) as u16;
+            }
+            self.clip_look_change(ed, &ctx, &r, (v - was).abs() > 0.04, json!({"track": ti, "clip": ci, "crop": crop}));
+        }
+        if !look.is_plain() {
+            ui.add_space(4.0);
+            if ui.button("As Recorded").on_hover_text("Its colours and its whole picture again").clicked() {
+                self.run(
+                    ed,
+                    &ctx,
+                    "video.clipLook",
+                    json!({"track": ti, "clip": ci, "brightness": 0, "contrast": 0, "saturation": 0, "crop": [0, 0, 0, 0]}),
+                );
+            }
+        }
+    }
+
+    /// A change of a clip's look from a slider: a drag is one undo step.
+    fn clip_look_change(&mut self, ed: &mut Editor, ctx: &egui::Context, r: &egui::Response, moved: bool, p: serde_json::Value) {
+        if r.drag_started() {
+            self.session.begin("Colour and Crop");
+        }
+        if r.changed() && moved {
+            if r.dragged() {
+                let _ = self.session.drag("video.clipLook", &p);
+            } else {
+                self.run(ed, ctx, "video.clipLook", p);
+            }
+        }
+        if r.drag_stopped() {
+            self.session.commit();
+        }
+    }
+
     /// A track header's lock and (a sound track's) play-alone toggles, in `rect` (right to left).
     pub(super) fn track_toggles(&mut self, ed: &mut Editor, ui: &mut Ui, rect: Rect, i: usize, track: &Track) {
         let ctx = ui.ctx().clone();

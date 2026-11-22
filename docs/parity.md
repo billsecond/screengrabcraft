@@ -201,7 +201,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Lottie animations brought in | Has | |
 | **Subtitle files brought in** | Has | File › Import Subtitles: SubRip (.srt) or WebVTT (.vtt) timed on the video as it is now, made its captions (instead of those it had); each line follows its speaker's track from then on (`You:` and `Others:` lines theirs, the rest the microphone's) |
 | Items moved and resized on the picture, snapped to its middle and edges | Has | |
-| Rotate an item; crop a clip | Missing | |
+| **Rotate an item; crop a clip** | Has | an item's panel turns it (Turn); a picture's or a video's crops its sides (Frame); a screen or camera clip's panel crops its edges, what's left filling the picture, its shape kept |
 | Pin a picture onto a slanted surface | Missing | |
 
 ## Editing a video: motion and effects
@@ -221,8 +221,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Camera shape and corner | Has | |
 | **Camera background removed (no green screen)** | Has | the background model looks at four of the camera's pictures and learns the room; each picture keeps what differs from it (the camera kept still) |
 | **A colour removed (green screen)** | Has | the camera's panel: the colour and how far from it still goes; its glow on you taken out |
-| Colour adjustments and looks | Missing | |
-| Border, shadow, rounded corners on a clip | Part | the camera's shapes |
+| **Colour adjustments and looks** | Part | a screen or camera clip's brightness, contrast and colour, in its panel; no ready-made looks |
+| **Border, shadow, rounded corners on a clip** | Part | a picture or a video put on a layer: a border of any colour, rounded corners and a soft shadow (its panel, Frame); the camera's shapes; not the recording's own screen |
 | Device frames, masks, blend modes | Missing | |
 | Spotlight, blur a region | Has | |
 | Motion blur, freeze a region | Missing | |
@@ -290,7 +290,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 15. Groups of clips, later clips pushed along, locked and solo tracks, clip colours (#90).
 16. Words cut out of the video from the transcript; filler words taken out (word times estimated) (#95).
 17. J, K and L playback keys; a clip played backwards, its sound too (#97).
-18. Subtitle files brought in as captions; a watermark on the video.
+18. Subtitle files brought in as captions; a watermark on the video (#102).
+19. Items turned and framed (cropped, bordered, rounded, shadowed); a clip's colours and crop.
 
 **Still to build, in this order**
 

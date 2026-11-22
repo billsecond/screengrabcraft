@@ -334,6 +334,57 @@ pub struct Item {
     /// into it); eased from one to the next. None: it stays at `place`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub keys: Vec<Key>,
+    /// How it's framed: turned, and (a picture or a video) cut down, bordered, rounded, shadowed.
+    #[serde(skip_serializing_if = "ItemLook::is_plain")]
+    pub look: ItemLook,
+}
+
+/// How an item is framed on the picture: turned about its middle, and, a picture or a video, cut
+/// down at its sides, with a border, rounded corners and a shadow under it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ItemLook {
+    /// Degrees, clockwise (-180 to 180).
+    pub rotate: f32,
+    /// What's cut off each side of its picture, shares of it: left, top, right, bottom (0 to
+    /// 0.45 each).
+    pub crop: [f32; 4],
+    /// A border round it as wide as this share of its width (0 none, to 0.1)...
+    pub border: f32,
+    /// ...of this colour (`#rrggbb`).
+    pub border_colour: String,
+    /// Its corners rounded: the radius as a share of its shorter side (0 to 0.5).
+    pub radius: f32,
+    /// A soft shadow under it.
+    pub shadow: bool,
+}
+
+impl Default for ItemLook {
+    fn default() -> ItemLook {
+        ItemLook { rotate: 0.0, crop: [0.0; 4], border: 0.0, border_colour: "#ffffff".to_string(), radius: 0.0, shadow: false }
+    }
+}
+
+impl ItemLook {
+    /// Nothing changed: drawn as it is.
+    pub fn is_plain(&self) -> bool {
+        let none = |v: f32| v.abs() < 1.0e-4 || !v.is_finite();
+        none(self.rotate) && self.crop.iter().all(|c| none(*c)) && none(self.border) && none(self.radius) && !self.shadow
+    }
+
+    /// Every value in its range (a hostile file's NaNs made sensible).
+    pub fn checked(self) -> ItemLook {
+        let f = |v: f32, lo: f32, hi: f32| if v.is_finite() { v.clamp(lo, hi) } else { 0.0 };
+        let colour = color(&self.border_colour, [0xff, 0xff, 0xff]);
+        ItemLook {
+            rotate: f(self.rotate, -180.0, 180.0),
+            crop: self.crop.map(|c| f(c, 0.0, 0.45)),
+            border: f(self.border, 0.0, 0.1),
+            border_colour: format!("#{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2]),
+            radius: f(self.radius, 0.0, 0.5),
+            shadow: self.shadow,
+        }
+    }
 }
 
 /// A moment of an item's motion (a keyframe): its place then, `at` µs into it.
@@ -359,6 +410,7 @@ impl Default for Item {
             intro: Anim::default(),
             outro: Anim::default(),
             keys: Vec::new(),
+            look: ItemLook::default(),
         }
     }
 }
@@ -1171,6 +1223,7 @@ impl Timeline {
                 i.len = i.len.clamp(MIN_CLIP_US, u64::MAX / 8);
                 i.from = i.from.min(u64::MAX / 8);
                 i.place = i.place.clamped();
+                i.look = std::mem::take(&mut i.look).checked();
                 i.keys.truncate(MAX_KEYS);
                 for k in &mut i.keys {
                     k.at = k.at.min(u64::MAX / 8);

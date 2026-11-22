@@ -79,6 +79,56 @@ pub struct Clip {
     /// reversed, and its sound).
     #[serde(default, skip_serializing_if = "is_false")]
     pub reverse: bool,
+    /// Its picture's colours changed and its edges cut off (a picture track's clip).
+    #[serde(default, skip_serializing_if = "ClipLook::is_plain")]
+    pub look: ClipLook,
+}
+
+/// How a picture track's clip looks: lighter or darker, more or less contrast and colour, and its
+/// edges cut off (what's left fills the picture, its shape kept).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipLook {
+    /// -100 (darker) to 100 (lighter); 0 as recorded.
+    pub brightness: i8,
+    /// -100 (flat) to 100 (more contrast).
+    pub contrast: i8,
+    /// -100 (grey) to 100 (more colour).
+    pub saturation: i8,
+    /// What's cut off each side, thousandths of the picture: left, top, right, bottom (0 to 450).
+    pub crop: [u16; 4],
+}
+
+/// The most cut off a side (thousandths).
+pub const MAX_CROP: u16 = 450;
+
+impl ClipLook {
+    /// As recorded.
+    pub const PLAIN: ClipLook = ClipLook { brightness: 0, contrast: 0, saturation: 0, crop: [0; 4] };
+
+    pub fn is_plain(&self) -> bool {
+        *self == ClipLook::PLAIN
+    }
+
+    /// Every value in its range.
+    pub fn checked(self) -> ClipLook {
+        let p = |v: i8| v.clamp(-100, 100);
+        ClipLook {
+            brightness: p(self.brightness),
+            contrast: p(self.contrast),
+            saturation: p(self.saturation),
+            crop: self.crop.map(|c| c.min(MAX_CROP)),
+        }
+    }
+
+    /// The part of the picture shown (shares of it): what the crop leaves, cut a little more the
+    /// other way so it keeps the picture's shape, in the middle of what's left.
+    pub fn view(&self) -> crate::zoom::View {
+        let c = self.checked().crop.map(|v| f32::from(v) / 1000.0);
+        let (kw, kh) = ((1.0 - c[0] - c[2]).max(0.1), (1.0 - c[1] - c[3]).max(0.1));
+        let s = kw.min(kh);
+        crate::zoom::View { x: c[0] + (kw - s) / 2.0, y: c[1] + (kh - s) / 2.0, w: s, h: s }
+    }
 }
 
 /// How many colours a clip can be given.
@@ -171,7 +221,20 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false, transition: None, colour: None, group: None, reverse: false }
+        Clip {
+            at,
+            from,
+            len,
+            speed: NORMAL_SPEED,
+            fade_in: 0,
+            fade_out: 0,
+            hold: false,
+            transition: None,
+            colour: None,
+            group: None,
+            reverse: false,
+            look: ClipLook::PLAIN,
+        }
     }
 
     /// A held frame: the picture recorded at `from`, shown from `at` for `len`.
@@ -642,6 +705,7 @@ impl Timeline {
                             transition: c.transition.map(|x| checked_transition(x, sound)),
                             colour: c.colour.filter(|k| *k < CLIP_COLOURS),
                             group: c.group,
+                            look: c.look.checked(),
                             ..Clip::held(c.at.min(u64::MAX / 4), c.from.min(source - 1), len)
                         });
                     }
@@ -662,6 +726,7 @@ impl Timeline {
                         colour: c.colour.filter(|k| *k < CLIP_COLOURS),
                         group: c.group,
                         reverse: c.reverse,
+                        look: c.look.checked(),
                     })
                 })
                 .take(10_000)
@@ -1126,6 +1191,19 @@ impl Timeline {
             }
         }
         Ok(n)
+    }
+
+    /// A picture track's clip's look: its colours and its crop (see [`ClipLook`]).
+    pub fn set_clip_look(&mut self, track: usize, clip: usize, change: impl FnOnce(&mut ClipLook)) -> Result<(), EditError> {
+        if !self.track(track)?.kind.is_video() {
+            return Err(EditError::Invalid("only a picture track's clip has colours and a crop".to_string()));
+        }
+        let (clips, _) = self.clip_mut(track, clip)?;
+        if let Some(c) = clips.get_mut(clip) {
+            change(&mut c.look);
+            c.look = c.look.checked();
+        }
+        Ok(())
     }
 
     /// Locks a track (its clips stay as they are) or lets it go.
