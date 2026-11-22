@@ -43,6 +43,8 @@ Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft
 type R<T> = Result<T, String>;
 
 fn main() -> ExitCode {
+    // Projects rendered here draw their text in the computer's fonts they name.
+    screengrabcraft_desktop::fonts::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V" | "version") => {

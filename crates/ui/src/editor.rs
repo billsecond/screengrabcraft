@@ -246,6 +246,12 @@ pub struct Editor {
     pub(crate) own_stamp_pictures: std::collections::HashMap<String, Raster>,
     /// The open dialog picks a picture to keep as a stamp (not one to open).
     pub(crate) adding_stamp: bool,
+    /// The font menu's search.
+    pub(crate) font_query: String,
+    /// The fonts on the computer, as last asked (none until the font menu is first opened).
+    pub(crate) font_list: Option<Vec<String>>,
+    /// The computer's fonts handed to egui, so text being typed is shown in them.
+    pub(crate) egui_fonts: std::collections::HashSet<String>,
     /// Files being transcribed (Transcribe a Video or Sound File…).
     pub transcripts: crate::transcribe::Transcripts,
     /// A recording being read on a thread of its own.
@@ -344,6 +350,9 @@ impl Editor {
             own_stamps: None,
             own_stamp_pictures: std::collections::HashMap::new(),
             adding_stamp: false,
+            font_query: String::new(),
+            font_list: None,
+            egui_fonts: std::collections::HashSet::new(),
             opening_video: None,
             toast: None,
             thumbs: std::collections::HashMap::new(),

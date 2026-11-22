@@ -15,6 +15,8 @@ screengrabcraft-render = { workspace = true }
 screengrabcraft-media = { workspace = true }
 screengrabcraft-engine = { workspace = true }
 egui = { workspace = true }
+# A computer's font checked before egui is given it (canvas.rs, typing_family).
+skrifa = { workspace = true }
 serde_json = { workspace = true }
 log = { workspace = true }
 

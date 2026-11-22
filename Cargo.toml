@@ -39,6 +39,12 @@ gif = "0.14"
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 # Glyph outlines from the bundled fonts, for text the annotations carry.
 ab_glyph = "0.2.32"
+# The fonts on the computer, for text and callouts (MIT): found in the system's font folders,
+# read when a text needs one, never shipped.
+fontdb = "0.23"
+# A font file checked before it is handed to egui to show text being typed in it (egui reads fonts
+# with it, and stops on one it can't read).
+skrifa = "0.44"
 # Deflate for the PDF writer (the backend written in Rust).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 

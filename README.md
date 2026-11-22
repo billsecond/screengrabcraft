@@ -187,7 +187,9 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   does the same with any tool.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
   with the text in it) with a tail set to point down left, down right, left, right, up or down,
-  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
+  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono or any font on the computer (Font,
+  with a search; a project keeps the font's name, and shows the built-in font where it's missing;
+  not in the browser), bold, italic, left, centred or right.
   Text overlays: an outline round the letters, a shadow, a filled or see-through box behind
   them, and big titles, each a quick style of the Text tool.
 - **Step** badges that count themselves, in numbers, capital or small letters, or Roman numerals

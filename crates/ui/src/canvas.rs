@@ -1435,6 +1435,32 @@ fn dashed_rect(p: &egui::Painter, r: egui::Rect, color: Color32) {
     p.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, color), 5.0, 3.0));
 }
 
+/// The egui family that shows text being typed in a font on the computer: handed to egui the
+/// first time, and used once egui has it (the frame after); none for the bundled fonts, or
+/// while egui hasn't it yet.
+fn typing_family(ed: &mut Editor, ctx: &egui::Context, style: &screengrabcraft_model::Style) -> Option<egui::FontFamily> {
+    if style.font.is_bundled() {
+        return None;
+    }
+    let name = format!("computer:{}:{}", style.font.as_str(), if style.bold { "bold" } else { "regular" });
+    let family = egui::FontFamily::Name(name.clone().into());
+    if ctx.fonts(|f| f.definitions().families.contains_key(&family)) {
+        return Some(family);
+    }
+    // Only a file egui can read: it stops the program over one it can't.
+    if ed.egui_fonts.insert(name.clone())
+        && let Some((bytes, index)) = screengrabcraft_render::text::font_file(style.font.as_str(), style.bold)
+        && skrifa::FontRef::from_index(&bytes, index).is_ok()
+    {
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        let to = egui::epaint::text::InsertFontFamily { family: family.clone(), priority: egui::epaint::text::FontPriority::Highest };
+        ctx.add_font(egui::epaint::text::FontInsert::new(&name, data, vec![to]));
+        ctx.request_repaint();
+    }
+    None
+}
+
 /// The text box being typed into, over the annotation, in its own font and size.
 fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     let Some(id) = ed.editing else { return };
@@ -1450,7 +1476,9 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     };
     let scale = ed.view.scale();
     let pad = text::padding(&o.style);
-    let family = if o.style.mono {
+    let family = if let Some(f) = typing_family(ed, ui.ctx(), &o.style) {
+        f
+    } else if o.style.mono {
         egui::FontFamily::Name("mono".into())
     } else if o.style.bold {
         egui::FontFamily::Name("sans-bold".into())
