@@ -31,7 +31,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Fixed size or fixed place area | Has | a capture preset of a set size, placed with a click; the Recorder's fixed sizes for videos |
 | Aspect ratio held while dragging (square, 16:9, 4:3) | Has | Shift, Ctrl, Ctrl+Shift while dragging (the overlay says so); a preset can hold any shape |
 | The program's own windows kept out of the picture | Has | the editor steps aside |
-| The mouse pointer in the picture | Part | drawn into the picture when Settings say so; not a separate object to move or delete later |
+| The mouse pointer in the picture | Has | drawn into the picture when Settings say so, and kept in the capture's side file as an annotation of its own, so the editor can move or delete it |
 | **Grab Text: the text in an area straight to the clipboard** | Has (0.1.54) | Windows' own text reader, on this computer; Windows only for now |
 | Scrolling capture, scrolled by hand | Has | |
 | **Scrolling capture that scrolls by itself** | Has | Windows: it turns the mouse wheel over the area and stops at the end of the page or at the longest picture; elsewhere, by hand |
@@ -82,55 +82,55 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Arrow: one or two heads, thickness, dashes, shadow | Has | |
-| Curved arrow, more head shapes | Missing | |
-| Line, pen, highlighter | Has | |
+| **Curved arrow, more head shapes** | Has | a diamond in a selected arrow's middle bends it, or Straight and Curved in its Shape options; heads notched, solid, an open V, a dot or a bar |
+| Line, pen, highlighter | Has | a line bends as an arrow does: the diamond in its middle, or Curved in its Shape options |
 | Text: fill, outline round the letters, shadow, alignment | Has | |
-| Any font on the computer | Missing | two bundled fonts |
+| **Any font on the computer** | Has | for text and callouts, with a search; used, never shipped; a project keeps the font's name and shows the built-in font where it's missing; not in the browser |
 | Callouts in five forms, tails any way | Has | |
-| Callout with several tails | Missing | |
+| **Callout with several tails** | Has | Add a Tail in a selected callout's Shape options or its right-click menu: up to 8, each dragged on its own, in every form |
 | Rectangle, rounded rectangle, ellipse | Has | |
-| Polygon, triangle, star | Missing | |
-| Stamps | Part | seven drawn stamps; no searchable library, no emoji, no pictures of your own |
+| **Polygon, triangle, star** | Has | triangles, diamonds, polygons of 3 to 12 corners and stars of 3 to 12 points, drawn in a box with the Shape tool; and polygons of points clicked one by one (Shape options › Points clicked: a double click or Enter closes it), moved and resized as a box |
+| **Stamps: a library with a search, faces, pictures of your own** | Has | 34 drawn in code (25 symbols and 9 faces); pictures of your own kept in the settings folder (not in the browser) |
 | Fill an area or a shape | Has | |
-| Gradient fills | Missing | |
+| **Gradient fills** | Has | linear at any angle or radial, from the fill colour to a second one: shapes, callouts, text boxes and step badges (the Fill menu), and the Fill tool on the picture or on a shape; a gradient quick style for shapes |
 | Move, select, nudge, duplicate | Has | |
 | Selection tool: move, copy, cut, delete or crop to an area | Has | |
-| Ellipse, polygon or freehand selection; invert | Missing | |
-| Magic wand (select by colour) | Missing | |
+| **Ellipse, polygon or freehand selection; invert** | Has | the Selection tool's Box, Ellipse and Freehand (any outline, a polygon drawn round); Invert (Ctrl+Shift+I); moving, copying, deleting, cropping and the colour effects keep to the shape |
+| **Magic wand (select by colour)** | Has | with a tolerance, joined to the pixel clicked or anywhere |
 | Crop, trim borders | Has | |
 | **Cut Out: take a strip out and close the gap** | Has (0.1.56) | columns or rows; straight, saw or wave |
 | Blur, pixelate | Has | |
-| Text and personal details found and hidden by themselves | Missing | |
-| Simplify (screen parts drawn as plain shapes) | Missing | |
-| Lift a button or a block and move it, filling where it was | Missing | |
-| Edit text in the picture, in a matching font | Missing | |
+| **Personal details found and hidden by themselves** | Part | Image › Hide Personal Details…: email addresses, phone numbers, card numbers (Luhn's check) and address lines, found by Grab Text's reader and covered with a blur, a pixelate or a solid box, each an annotation to move or delete; Windows only; faces aren't found (no face model with a clear open licence) |
+| **Simplify (screen parts drawn as plain shapes)** | Has | Image › Simplify: areas of one colour become flat boxes in their colour, icons small boxes, lines of text grey bars (from Grab Text's lines on Windows, from the marks themselves elsewhere); one group under the other annotations |
+| **Lift a button or a block and move it, filling where it was** | Has | the Selection tool's "Fill where a moved part was", and Fill from Round It to take something out |
+| **Edit text in the picture, in a matching font** | Part | Image › Edit Text in the Picture…: the lines Grab Text finds are outlined, and a click on one covers it with the colour round it and puts a text in its place in the same size and colour, to type into; Windows only; the font itself isn't recognised (the computer's interface font is used) |
 | Step numbers that count themselves | Has | |
-| Steps as letters or Roman numerals; other badge shapes | Missing | |
-| Eraser | Part | Delete on a selected area makes it see-through |
+| **Steps as letters or Roman numerals; other badge shapes** | Has | A, B, C, a, b, c, I, II, III, i, ii, iii, each counting on its own; circle, rounded square, square, diamond, hexagon, pin |
+| **Eraser** | Has | a tool of its own (E): rubs the picture out to see-through, or to a colour, at a width |
 | Magnify, spotlight | Has | |
 | Eyedropper, any colour | Has | |
 | Remove background | Has | a model on this computer |
 | Make a colour see-through | Has | |
 | **Grab Text from the picture or an area** | Has (0.1.54) | Image menu, right-click, Ctrl+Shift+T |
-| The captured pointer moved or deleted | Missing | |
+| **The captured pointer moved or deleted** | Has | the capture service keeps the pointer as a picture annotation in the capture's side file (the picture without it under it, and as the original); the editor opens the capture with it, to move, delete or restyle |
 | Quick styles in themes, favourites | Has | |
-| Themes of your own | Missing | |
-| Effect presets | Missing | |
+| **Themes of your own** | Has | the theme menu's "New theme from the current colours…": four colours (the ones in use first, each changeable) and a name, kept in the editor's settings and listed after the built-in four; deleted from the same menu |
+| **Effect presets** | Has | at the top of the Effects pane: eight ready-made (Soft Shadow, Photo Frame, Rounded Card, Torn Paper, Old Photo, Faded Edges, Thin Line, Black and White), each one or a few effects applied with one click as one undo step; Keep as Preset… under any effect keeps its settings under a name, kept in the editor's settings (a right-click deletes one) |
 | Undo and redo, also after closing | Has | |
 | Flatten selected, flatten all | Has | |
 | Bring forward, send back | Has | |
-| Group, align, flip annotations; select all of one kind | Missing | |
-| Rotate annotations | Missing | |
-| Snap to guides | Missing | |
+| **Group, align, flip annotations; select all of one kind** | Has | Edit menu and right-click: group (Ctrl+G), align, distribute, flip across or up and down, select all of the kinds selected; a group is selected, moved and turned as one |
+| **Rotate annotations** | Has | a round handle over a box or a group (Shift: 15° steps), or Rotate and Flip; lines, arrows and strokes turn by their points; blur, pixelate, spotlight and magnify stay square |
+| **Snap to guides** | Has | View › Rulers and Guides: rulers along the top and the left, guides dragged out of them (moved by dragging, taken away on their ruler or from their right-click menu), Guides at the Middle, Clear Guides; what is moved snaps its edges and middle to the guides and the picture's edges and middle (View › Snap to Guides); guides last while the picture is open |
 | Spell check | Missing | |
-| Measure a distance | Missing | |
+| **Measure a distance** | Has | the Measure tool (I): a drag reads out the length, across, down and the angle; Keep This One on the Picture (or keep each) adds a dimension line with a bar at each end and its length on a label, grouped |
 | Picture grows when something is moved past its edge | Has | |
 | Canvas size and colour, see-through | Has | |
 | Zoom, pan, Hand tool | Has | |
 | Copy, paste (a pasted picture stays an object) | Has | |
 | Project file that keeps the annotations | Has | `.sgcraft` |
 | Saves itself; Revert to Original | Has | |
-| Tool bar with names; tools of your choosing | Part | names on or off; the tools can't be chosen |
+| **Tool bar with names; tools of your choosing** | Has | names on or off (View › Tool Names); View › Customize Tool Bar…: tick the tools to show and move them up or down, kept in the settings; Usual Tools puts it back; a tool left off keeps its key |
 
 ## Effects on a picture
 
@@ -138,16 +138,16 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 |---|---|---|
 | Border, drop shadow, round corners | Has | |
 | Torn edge | Has | |
-| Other edges: wavy, faded, bevelled | Missing | |
+| **Other edges: wavy, faded, bevelled** | Has | beside the torn edge; each on the sides chosen |
 | Brightness and contrast | Has | |
-| Hue, saturation, gamma | Missing | |
+| **Hue, saturation, gamma** | Has | with lightness, in one effect |
 | Greyscale, invert | Has | |
-| Sepia, sharpen, blur all | Missing | |
-| Colour replaced by another | Part | by see-through only |
-| Perspective, page curl, reflection | Missing | |
-| Watermark (a picture or words) | Missing | |
-| Capture details written on the picture (time, program) | Missing | |
-| Effects on a selected area only | Missing | |
+| **Sepia, sharpen, blur all** | Has | |
+| **Colour replaced by another** | Has | Effects › Replace a Colour… and the Effects pane: a colour, chosen or picked from the picture with the eyedropper, and those within a tolerance of it, become another everywhere or only where they join the point picked; near colours keep their shade and smooth edges take the new colour; kept to a selected area too. Make a Colour Transparent (Image menu) turns one see-through |
+| **Perspective, page curl, reflection** | Has | the annotations move with a tilt; a page curl at any corner |
+| **Watermark (a picture or words)** | Has | in a corner, the middle or all over, turned; over the picture, or under its words and lines |
+| **Capture details written on the picture (time, program)** | Part | the time (from the capture's file), what it is of and its size, in a corner or on a strip below; captures don't record the program yet, so its name is typed |
+| **Effects on a selected area only** | Has | the colour changes, sharpen and blur keep to the area selected on the picture |
 | Effects added at capture time | Has | by a capture preset: border, round corners, torn edge, shadow, grey, made by the editor's own effects |
 
 ## Pictures: changing, keeping, sharing
@@ -155,9 +155,9 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Resize, rotate a quarter turn, flip | Has | |
-| Rotate by any angle | Missing | |
-| Templates: pictures laid out in a frame with words | Missing | |
-| Several pictures combined into one | Missing | |
+| **Rotate by any angle** | Has | Image › Rotate by an Angle…: the picture grows to hold the turned one, the corners see-through or a colour, the annotations turned with it |
+| **Templates: pictures laid out in a frame with words** | Has | Image › Template…: steps in a row, down the page, in a grid, or before and after, with a title and each step's words; every part stays an annotation |
+| **Several pictures combined into one** | Has | Image › Combine Pictures…: side by side, stacked or in a grid, with recent captures or picture files |
 | Many pictures changed at once (batch) | Has | Batch Changes (File menu, or All captures for the pictures shown): resize, the effects, grayscale, invert, trim, in order; a format and a name pattern; each saved beside its picture, none written over |
 | Print | Part | the Image Editor's File menu and Ctrl+P, through Windows' own printing window; greyed out elsewhere |
 | Recent captures strip; delete to the bin | Has | |
@@ -166,7 +166,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Captures sorted by program or website, tags, favourites | Part | All captures filters by favourites, the program a window was taken from and tags, and searches them and the window's title; a website only by its page's title |
 | Captures folder of your choosing | Has | |
 | PNG, JPEG, WebP, BMP, GIF, PDF | Has | |
-| TIFF, HEIF | Missing | |
+| **TIFF**, HEIF | Part | TIFF opened and saved (Export As, the command line; LZW-compressed, see-through kept), in the browser too; HEIF isn't opened: there is a pure-Rust decoder under MIT or Apache-2.0 (heifer; the other, heic, is AGPL), but HEIF pictures are HEVC, which is covered by patents, so shipping a decoder for it is the owner's call |
 | Multi-page PDF of several captures | Has | All captures' PDF of These (the pictures shown, or those chosen with Ctrl+click), or Batch Changes' "One PDF, a page each": a page for each picture, changed first if asked, saved where the owner says |
 | Copy, save | Has | |
 | Open in another program | Part | Open With… (the File menu: the picture as shown; a capture's right-click menu in the strip: its file) in Windows' own window for choosing a program, and Show in Folder; greyed out elsewhere |
@@ -310,38 +310,64 @@ By how much someone using it every day would miss each one. Built ones move to a
 33. The sound turned round while playing backwards (J), as recorded (#125).
 34. Narration recorded over the video in the editor, onto a sound layer of its own (#126).
 35. A narrated video made only of pictures: a new video of them, no screen recording needed (#127).
-4. Scrolling capture that scrolls by itself (Windows; #59).
-5. Capture presets; areas of a set size; shapes held while dragging (#62).
-6. Drawing on the screen while recording (Windows; #65).
-7. Tags, favourites, and captures sorted by the program they were taken from (#68).
-8. Print; batch changes; captures on a timer or at a set time (#72).
-9. A picture per click made into a how-to guide (#74).
-10. Several areas in one capture; a freehand area (#78).
-11. A multi-page PDF of several captures (#80).
-12. Captures pinned at the front of the Recent strip (#83).
-13. A countdown before a recording; a still from the camera (#84).
-14. A border round the camera, and the camera mirrored (#87).
-15. QR codes read and made (#91).
-16. Capture presets with effects added as they're taken, a folder and a format of their own, and
+36. Scrolling capture that scrolls by itself (Windows; #59).
+37. Capture presets; areas of a set size; shapes held while dragging (#62).
+38. Drawing on the screen while recording (Windows; #65).
+39. Tags, favourites, and captures sorted by the program they were taken from (#68).
+40. Print; batch changes; captures on a timer or at a set time (#72).
+41. A picture per click made into a how-to guide (#74).
+42. Several areas in one capture; a freehand area (#78).
+43. A multi-page PDF of several captures (#80).
+44. Captures pinned at the front of the Recent strip (#83).
+45. A countdown before a recording; a still from the camera (#84).
+46. A border round the camera, and the camera mirrored (#87).
+47. QR codes read and made (#91).
+48. Capture presets with effects added as they're taken, a folder and a format of their own, and
     `--preset <name>` (#93).
-17. Open With: a capture in a program of the owner's choosing (Windows; #94).
-18. The camera full screen, swapped with the screen while recording (#98).
-19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
-20. The how-to guide saved as a word-processor document and as slides (#101).
-21. A still from the camera at the camera's own size (#103).
-22. A recording cut short by a crash kept and said when the service starts again (#104).
-23. Open menus, drop-downs and tooltips snapped to like windows (Windows; #107).
+49. Open With: a capture in a program of the owner's choosing (Windows; #94).
+50. The camera full screen, swapped with the screen while recording (#98).
+51. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
+52. The how-to guide saved as a word-processor document and as slides (#101).
+53. A still from the camera at the camera's own size (#103).
+54. A recording cut short by a crash kept and said when the service starts again (#104).
+55. Open menus, drop-downs and tooltips snapped to like windows (Windows; #107).
+56. Step badges as letters or Roman numerals, and other badge shapes (#60).
+57. Polygons, triangles and stars; curved arrows and more head shapes (#63).
+58. A stamp library with search, faces, and pictures of your own as stamps (#67).
+59. Any font on the computer (#70).
+60. More effects: hue, saturation and gamma, sepia, sharpen, blur, wavy and faded edges, a bevel,
+    perspective, a page curl, a reflection, a watermark, capture details; on a selected area (#75).
+61. Rotate, group, align, distribute and flip annotations; select all of one kind (#77).
+62. Magic wand, an eraser, ellipse and freehand selections; invert the selection (#81).
+63. Templates; several pictures combined into one (#82).
+64. Personal details hidden by themselves: emails, phone and card numbers, addresses (Windows; not faces; #86).
+65. Simplify; a part of the picture lifted and moved, filled where it was (#89).
+66. Edit text in the picture: a line read covered and typed over in its size and colour (Windows; #92).
+67. Polygons of points clicked one by one; bent lines; callouts with several tails (#96).
+68. Gradient fills; themes of your own for the quick styles (#100).
+69. Effect presets; the picture rotated by any angle (#105).
+70. Rulers, guides and snapping; measuring a distance (#108).
+71. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
+72. TIFF opened and saved; a colour replaced by another (#114).
 
-**Still to build, in this order**
+**Still to build**
 
-2. Step badges as letters or Roman numerals, and other badge shapes.
-3. Polygons, triangles and stars; curved arrows.
-4. A stamp library with search, emoji, and pictures of your own as stamps.
-5. Any font on the computer.
-7. More effects: hue and saturation, sepia, sharpen, wavy and faded edges, perspective, page
-    curl, reflection, watermark, capture details.
-8. Rotate, group and align annotations; select all of one kind.
-9. Magic wand, eraser, ellipse and freehand selections.
-12. Templates; several pictures combined into one.
-14. Personal details hidden by themselves; simplify; lift and move parts; edit text in place.
-16. The rest: HDR, measuring, spell check.
+What is left either waits on a decision of the owner's or finishes something already built:
+
+1. Spell check in text annotations: built (#115), and kept out until the licence of the word
+   checker it uses is settled.
+2. HEIF pictures: there is a decoder with an open licence, but HEIF pictures are HEVC video
+   pictures, which are under patents.
+3. HDR screens captured in their true colours.
+4. Faces found by Hide Personal Details: there is no face finder with a clear licence yet.
+5. The picture's own font matched when its text is edited in place.
+6. A whole web page captured from its address, and pictures from a phone: both need the network.
+7. Printing from any program into the editor: it needs a printer driver.
+8. Parts of a window (a button, a pane) snapped to: Windows finds them only through calls made
+   with `unsafe`, which this project doesn't use.
+9. Drawing on the screen while recording, on macOS and Linux; desktop icons hidden while recording.
+10. Captures sorted by website: a capture of a browser can't see the page's address, only its title.
+11. Capture details on the picture: the program a window was taken from is in the captures'
+    library now, but the details still ask for it to be typed.
+12. Captions lit up word by word, and words cut from the transcript: the speech model times whole
+    lines, so the times of the words are estimated.

@@ -404,6 +404,8 @@ fn main() -> std::process::ExitCode {
     // The copy that stays: its log is the one kept.
     logging::to_file(if video { "video-editor" } else { "editor" });
     log::info!("{}", version::line(kind.name()));
+    // Text and callouts can use the fonts on the computer (looked for now, out of the way).
+    screengrabcraft_desktop::fonts::install();
     if video {
         // Before any window is made: its taskbar button is its own, not the picture editor's.
         cloak::own_taskbar_button(VIDEO_APP_ID);

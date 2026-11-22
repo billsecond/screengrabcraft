@@ -566,7 +566,7 @@ fn a_snapped_line_stops_at_the_edge_on_its_angle() {
     let (a, b) = (at(&h, 200.0, 150.0), at(&h, 470.0, 400.0));
     shift_drag(&mut h, a, b);
     let ed = h.state();
-    let Some(Shape::Line { from, to }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
+    let Some(Shape::Line { from, to, .. }) = ed.session.doc.objects.first().map(|o| o.shape.clone()) else { panic!("no line") };
     assert!(picture(ed).contains(to), "{to:?}");
     assert!(((to.x - from.x).abs() - (to.y - from.y).abs()).abs() < 0.5, "still at 45 degrees: {from:?} to {to:?}");
 }
@@ -816,7 +816,7 @@ fn a_thicker_line_or_bigger_badge_stays_on_the_picture() {
     let mut ed = editor();
     let style = Kind::Step.default_style();
     let center = screengrabcraft_model::Pt::new(385.0, 150.0);
-    let id = ed.session.doc.add(Shape::Step { center, number: 1 }, style).unwrap();
+    let id = ed.session.doc.add(Shape::step(center, 1), style).unwrap();
     ed.session.doc.bring_inside(id);
     ed.session.select(vec![id]);
     let bigger = screengrabcraft_model::Style { font_size: 60.0, ..style };
@@ -1172,7 +1172,13 @@ fn a_side_file_from_before_still_opens_and_the_picture_is_its_original() {
     // Saved by an older version: no original in it, and the picture beside it never rewritten.
     let mut doc = Document::new(Raster::filled(200, 100, Color::WHITE).unwrap());
     doc.add(
-        Shape::Arrow { from: screengrabcraft_model::Pt::new(5.0, 5.0), to: screengrabcraft_model::Pt::new(50.0, 50.0), heads: Default::default() },
+        Shape::Arrow {
+            from: screengrabcraft_model::Pt::new(5.0, 5.0),
+            to: screengrabcraft_model::Pt::new(50.0, 50.0),
+            heads: Default::default(),
+            bend: 0.0,
+            head: Default::default(),
+        },
         Kind::Arrow.default_style(),
     )
     .unwrap();
@@ -1671,7 +1677,10 @@ fn the_file_menu_has_room_between_its_items() {
 
 #[test]
 fn clicking_a_stamp_again_selects_it_and_dragging_it_moves_it_without_adding_another() {
-    let mut h = harness(editor());
+    // Where it is put exactly, not snapped to the picture's middle on the way.
+    let mut ed = editor();
+    ed.settings.no_snap = true;
+    let mut h = harness(ed);
     h.run_steps(2);
     h.state_mut().set_tool(Tool::Draw(Kind::Stamp));
     let p = at(&h, 150.0, 120.0);
@@ -1867,6 +1876,7 @@ fn the_eyedropper_takes_a_colour_from_the_picture_for_the_selection() {
                 tail: screengrabcraft_model::Pt::new(40.0, 130.0),
                 text: "Hi".into(),
                 form: screengrabcraft_model::CalloutForm::Rounded,
+                tails: Vec::new(),
             },
             Kind::Callout.default_style(),
         )
@@ -2983,4 +2993,262 @@ fn cut_out_takes_the_strip_dragged_across_out_and_joins_the_rest() {
     let p = at(&h, 50.0, 50.0);
     click_at(&mut h, p);
     assert_eq!(h.state().session.doc.width(), 400);
+}
+
+/// A box is turned by the round handle above it; a turned box is resized along its own sides;
+/// two grouped with Ctrl+G are selected and moved as one; the right-click menu arranges them.
+#[test]
+fn a_box_is_turned_by_its_handle_and_a_group_moves_as_one() {
+    use screengrabcraft_model::{ObjectId, Pt};
+    let mut h = harness(editor());
+    h.run_steps(4);
+    let add = |h: &mut Harness<'_, Editor>, x: f32, colour: &str| {
+        let obj = serde_json::json!({"type": "rect", "rect": {"x": x, "y": 100, "w": 120, "h": 60}, "style": {"fill": colour, "shadow": false}});
+        let out = h.state_mut().session.execute("object.add", &serde_json::json!({ "object": obj })).unwrap();
+        ObjectId(out["id"].as_u64().unwrap())
+    };
+    let a = add(&mut h, 40.0, "#1E88E5");
+    h.state_mut().set_tool(Tool::Select);
+    h.state_mut().session.select(vec![a]);
+    h.run_steps(2);
+    let (pivot, knob) = h.state().turn_handle().unwrap();
+    assert_eq!(pivot, Pt::new(100.0, 130.0));
+    assert!((knob.x - 100.0).abs() < 0.01 && knob.y < 100.0, "{knob:?}");
+    // Round to the right of its middle: a quarter turn, the way a clock goes.
+    let (from, to) = (h.state().view.to_screen(knob), at(&h, 200.0, 130.0));
+    drag(&mut h, from, to);
+    let turned = h.state().session.doc.get(a).unwrap().rotation;
+    assert!((turned - 90.0).abs() < 2.0, "{turned}");
+    assert_eq!(h.state().session.undo_label(), Some("Rotate"));
+    crate::quick_tests::shot(&mut h, "turned-box");
+    // Its corner handle is where the turned corner shows, and pulls along the box's own side.
+    let (_, corner) =
+        h.state().session.doc.get(a).unwrap().handles().into_iter().find(|(k, _)| *k == screengrabcraft_model::Handle::BottomRight).unwrap();
+    let c = h.state().view.to_screen(corner);
+    assert!(h.state().handle_at(c).is_some_and(|(_, k)| k == screengrabcraft_model::Handle::BottomRight));
+    // Shift snaps the turn to steps of 15°.
+    h.state_mut().session.execute("object.rotate", &serde_json::json!({"angle": 0})).unwrap();
+    // A second box; both selected, grouped by Ctrl+G.
+    let b = add(&mut h, 220.0, "#43A047");
+    h.state_mut().session.select(vec![a, b]);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::G);
+    h.run_steps(3);
+    let g = h.state().session.doc.get(a).unwrap().group;
+    assert!(g.is_some() && h.state().session.doc.get(b).unwrap().group == g, "grouped");
+    // A click on one selects both, and a drag moves both.
+    let p = at(&h, 270.0, 130.0);
+    let away = at(&h, 380.0, 280.0);
+    crate::tests::click_at(&mut h, away);
+    assert!(h.state().session.selected().is_empty());
+    crate::tests::click_at(&mut h, p);
+    assert_eq!(h.state().session.selected(), vec![a, b]);
+    let left = |h: &Harness<'_, Editor>, id| h.state().session.doc.get(id).unwrap().shape.rect().unwrap().x;
+    let down = at(&h, 270.0, 200.0);
+    drag(&mut h, p, down);
+    assert_eq!((left(&h, a), left(&h, b)), (40.0, 220.0), "moved down together");
+    assert!(h.state().session.doc.get(a).unwrap().shape.rect().unwrap().y > 150.0);
+    // The group has a turning handle too.
+    assert!(h.state().turn_handle().is_some());
+    crate::quick_tests::shot(&mut h, "group-selected");
+    // The right-click menu arranges them.
+    let on = at(&h, 270.0, 200.0);
+    right_click(&mut h, on);
+    crate::quick_tests::shot(&mut h, "arrange-right-click");
+    let sub = h.get_by_label_contains("Rotate and Flip").rect().center();
+    h.hover_at(sub);
+    h.run_steps(3);
+    h.get_by_label_contains("Rotate and Flip").click();
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "arrange-menu");
+    h.get_by_label("Flip Across").click();
+    h.run_steps(3);
+    assert_eq!((left(&h, a), left(&h, b)), (220.0, 40.0), "mirrored round their middle");
+    assert_eq!(h.state().session.undo_label(), Some("Flip Annotations"));
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::G);
+    h.run_steps(3);
+    assert_eq!(h.state().session.doc.get(a).unwrap().group, None, "ungrouped");
+}
+
+/// The Selection tool selects an ellipse, a freehand outline or a colour (the magic wand), the
+/// selection turns inside out, and what is done to it keeps to its shape; the eraser rubs out.
+#[test]
+fn ellipse_freehand_and_wand_selections_and_the_eraser() {
+    let mut ed = editor();
+    // White with a blue square.
+    let mut pic = Raster::filled(400, 300, Color::WHITE).unwrap();
+    for y in 100..180 {
+        for x in 150..250 {
+            let i = (y * 400 + x) * 4;
+            pic.pixels_mut()[i..i + 4].copy_from_slice(&[30, 90, 220, 255]);
+        }
+    }
+    ed.session.replace(Document::new(pic));
+    let mut h = harness(ed);
+    h.run_steps(4);
+    h.state_mut().set_tool(Tool::Area);
+    h.run_steps(2);
+    let alpha = |h: &Harness<'_, Editor>, x, y| h.state().session.doc.base.pixel(x, y).map_or(0, |c| c.a);
+    // The magic wand: a click on the blue takes the square.
+    h.state_mut().area_mode = crate::selection::AreaMode::Wand;
+    let blue = at(&h, 200.0, 140.0);
+    click_at(&mut h, blue);
+    assert_eq!(h.state().area, Some(screengrabcraft_model::Rect::new(150.0, 100.0, 100.0, 80.0)));
+    crate::quick_tests::shot(&mut h, "magic-wand");
+    // Inverted, then deleted: the white goes, the blue stays.
+    h.key_press_modifiers(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::I);
+    h.run_steps(3);
+    assert_eq!(h.state().area, Some(h.state().session.doc.bounds()));
+    crate::quick_tests::shot(&mut h, "selection-inverted");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 10, 10), alpha(&h, 200, 140)), (0, 255));
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(3);
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state().area.is_none());
+    // An ellipse dragged out, then deleted: its box's corner stays.
+    h.state_mut().area_mode = crate::selection::AreaMode::Ellipse;
+    let (a, b) = (at(&h, 20.0, 20.0), at(&h, 120.0, 100.0));
+    drag(&mut h, a, b);
+    assert!(h.state().area_shape().is_some());
+    crate::quick_tests::shot(&mut h, "ellipse-selection");
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert_eq!((alpha(&h, 70, 60), alpha(&h, 22, 22)), (0, 255));
+    // A freehand outline round a corner.
+    h.state_mut().area_mode = crate::selection::AreaMode::Freehand;
+    for (x, y) in [(300.0, 200.0), (390.0, 200.0), (390.0, 290.0), (300.0, 290.0)] {
+        let p = at(&h, x, y);
+        if (x, y) == (300.0, 200.0) {
+            h.hover_at(p);
+            h.run_steps(1);
+            h.drag_at(p);
+        } else {
+            h.hover_at(p);
+        }
+        h.run_steps(1);
+    }
+    let end = at(&h, 300.0, 210.0);
+    h.drop_at(end);
+    h.run_steps(3);
+    assert!(matches!(h.state().area_shape().map(|c| &c.shape), Some(screengrabcraft_render::region::AreaShape::Freehand { .. })));
+    // The eraser: a drag rubs out a line.
+    h.state_mut().set_tool(Tool::Eraser);
+    h.state_mut().eraser_width = 10.0;
+    h.run_steps(2);
+    crate::quick_tests::shot(&mut h, "eraser-panel");
+    let (a, b) = (at(&h, 20.0, 250.0), at(&h, 280.0, 250.0));
+    drag(&mut h, a, b);
+    assert_eq!(h.state().session.undo_label(), Some("Erase"));
+    assert_eq!((alpha(&h, 150, 250), alpha(&h, 150, 240)), (0, 255));
+}
+
+/// Combine Pictures puts this picture and others (a recent capture, files) together; Template
+/// lays them out on a page with a title and the steps' words, every part an annotation.
+#[test]
+fn pictures_are_combined_and_laid_out_in_a_template_from_the_image_menu() {
+    use crate::compose::ComposeKind;
+    let mut h = harness(editor());
+    h.run_steps(4);
+    h.get_by_label("Image").click();
+    h.run_steps(2);
+    h.get_by_label("Combine Pictures…").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_some());
+    // A picture file picked (as the host hands it over).
+    let pic = Raster::filled(120, 90, Color::rgb(0, 0, 255)).unwrap();
+    let bytes = screengrabcraft_render::encode(&pic, ImageFormat::Png, 92).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes: bytes.clone() }]);
+    h.run_steps(3);
+    h.get_by_label_contains("blue.png");
+    crate::quick_tests::shot(&mut h, "combine-pictures");
+    h.get_by_label("Combine").click();
+    h.run_steps(3);
+    assert!(h.state().compose.is_none());
+    assert_eq!(h.state().session.undo_label(), Some("Combine Pictures"));
+    assert!(h.state().session.doc.width() > 400 + 120);
+    assert!(h.state().session.lent.is_empty());
+    // A template of the two, with a title and the steps' words.
+    h.state_mut().session.undo();
+    h.state_mut().open_compose(ComposeKind::Template);
+    h.state_mut().compose_files(&ctx, vec![OpenedFile { name: "blue.png".into(), path: None, bytes }]);
+    if let Some(c) = &mut h.state_mut().compose {
+        c.title = "How to do it".into();
+        c.steps = vec!["Open the menu".into(), "Pick the blue one".into()];
+    }
+    h.run_steps(3);
+    crate::quick_tests::shot(&mut h, "template-window");
+    h.get_by_label("Make").click();
+    h.run_steps(6);
+    let doc = &h.state().session.doc;
+    assert_eq!((doc.count(Kind::Image), doc.count(Kind::Step), doc.count(Kind::Text)), (2, 2, 3));
+    crate::quick_tests::shot(&mut h, "template-made");
+}
+
+/// A capture with the pointer in it, as the capture service keeps it (the pointer drawn in, and
+/// the side file with it as an annotation of its own): the editor opens it with the pointer as a
+/// picture annotation, which is moved or deleted like any other.
+#[test]
+fn the_captured_pointer_is_an_annotation_to_move_or_delete() {
+    let plain = Raster::filled(400, 300, Color::rgb(30, 90, 200)).unwrap();
+    let drawn = screengrabcraft_render::pointer::draw(&plain, 200.0, 150.0, 1.0).unwrap();
+    let doc = screengrabcraft_render::pointer::as_document(&plain, 200.0, 150.0, 1.0).unwrap();
+    let side_bytes = screengrabcraft_render::project::save_with_original(&doc, Some(&plain)).unwrap();
+    let png = screengrabcraft_render::encode(&drawn, ImageFormat::Png, 100).unwrap();
+    let disk = Disk::with(&[("captures/a.png", png), ("captures/a.sgcraft", side_bytes)]);
+    let mut h = on_disk(&disk, Some("captures/a.png"));
+    let ed = h.state();
+    assert!(ed.session.doc.base == plain, "the picture under it is the screen alone");
+    assert!(matches!(ed.session.doc.objects.as_slice(), [o] if matches!(o.shape, Shape::Image { .. })), "the pointer, a picture annotation");
+    // Clicked and deleted: the screen as it was, with no pointer.
+    h.state_mut().set_tool(Tool::Select);
+    let p = at(&h, 203.0, 158.0);
+    click_at(&mut h, p);
+    assert_eq!(h.state().session.selected().len(), 1);
+    h.key_press(egui::Key::Delete);
+    h.run_steps(2);
+    assert!(h.state().session.doc.objects.is_empty());
+    h.run_steps(6);
+    let flat = screengrabcraft_render::decode(&disk.get("captures/a.png").unwrap()).unwrap();
+    assert!(flat == plain, "written again without it");
+}
+
+/// Batch Changes keeps an effect's settings before its window is drawn: what it would run is what
+/// the effect's own window applies, for every effect (the picture and capture work met here).
+#[test]
+fn a_dialogs_batch_command_is_what_its_window_applies() {
+    use crate::dialogs::{Dialog, body, command};
+    let doc = Document::new(Raster::filled(40, 30, Color::WHITE).unwrap());
+    let all = [
+        Dialog::resize(&doc),
+        Dialog::canvas(),
+        Dialog::border(),
+        Dialog::shadow(),
+        Dialog::torn(),
+        Dialog::rotate_any(),
+        Dialog::round(),
+        Dialog::brightness(),
+        Dialog::wavy(),
+        Dialog::faded(),
+        Dialog::bevel(),
+        Dialog::perspective(),
+        Dialog::curl(),
+        Dialog::reflection(),
+        Dialog::hue(),
+        Dialog::replace(),
+        Dialog::sharpen(),
+        Dialog::blur(),
+        Dialog::watermark(),
+        Dialog::details(),
+    ];
+    type Shown = (Dialog, Option<(&'static str, serde_json::Value)>);
+    for d in all {
+        let mut h = Harness::builder().with_size(egui::vec2(600.0, 700.0)).build_ui_state(|ui, s: &mut Shown| s.1 = body(&mut s.0, ui), (d, None));
+        h.step();
+        let (d, shown) = h.state();
+        assert!(shown.is_some(), "{}", d.title());
+        assert_eq!(&command(d), shown, "{}", d.title());
+    }
 }

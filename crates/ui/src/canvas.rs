@@ -2,8 +2,8 @@
 //! does on it (drawing with each tool, selecting, moving, resizing, cropping, typing text).
 
 use egui::{Color32, CursorIcon, Pos2, Sense, Stroke, StrokeKind, TextureOptions, Ui, pos2, vec2};
-use screengrabcraft_model::object::step_radius;
-use screengrabcraft_model::{ArrowHeads, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
+use screengrabcraft_model::object::{step_radius, turn};
+use screengrabcraft_model::{ArrowHeads, BadgeShape, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
 use screengrabcraft_render::{Options, text};
 
 use crate::editor::{Editor, Tool};
@@ -150,6 +150,47 @@ pub enum Drag {
         start: Pt,
         now: Pt,
     },
+    /// A freehand outline being drawn round an area with the Selection tool.
+    AreaFree {
+        points: Vec<Pt>,
+    },
+    /// The eraser being dragged over the picture.
+    Erase {
+        points: Vec<Pt>,
+    },
+    /// A distance being measured with the Measure tool.
+    Measure {
+        start: Pt,
+        now: Pt,
+    },
+    /// The selection being turned by its handle: round `pivot`, from where the press was, the
+    /// annotations as they were before.
+    Rotate {
+        ids: Vec<ObjectId>,
+        pivot: Pt,
+        start: Pt,
+        before: Vec<screengrabcraft_model::Object>,
+    },
+}
+
+/// Starts dragging a handle of the selection: turning it by the turning handle, else reshaping.
+fn grab_handle(ed: &mut Editor, id: ObjectId, handle: Handle, start: Pt) {
+    if handle == Handle::Rotate
+        && let Some((pivot, _)) = ed.turn_handle()
+    {
+        let ids = ed.session.selected();
+        let before = ids.iter().filter_map(|i| ed.session.doc.get(*i).cloned()).collect();
+        ed.session.begin("Rotate");
+        ed.drag = Some(Drag::Rotate { ids, pivot, start, before });
+        return;
+    }
+    ed.session.begin("Resize");
+    ed.drag = Some(Drag::Handle { id, handle });
+}
+
+/// The angle, in degrees the way a clock goes, from `pivot` to `p`.
+fn angle_to(pivot: Pt, p: Pt) -> f32 {
+    (p.y - pivot.y).atan2(p.x - pivot.x).to_degrees()
 }
 
 /// The picture's tiles on the GPU (a long scrolling capture is more than one texture).
@@ -165,6 +206,10 @@ const HANDLE: f32 = 10.0;
 const GRAB: f32 = 13.0;
 /// How near a line or a border a press takes hold of its annotation, in screen points.
 const NEAR: f32 = 6.0;
+/// How far above a box its turning handle is, in screen points.
+const TURN_REACH: f32 = 28.0;
+/// The steps a turn snaps to with Shift held, in degrees.
+const TURN_STEP: f32 = 15.0;
 /// How big a tool drawn as the pointer is (the eyedropper, the Fill tool's pail), in screen points.
 const POINTER: f32 = 30.0;
 
@@ -196,10 +241,16 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
     };
     let line_end = || if shift { area.stop_at_edge(start, snap_angle(start, now)) } else { now };
     match kind {
-        Kind::Arrow => Shape::Arrow { from: start, to: line_end(), heads: ArrowHeads::End },
-        Kind::Line => Shape::Line { from: start, to: line_end() },
+        Kind::Arrow => Shape::Arrow { from: start, to: line_end(), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+        Kind::Line => Shape::Line { from: start, to: line_end(), bend: 0.0 },
         Kind::Rect => Shape::Rect { rect: boxed(false), radius: 0.0 },
         Kind::Ellipse => Shape::Ellipse { rect: boxed(false) },
+        Kind::Polygon => Shape::Polygon {
+            rect: boxed(false),
+            sides: opts.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES),
+            star: opts.star.unwrap_or(false),
+            corners: Vec::new(),
+        },
         Kind::Pen => Shape::Pen { points: vec![start, now] },
         Kind::Highlight => Shape::highlight(boxed(false)),
         Kind::Text => Shape::Text { rect: boxed(false), text: String::new() },
@@ -208,9 +259,9 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
             let rect = boxed(false);
             let form = opts.form.unwrap_or_default();
             let tail = area.nearest(opts.tail.unwrap_or_default().place(form, rect));
-            Shape::Callout { rect, tail, text: String::new(), form }
+            Shape::Callout { rect, tail, text: String::new(), form, tails: Vec::new() }
         }
-        Kind::Step => Shape::Step { center: now, number: step },
+        Kind::Step => Shape::step(now, step),
         Kind::Blur => Shape::Blur { rect: boxed(false) },
         Kind::Pixelate => Shape::Pixelate { rect: boxed(false) },
         Kind::Spotlight => Shape::Spotlight { rect: boxed(false), ellipse: false },
@@ -223,7 +274,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
 /// Whether a just-drawn shape is big enough to keep.
 fn big_enough(shape: &Shape) -> bool {
     match shape {
-        Shape::Arrow { from, to, .. } | Shape::Line { from, to } => from.distance(*to) >= 4.0,
+        Shape::Arrow { from, to, .. } | Shape::Line { from, to, .. } => from.distance(*to) >= 4.0,
         Shape::Pen { points } => points.len() >= 2 && Rect::bounding(points).w.max(Rect::bounding(points).h) >= 2.0,
         Shape::Step { .. } => true,
         other => other.rect().is_some_and(|r| r.w >= 4.0 && r.h >= 4.0),
@@ -283,14 +334,24 @@ impl Editor {
         }
         let tol = NEAR / self.view.scale();
         let solid = |o: &&screengrabcraft_model::Object| {
-            o.shape.hit(&screengrabcraft_model::Style { fill: screengrabcraft_model::Color::WHITE, ..o.style }, p, tol)
+            o.shape.hit(
+                &screengrabcraft_model::Style { fill: screengrabcraft_model::Color::WHITE, ..o.style },
+                turn(p, o.shape.pivot(), -o.turn()),
+                tol,
+            )
         };
         self.session.doc.objects.iter().rev().filter(|o| has_inside(o.shape.kind())).find(solid).map(|o| o.id)
     }
 
-    /// The handle of a selected annotation under a screen point.
+    /// The handle of a selected annotation under a screen point (the turning handle of a box or
+    /// a group among them).
     pub(crate) fn handle_at(&self, s: Pos2) -> Option<(ObjectId, Handle)> {
         let sel = self.session.selected();
+        if let Some((_, knob)) = self.turn_handle()
+            && self.view.to_screen(knob).distance(s) <= GRAB
+        {
+            return sel.first().map(|id| (*id, Handle::Rotate));
+        }
         if sel.len() != 1 {
             return None;
         }
@@ -301,7 +362,36 @@ impl Editor {
             return None;
         }
         // The nearest one in reach, so two handles close together (a small box) both work.
-        nearest(o.shape.handles(&o.style), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
+        nearest(o.handles(), |p| self.view.to_screen(p).distance(s)).map(|h| (id, h))
+    }
+
+    /// Where the selection turns round, and its turning handle (on the picture): above the top
+    /// of a box, turned with it, or of a group's box. None for a line, a stroke, an effect
+    /// that stays square, or several annotations that aren't one group.
+    pub(crate) fn turn_handle(&self) -> Option<(Pt, Pt)> {
+        let sel = self.session.selected();
+        let doc = &self.session.doc;
+        let up = TURN_REACH / self.view.scale();
+        match sel.as_slice() {
+            [one] => {
+                let o = doc.get(*one)?;
+                if !o.shape.turns() || o.group.is_some() && doc.with_groups(&[o.id]).len() > 1 {
+                    return None;
+                }
+                let r = o.shape.rect()?;
+                let c = o.shape.pivot();
+                Some((c, turn(Pt::new(r.center().x, r.y - up), c, o.turn())))
+            }
+            [first, ..] => {
+                let g = doc.get(*first)?.group?;
+                if !sel.iter().all(|id| doc.get(*id).is_some_and(|o| o.group == Some(g))) {
+                    return None;
+                }
+                let b = doc.bounds_of(&sel)?;
+                Some((b.center(), Pt::new(b.center().x, b.y - up)))
+            }
+            [] => None,
+        }
     }
 
     fn crop_handle_at(&self, s: Pos2) -> Option<Handle> {
@@ -452,13 +542,22 @@ pub fn show(ed: &mut Editor, ui: &mut Ui) {
         }
         ed.upload(&ctx);
         // The right button puts the eyedropper away rather than open the menu.
-        let picking = crate::eyedropper::active(&ctx);
+        let picking = crate::eyedropper::active(&ctx) || ed.edit_text.picking();
+        // Snapping is for a move under way.
+        if !matches!(ed.drag, Some(Drag::Move { .. })) {
+            ed.snap = None;
+            ed.snap_lines.clear();
+        }
         input(ed, ui, &resp);
         if !picking {
             context_menu(ed, &ctx, &resp);
         }
         crate::playback::show(ed, &ctx, rect);
         paint(ed, ui, rect);
+        crate::guides::paint_snapped(ed, ui, rect);
+        crate::guides::show(ed, ui, rect);
+        crate::edit_text::paint(ed, ui, resp.hover_pos());
+        paint_polygon_draft(ed, ui, resp.hover_pos());
         text_editor(ed, ui);
     });
 }
@@ -509,6 +608,14 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         ctx.set_cursor_icon(CursorIcon::Grab);
     }
 
+    // ---- Edit Text in the Picture: while its lines are offered, a click picks one ----
+    if crate::edit_text::input(ed, &ctx, resp) {
+        return;
+    }
+    if polygon_input(ed, &ctx, resp) {
+        return;
+    }
+
     // ---- the eyedropper: while it's out, a click on the picture takes the colour there and
     // nothing else happens; Esc or the right button puts it away ----
     if crate::eyedropper::active(&ctx) {
@@ -519,7 +626,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         if let Some(h) = hover
             && resp.hovered()
         {
-            let colour = ed.colour_at(ed.view.to_image(h));
+            let at = ed.view.to_image(h);
+            let colour = ed.colour_at(at);
             match colour {
                 Some(c) => {
                     ctx.set_cursor_icon(CursorIcon::None);
@@ -531,7 +639,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     p.rect_stroke(swatch.expand(1.5), 5.0, Stroke::new(1.0, Color32::from_black_alpha(200)), StrokeKind::Outside);
                     crate::icons::paint_pointer(&p, h, crate::icons::Icon::Eyedropper, POINTER);
                     if resp.clicked_by(egui::PointerButton::Primary) || resp.drag_stopped_by(egui::PointerButton::Primary) {
-                        crate::eyedropper::picked(&ctx, c);
+                        let pixel = (at.x >= 0.0 && at.y >= 0.0).then(|| (at.x.floor() as u32, at.y.floor() as u32));
+                        crate::eyedropper::picked_at(&ctx, c, pixel);
                     }
                 }
                 None => ctx.set_cursor_icon(CursorIcon::NotAllowed),
@@ -550,6 +659,8 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
         let on_picture = ed.session.doc.bounds().contains(to_img(h, &ed.view));
         let cursor = match ed.tool {
             Tool::Hand => CursorIcon::Grab,
+            Tool::Measure if on_picture => CursorIcon::Crosshair,
+            Tool::Measure => CursorIcon::Default,
             Tool::Select | Tool::Favorites => {
                 if ed.area.is_some_and(|a| a.contains(to_img(h, &ed.view))) {
                     CursorIcon::Move
@@ -585,6 +696,17 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 CursorIcon::None
             }
             Tool::Fill => CursorIcon::Default,
+            // The eraser's size round the pointer.
+            Tool::Eraser if on_picture => {
+                if resp.hovered() {
+                    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("tool-pointer")));
+                    let r = (ed.eraser_width * ed.view.scale() / 2.0).max(2.0);
+                    p.circle_stroke(h, r, Stroke::new(2.5, Color32::from_black_alpha(160)));
+                    p.circle_stroke(h, r, Stroke::new(1.0, Color32::WHITE));
+                }
+                CursorIcon::Crosshair
+            }
+            Tool::Eraser => CursorIcon::Default,
             // What a press does: a handle reshapes, an annotation moves, elsewhere draws.
             Tool::Draw(_) if ed.handle_at(h).is_some() => ed.handle_at(h).map(|(_, handle)| cursor_for(handle)).unwrap_or(CursorIcon::Crosshair),
             Tool::Draw(k) if k != Kind::Pen && ed.object_under(to_img(h, &ed.view)).is_some() => CursorIcon::Move,
@@ -601,7 +723,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
     match &ed.drag {
         Some(Drag::Handle { handle, .. }) => ctx.set_cursor_icon(cursor_for(*handle)),
         Some(Drag::CropHandle { handle }) => ctx.set_cursor_icon(cursor_for(*handle)),
-        Some(Drag::Move { .. } | Drag::CropMove { .. }) => ctx.set_cursor_icon(CursorIcon::Grabbing),
+        Some(Drag::Move { .. } | Drag::CropMove { .. } | Drag::Rotate { .. }) => ctx.set_cursor_icon(CursorIcon::Grabbing),
         _ => {}
     }
 
@@ -642,8 +764,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     // Inside an area of the picture selected: that part of it is moved.
                 } else if let Some((id, handle)) = ed.handle_at(start_s) {
                     ed.area = None;
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                 } else if let Some(id) = ed.object_under(start) {
                     ed.area = None;
                     let mut sel = ed.session.selected();
@@ -658,7 +779,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                         ed.session.select(sel.clone());
                     }
                     ed.session.begin("Move");
-                    ed.drag = Some(Drag::Move { ids: sel, last: start });
+                    ed.drag = Some(Drag::Move { ids: ed.session.selected(), last: start });
                 } else {
                     ed.drag = Some(Drag::Rubber { start, now: start });
                 }
@@ -675,31 +796,40 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 }
             }
             Tool::CutOut => ed.drag = Some(Drag::CutNew { start, now: start }),
+            Tool::Measure => {
+                ed.measured = None;
+                ed.drag = Some(Drag::Measure { start, now: start });
+            }
             // The Hand tool's press pans (above), so it never gets here.
             Tool::Hand => {}
             // A fill happens where the button went down; moving on before letting go is no drag.
             Tool::Fill => fill_at(ed, &ctx, start),
+            Tool::Eraser => ed.drag = Some(Drag::Erase { points: vec![start] }),
             Tool::Area => {
                 if lift_area(ed, &ctx, start) {
                     // Inside the selected area: that part of the picture is moved.
                 } else if let Some((id, handle)) = ed.handle_at(start_s) {
                     // A piece taken out is resized by its handles, and moved again by a drag.
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                 } else if let Some(id) = ed.object_under(start).filter(|id| ed.session.selected().contains(id)) {
                     ed.session.begin("Move");
                     ed.drag = Some(Drag::Move { ids: vec![id], last: start });
                 } else {
                     ed.area = None;
                     ed.session.select(Vec::new());
-                    ed.drag = Some(Drag::AreaNew { start });
+                    ed.chosen = None;
+                    match ed.area_mode {
+                        crate::selection::AreaMode::Freehand => ed.drag = Some(Drag::AreaFree { points: vec![start] }),
+                        // The wand takes a colour where the press was; moving on is no drag.
+                        crate::selection::AreaMode::Wand => ed.select_by_colour(start),
+                        _ => ed.drag = Some(Drag::AreaNew { start }),
+                    }
                 }
             }
             Tool::Draw(kind) => {
                 // Starting on a handle of the selected annotation reshapes it instead.
                 if let Some((id, handle)) = ed.handle_at(start_s) {
-                    ed.session.begin("Resize");
-                    ed.drag = Some(Drag::Handle { id, handle });
+                    grab_handle(ed, id, handle, start);
                     return;
                 }
                 // Starting on an annotation picks it up and moves it, whatever the tool, as a
@@ -709,10 +839,17 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 {
                     ed.session.select(vec![id]);
                     ed.session.begin("Move");
-                    ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+                    ed.drag = Some(Drag::Move { ids: ed.session.selected(), last: start });
                     return;
                 }
-                let step = ed.session.doc.next_step_number();
+                // A picture of your own from the stamp library: placed, and moved by the drag.
+                if kind == Kind::Stamp && ed.own_stamp.is_some() {
+                    if let Some(id) = crate::stamps::place(ed, &ctx, start) {
+                        ed.drag = Some(Drag::Move { ids: vec![id], last: start });
+                    }
+                    return;
+                }
+                let step = ed.session.doc.next_step_number(ed.tool_options(Kind::Step).labels.unwrap_or_default());
                 let shape = ed.with_defaults(shape_for(kind, start, start, false, ed.tool_options(kind), step, image_size));
                 let style = ed.tool_style(kind);
                 ed.session.begin(&format!("Draw {}", kind.label()));
@@ -763,15 +900,45 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.touch();
             }
             Some(Drag::Move { ids, last }) => {
+                // Snapping on: where they go is worked out from where they began and how far the
+                // pointer has gone, then their edges or middle put on a line within reach.
+                let step = now.sub(last);
+                let snapped = if ed.settings.no_snap {
+                    None
+                } else {
+                    let origin = ed.session.doc.bounds_of(&ids);
+                    let st = match (ed.snap, origin) {
+                        (Some(st), _) => Some(st),
+                        (None, Some(origin)) => Some(crate::guides::SnapState { origin, raw: Pt::ZERO, applied: Pt::ZERO }),
+                        (None, None) => None,
+                    };
+                    st.map(|mut st| {
+                        st.raw = st.raw.add(step);
+                        let (xs, ys) = crate::guides::lines(ed);
+                        let reach = crate::guides::SNAP / ed.view.scale().max(0.01);
+                        let (extra, lines) = crate::guides::snap(st.origin.translate(st.raw), &xs, &ys, reach);
+                        ed.snap_lines = lines;
+                        (st, st.raw.add(extra).sub(st.applied))
+                    })
+                };
                 // Free to go off the picture (within reach): it grows to hold them, see-through
                 // where it is new, as far as they go.
-                let d = ed.session.doc.limit_move_near(&ids, now.sub(last), screengrabcraft_model::document::MAX_GROW);
+                let want = snapped.map_or(step, |(_, d)| d);
+                let d = ed.session.doc.limit_move_near(&ids, want, screengrabcraft_model::document::MAX_GROW);
                 for id in &ids {
                     if let Some(o) = ed.session.doc.get_mut(*id) {
                         o.shape.translate(d);
                     }
                 }
-                let mut last = last.add(d);
+                // Snapping keeps count of the pointer itself; otherwise the pointer's hold on them does.
+                let mut last = match snapped {
+                    Some((mut st, _)) => {
+                        st.applied = st.applied.add(d);
+                        ed.snap = Some(st);
+                        now
+                    }
+                    None => last.add(d),
+                };
                 let (w, h) = (ed.session.doc.width() as f32, ed.session.doc.height() as f32);
                 if let Some(shift) = ed.session.doc.bounds_of(&ids).and_then(|area| ed.session.doc.grow_to(area)) {
                     last = last.add(shift);
@@ -785,23 +952,70 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::Handle { id, handle }) => {
                 if let Some(o) = ed.session.doc.get_mut(id) {
                     let style = o.style;
-                    let mut reshaped = o.shape.clone();
-                    reshaped.drag_handle(&style, handle, inside, shift);
+                    let mut reshaped = o.clone();
+                    // A turned box follows the pointer itself (its corners may be off the picture).
+                    reshaped.drag_handle(handle, if o.turn() == 0.0 { inside } else { now }, shift);
                     // Text boxes keep room for their text.
-                    if let Shape::Text { rect, text: body } = &mut reshaped {
+                    if let Shape::Text { rect, text: body } = &mut reshaped.shape {
                         let need = text::fit_box(body, &style, rect.min(), Some(rect.w));
                         rect.h = rect.h.max(need.h);
                     }
                     // Keeping proportions or room for text can reach past the pointer: it stops at
                     // the edge. An annotation already over it (an old project, a crop) stays free.
-                    if bounds.encloses(reshaped.extent()) || !bounds.encloses(o.shape.extent()) {
-                        o.shape = reshaped;
+                    if bounds.encloses(reshaped.extent()) || !bounds.encloses(o.extent()) || o.turn() != 0.0 {
+                        o.shape = reshaped.shape;
                     }
                 }
                 ed.session.touch();
             }
+            Some(Drag::Rotate { ids, pivot, start, before }) => {
+                let mut by = angle_to(pivot, now) - angle_to(pivot, start);
+                // Shift: in steps, of the box's own turn when it's one box.
+                if shift {
+                    let base = match before.as_slice() {
+                        [one] => one.turn(),
+                        _ => 0.0,
+                    };
+                    by = ((base + by) / TURN_STEP).round() * TURN_STEP - base;
+                }
+                for o in &before {
+                    if let Some(slot) = ed.session.doc.get_mut(o.id) {
+                        *slot = o.clone();
+                    }
+                }
+                ed.session.doc.rotate_objects(&ids, by, pivot);
+                ed.session.touch();
+            }
+            Some(Drag::AreaFree { mut points }) => {
+                if points.last().is_none_or(|l| l.distance(inside) * ed.view.scale() >= 2.0)
+                    && points.len() < screengrabcraft_render::region::MAX_OUTLINE
+                {
+                    points.push(inside);
+                }
+                ed.area = Rect::bounding(&points).intersect(bounds);
+                ed.chosen = ed.area.map(|bbox| crate::selection::Chosen {
+                    bbox,
+                    rect: bbox,
+                    shape: screengrabcraft_render::region::AreaShape::Freehand { points: points.clone() },
+                    invert: false,
+                });
+                ed.drag = Some(Drag::AreaFree { points });
+            }
+            Some(Drag::Erase { mut points }) => {
+                if points.last().is_none_or(|l| l.distance(now) * ed.view.scale() >= 1.5)
+                    && points.len() < screengrabcraft_render::region::MAX_OUTLINE
+                {
+                    points.push(now);
+                }
+                ed.drag = Some(Drag::Erase { points });
+            }
             Some(Drag::Rubber { start, .. }) => ed.drag = Some(Drag::Rubber { start, now: inside }),
             Some(Drag::CutNew { start, .. }) => ed.drag = Some(Drag::CutNew { start, now: inside }),
+            Some(Drag::Measure { start, .. }) => {
+                // Shift keeps it level, upright or at a step of 15°.
+                let end = if shift { bounds.stop_at_edge(start, snap_angle(start, now)) } else { inside };
+                ed.drag = Some(Drag::Measure { start, now: end });
+            }
             Some(Drag::CropNew { start }) => {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.crop = Rect::from_points(start, end).intersect(bounds);
@@ -809,6 +1023,15 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::AreaNew { start }) => {
                 let end = if shift { square_from(start, now) } else { now };
                 ed.area = Rect::from_points(start, end).intersect(bounds);
+                ed.chosen = match (ed.area_mode, ed.area) {
+                    (crate::selection::AreaMode::Ellipse, Some(bbox)) => Some(crate::selection::Chosen {
+                        bbox,
+                        rect: Rect::from_points(start, end),
+                        shape: screengrabcraft_render::region::AreaShape::Ellipse,
+                        invert: false,
+                    }),
+                    _ => None,
+                };
             }
             Some(Drag::CropHandle { handle }) => {
                 if let Some(c) = ed.crop {
@@ -864,6 +1087,13 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     click(ed, &ctx, press, shift);
                 }
             }
+            Some(Drag::Rotate { ids, .. }) => {
+                // A corner turned past the edge: the picture grows to hold it, as a move does.
+                if let Some(shift) = ed.session.doc.bounds_of(&ids).and_then(|area| ed.session.doc.grow_to(area)) {
+                    ed.picture_moved(shift);
+                }
+                ed.session.commit();
+            }
             Some(Drag::Move { .. }) | Some(Drag::Handle { .. }) => {
                 // Let go: the picture keeps only the growth that is needed for where things are now.
                 if let Some(keep) = ed.grown.take()
@@ -874,6 +1104,22 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                 ed.session.commit()
             }
             Some(Drag::CutNew { start, now }) => cut_strip(ed, &ctx, start, now),
+            Some(Drag::Measure { start, now }) => {
+                if start.distance(now) >= 1.0 {
+                    ed.measured = Some((start, now));
+                    if ed.settings.measure.keep {
+                        keep_measurement(ed, &ctx);
+                    }
+                }
+            }
+            Some(Drag::AreaFree { points }) => {
+                // Round too little to be an area: none.
+                if points.len() < 3 || ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
+                    ed.area = None;
+                    ed.chosen = None;
+                }
+            }
+            Some(Drag::Erase { points }) => ed.erase_along(&ctx, &points),
             // Too small to be an area: none.
             Some(Drag::AreaNew { .. }) => {
                 if ed.area.is_some_and(|a| a.w < 2.0 || a.h < 2.0) {
@@ -883,6 +1129,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
             Some(Drag::Rubber { start, now }) => {
                 let area = Rect::from_points(start, now);
                 let mut ids = ed.session.doc.objects_in(area);
+                ed.chosen = None;
                 // Round no annotation, it selects that part of the picture itself, as the
                 // Selection tool does: to move, copy, cut, delete or crop to.
                 if ids.is_empty() && !shift {
@@ -904,7 +1151,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
 
 /// Whether a kind is a shape with an inside to fill.
 fn has_inside(kind: Kind) -> bool {
-    matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
+    matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp)
 }
 
 /// The strip a Cut Out drag from `start` to `now` takes out: all the way down the picture
@@ -932,13 +1179,56 @@ fn cut_strip(ed: &mut Editor, ctx: &egui::Context, start: Pt, now: Pt) {
 
 /// The Fill tool at an image point: a shape with an inside there takes the colour as its fill;
 /// anywhere else, the area of the picture round the pixel does.
+/// The last measurement kept on the picture: a dimension line and its length (the command
+/// `object.measure`), in the Measure tool's colour.
+pub(crate) fn keep_measurement(ed: &mut Editor, ctx: &egui::Context) {
+    let Some((a, b)) = ed.measured.take() else { return };
+    let colour = ed.settings.measure.color.to_hex();
+    ed.run(ctx, "object.measure", serde_json::json!({"from": {"x": a.x, "y": a.y}, "to": {"x": b.x, "y": b.y}, "color": colour}));
+    // The Measure tool stays in charge: the panel keeps reading out what is measured.
+    if ed.tool == Tool::Measure {
+        ed.session.select(Vec::new());
+    }
+}
+
+/// A measurement on the screen: the line, a bar at each end, and its length by the far end.
+fn paint_measurement(ed: &Editor, painter: &egui::Painter, a: Pt, b: Pt) {
+    let (sa, sb) = (ed.view.to_screen(a), ed.view.to_screen(b));
+    let ink = crate::to_color32(ed.settings.measure.color.with_alpha(255));
+    let d = sb - sa;
+    let n = if d.length() > 0.5 { vec2(-d.y, d.x).normalized() * 6.0 } else { vec2(0.0, 6.0) };
+    painter.line_segment([sa, sb], Stroke::new(3.5, Color32::from_black_alpha(120)));
+    painter.line_segment([sa, sb], Stroke::new(1.5, ink));
+    for e in [sa, sb] {
+        painter.line_segment([e - n, e + n], Stroke::new(1.5, ink));
+    }
+    let text = format!(
+        "{}  ({:.0} across, {:.0} down, {:.0}°)",
+        screengrabcraft_engine::measure::length_text(a, b),
+        (b.x - a.x).abs(),
+        (b.y - a.y).abs(),
+        screengrabcraft_engine::measure::angle(a, b)
+    );
+    let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), Color32::WHITE);
+    let at = sb + vec2(12.0, 10.0);
+    let bg = egui::Rect::from_min_size(at, galley.size() + vec2(12.0, 6.0));
+    painter.rect_filled(bg, 4.0, Color32::from_black_alpha(180));
+    painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+}
+
 fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
     let fill = ed.settings.fill;
     let colour = fill.color.to_hex();
+    // The gradient goes too (none takes a shape's away).
+    let gradient = serde_json::to_value(fill.gradient).unwrap_or(serde_json::Value::Null);
     if let Some(id) = ed.fillable_under(p) {
-        ed.run(ctx, "object.update", serde_json::json!({"id": id.0, "style": {"fill": colour}}));
+        ed.run(ctx, "object.update", serde_json::json!({"id": id.0, "style": {"fill": colour, "gradient": gradient}}));
     } else if ed.session.doc.bounds().contains(p) {
-        ed.run(ctx, "image.fill", serde_json::json!({"x": p.x.floor(), "y": p.y.floor(), "color": colour, "tolerance": fill.tolerance}));
+        let mut params = serde_json::json!({"x": p.x.floor(), "y": p.y.floor(), "color": colour, "tolerance": fill.tolerance});
+        if !fill.gradient.is_none() {
+            params["gradient"] = gradient;
+        }
+        ed.run(ctx, "image.fill", params);
     }
 }
 
@@ -947,7 +1237,11 @@ fn fill_at(ed: &mut Editor, ctx: &egui::Context, p: Pt) {
 /// as a piece of its own (the command `image.lift`), and the drag moves it. False when the drag
 /// starts elsewhere.
 fn lift_area(ed: &mut Editor, ctx: &egui::Context, start: Pt) -> bool {
-    let Some(params) = ed.area.filter(|a| a.contains(start)).and_then(|_| ed.area_params()) else { return false };
+    let Some(mut params) = ed.area.filter(|a| a.contains(start)).and_then(|_| ed.area_params()) else { return false };
+    // Where it was: see-through, or filled from round it (as the Selection tool's panel says).
+    if ed.settings.fill_lifted {
+        params["fill"] = serde_json::json!(true);
+    }
     ed.area = None;
     if let Some(id) = ed.run(ctx, "image.lift", params).and_then(|out| out.get("id").and_then(serde_json::Value::as_u64)) {
         let id = ObjectId(id);
@@ -956,6 +1250,75 @@ fn lift_area(ed: &mut Editor, ctx: &egui::Context, start: Pt) -> bool {
         ed.drag = Some(Drag::Move { ids: vec![id], last: start });
     }
     true
+}
+
+/// The Shape tool drawing a polygon of points clicked one by one: each click puts a corner down,
+/// a double click (or a click on the first corner, or Enter) closes it, Backspace takes the last
+/// back and Esc lets it go. A press on an annotation before the first corner picks it up, as with
+/// any tool. True when it took the pointer. (Enter, Backspace and Esc are the editor's keys.)
+fn polygon_input(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) -> bool {
+    if ed.tool != Tool::Draw(Kind::Polygon) || !ed.polygon_points {
+        return false;
+    }
+    if ed.polygon_draft.is_empty()
+        && let Some(p) = ctx.input(|i| i.pointer.press_origin())
+        && ctx.input(|i| i.pointer.primary_down() || i.pointer.primary_released())
+        && (ed.handle_at(p).is_some() || ed.object_under(ed.view.to_image(p)).is_some())
+    {
+        return false;
+    }
+    if resp.hovered() {
+        ctx.set_cursor_icon(CursorIcon::Crosshair);
+    }
+    if resp.clicked_by(egui::PointerButton::Primary)
+        && let Some(h) = resp.interact_pointer_pos()
+    {
+        // A double click (its second click where the first put the last corner) closes it;
+        // quick clicks elsewhere are corners.
+        let last = ed.polygon_draft.last().map(|l| ed.view.to_screen(*l));
+        if resp.double_clicked() && last.is_some_and(|l| l.distance(h) <= GRAB) {
+            close_polygon(ed, ctx);
+            return true;
+        }
+        let p = ed.view.to_image(h);
+        let first = ed.polygon_draft.first().map(|f| ed.view.to_screen(*f));
+        if ed.polygon_draft.len() >= 3 && first.is_some_and(|f| f.distance(h) <= GRAB) {
+            close_polygon(ed, ctx);
+        } else if ed.session.doc.bounds().contains(p) && ed.polygon_draft.len() < screengrabcraft_model::object::MAX_CORNERS {
+            ed.stop_editing();
+            ed.session.select(Vec::new());
+            ed.polygon_draft.push(p);
+        }
+    }
+    true
+}
+
+/// The polygon clicked out, added (with the Shape tool's look); fewer than three corners, let go.
+pub(crate) fn close_polygon(ed: &mut Editor, ctx: &egui::Context) {
+    let points = std::mem::take(&mut ed.polygon_draft);
+    let Some(shape) = screengrabcraft_model::object::polygon_through(&points) else {
+        ed.toast(ctx, "A polygon needs three corners or more");
+        return;
+    };
+    let mut object = serde_json::to_value(shape).unwrap_or_default();
+    object["style"] = serde_json::to_value(ed.tool_style(Kind::Polygon)).unwrap_or_default();
+    ed.run(ctx, "object.add", serde_json::json!({ "object": object }));
+}
+
+/// The corners clicked so far, joined, and on to the pointer.
+fn paint_polygon_draft(ed: &Editor, ui: &Ui, hover: Option<Pos2>) {
+    if ed.polygon_draft.is_empty() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let painter = ui.painter();
+    let mut pts: Vec<Pos2> = ed.polygon_draft.iter().map(|p| ed.view.to_screen(*p)).collect();
+    pts.extend(hover);
+    painter.add(egui::Shape::line(pts.clone(), Stroke::new(2.0, t.handle)));
+    for p in pts.iter().take(ed.polygon_draft.len()) {
+        painter.circle_filled(*p, 4.0, Color32::WHITE);
+        painter.circle_stroke(*p, 4.0, Stroke::new(1.5, t.handle));
+    }
 }
 
 /// The menu a right-click on the picture opens: what can be done with the area of the picture
@@ -1027,6 +1390,8 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
             }
             crate::grab_text::item(ed, ui);
             crate::qr::read_item(ed, ui);
+            crate::details::item(ed, ui);
+            crate::edit_text::item(ed, ui);
             ui.separator();
         }
         let sel = ed.session.selected();
@@ -1055,6 +1420,21 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
                 ed.start_editing(id);
                 ui.close();
             }
+            // A callout: another tail, or one taken away.
+            let tails = match sel.as_slice() {
+                [one] => ed.session.doc.get(*one).and_then(|o| if let Shape::Callout { tails, .. } = &o.shape { Some(tails.len()) } else { None }),
+                _ => None,
+            };
+            if let Some(n) = tails {
+                if item(ui, n + 1 < screengrabcraft_model::object::MAX_TAILS, "Add a Tail", "") {
+                    ed.run(ctx, "object.addTail", serde_json::json!({}));
+                    ui.close();
+                }
+                if n > 0 && item(ui, true, "Remove a Tail", "") {
+                    ed.run(ctx, "object.removeTail", serde_json::json!({}));
+                    ui.close();
+                }
+            }
             if item(ui, true, "Duplicate", "Ctrl+D") {
                 ed.run(ctx, "edit.duplicate", serde_json::json!({}));
                 ui.close();
@@ -1069,6 +1449,10 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
             }
             if item(ui, true, "Send to Back", "") {
                 ed.run(ctx, "object.order", serde_json::json!({"to": "back"}));
+                ui.close();
+            }
+            ui.separator();
+            if crate::arrange::items(ed, ui) {
                 ui.close();
             }
             ui.separator();
@@ -1089,6 +1473,8 @@ fn context_menu(ed: &mut Editor, ctx: &egui::Context, resp: &egui::Response) {
         if ed.area.is_none() {
             crate::grab_text::item(ed, ui);
             crate::qr::read_item(ed, ui);
+            crate::details::item(ed, ui);
+            crate::edit_text::item(ed, ui);
         }
         ui.separator();
         if item(ui, !ed.session.doc.objects.is_empty(), "Select All Annotations", "Ctrl+A") {
@@ -1116,6 +1502,8 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
     match ed.tool {
         // A click takes nothing out: the strip is dragged across.
         Tool::Hand | Tool::CutOut => {}
+        // A click lets the last measurement go.
+        Tool::Measure => ed.measured = None,
         Tool::Select | Tool::Favorites | Tool::Crop => {
             if ed.tool == Tool::Crop {
                 return;
@@ -1124,11 +1512,13 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
             ed.area = None;
             match hit {
                 Some(id) if shift => {
+                    // A group is let go of, or taken, as one.
                     let mut sel = ed.session.selected();
-                    if let Some(i) = sel.iter().position(|s| *s == id) {
-                        sel.remove(i);
+                    let unit = ed.session.doc.with_groups(&[id]);
+                    if sel.contains(&id) {
+                        sel.retain(|s| !unit.contains(s));
                     } else {
-                        sel.push(id);
+                        sel.extend(unit);
                     }
                     ed.session.select(sel);
                 }
@@ -1141,10 +1531,21 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                 fill_at(ed, ctx, p);
             }
         }
+        // A click rubs out a dab.
+        Tool::Eraser => {
+            if ed.session.doc.bounds().contains(p) {
+                ed.erase_along(ctx, &[p]);
+            }
+        }
         // A click lets go of the area; on a piece taken out of the picture it selects that.
         Tool::Area => {
             ed.area = None;
-            ed.session.select(hit.into_iter().collect());
+            ed.chosen = None;
+            if ed.area_mode == crate::selection::AreaMode::Wand && hit.is_none() && ed.session.doc.bounds().contains(p) {
+                ed.select_by_colour(p);
+            } else {
+                ed.session.select(hit.into_iter().collect());
+            }
         }
         Tool::Draw(kind) => {
             // A click on an annotation selects it (and types into text with the text tools).
@@ -1156,6 +1557,12 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                 return;
             }
             if editing_before {
+                return;
+            }
+            if kind == Kind::Stamp && ed.own_stamp.is_some() && ed.session.doc.bounds().contains(p) {
+                if crate::stamps::place(ed, ctx, p).is_some() {
+                    ed.session.commit();
+                }
                 return;
             }
             let style = ed.tool_style(kind);
@@ -1174,9 +1581,12 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                     let off = opts.tail.unwrap_or_default().offset(form, bw, bh);
                     let x = (p.x - off.x).min(w - bw).max(0.0);
                     let y = (p.y - off.y).min(h - bh).max(0.0);
-                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form })
+                    Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form, tails: Vec::new() })
                 }
-                Kind::Step => Some(Shape::Step { center: p, number: ed.session.doc.next_step_number() }),
+                Kind::Step => {
+                    let labels = ed.tool_options(Kind::Step).labels.unwrap_or_default();
+                    Some(ed.with_defaults(Shape::step(p, ed.session.doc.next_step_number(labels))))
+                }
                 Kind::Stamp => {
                     let size = (w.min(h) * 0.08).clamp(32.0, 128.0).min(w).min(h);
                     Some(Shape::Stamp { rect: Rect::new(p.x - size / 2.0, p.y - size / 2.0, size, size), stamp: ed.stamp() })
@@ -1239,7 +1649,7 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         if let Some(points) = stroke_points(&o.shape) {
             stroke_mark(&painter, ed, points, t.handle.gamma_multiply(0.7), false);
         } else {
-            let b = ed.view.rect_to_screen(o.shape.bounds(&o.style));
+            let b = ed.view.rect_to_screen(o.bounds());
             painter.rect_stroke(b.expand(2.0), 2.0, Stroke::new(1.0, t.handle.gamma_multiply(0.6)), StrokeKind::Outside);
         }
     }
@@ -1258,13 +1668,26 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         }
         let line_like = matches!(o.shape, Shape::Arrow { .. } | Shape::Line { .. });
         if !line_like {
-            let b = ed.view.rect_to_screen(o.shape.rect().unwrap_or_else(|| o.shape.bounds(&o.style)));
-            dashed_rect(&painter, b.expand(1.0), t.handle);
+            let r = o.shape.rect().unwrap_or_else(|| o.shape.bounds(&o.style));
+            if o.turn() == 0.0 {
+                dashed_rect(&painter, ed.view.rect_to_screen(r).expand(1.0), t.handle);
+            } else {
+                // Turned with it.
+                let (c, a) = (o.shape.pivot(), o.turn());
+                let mut pts: Vec<Pos2> = r.corners().iter().map(|q| ed.view.to_screen(turn(*q, c, a))).collect();
+                pts.extend(pts.first().copied());
+                painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, t.handle), 5.0, 3.0));
+            }
         }
         if selected.len() == 1 {
-            for (h, p) in o.shape.handles(&o.style) {
+            for (h, p) in o.handles() {
                 let s = ed.view.to_screen(p);
-                if h == Handle::Tail || line_like {
+                if h == Handle::Bend {
+                    // A diamond in the arrow's middle: dragged, it bends the arrow.
+                    let d = HANDLE * 0.75;
+                    let corners = vec![pos2(s.x, s.y - d), pos2(s.x + d, s.y), pos2(s.x, s.y + d), pos2(s.x - d, s.y)];
+                    painter.add(egui::Shape::convex_polygon(corners, t.handle, Stroke::new(1.5, Color32::WHITE)));
+                } else if matches!(h, Handle::Tail | Handle::TailAt(_)) || line_like {
                     painter.circle_filled(s, HANDLE * 0.6, Color32::WHITE);
                     painter.circle_stroke(s, HANDLE * 0.6, Stroke::new(1.5, t.handle));
                 } else {
@@ -1273,11 +1696,34 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
                     painter.rect_stroke(r, 1.5, Stroke::new(1.5, t.handle), StrokeKind::Middle);
                 }
             }
-            if let Shape::Step { center, .. } = o.shape {
-                let r = step_radius(o.style.font_size) * scale;
-                painter.circle_stroke(ed.view.to_screen(center), r + 3.0, Stroke::new(1.5, t.handle));
+            if let Shape::Step { center, badge, .. } = o.shape {
+                if badge == BadgeShape::Circle {
+                    let r = step_radius(o.style.font_size) * scale;
+                    painter.circle_stroke(ed.view.to_screen(center), r + 3.0, Stroke::new(1.5, t.handle));
+                } else {
+                    let b = ed.view.rect_to_screen(badge.bounds(center, step_radius(o.style.font_size)));
+                    painter.rect_stroke(b.expand(3.0), 3.0, Stroke::new(1.5, t.handle), StrokeKind::Outside);
+                }
             }
         }
+    }
+
+    // A group's box, and the handle that turns the selection.
+    if selected.len() > 1
+        && let Some(b) = ed.session.doc.bounds_of(&selected)
+        && selected.iter().all(|id| ed.session.doc.get(*id).is_some_and(|o| o.group.is_some()))
+    {
+        dashed_rect(&painter, ed.view.rect_to_screen(b).expand(3.0), t.handle);
+    }
+    if (ed.drag.is_none() || matches!(ed.drag, Some(Drag::Rotate { .. })))
+        && let Some((pivot, knob)) = ed.turn_handle()
+    {
+        let (k, c) = (ed.view.to_screen(knob), ed.view.to_screen(pivot));
+        let towards = (c - k).normalized();
+        painter.line_segment([k, k + towards * TURN_REACH], Stroke::new(1.5, t.handle));
+        painter.circle_filled(k, HANDLE * 0.6, Color32::WHITE);
+        painter.circle_stroke(k, HANDLE * 0.6, Stroke::new(1.5, t.handle));
+        painter.circle_filled(k, 2.0, t.handle);
     }
 
     // A rubber band.
@@ -1291,7 +1737,12 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
     // on any picture), and its size.
     if let Some(a) = ed.area {
         let r = ed.view.rect_to_screen(a);
-        painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.08));
+        // A shape (an ellipse, an outline, a colour, turned inside out) is tinted where it is.
+        if ed.area_shape().is_some() {
+            crate::selection::paint_tint(ed, &ui.ctx().clone(), &painter);
+        } else {
+            painter.rect_filled(r, 0.0, t.handle.gamma_multiply(0.08));
+        }
         painter.rect_stroke(r, 0.0, Stroke::new(1.0, Color32::BLACK), StrokeKind::Middle);
         dashed_rect(&painter, r, Color32::WHITE);
         let label = format!("{:.0} × {:.0}", a.w, a.h);
@@ -1300,6 +1751,21 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
         let bg = egui::Rect::from_center_size(at, galley.size() + vec2(12.0, 6.0));
         painter.rect_filled(bg, 4.0, Color32::from_black_alpha(200));
         painter.galley(bg.min + vec2(6.0, 3.0), galley, Color32::WHITE);
+    }
+
+    // The eraser's stroke while it is drawn.
+    if let Some(Drag::Erase { points }) = &ed.drag {
+        crate::selection::paint_stroke(ed, &painter, points);
+    }
+
+    // Measure: the line being drawn, or the last one, with its length.
+    let measuring = match &ed.drag {
+        Some(Drag::Measure { start, now }) => Some((*start, *now)),
+        _ if ed.tool == Tool::Measure => ed.measured,
+        _ => None,
+    };
+    if let Some((a, b)) = measuring {
+        paint_measurement(ed, &painter, a, b);
     }
 
     // Cut Out: the strip being chosen, all the way across the picture, with its width.
@@ -1406,6 +1872,32 @@ fn dashed_rect(p: &egui::Painter, r: egui::Rect, color: Color32) {
     p.extend(egui::Shape::dashed_line(&pts, Stroke::new(1.0, color), 5.0, 3.0));
 }
 
+/// The egui family that shows text being typed in a font on the computer: handed to egui the
+/// first time, and used once egui has it (the frame after); none for the bundled fonts, or
+/// while egui hasn't it yet.
+fn typing_family(ed: &mut Editor, ctx: &egui::Context, style: &screengrabcraft_model::Style) -> Option<egui::FontFamily> {
+    if style.font.is_bundled() {
+        return None;
+    }
+    let name = format!("computer:{}:{}", style.font.as_str(), if style.bold { "bold" } else { "regular" });
+    let family = egui::FontFamily::Name(name.clone().into());
+    if ctx.fonts(|f| f.definitions().families.contains_key(&family)) {
+        return Some(family);
+    }
+    // Only a file egui can read: it stops the program over one it can't.
+    if ed.egui_fonts.insert(name.clone())
+        && let Some((bytes, index)) = screengrabcraft_render::text::font_file(style.font.as_str(), style.bold)
+        && skrifa::FontRef::from_index(&bytes, index).is_ok()
+    {
+        let mut data = egui::FontData::from_owned(bytes);
+        data.index = index;
+        let to = egui::epaint::text::InsertFontFamily { family: family.clone(), priority: egui::epaint::text::FontPriority::Highest };
+        ctx.add_font(egui::epaint::text::FontInsert::new(&name, data, vec![to]));
+        ctx.request_repaint();
+    }
+    None
+}
+
 /// The text box being typed into, over the annotation, in its own font and size.
 fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     let Some(id) = ed.editing else { return };
@@ -1421,7 +1913,9 @@ fn text_editor(ed: &mut Editor, ui: &mut Ui) {
     };
     let scale = ed.view.scale();
     let pad = text::padding(&o.style);
-    let family = if o.style.mono {
+    let family = if let Some(f) = typing_family(ed, ui.ctx(), &o.style) {
+        f
+    } else if o.style.mono {
         egui::FontFamily::Name("mono".into())
     } else if o.style.bold {
         egui::FontFamily::Name("sans-bold".into())

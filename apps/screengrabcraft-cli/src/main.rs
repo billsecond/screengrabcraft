@@ -4,7 +4,7 @@
 //! screengrabcraft-cli capture [--screen N | --all | --area X,Y,W,H | --window TITLE] [--delay S] [-o FILE] [--clipboard]
 //! screengrabcraft-cli monitors | windows
 //! screengrabcraft-cli render IN [-o OUT]                 a project or picture flattened to a picture
-//! screengrabcraft-cli run IN --cmd ID[=JSON]... [--model FILE] [-o OUT]
+//! screengrabcraft-cli run IN --cmd ID[=JSON]... [--model FILE] [--picture FILE]... [-o OUT]
 //!                                                      editing commands, as the editor runs them
 //! screengrabcraft-cli commands                            every editing command, as JSON
 //! screengrabcraft-cli stitch FRAME... -o OUT              join the frames of a scrolling page
@@ -12,7 +12,7 @@
 //! screengrabcraft-cli --version
 //! ```
 //!
-//! Output files take their format from their extension: .png .jpg .webp .bmp .gif .pdf, or
+//! Output files take their format from their extension: .png .jpg .webp .bmp .tif .gif .pdf, or
 //! .sgcraft for a project with its annotations still editable.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
@@ -31,18 +31,21 @@ const USAGE: &str = "usage:
   screengrabcraft-cli windows
   screengrabcraft-cli render IN [-o OUT]
   screengrabcraft-cli text IN [--json]
-  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [-o OUT]
+  screengrabcraft-cli run IN --cmd ID[=JSON] [--cmd ...] [--model FILE] [--picture FILE]... [-o OUT]
   screengrabcraft-cli commands
   screengrabcraft-cli stitch FRAME... -o OUT
   screengrabcraft-cli service install|uninstall|status
   screengrabcraft-cli --version
 
-Output formats follow the extension: .png .jpg .webp .bmp .gif .pdf, or .sgcraft (a project).
---model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).";
+Output formats follow the extension: .png .jpg .webp .bmp .tif .gif .pdf, or .sgcraft (a project).
+--model FILE: the ONNX model image.removeBackground runs (the one installed with ScreenGrabCraft if not given).
+--picture FILE: a picture lent to the commands, the first as {\"picture\": 0} (effect.watermark).";
 
 type R<T> = Result<T, String>;
 
 fn main() -> ExitCode {
+    // Projects rendered here draw their text in the computer's fonts they name.
+    screengrabcraft_desktop::fonts::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         Some("--version" | "-V" | "version") => {
@@ -248,7 +251,14 @@ fn cmd_text(args: &[String]) -> R<()> {
     let pic = screengrabcraft_render::render(&doc).ok_or("the picture couldn't be drawn")?;
     let lines = screengrabcraft_desktop::text::read(&pic)?;
     if args.iter().any(|a| a == "--json") {
-        let v: Vec<Value> = lines.iter().map(|l| json!({"text": l.text, "x": l.x, "y": l.y, "width": l.w, "height": l.h})).collect();
+        let r = |r: screengrabcraft_model::Rect| json!({"x": r.x, "y": r.y, "width": r.w, "height": r.h});
+        let v: Vec<Value> = lines
+            .iter()
+            .map(|l| {
+                let words: Vec<Value> = l.words.iter().map(|w| json!({"text": w.text, "box": r(w.rect)})).collect();
+                json!({"text": l.text, "x": l.rect.x, "y": l.rect.y, "width": l.rect.w, "height": l.rect.h, "words": words})
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
     } else {
         println!("{}", screengrabcraft_desktop::text::joined(&lines));
@@ -257,7 +267,7 @@ fn cmd_text(args: &[String]) -> R<()> {
 }
 
 fn cmd_run(args: &[String]) -> R<()> {
-    let ins = positional(args, &["-o", "--output", "--cmd", "--model"]);
+    let ins = positional(args, &["-o", "--output", "--cmd", "--model", "--picture"]);
     let input = PathBuf::from(ins.first().ok_or("run needs an input file")?);
     let mut session = Session::new(read_doc(&input)?);
     // image.removeBackground's model: the one given, else the one installed (read only if used).
@@ -266,6 +276,18 @@ fn cmd_run(args: &[String]) -> R<()> {
         None => screengrabcraft_desktop::models::background_model().ok(),
     };
     session.background.set_model(model);
+    // image.hideDetails reads the picture's text with the system's reader (where there is one).
+    if screengrabcraft_desktop::text::ready().is_ok() {
+        session.reader.set(Some(std::sync::Arc::new(SystemText)));
+    }
+    // Pictures lent to the commands that take one (a watermark's), in the order given.
+    for (i, a) in args.iter().enumerate() {
+        if a == "--picture" {
+            let path = args.get(i + 1).ok_or("--picture needs a file")?;
+            let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+            session.lent.push(screengrabcraft_render::decode(&bytes).map_err(|e| format!("{path}: {e}"))?);
+        }
+    }
     let mut i = 0;
     while let Some(pos) = args.iter().skip(i).position(|a| a == "--cmd") {
         let at = i + pos + 1;
@@ -285,6 +307,15 @@ fn cmd_run(args: &[String]) -> R<()> {
         println!("{}", out.display());
     }
     Ok(())
+}
+
+/// The system's own text reader ([`screengrabcraft_desktop::text`]), lent to the commands.
+struct SystemText;
+
+impl screengrabcraft_engine::ReadText for SystemText {
+    fn read(&self, picture: &screengrabcraft_model::Raster) -> Result<Vec<screengrabcraft_model::TextLine>, String> {
+        screengrabcraft_desktop::text::read(picture)
+    }
 }
 
 fn cmd_stitch(args: &[String]) -> R<()> {

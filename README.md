@@ -61,6 +61,8 @@ Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4
 (Option on a Mac) as you let go to keep that area and drag out another: the last one without Alt
 (or Enter) keeps them all in one picture, laid out as they were on the screen with the rest
 see-through (Backspace takes the last one out again).
+With "Include the mouse pointer in captures" on, the pointer is drawn into the capture, and in the
+editor it is an annotation of its own, to move or delete.
 
 As soon as you've chosen the area ScreenGrabCraft does its default: copy the capture to the
 clipboard, open it in the editor, and save it in **Pictures/ScreenGrabCraft** (PNG, JPEG, WebP, BMP
@@ -365,11 +367,14 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - The tool bar has **Favorites**, **Arrow**, **Text**, **Callout**, **Shape**, **Stamp**,
   **Fill** and **Move** in the middle, then every other tool, each with its own full-size button
   and its name under it (a narrow window gives the tools a row of their own; View › Tool Names
-  turns the names off). Every tool keeps its key.
+  turns the names off). View › Customize Tool Bar… shows the tools you choose, in your order.
+  Every tool keeps its key, on the bar or not.
 - **Quick Styles**: ready-made looks for each tool in a theme of four colours (Bold, Soft, Vivid,
   Mono), drawn as they will look. A click sets the tool's look and changes the selected
   annotations to it; the star on a look keeps it under **Favorites**, with the favourites of every
-  tool, and a look made by hand can be kept too. See [the editor's tools](docs/editor-tools.md).
+  tool, and a look made by hand can be kept too. Themes of your own: "New theme from the current
+  colours…" in the theme menu makes one of the colours in use, named and kept with the four. See
+  [the editor's tools](docs/editor-tools.md).
 - **Grab Text** (Image menu, the right-click menu, Ctrl+Shift+T): the text in the picture, or in the
   area selected, read on this computer by Windows' own text reader and shown to copy (put anything
   right first). On macOS and Linux it isn't there yet.
@@ -377,43 +382,90 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   the area selected), each to copy; a web address is shown, never opened. **Make a QR Code…** puts
   a code of your words or web address on the picture, to move and size like any picture. Both on
   this computer, everywhere.
+- **Hide Personal Details** (Image menu, the right-click menu): email addresses, phone numbers,
+  card numbers and address lines found by the same reader, each covered with a blur, a pixelate
+  or a solid box that stays an annotation to move or delete (Windows; faces aren't found).
+- **Edit Text in the Picture** (Image menu, the right-click menu): the lines of text found are
+  outlined; click one and it's covered with the colour round it and a text box takes its place in
+  the same size and colour, ready to type into (Windows; set in the computer's interface font).
 - **Eyedropper** in every colour menu: pick any colour from the picture. Over the picture the
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
-- **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to.
+- **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a
+  box, an ellipse, a freehand outline, or a colour with the magic wand; Invert Selection
+  (Ctrl+Shift+I) takes everything else. **Eraser** (E): rubs the picture out to see-through or
+  to a colour. With "Fill where a moved part was" ticked, a part dragged away (a button, a block)
+  leaves its place filled from the colours round it; **Fill from Round It** takes something out
+  of the picture that way.
+- **Simplify** (Image menu): the picture's parts drawn over it as plain shapes, flat boxes in
+  their colours and grey bars for the text, one group under the other annotations (Ungroup to
+  change one).
   **Flatten** the selected annotations or all of them; a **right-click menu** on the picture has
   these and the rest. Copy with annotations selected copies just them.
-- **Arrow** (one or two heads, any thickness), **line**, **shape** (a rectangle, rounded or not,
-  or an ellipse) and **pen**; Shift draws at 45° and makes squares and circles.
+- **Arrow** (one or two heads, notched, solid, an open V, a dot or a bar, any thickness; straight
+  or curved: drag the diamond in a selected arrow's middle to bend it), **line**, **shape** (a
+  rectangle, rounded or not, an ellipse, a triangle, a diamond, a polygon of up to 12 corners or a
+  star, picked in its Shape options, or a polygon of points clicked one by one: Points clicked, then
+  a double click or Enter closes it) and **pen**; Shift draws at 45° and makes squares and circles.
+  A line bends as an arrow does, by the diamond in its middle.
 - **Highlighter** (H): drag a box over what should stand out; it's tinted as under a marker
   (dark stays dark), and resized by its handles or moved like any shape.
+- **Rulers and guides** (View menu): rulers along the top and the left; drag a guide out of one,
+  drag it to move it, back onto its ruler to take it away. What is moved snaps its edges and
+  middle to the guides and to the picture's edges and middle (View › Snap to Guides).
+- **Measure** (I): drag across the picture for a distance in pixels, across, down and at what
+  angle; keep it on the picture as a dimension line with its length, or keep every one.
 - **Hand** (D): drag the picture round in the window. Space held down, or the middle button,
   does the same with any tool.
 - **Text** and **callouts** in five forms (a rounded box, a box, an oval, a cloud and an arrow
   with the text in it) with a tail set to point down left, down right, left, right, up or down,
-  and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
+  and dragged anywhere, and more tails (Add a Tail, up to 8) to point at several things; in
+  PatroneOS Sans or PatroneOS Mono or any font on the computer (Font,
+  with a search; a project keeps the font's name, and shows the built-in font where it's missing;
+  not in the browser), bold, italic, left, centred or right.
   Text overlays: an outline round the letters, a shadow, a filled or see-through box behind
   them, and big titles, each a quick style of the Text tool.
-- **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
-  information, heart).
+- **Step** badges that count themselves, in numbers, capital or small letters, or Roman numerals
+  (each way counts on its own, so 1, 2, 3 can have a, b, c beside them), on a circle, a rounded
+  or square box, a diamond, a hexagon or a pin (Shape, in the Step tool's properties), and
+  **stamps**: a library of 34 drawn in code (check, cross, star, arrows, a pin, a lock, a light
+  bulb, faces and more) with a search, and pictures of your own (a logo, a signature) kept as
+  stamps from a file or the clipboard.
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
 - Colours (a palette that reads well for people who see red and green alike, and any colour),
   thickness, opacity, shadows, dashes.
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
-  close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it.
-- **Crop**, **resize**, canvas size, rotate, flip, trim borders.
+  close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it;
+  a linear or radial gradient to a second colour, too.
+- **Crop**, **resize**, canvas size, rotate (a quarter turn, or any angle with Image › Rotate by an
+  Angle…: the corners see-through or a colour, the annotations turned with it), flip, trim borders.
 - **Cut Out** (U): drag across the picture over what to take out (columns, or rows) and the rest
   is joined, straight or with a saw or a wave and a thin see-through gap. Annotations past the strip
   move with the picture. An area chosen with the Selection tool can be cut out from its right-click
   menu too.
 - **Properties and Effects, docked at the right**: Properties (the quick styles and the tool
-  properties) over Effects (border, drop shadow, torn edge, round corners, brightness and
-  contrast, each opened with its settings and Apply; greyscale and invert under Colours). Drag
-  the panes' left edge to make them wider, and the bar between them to give either more room
-  (a double click puts it back). The Effects menu has them too.
+  properties) over Effects (brightness and contrast; hue, saturation and gamma; a colour
+  replaced by another, picked from the picture with the eyedropper, everywhere or only where it
+  joins the point picked; sharpen; blur;
+  border, drop shadow, round corners; torn, wavy and faded edges, a bevel; perspective, a page
+  curl, a reflection; a watermark of words or a picture, over the picture or under its words and
+  lines; the capture's details written on it; each opened with its settings and Apply;
+  greyscale, sepia and invert under Colours). **Presets** at the top apply an effect, or a few one
+  after another (Photo Frame, Rounded Card, Torn Paper, Old Photo...), with one click; Keep as
+  Preset… under an effect keeps its settings under a name of your own. The colour changes, sharpen and blur keep to an
+  area selected on the picture. Drag the panes' left edge to make them wider, and the bar
+  between them to give either more room (a double click puts it back). The Effects menu has
+  them too.
+- **Combine Pictures** and **Template** (Image menu): this picture with recent captures or picture
+  files, side by side, stacked or in a grid; or laid out on a page with a title, step numbers and
+  each step's words, every part an annotation to change.
+- **Turn, group and line up annotations**: the round handle over a selected box (or group) turns
+  it, Shift in steps of 15°; Edit › Group (Ctrl+G) and Ungroup, Rotate and Flip, Align and
+  Distribute, and Select All of This Kind, in the right-click menu too.
 - Everything stays on the picture: drawing, moving and resizing stop at its edge.
 - Whatever drawing tool is chosen, a click on an annotation selects it and a drag moves it (the
   pen draws over things); its handles take hold even when the press is a little off.
-- Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour).
+- Rectangles, ellipses and callouts have a **fill** colour (none, the palette, or any colour), or a
+  **gradient**: linear at any angle, or radial, to a second colour (the Fill menu).
 - Undo and redo for everything, even after the editor is closed and the capture opened again
   (the last 30 steps are kept in its side file), copy and paste (a pasted picture lands as an editable object),
   drag and drop, zoom and pan, the strip of recent captures. Right-click a capture there and Pin to
@@ -424,7 +476,7 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   program, or those with one tag. The program and tags are kept in `library.json` in the settings
   folder, never in the pictures.
 - Save as a **`.sgcraft` project** (JSON; the annotations stay editable) or export PNG, JPEG,
-  WebP, BMP, GIF or PDF.
+  WebP, BMP, TIFF, GIF or PDF. TIFF files open too.
 - **Print** (File › Print, Ctrl+P) through Windows' own printing window (greyed out elsewhere).
 - **Open With…** (the File menu for the picture as shown, or a capture's right-click menu in the
   strip for its file): Windows' own window for choosing a program to open it in (greyed out
@@ -444,6 +496,7 @@ The editor's keyboard shortcuts are under Help › Keyboard Shortcuts.
 screengrabcraft-cli capture --all -o desktop.png
 screengrabcraft-cli capture --window Notepad --clipboard
 screengrabcraft-cli run shot.png --cmd 'object.add={"object":{"type":"arrow","from":{"x":20,"y":20},"to":{"x":200,"y":120}}}' --cmd 'effect.shadow' -o shot.sgcraft
+screengrabcraft-cli run shot.png --picture logo.png --cmd 'effect.watermark={"picture":0,"place":"bottomRight"}' -o marked.png
 screengrabcraft-cli render shot.sgcraft -o shot.png
 screengrabcraft-cli text shot.png
 screengrabcraft-cli commands

@@ -95,7 +95,7 @@ impl Services for WebServices {
         let (answers, ctx) = (self.answers.clone(), self.ctx.clone());
         wasm_bindgen_futures::spawn_local(async move {
             let picked = rfd::AsyncFileDialog::new()
-                .add_filter("Pictures and projects", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "sgcraft"])
+                .add_filter("Pictures and projects", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "sgcraft"])
                 .pick_file()
                 .await;
             let answer = match picked {

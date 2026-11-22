@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Pt, Rect};
-use crate::object::{Kind, Object, ObjectId, Shape, Style};
+use crate::object::{Kind, Object, ObjectId, Shape, StepLabels, Style};
 use crate::raster::Raster;
 
 /// The most annotations one document holds.
@@ -90,7 +90,7 @@ impl Document {
         }
         let id = ObjectId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
-        self.objects.push(Object { id, shape: shape.sanitized(style.width), style: style.clamped() });
+        self.objects.push(Object::new(id, shape.sanitized(style.width), style.clamped()));
         Ok(id)
     }
 
@@ -110,6 +110,7 @@ impl Document {
         self.next_id = self.next_id.max(object.id.0.saturating_add(1));
         object.shape = object.shape.sanitized(object.style.width);
         object.style = object.style.clamped();
+        object.rotation = crate::object::clamp_rotation(object.rotation);
         let id = object.id;
         self.objects.push(object);
         Ok(id)
@@ -160,7 +161,7 @@ impl Document {
 
     /// The topmost annotation under `p`.
     pub fn object_at(&self, p: Pt, tol: f32) -> Option<ObjectId> {
-        self.objects.iter().rev().find(|o| o.shape.hit(&o.style, p, tol)).map(|o| o.id)
+        self.objects.iter().rev().find(|o| o.hit(p, tol)).map(|o| o.id)
     }
 
     /// Annotations whose bounds lie inside `area` (a rubber-band selection).
@@ -168,7 +169,7 @@ impl Document {
         self.objects
             .iter()
             .filter(|o| {
-                let b = o.shape.bounds(&o.style);
+                let b = o.bounds();
                 area.contains(b.min()) && area.contains(b.max())
             })
             .map(|o| o.id)
@@ -177,7 +178,7 @@ impl Document {
 
     /// `d` cut down so that these annotations, moved by it together, stay on the picture.
     pub fn limit_move(&self, ids: &[ObjectId], d: Pt) -> Pt {
-        let area = ids.iter().filter_map(|id| self.get(*id)).map(|o| o.shape.bounds(&o.style)).reduce(Rect::union);
+        let area = ids.iter().filter_map(|id| self.get(*id)).map(Object::bounds).reduce(Rect::union);
         area.map_or(d, |a| a.limit_move(d, self.bounds()))
     }
 
@@ -192,7 +193,7 @@ impl Document {
 
     /// The box round these annotations together.
     pub fn bounds_of(&self, ids: &[ObjectId]) -> Option<Rect> {
-        ids.iter().filter_map(|id| self.get(*id)).map(|o| o.shape.bounds(&o.style)).reduce(Rect::union)
+        ids.iter().filter_map(|id| self.get(*id)).map(Object::bounds).reduce(Rect::union)
     }
 
     /// Makes the picture larger, see-through where it is new, so that `area` is on it. What was
@@ -232,7 +233,7 @@ impl Document {
     /// (back to the left, or up); none when nothing was cut.
     pub fn shrink_to(&mut self, keep: Rect) -> Option<Pt> {
         let (w, h) = (self.width(), self.height());
-        let need = self.objects.iter().map(|o| o.shape.bounds(&o.style)).fold(keep, Rect::union);
+        let need = self.objects.iter().map(Object::bounds).fold(keep, Rect::union);
         if ![need.x, need.y, need.w, need.h].iter().all(|v| v.is_finite()) {
             return None;
         }
@@ -253,16 +254,19 @@ impl Document {
     pub fn bring_inside(&mut self, id: ObjectId) {
         let bounds = self.bounds();
         if let Some(o) = self.get_mut(id) {
-            o.shape.translate(o.shape.bounds(&o.style).way_into(bounds));
+            let d = o.bounds().way_into(bounds);
+            o.shape.translate(d);
         }
     }
 
-    /// The number the next step badge gets: one more than the highest so far.
-    pub fn next_step_number(&self) -> u32 {
+    /// The number the next step badge written with `labels` gets: one more than the highest so
+    /// far of those written the same way (numbers, letters and Roman numerals each count on
+    /// their own, so 1, 2, 3 can have a, b, c beside them).
+    pub fn next_step_number(&self, labels: StepLabels) -> u32 {
         self.objects
             .iter()
             .filter_map(|o| match o.shape {
-                Shape::Step { number, .. } => Some(number),
+                Shape::Step { number, labels: l, .. } if l == labels => Some(number),
                 _ => None,
             })
             .max()
@@ -306,8 +310,15 @@ impl Document {
     /// Every annotation's geometry passed through `f`, and its lengths scaled by `scale` (for a
     /// picture that was cropped, resized, turned or flipped).
     pub fn map_objects(&mut self, f: &dyn Fn(Pt) -> Pt, scale: f32) {
+        // A mirror (a flip) turns a turned box the other way.
+        let (o0, ox, oy) = (f(Pt::ZERO), f(Pt::new(1.0, 0.0)), f(Pt::new(0.0, 1.0)));
+        let (a, b) = (ox.sub(o0), oy.sub(o0));
+        let mirrors = a.x * b.y - a.y * b.x < 0.0;
         for o in &mut self.objects {
             o.shape.map_points(f);
+            if mirrors {
+                o.rotation = crate::object::clamp_rotation(-o.rotation);
+            }
             if (scale - 1.0).abs() > f32::EPSILON {
                 o.style = o.style.scaled(scale);
                 if let Shape::Spotlight { .. } = o.shape {
@@ -323,6 +334,121 @@ impl Document {
     pub fn count(&self, kind: Kind) -> usize {
         self.objects.iter().filter(|o| o.shape.kind() == kind).count()
     }
+
+    /// These annotations and every other in a group with one of them, in drawing order.
+    pub fn with_groups(&self, ids: &[ObjectId]) -> Vec<ObjectId> {
+        let groups: Vec<u64> = ids.iter().filter_map(|id| self.get(*id)).filter_map(|o| o.group).collect();
+        self.objects.iter().filter(|o| ids.contains(&o.id) || o.group.is_some_and(|g| groups.contains(&g))).map(|o| o.id).collect()
+    }
+
+    /// A group number no annotation has.
+    pub fn next_group(&self) -> u64 {
+        self.objects.iter().filter_map(|o| o.group).max().map_or(1, |g| g.saturating_add(1))
+    }
+
+    /// These annotations as the units that move together: each group as one, each annotation
+    /// on its own as one; in drawing order of their first member.
+    pub fn units(&self, ids: &[ObjectId]) -> Vec<Vec<ObjectId>> {
+        let mut units: Vec<(Option<u64>, Vec<ObjectId>)> = Vec::new();
+        for o in self.objects.iter().filter(|o| ids.contains(&o.id)) {
+            match o.group.and_then(|g| units.iter_mut().find(|(k, _)| *k == Some(g))) {
+                Some((_, members)) => members.push(o.id),
+                None => units.push((o.group, vec![o.id])),
+            }
+        }
+        units.into_iter().map(|(_, m)| m).collect()
+    }
+
+    /// Moves these annotations by `d`.
+    pub fn move_objects(&mut self, ids: &[ObjectId], d: Pt) {
+        for o in self.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+            o.shape.translate(d);
+        }
+    }
+
+    /// Turns these annotations by `degrees` round `pivot`: boxes go round it and turn; lines,
+    /// arrows and strokes have their points turned; a blur or a spotlight goes round it square.
+    pub fn rotate_objects(&mut self, ids: &[ObjectId], degrees: f32, pivot: Pt) {
+        let deg = crate::object::clamp_rotation(degrees);
+        if deg == 0.0 {
+            return;
+        }
+        let pivot = pivot.finite();
+        for o in self.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+            if o.shape.rect().is_some() {
+                let c = o.shape.pivot();
+                o.shape.translate(crate::object::turn(c, pivot, deg).sub(c));
+                if o.shape.turns() {
+                    o.rotation = crate::object::clamp_rotation(o.rotation + deg);
+                }
+            } else {
+                o.shape.map_points(&|q| crate::object::turn(q, pivot, deg));
+            }
+        }
+    }
+
+    /// Mirrors these annotations round the middle of them all, across (`horizontal`) or up and
+    /// down; a turned box turns the other way.
+    pub fn flip_objects(&mut self, ids: &[ObjectId], horizontal: bool) {
+        let Some(c) = self.bounds_of(ids).map(Rect::center) else { return };
+        for o in self.objects.iter_mut().filter(|o| ids.contains(&o.id)) {
+            o.shape.mirror(c, horizontal);
+            o.rotation = crate::object::clamp_rotation(-o.rotation);
+        }
+    }
+
+    /// Lines up these annotations (a group as one) on one side or the middle of the box round
+    /// them all, or of `within` when given (the picture, for one alone).
+    pub fn align(&mut self, ids: &[ObjectId], to: Align, within: Option<Rect>) {
+        let Some(frame) = within.or_else(|| self.bounds_of(ids)) else { return };
+        for unit in self.units(ids) {
+            let Some(b) = self.bounds_of(&unit) else { continue };
+            let d = match to {
+                Align::Left => Pt::new(frame.x - b.x, 0.0),
+                Align::Center => Pt::new(frame.center().x - b.center().x, 0.0),
+                Align::Right => Pt::new(frame.right() - b.right(), 0.0),
+                Align::Top => Pt::new(0.0, frame.y - b.y),
+                Align::Middle => Pt::new(0.0, frame.center().y - b.center().y),
+                Align::Bottom => Pt::new(0.0, frame.bottom() - b.bottom()),
+            };
+            self.move_objects(&unit, d.finite());
+        }
+    }
+
+    /// Spreads these annotations (a group as one) evenly across (`horizontal`) or down: the
+    /// first and the last stay, and the gaps between them all become the same. Nothing moves
+    /// with fewer than three.
+    pub fn distribute(&mut self, ids: &[ObjectId], horizontal: bool) {
+        let mut units: Vec<(Vec<ObjectId>, Rect)> = self.units(ids).into_iter().filter_map(|u| self.bounds_of(&u).map(|b| (u, b))).collect();
+        if units.len() < 3 {
+            return;
+        }
+        let start = |r: &Rect| if horizontal { r.x } else { r.y };
+        let size = |r: &Rect| if horizontal { r.w } else { r.h };
+        units.sort_by(|a, b| start(&a.1).total_cmp(&start(&b.1)));
+        let (Some(first), Some(last)) = (units.first(), units.last()) else { return };
+        let span = start(&last.1) + size(&last.1) - start(&first.1);
+        let total: f32 = units.iter().map(|(_, r)| size(r)).sum();
+        let gap = (span - total) / (units.len() - 1) as f32;
+        let mut at = start(&first.1);
+        for (unit, r) in &units {
+            let d = at - start(r);
+            self.move_objects(unit, if horizontal { Pt::new(d, 0.0) } else { Pt::new(0.0, d) }.finite());
+            at += size(r) + gap;
+        }
+    }
+}
+
+/// Where annotations are lined up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Align {
+    Left,
+    Center,
+    Right,
+    Top,
+    Middle,
+    Bottom,
 }
 
 #[cfg(test)]
@@ -398,10 +524,10 @@ mod tests {
         let a = d.add(rect(0.0), Style::default()).unwrap();
         let b = d.add(rect(20.0), Style::default()).unwrap();
         assert_ne!(a, b);
-        let clash = Object { id: a, shape: rect(40.0), style: Style::default() };
+        let clash = Object::new(a, rect(40.0), Style::default());
         let c = d.insert(clash).unwrap();
         assert!(c != a && c != b);
-        let far = Object { id: ObjectId(500), shape: rect(40.0), style: Style::default() };
+        let far = Object::new(ObjectId(500), rect(40.0), Style::default());
         assert_eq!(d.insert(far).unwrap(), ObjectId(500));
         assert_eq!(d.add(rect(1.0), Style::default()).unwrap(), ObjectId(501));
         assert_eq!(d.remove(&[a, ObjectId(999)]), 1);
@@ -440,13 +566,105 @@ mod tests {
     #[test]
     fn steps_count_up_and_images_are_pruned() {
         let mut d = doc();
-        assert_eq!(d.next_step_number(), 1);
-        d.add(Shape::Step { center: Pt::ZERO, number: 4 }, Style::default()).unwrap();
-        assert_eq!(d.next_step_number(), 5);
+        assert_eq!(d.next_step_number(StepLabels::Numbers), 1);
+        d.add(Shape::step(Pt::ZERO, 4), Style::default()).unwrap();
+        assert_eq!(d.next_step_number(StepLabels::Numbers), 5);
+        // Letters count on their own.
+        assert_eq!(d.next_step_number(StepLabels::Lower), 1);
+        d.add(Shape::Step { center: Pt::ZERO, number: 2, labels: StepLabels::Lower, badge: Default::default() }, Style::default()).unwrap();
+        assert_eq!((d.next_step_number(StepLabels::Lower), d.next_step_number(StepLabels::Numbers)), (3, 5));
         assert!(d.add(Shape::Image { rect: Rect::default(), image: 9 }, Style::default()).is_err());
         let key = d.add_image(Raster::filled(2, 2, Color::BLACK).unwrap()).unwrap();
         let id = d.add(Shape::Image { rect: Rect::new(0.0, 0.0, 2.0, 2.0), image: key }, Style::default()).unwrap();
         d.remove(&[id]);
         assert!(d.images.is_empty());
+    }
+
+    #[test]
+    fn a_turned_box_is_hit_and_bounded_where_it_shows() {
+        let mut d = doc();
+        let filled = Style { fill: Color::RED, ..Style::default() };
+        let a = d.add(Shape::Rect { rect: Rect::new(30.0, 35.0, 40.0, 10.0), radius: 0.0 }, filled).unwrap();
+        // Unturned: wide and low.
+        assert_eq!(d.object_at(Pt::new(50.0, 25.0), 0.0), None);
+        d.rotate_objects(&[a], 90.0, Pt::new(50.0, 40.0));
+        let o = d.get(a).unwrap();
+        assert_eq!(o.rotation, 90.0);
+        // Turned a quarter: tall and narrow, round the same middle.
+        assert_eq!(d.object_at(Pt::new(50.0, 25.0), 0.0), Some(a));
+        assert_eq!(d.object_at(Pt::new(35.0, 40.0), 0.0), None);
+        let b = o.bounds();
+        assert!((b.w - 14.0).abs() < 0.5 && (b.h - 44.0).abs() < 0.5, "{b:?}");
+        // Lines turn by their points and keep no turn.
+        let l = d.add(Shape::Line { from: Pt::new(10.0, 10.0), to: Pt::new(30.0, 10.0), bend: 0.0 }, Style::default()).unwrap();
+        d.rotate_objects(&[l], 90.0, Pt::new(20.0, 10.0));
+        let o = d.get(l).unwrap();
+        assert_eq!((o.rotation, o.shape.extent()), (0.0, Rect::new(20.0, 0.0, 0.0, 20.0)));
+        // A blur goes round square.
+        let blur = d.add(Shape::Blur { rect: Rect::new(0.0, 0.0, 10.0, 10.0) }, Style::default()).unwrap();
+        d.rotate_objects(&[blur], 180.0, Pt::new(20.0, 20.0));
+        assert_eq!((d.get(blur).unwrap().rotation, d.get(blur).unwrap().shape.rect()), (0.0, Some(Rect::new(30.0, 30.0, 10.0, 10.0))));
+        // A flip of the picture turns it the other way.
+        d.map_objects(&|p| Pt::new(100.0 - p.x, p.y), 1.0);
+        d.get_mut(a).unwrap().rotation = 30.0;
+        d.map_objects(&|p| Pt::new(100.0 - p.x, p.y), 1.0);
+        assert_eq!(d.get(a).unwrap().rotation, -30.0);
+        d.map_objects(&|p| Pt::new(80.0 - p.y, p.x), 1.0);
+        assert_eq!(d.get(a).unwrap().rotation, -30.0, "a quarter turn of the picture isn't a mirror");
+    }
+
+    #[test]
+    fn a_turned_box_is_resized_along_its_own_sides() {
+        let mut o = Object::new(ObjectId(1), Shape::Rect { rect: Rect::new(0.0, 0.0, 40.0, 20.0), radius: 0.0 }, Style::default());
+        o.rotation = 90.0;
+        // Its top left corner, on the picture, is at the top right of what shows.
+        let corners = o.handles();
+        let (_, tl) = corners.iter().find(|(h, _)| *h == crate::Handle::TopLeft).copied().unwrap();
+        let (_, br) = corners.iter().find(|(h, _)| *h == crate::Handle::BottomRight).copied().unwrap();
+        assert!((tl.x - 30.0).abs() < 0.01 && (tl.y + 10.0).abs() < 0.01, "{tl:?}");
+        // Pulled outwards (up the picture is along its width): it grows, the far corner stays.
+        o.drag_handle(crate::Handle::TopLeft, Pt::new(tl.x, tl.y - 10.0), false);
+        let r = o.shape.rect().unwrap();
+        assert!((r.w - 50.0).abs() < 0.01 && (r.h - 20.0).abs() < 0.01, "{r:?}");
+        let (_, br_now) = o.handles().into_iter().find(|(h, _)| *h == crate::Handle::BottomRight).unwrap();
+        assert!(br_now.distance(br) < 0.01, "{br:?} → {br_now:?}");
+        assert_eq!(crate::object::clamp_rotation(270.0), -90.0);
+        assert_eq!(crate::object::clamp_rotation(f32::NAN), 0.0);
+    }
+
+    #[test]
+    fn groups_align_distribute_and_flip_as_units() {
+        let mut d = doc();
+        let a = d.add(rect(0.0), Style::default()).unwrap();
+        let b = d.add(rect(30.0), Style::default()).unwrap();
+        let c = d.add(Shape::Rect { rect: Rect::new(70.0, 50.0, 20.0, 20.0), radius: 0.0 }, Style::default()).unwrap();
+        let w = Style::default().width / 2.0;
+        // a and b grouped: they move as one.
+        let g = d.next_group();
+        for id in [a, b] {
+            d.get_mut(id).unwrap().group = Some(g);
+        }
+        assert_eq!(d.with_groups(&[b]), vec![a, b]);
+        assert_eq!(d.units(&[a, b, c]), vec![vec![a, b], vec![c]]);
+        d.align(&[a, b, c], Align::Bottom, None);
+        let bottom = |d: &Document, id| d.get(id).unwrap().shape.rect().unwrap().bottom();
+        assert_eq!((bottom(&d, a), bottom(&d, b), bottom(&d, c)), (70.0, 70.0, 70.0));
+        d.align(&[a, b, c], Align::Left, None);
+        let left = |d: &Document, id| d.get(id).unwrap().shape.rect().unwrap().x;
+        assert_eq!((left(&d, a), left(&d, b), left(&d, c)), (0.0, 30.0, 0.0), "the group keeps its shape");
+        // Three apart, spread evenly.
+        let x = d.add(rect(0.0), Style::default()).unwrap();
+        let y = d.add(rect(10.0), Style::default()).unwrap();
+        let z = d.add(rect(80.0), Style::default()).unwrap();
+        d.distribute(&[x, y, z], true);
+        assert_eq!(left(&d, y), 40.0);
+        // Flipped across round their middle.
+        d.flip_objects(&[x, z], true);
+        assert_eq!((left(&d, x), left(&d, z)), (80.0, 0.0));
+        let _ = w;
+        // A stamp of an arrow points the other way.
+        let s = d.add(Shape::Stamp { rect: Rect::new(0.0, 0.0, 10.0, 10.0), stamp: crate::StampKind::ArrowLeft }, Style::default()).unwrap();
+        d.flip_objects(&[s], true);
+        assert!(matches!(d.get(s).unwrap().shape, Shape::Stamp { stamp: crate::StampKind::ArrowRight, .. }));
     }
 }

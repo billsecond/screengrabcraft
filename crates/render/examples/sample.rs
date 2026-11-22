@@ -29,7 +29,10 @@ fn main() -> Result<(), String> {
         d.add(s, k.default_style()).map(|_| ())
     };
     let e = |r: Result<(), screengrabcraft_model::DocError>| r.map_err(|e| e.to_string());
-    e(add(&mut d, Shape::Arrow { from: Pt::new(420.0, 470.0), to: Pt::new(250.0, 330.0), heads: ArrowHeads::End }))?;
+    e(add(
+        &mut d,
+        Shape::Arrow { from: Pt::new(420.0, 470.0), to: Pt::new(250.0, 330.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+    ))?;
     e(add(&mut d, Shape::Rect { rect: Rect::new(330.0, 90.0, 260.0, 90.0), radius: 10.0 }))?;
     e(add(&mut d, Shape::Ellipse { rect: Rect::new(620.0, 90.0, 200.0, 110.0) }))?;
     e(add(&mut d, Shape::highlight(Rect::new(324.0, 229.0, 387.0, 22.0))))?;
@@ -42,15 +45,16 @@ fn main() -> Result<(), String> {
             tail: Pt::new(150.0, 380.0),
             text: "This panel shows your recent captures".into(),
             form: screengrabcraft_model::CalloutForm::Rounded,
+            tails: Vec::new(),
         },
     ))?;
     for (i, c) in [(1u32, Pt::new(80.0, 90.0)), (2, Pt::new(350.0, 70.0)), (3, Pt::new(640.0, 70.0))] {
-        e(add(&mut d, Shape::Step { center: c, number: i }))?;
+        e(add(&mut d, Shape::step(c, i)))?;
     }
     e(add(&mut d, Shape::Blur { rect: Rect::new(340.0, 280.0, 200.0, 60.0) }))?;
     e(add(&mut d, Shape::Pixelate { rect: Rect::new(560.0, 270.0, 60.0, 80.0) }))?;
     e(add(&mut d, Shape::Magnify { rect: Rect::new(470.0, 380.0, 110.0, 110.0) }))?;
-    for (i, k) in StampKind::ALL.iter().enumerate() {
+    for (i, k) in StampKind::FIRST.iter().enumerate() {
         let style = Style { fill: screengrabcraft_render::stamp::default_fill(*k), ..Kind::Stamp.default_style() };
         d.add(Shape::Stamp { rect: Rect::new(610.0 + i as f32 * 40.0, 460.0, 34.0, 34.0), stamp: *k }, style).map_err(|e| e.to_string())?;
     }

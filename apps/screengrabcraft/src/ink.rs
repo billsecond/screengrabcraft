@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{Sense, Ui, pos2, vec2};
-use screengrabcraft_model::{ArrowHeads, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::{ArrowHeads, BadgeShape, Color, Document, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, StepLabels, Style};
 use screengrabcraft_ui::icons::{self, Icon};
 
 /// How long a mark stays once it's drawn, and how long it then takes to fade away.
@@ -117,13 +117,13 @@ impl Ink {
         let at = at.finite();
         match self.tool {
             Tool::Pen => self.current = Some(Shape::Pen { points: vec![at] }),
-            Tool::Arrow => self.current = Some(Shape::Arrow { from: at, to: at, heads: ArrowHeads::End }),
+            Tool::Arrow => self.current = Some(Shape::Arrow { from: at, to: at, heads: ArrowHeads::End, bend: 0.0, head: HeadShape::default() }),
             Tool::Box => self.current = Some(Shape::Rect { rect: Rect::new(at.x, at.y, 0.0, 0.0), radius: 0.0 }),
             Tool::Step => {
                 self.current = None;
                 let number = self.next_step;
                 self.next_step = self.next_step.saturating_add(1);
-                self.keep(Shape::Step { center: at, number }, now);
+                self.keep(Shape::Step { center: at, number, labels: StepLabels::default(), badge: BadgeShape::default() }, now);
             }
         }
     }
@@ -180,7 +180,7 @@ impl Ink {
             .iter()
             .filter_map(|m| {
                 let o = opacity(m.done, now);
-                (o > 0.0).then(|| Object { id: ObjectId(0), shape: m.shape.clone(), style: self.style(o) })
+                (o > 0.0).then(|| Object { id: ObjectId(0), shape: m.shape.clone(), style: self.style(o), rotation: 0.0, group: None })
             })
             .collect();
         if let Some(c) = &self.current {
@@ -190,7 +190,7 @@ impl Ink {
                 }
                 other => other.clone(),
             };
-            out.push(Object { id: ObjectId(0), shape, style: self.style(1.0) });
+            out.push(Object { id: ObjectId(0), shape, style: self.style(1.0), rotation: 0.0, group: None });
         }
         out
     }
@@ -359,10 +359,10 @@ mod tests {
         ink.begin(Pt::new(50.0, 5.0), t0);
         let shapes: Vec<Shape> = ink.objects(t0).into_iter().map(|o| o.shape).collect();
         assert!(matches!(&shapes[0], Shape::Pen { points } if points.len() == 3));
-        assert_eq!(shapes[1], Shape::Arrow { from: Pt::new(100.0, 100.0), to: Pt::new(150.0, 120.0), heads: ArrowHeads::End });
+        assert_eq!(shapes[1], Shape::Arrow { from: Pt::new(100.0, 100.0), to: Pt::new(150.0, 120.0), heads: ArrowHeads::End, bend: 0.0, head: HeadShape::default() });
         assert_eq!(shapes[2], Shape::Rect { rect: Rect::new(40.0, 30.0, 40.0, 60.0), radius: 0.0 }, "dragged up and left, the right way round");
-        assert_eq!(shapes[3], Shape::Step { center: Pt::new(5.0, 5.0), number: 1 });
-        assert_eq!(shapes[4], Shape::Step { center: Pt::new(50.0, 5.0), number: 2 });
+        assert_eq!(shapes[3], Shape::Step { center: Pt::new(5.0, 5.0), number: 1, labels: StepLabels::default(), badge: BadgeShape::default() });
+        assert_eq!(shapes[4], Shape::Step { center: Pt::new(50.0, 5.0), number: 2, labels: StepLabels::default(), badge: BadgeShape::default() });
         // They fade together, and are let go of once faded.
         let half = ink.objects(at(3500, t0));
         assert!(half.iter().all(|o| (o.style.opacity - 0.5).abs() < 0.01));
@@ -372,7 +372,7 @@ mod tests {
         ink.begin(Pt::new(1.0, 1.0), t0);
         ink.clear();
         ink.begin(Pt::new(1.0, 1.0), t0);
-        assert_eq!(ink.objects(t0).first().map(|o| o.shape.clone()), Some(Shape::Step { center: Pt::new(1.0, 1.0), number: 1 }));
+        assert_eq!(ink.objects(t0).first().map(|o| o.shape.clone()), Some(Shape::Step { center: Pt::new(1.0, 1.0), number: 1, labels: StepLabels::default(), badge: BadgeShape::default() }));
     }
 
     #[test]

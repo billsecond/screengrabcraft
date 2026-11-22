@@ -11,16 +11,21 @@ pub mod geom;
 pub mod guide;
 pub mod library;
 pub mod object;
+pub mod presets;
 pub mod quick;
 pub mod raster;
 pub mod settings;
 pub mod timed;
+pub mod text;
 
 pub use color::Color;
-pub use document::{DocError, Document, Meta, Order};
+pub use document::{Align, DocError, Document, Meta, Order};
 pub use geom::{IRect, Pt, Rect};
 pub use library::{CaptureInfo, Library};
-pub use object::{ArrowHeads, CalloutForm, Handle, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
+pub use object::{
+    ArrowHeads, BadgeShape, CalloutForm, FontName, Gradient, GradientKind, Handle, HeadShape, Kind, Object, ObjectId, Shape, ShapeOptions, StampKind,
+    StepLabels, Style, TailSpot, TextAlign,
+};
 pub use quick::QuickStyle;
 pub use raster::{MAX_PIXELS, MAX_SIDE, Raster, RasterError};
 pub use settings::{
@@ -28,6 +33,7 @@ pub use settings::{
     RecorderOptions, Settings, Stamp, Theme,
 };
 pub use timed::{TimedArea, TimedCaptures};
+pub use text::{TextLine, TextWord};
 
 /// The program's name, as people see it.
 pub const APP_NAME: &str = "ScreenGrabCraft";

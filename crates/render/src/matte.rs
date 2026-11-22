@@ -356,6 +356,106 @@ pub fn remove_colour(r: &Raster, colour: Color, tolerance: u8, region: Region, s
     Ok(Removed { picture: out, cleared, softened })
 }
 
+/// What [`replace_colour`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Replaced {
+    pub picture: Raster,
+    /// Pixels given the new colour.
+    pub replaced: u64,
+    /// Pixels at the edge of those, a mix of the old colour and another, given the new colour in
+    /// the old one's place.
+    pub softened: u64,
+}
+
+/// The picture with `colour` (and the colours within `tolerance` of it, 0 to 255 a channel)
+/// replaced by `with` in `region`. Alpha isn't compared: a half see-through pixel of the colour
+/// is replaced too, and stays as see-through (times `with`'s own alpha). A pixel close to the
+/// colour but not quite it keeps its difference from it on the new colour (a photograph's grain,
+/// a JPEG's noise). The pixels just outside what was replaced that are a mix of the colour and
+/// something else (the smooth edges of text and shapes) get the new colour in the old one's
+/// place, so no fringe of the old colour is left. See-through pixels are left as they are, and
+/// a region joined to a point (or the edges) doesn't cross them.
+pub fn replace_colour(r: &Raster, colour: Color, with: Color, tolerance: u8, region: Region) -> Result<Replaced, RasterError> {
+    let (w, h) = (r.width() as usize, r.height() as usize);
+    let n = checked_len(r.width(), r.height())? / 4;
+    let px = r.pixels();
+    let colour_at = |i: usize| match px.get(i * 4..i * 4 + 4) {
+        Some([r, g, b, a]) => Color::rgba(*r, *g, *b, *a),
+        _ => Color::TRANSPARENT,
+    };
+    let near = |i: usize| {
+        let c = colour_at(i);
+        c.a > 0 && c.r.abs_diff(colour.r).max(c.g.abs_diff(colour.g)).max(c.b.abs_diff(colour.b)) <= tolerance
+    };
+    // 1 where the colour is replaced.
+    let mut gone = vec![0u8; n];
+    match region {
+        Region::Everywhere => {
+            for (i, g) in gone.iter_mut().enumerate() {
+                *g = u8::from(near(i));
+            }
+        }
+        Region::Edges => {
+            let (right, bottom) = (w.saturating_sub(1), h.saturating_sub(1));
+            let mut seeds: Vec<(usize, usize)> = (0..w).flat_map(|x| [(x, 0), (x, bottom)]).collect();
+            seeds.extend((0..h).flat_map(|y| [(0, y), (right, y)]));
+            flood(w, h, &seeds, &near, &mut gone);
+        }
+        Region::From(x, y) => {
+            if (x as usize) < w && (y as usize) < h {
+                flood(w, h, &[(x as usize, y as usize)], &near, &mut gone);
+            }
+        }
+    }
+    let mut out = r.clone();
+    let (mut replaced, mut softened) = (0u64, 0u64);
+    let shift = |c: u8, from: u8, to: u8| (i16::from(to) + i16::from(c) - i16::from(from)).clamp(0, 255) as u8;
+    let times = |a: u8, k: u8| ((u32::from(a) * u32::from(k) + 127) / 255) as u8;
+    let dst = out.pixels_mut();
+    for (i, g) in gone.iter().enumerate() {
+        if *g == 1
+            && let Some(p) = dst.get_mut(i * 4..i * 4 + 4)
+        {
+            p[0] = shift(p[0], colour.r, with.r);
+            p[1] = shift(p[1], colour.g, with.g);
+            p[2] = shift(p[2], colour.b, with.b);
+            p[3] = times(p[3], with.a);
+            replaced += 1;
+        }
+    }
+    // The smooth edges: the pixels next to what was replaced that are a mix of the old colour
+    // and something purer close by get the new colour for the old one's part of them.
+    let is_gone = |x: usize, y: usize| gone.get(y * w + x).is_some_and(|g| *g == 1);
+    let wa = f32::from(with.a) / 255.0;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if gone.get(i).is_none_or(|g| *g != 0) || colour_at(i).a == 0 {
+                continue;
+            }
+            let touches = (y.saturating_sub(1)..(y + 2).min(h)).any(|yy| (x.saturating_sub(1)..(x + 2).min(w)).any(|xx| is_gone(xx, yy)));
+            if !touches {
+                continue;
+            }
+            let Some((a, subject)) = unmix(r, &gone, x, y, colour) else { continue };
+            // `a` of the pixel is the subject, the rest the old colour, now `with`.
+            let keep = a + (1.0 - a) * wa;
+            if keep <= f32::EPSILON {
+                continue;
+            }
+            let mix = |s: u8, n: u8| ((f32::from(s) * a + f32::from(n) * (1.0 - a) * wa) / keep).round().clamp(0.0, 255.0) as u8;
+            if let Some(p) = dst.get_mut(i * 4..i * 4 + 4) {
+                p[0] = mix(subject.r, with.r);
+                p[1] = mix(subject.g, with.g);
+                p[2] = mix(subject.b, with.b);
+                p[3] = (f32::from(p[3]) * keep).round().clamp(0.0, 255.0) as u8;
+                softened += 1;
+            }
+        }
+    }
+    Ok(Replaced { picture: out, replaced, softened })
+}
+
 /// How dark a shadow of black on `bg` the colour `c` is (0 none, 1 black), if it is one: it lies
 /// on the line from `bg` to black, not too dark. A background close to black shows no shadows.
 fn shadow_mix(c: Color, bg: Color) -> Option<f32> {
@@ -751,5 +851,74 @@ mod tests {
         assert_eq!(remove_colour(&line, Color::WHITE, 0, Region::Edges, true).unwrap().cleared, 5);
         let transparent = Raster::filled(3, 3, Color::TRANSPARENT).unwrap();
         assert_eq!(edge_colour(&transparent), Some(Color::TRANSPARENT));
+    }
+
+    const GREEN: Color = Color::rgb(40, 160, 70);
+
+    #[test]
+    fn a_colour_is_replaced_everywhere_with_smooth_edges_and_no_fringe() {
+        let r = disc_on_blue();
+        let out = replace_colour(&r, BLUE, GREEN, 24, Region::Everywhere).unwrap();
+        assert!(out.replaced > 0 && out.softened > 0, "{} replaced, {} softened", out.replaced, out.softened);
+        assert_eq!(out.picture.pixel(2, 2), Some(GREEN));
+        assert_eq!(out.picture.pixel(40, 30), Some(Color::rgb(229, 57, 53)), "the disc is left as it was");
+        // At the disc's smooth edge, the old blue is gone from the mix: every pixel lies between
+        // the disc's red and the new green, and none is bluer than either.
+        for y in 0..60 {
+            for x in 0..80 {
+                let (Some(c), Some(was)) = (out.picture.pixel(x, y), r.pixel(x, y)) else { continue };
+                assert_eq!(c.a, 255);
+                assert!(c.b <= GREEN.b.max(53) + 6, "({x}, {y}) {was:?} became {c:?}, still blue");
+            }
+        }
+    }
+
+    #[test]
+    fn a_colour_is_replaced_only_where_it_joins_the_point() {
+        // A black ring on white: from inside it, only the white inside goes; from outside, only that.
+        let mut r = Raster::filled(30, 30, Color::WHITE).unwrap();
+        for y in 5..25 {
+            for x in 5..25 {
+                if !(10..20).contains(&x) || !(10..20).contains(&y) {
+                    let i = (y * 30 + x) * 4;
+                    r.pixels_mut()[i..i + 4].copy_from_slice(&[0, 0, 0, 255]);
+                }
+            }
+        }
+        let inside = replace_colour(&r, Color::WHITE, Color::RED, 10, Region::From(15, 15)).unwrap();
+        assert_eq!(inside.replaced, 100);
+        assert_eq!(inside.picture.pixel(15, 15), Some(Color::RED));
+        assert_eq!(inside.picture.pixel(0, 0), Some(Color::WHITE));
+        let outside = replace_colour(&r, Color::WHITE, Color::RED, 10, Region::From(0, 0)).unwrap();
+        assert_eq!(outside.picture.pixel(15, 15), Some(Color::WHITE));
+        assert_eq!(outside.picture.pixel(29, 29), Some(Color::RED));
+        let edges = replace_colour(&r, Color::WHITE, Color::RED, 10, Region::Edges).unwrap();
+        assert_eq!(edges.picture, outside.picture);
+        let everywhere = replace_colour(&r, Color::WHITE, Color::RED, 10, Region::Everywhere).unwrap();
+        assert_eq!(everywhere.replaced, 30 * 30 - (400 - 100));
+        assert_eq!(replace_colour(&r, Color::WHITE, Color::RED, 10, Region::From(500, 500)).unwrap().replaced, 0);
+    }
+
+    #[test]
+    fn near_colours_keep_their_difference_and_see_through_is_kept() {
+        // A light grey noise on white keeps its shade on the new colour; see-through pixels stay,
+        // a half see-through one of the colour is replaced and stays half see-through.
+        let mut r = Raster::filled(4, 1, Color::WHITE).unwrap();
+        r.pixels_mut()[4..8].copy_from_slice(&[245, 245, 245, 255]);
+        r.pixels_mut()[8..12].copy_from_slice(&[255, 255, 255, 0]);
+        r.pixels_mut()[12..16].copy_from_slice(&[255, 255, 255, 128]);
+        let out = replace_colour(&r, Color::WHITE, Color::rgb(100, 150, 200), 16, Region::Everywhere).unwrap();
+        assert_eq!(out.picture.pixel(0, 0), Some(Color::rgb(100, 150, 200)));
+        assert_eq!(out.picture.pixel(1, 0), Some(Color::rgb(90, 140, 190)));
+        assert_eq!(out.picture.pixel(2, 0), Some(Color::rgba(255, 255, 255, 0)));
+        assert_eq!(out.picture.pixel(3, 0), Some(Color::rgba(100, 150, 200, 128)));
+        assert_eq!(out.replaced, 3);
+        // A see-through pixel is a wall for a region joined to a point.
+        let mut split = Raster::filled(5, 1, Color::WHITE).unwrap();
+        split.pixels_mut()[8..12].copy_from_slice(&[255, 255, 255, 0]);
+        assert_eq!(replace_colour(&split, Color::WHITE, Color::RED, 0, Region::From(0, 0)).unwrap().replaced, 2);
+        // The new colour's own alpha is used.
+        let half = replace_colour(&Raster::single(Color::WHITE), Color::WHITE, Color::rgba(0, 0, 0, 51), 0, Region::Everywhere).unwrap();
+        assert_eq!(half.picture.pixel(0, 0), Some(Color::rgba(0, 0, 0, 51)));
     }
 }

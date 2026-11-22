@@ -21,6 +21,9 @@ ScreenGrabCraft takes pictures of your screen, so here is exactly what it does w
 - **What is written about them:** the log (in the settings folder) records a capture's size and
   file name, never its content. The settings remember the last area captured, for Repeat Last
   Capture.
+- **Stamps of your own:** a picture you add to the stamp library (from a file or the clipboard)
+  is kept, no larger than 512 pixels, in the `stamps` folder in the settings folder, until you
+  remove it there (Remove, in the library). Nothing else is kept of it.
 - **Video recordings:** the microphone, the camera and the computer's sound are used only while
   a video recording you started is running, and only the ones you chose (Settings › Recording). The
   camera's light is on for exactly that long. A Record Video recording is made into an MP4 in

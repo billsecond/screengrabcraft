@@ -21,7 +21,7 @@ L1                              model (document, shapes, styles, geometry, setti
 | Crate | Builds for the browser | Job |
 |---|---|---|
 | `model` | yes | `Document` (a `Raster` plus `Object`s in drawing order), `Shape` (15 kinds), `Style`, hit testing and handles, `Settings`/`EditorSettings`, hotkeys, file naming |
-| `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
+| `render` | yes | `Renderer` (the document drawn, the picture's pixmap cached), blur/pixelate/spotlight/magnify, text from the bundled fonts as paths, stamps, whole-picture effects, PNG/JPEG/WebP/BMP/TIFF/GIF/PDF, `.sgcraft` projects, the scrolling `Stitcher`, the `GifWriter` |
 | `media` | yes (no encoders) | video: the recording file (`recording`: append-only chunks, a track per source), the `Timeline` of edits, the `Composer` (the frame at a moment, the camera in its corner) and `mix` (the sound), the MP4 writer, AV1 (rav1e) and Opus (rusty-opus) encoders and the parallel `export` |
 | `capture` | no | `freeze()` (every monitor's picture, the windows, the pointer), `grab_monitor`, `grab_on_monitor`, `grabber` (one area over and over, for recordings), `grab_area`, permission |
 | `matte` | no | Remove Background's model: an ONNX salient-object model (IS-Net, U²-Net, BiRefNet) run by tract, the runtime written in Rust; the picture shrunk to the model's square, its answer stretched back as a soft matte. The host reads the model file; `desktop::models` finds it |
@@ -62,6 +62,11 @@ so the editor runs it on a thread of its own (`ui::background`, with a progress 
 hands the matte to the session for that picture, and then runs the command; the command-line
 program runs it in place. The model is IS-Net, its weights in 8 bits (`assets/models`), installed
 beside the programs and never downloaded; the browser build has none, and says so.
+
+The effect `effect.replaceColor` (Replace a Colour) is the same picture work with another colour
+in place of see-through (`render::matte::replace_colour`): the pixels within the tolerance take
+the new colour, each keeping its difference from the old one, and the pixels at their edge are
+unmixed and mixed again with the new colour, so no fringe of the old one is left.
 
 ## The capture service
 

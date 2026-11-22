@@ -41,6 +41,13 @@ impl Color {
         Color { a, ..self }
     }
 
+    /// The colour `t` (0 to 1) of the way from this one to `other`, each channel alike.
+    pub fn mix(self, other: Color, t: f32) -> Color {
+        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        let m = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round().clamp(0.0, 255.0) as u8;
+        Color { r: m(self.r, other.r), g: m(self.g, other.g), b: m(self.b, other.b), a: m(self.a, other.a) }
+    }
+
     /// Relative luminance (0 dark to 1 light), for choosing a readable text colour on it.
     pub fn luminance(self) -> f32 {
         let lin = |c: u8| {

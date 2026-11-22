@@ -7,13 +7,20 @@
 pub mod batch;
 pub mod guide;
 pub mod library;
+pub mod arrange;
+pub mod compose;
+pub mod details;
+pub mod edit_text;
+pub mod fx;
+pub mod measure;
 pub mod registry;
 pub mod session;
+pub mod simplify;
 pub mod video;
 
 pub use library::LIBRARY_COMMANDS;
 pub use registry::{COMMANDS, CommandSpec, describe, find, merge_style, parse_object};
-pub use session::{Background, Session};
+pub use session::{Background, ReadText, Reader, Session};
 pub use video::{VIDEO_COMMANDS, VideoSession};
 
 #[derive(Debug, thiserror::Error)]

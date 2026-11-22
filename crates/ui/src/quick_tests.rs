@@ -6,7 +6,7 @@ use egui_kittest::kittest::Queryable as _;
 use screengrabcraft_model::{CalloutForm, Color, Kind, Pt, Rect, Shape, Style};
 
 use crate::editor::{Editor, Tool};
-use crate::tests::{at, drag, editor, harness, ready, ready_tall};
+use crate::tests::{at, drag, editor, ready, ready_tall};
 
 /// Saves what the window looks like, when asked (`SGC_SHOTS=folder`).
 pub(crate) fn shot(h: &mut Harness<'_, Editor>, name: &str) {
@@ -23,8 +23,13 @@ fn click(h: &mut Harness<'_, Editor>, label: &str) {
 }
 
 fn callout(ed: &mut Editor) -> screengrabcraft_model::ObjectId {
-    let shape =
-        Shape::Callout { rect: Rect::new(60.0, 40.0, 160.0, 60.0), tail: Pt::new(70.0, 160.0), text: "Hi".into(), form: CalloutForm::Rounded };
+    let shape = Shape::Callout {
+        rect: Rect::new(60.0, 40.0, 160.0, 60.0),
+        tail: Pt::new(70.0, 160.0),
+        text: "Hi".into(),
+        form: CalloutForm::Rounded,
+        tails: Vec::new(),
+    };
     ed.session.doc.add(shape, Kind::Callout.default_style()).unwrap()
 }
 
@@ -66,7 +71,7 @@ fn sized(width: f32) -> Harness<'static, Editor> {
 
 #[test]
 fn every_tool_is_on_the_tool_bar_at_full_size_in_the_middle() {
-    let mut h = sized(1600.0);
+    let mut h = sized(1700.0);
     let rects: Vec<egui::Rect> = BAR.iter().map(|l| h.get_by_label(l).rect()).collect();
     for (pair, names) in rects.windows(2).zip(BAR.windows(2)) {
         if let [a, b] = pair {
@@ -78,7 +83,7 @@ fn every_tool_is_on_the_tool_bar_at_full_size_in_the_middle() {
     }
     let (first, last) = (rects.first().unwrap(), rects.last().unwrap());
     let middle = (first.min.x + last.max.x) / 2.0;
-    assert!((middle - 800.0).abs() < 60.0, "centred: {middle}");
+    assert!((middle - 850.0).abs() < 60.0, "centred: {middle}");
     // The files at the left, copying and the zoom at the right, none of them over the tools.
     let save = h.get_by_label("Delete the selection (Del)").rect();
     let copy = h.get_by_label("Copy the picture (Ctrl+C)").rect();
@@ -123,7 +128,8 @@ fn every_tool_button_picks_its_tool_and_shows_it_picked() {
 
 #[test]
 fn the_shape_button_draws_a_rectangle_or_an_ellipse() {
-    let mut h = harness(editor());
+    // As tall as a full-HD screen: the shape picker is under four rows of quick styles.
+    let mut h = crate::tests::harness_sized(editor(), egui::vec2(1200.0, 1080.0));
     h.run_steps(4);
     click(&mut h, "Shape (R, O)");
     assert_eq!(h.state().tool, Tool::Draw(Kind::Rect));
@@ -152,6 +158,64 @@ fn the_shape_button_draws_a_rectangle_or_an_ellipse() {
     assert!(matches!(last, Some(Shape::Rect { radius, .. }) if radius > 0.0), "{last:?}");
 }
 
+/// The Step tool's Shape options: steps in capital letters, then a pin; the badges count on in
+/// letters beside the numbered one; a quick style gives a selected badge another outline and
+/// keeps its letter.
+#[test]
+fn steps_count_in_letters_on_badges_of_other_shapes() {
+    use screengrabcraft_model::{BadgeShape, StepLabels};
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Step));
+    let label = |h: &Harness<'_, Editor>, i: usize| h.state().session.doc.objects.get(i).and_then(|o| o.shape.step_label());
+    let p = at(&h, 40.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    assert_eq!(label(&h, 0).as_deref(), Some("1"));
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    shot(&mut h, "step-shape-options");
+    click(&mut h, "A, B, C");
+    assert_eq!(h.state().tool_options(Kind::Step).labels, Some(StepLabels::Upper));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label_contains("The next step is A.");
+    let p = at(&h, 100.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "Pin");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let p = at(&h, 160.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    assert_eq!((label(&h, 1).as_deref(), label(&h, 2).as_deref()), (Some("A"), Some("B")), "letters count on their own");
+    let badge = |h: &Harness<'_, Editor>, i: usize| match h.state().session.doc.objects.get(i).map(|o| &o.shape) {
+        Some(Shape::Step { badge, .. }) => Some(*badge),
+        _ => None,
+    };
+    assert_eq!((badge(&h, 0), badge(&h, 1), badge(&h, 2)), (Some(BadgeShape::Circle), Some(BadgeShape::Circle), Some(BadgeShape::Pin)));
+    // The letter badge selected, a square look: square, and still A.
+    let id = h.state().session.doc.objects.get(1).map(|o| o.id).unwrap();
+    h.state_mut().set_tool(Tool::Select);
+    h.state_mut().session.select(vec![id]);
+    h.run_steps(3);
+    click(&mut h, "Green, square badge");
+    assert_eq!((badge(&h, 1), label(&h, 1).as_deref()), (Some(BadgeShape::Rounded), Some("A")));
+    assert_eq!(h.state().session.undo_label(), Some("Apply Quick Style"));
+    h.get_by_label_contains("shows A");
+    // Every badge and way of counting, for the picture of it.
+    for (i, badge) in BadgeShape::ALL.into_iter().enumerate() {
+        for (j, labels) in StepLabels::ALL.into_iter().enumerate() {
+            let center = Pt::new(40.0 + i as f32 * 60.0, 110.0 + j as f32 * 36.0);
+            let style = Kind::Step.default_style();
+            h.state_mut().session.doc.add(Shape::Step { center, number: [1, 2, 4, 9, 38][j], labels, badge }, style).unwrap();
+        }
+    }
+    h.state_mut().session.touch();
+    h.run_steps(3);
+    shot(&mut h, "step-badges");
+}
+
 #[test]
 fn a_quick_style_restyles_the_selected_callout_in_one_undo_step() {
     let mut ed = editor();
@@ -162,7 +226,7 @@ fn a_quick_style_restyles_the_selected_callout_in_one_undo_step() {
     shot(&mut h, "callout-quick-styles");
     click(&mut h, "Blue, arrow");
     let o = h.state().session.doc.get(id).cloned().unwrap();
-    let Shape::Callout { form, tail, rect, text } = o.shape else { panic!("a callout") };
+    let Shape::Callout { form, tail, rect, text, .. } = o.shape else { panic!("a callout") };
     assert_eq!((form, text.as_str()), (CalloutForm::Arrow, "Hi"));
     assert!(tail.x > rect.right(), "the arrow points right: {tail:?} {rect:?}");
     assert_eq!(o.style.fill, Color::rgb(0x1E, 0x88, 0xE5));
@@ -254,7 +318,7 @@ fn every_tool_has_quick_styles_in_its_panel() {
     for (tool, ..) in Tool::ALL {
         let mut h = ready_tall(editor(), tool);
         let presets = match tool {
-            Tool::Draw(k) => screengrabcraft_model::quick::presets(k, screengrabcraft_model::quick::theme("")),
+            Tool::Draw(k) => screengrabcraft_model::quick::presets(k, &screengrabcraft_model::quick::theme("", &[])),
             _ => continue,
         };
         for p in &presets {
@@ -300,6 +364,9 @@ fn properties_stay_shown_over_the_effects_pane() {
     }
     assert!(h.query_by_label("Apply Border").is_none());
     click(&mut h, "Border");
+    // Its Apply is further down the pane than it shows at once.
+    h.get_by_label("Apply Border").scroll_to_me();
+    h.run_steps(3);
     shot(&mut h, "effects-pane");
     click(&mut h, "Apply Border");
     assert_eq!(h.state().session.undo_label(), Some("Border"));
@@ -450,7 +517,7 @@ fn text_overlays_come_outlined_shadowed_on_boxes_and_as_titles() {
 
 #[test]
 fn with_room_to_spare_each_tool_has_its_name_under_it_and_the_name_picks_it() {
-    let mut h = sized(1600.0);
+    let mut h = sized(1700.0);
     let named_top = h.state().view.canvas.min.y;
     // Under the Blur button, its name: a click there picks the tool as the button does.
     let blur = h.get_by_label("Blur (B)").rect();
@@ -512,4 +579,372 @@ fn nothing_selected_the_panel_says_how_things_are_moved() {
         assert!(h.query_by_label(said).is_some(), "{said}");
     }
     shot(&mut h, "move-tips");
+}
+
+/// The Shape tool's picker draws triangles and stars; the Shape button keeps drawing them; an
+/// arrow is bent by the handle in its middle, and its picker makes the next one curved.
+#[test]
+fn shapes_draw_triangles_and_stars_and_arrows_bend() {
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Rect));
+    click(&mut h, "Shape options");
+    click(&mut h, "Triangle");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Polygon));
+    let (a, b) = (at(&h, 30.0, 30.0), at(&h, 130.0, 120.0));
+    drag(&mut h, a, b);
+    let last = |h: &Harness<'_, Editor>| h.state().session.doc.objects.last().map(|o| o.shape.clone());
+    assert!(matches!(last(&h), Some(Shape::Polygon { sides: 3, star: false, .. })), "{:?}", last(&h));
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "Star");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let (a, b) = (at(&h, 150.0, 30.0), at(&h, 250.0, 120.0));
+    drag(&mut h, a, b);
+    assert!(matches!(last(&h), Some(Shape::Polygon { sides: 5, star: true, .. })), "{:?}", last(&h));
+    // Six points for the next one, from the picker.
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "6");
+    shot(&mut h, "shape-picker-polygons");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert_eq!((h.state().tool_options(Kind::Polygon).sides, h.state().tool_options(Kind::Polygon).star), (Some(6), Some(true)));
+    // Another tool and back: the Shape button still draws stars.
+    click(&mut h, "Arrow (A)");
+    click(&mut h, "Shape (R, O)");
+    assert_eq!(h.state().tool, Tool::Draw(Kind::Polygon));
+    // An arrow, bent by its middle handle: one undo step.
+    click(&mut h, "Arrow (A)");
+    let (a, b) = (at(&h, 40.0, 220.0), at(&h, 240.0, 220.0));
+    drag(&mut h, a, b);
+    let (m, up) = (at(&h, 140.0, 220.0), at(&h, 140.0, 170.0));
+    drag(&mut h, m, up);
+    let Some(Shape::Arrow { bend, .. }) = last(&h) else { panic!("an arrow") };
+    assert!((bend - 0.25).abs() < 0.03, "bowed up a quarter of its length: {bend}");
+    assert_eq!(h.state().session.undo_label(), Some("Resize"));
+    // An open head, from the picker: on the arrow, and on the next ones.
+    click(&mut h, "Shape options");
+    click(&mut h, "Open V");
+    shot(&mut h, "arrow-shape-options");
+    assert!(matches!(last(&h), Some(Shape::Arrow { head: screengrabcraft_model::HeadShape::Open, .. })), "{:?}", last(&h));
+    assert_eq!(h.state().tool_options(Kind::Arrow).head, Some(screengrabcraft_model::HeadShape::Open));
+    // The picker straightens it.
+    click(&mut h, "Straight");
+    let Some(Shape::Arrow { bend, .. }) = last(&h) else { panic!("an arrow") };
+    assert_eq!(bend, 0.0);
+    // Undone, it is bent again, for the picture of it.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    assert!(h.state_mut().session.undo());
+    h.run_steps(2);
+    shot(&mut h, "polygons-and-curved-arrow");
+}
+
+/// A host that keeps pictures of your own as stamps in memory, with a picture on its clipboard.
+#[derive(Clone, Default)]
+struct StampHost(std::rc::Rc<std::cell::RefCell<Vec<(String, screengrabcraft_model::Raster)>>>);
+
+impl crate::services::Services for StampHost {
+    fn has_paths(&self) -> bool {
+        false
+    }
+
+    fn paste_image(&self) -> Option<screengrabcraft_model::Raster> {
+        // A small picture of two colours, wider than tall.
+        let mut r = screengrabcraft_model::Raster::filled(60, 30, Color::rgb(0, 120, 200)).ok()?;
+        for px in r.pixels_mut().as_chunks_mut::<4>().0.iter_mut().take(60 * 15) {
+            *px = [250, 200, 0, 255];
+        }
+        Some(r)
+    }
+
+    fn keeps_own_stamps(&self) -> bool {
+        true
+    }
+
+    fn own_stamps(&self) -> Vec<String> {
+        self.0.borrow().iter().map(|(n, _)| n.clone()).collect()
+    }
+
+    fn own_stamp(&self, name: &str) -> Option<screengrabcraft_model::Raster> {
+        self.0.borrow().iter().find(|(n, _)| n == name).map(|(_, r)| r.clone())
+    }
+
+    fn add_own_stamp(&self, png: &[u8]) -> Result<String, String> {
+        let pic = screengrabcraft_render::codec::decode(png).map_err(|e| e.to_string())?;
+        let name = format!("mine-{}", self.0.borrow().len() + 1);
+        self.0.borrow_mut().push((name.clone(), pic));
+        Ok(name)
+    }
+
+    fn remove_own_stamp(&self, name: &str) -> Result<(), String> {
+        self.0.borrow_mut().retain(|(n, _)| n != name);
+        Ok(())
+    }
+}
+
+/// The stamp library: a search finds a face, which is placed in its own colour; the copied
+/// picture is kept as a stamp of your own and placed as a picture; then taken out again.
+#[test]
+fn the_stamp_library_finds_stamps_and_keeps_your_pictures() {
+    use screengrabcraft_model::StampKind;
+    let host = StampHost::default();
+    let mut ed = Editor::new(Box::new(host.clone()), screengrabcraft_model::EditorSettings::default());
+    ed.session.replace(screengrabcraft_model::Document::new(screengrabcraft_model::Raster::filled(400, 300, Color::WHITE).unwrap()));
+    ed.view.fit_pending = true;
+    let mut h = ready_tall(ed, Tool::Draw(Kind::Stamp));
+    for name in ["Arrow up", "Sad face", "Pencil", crate::stamps::SEARCH] {
+        h.get_by_label(name);
+    }
+    click(&mut h, crate::stamps::SEARCH);
+    h.event(egui::Event::Text("smile".into()));
+    h.run_steps(3);
+    assert_eq!(h.state().stamp_query, "smile");
+    assert!(h.query_by_label("Sad face").is_none() && h.query_by_label("Arrow up").is_none(), "the search leaves the rest out");
+    shot(&mut h, "stamp-library-search");
+    click(&mut h, "Happy face");
+    assert_eq!(h.state().stamp(), StampKind::Happy);
+    let p = at(&h, 100.0, 100.0);
+    crate::tests::click_at(&mut h, p);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    assert!(matches!(o.shape, Shape::Stamp { stamp: StampKind::Happy, .. }), "{:?}", o.shape);
+    assert_eq!(o.style.fill, StampKind::Happy.color(), "in its own colour");
+    // The copied picture kept, chosen, and placed as a picture, in proportion.
+    // (The search still narrows the stamps, so your pictures are in sight under them.)
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Add the Copied Picture");
+    assert_eq!(crate::services::Services::own_stamps(&host), vec!["mine-1".to_string()]);
+    assert_eq!(h.state().own_stamp.as_deref(), Some("mine-1"));
+    h.get_by_label(&crate::stamps::own_name(0));
+    let p = at(&h, 250.0, 150.0);
+    crate::tests::click_at(&mut h, p);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    let Shape::Image { rect, image } = o.shape else { panic!("a picture: {:?}", o.shape) };
+    assert!((rect.w / rect.h - 2.0).abs() < 0.05 && rect.contains(screengrabcraft_model::Pt::new(250.0, 150.0)), "{rect:?}");
+    assert_eq!(h.state().session.doc.images.get(&image).map(|r| (r.width(), r.height())), Some((60, 30)));
+    assert_eq!(h.state().session.undo_label(), Some("Add Stamp"));
+    shot(&mut h, "stamp-library-own");
+    // Let go of it, then the picture is taken out of the stamps.
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, &crate::stamps::own_name(0));
+    click(&mut h, "Remove");
+    assert!(crate::services::Services::own_stamps(&host).is_empty() && h.state().own_stamp.is_none());
+    assert!(h.query_by_label(&crate::stamps::own_name(0)).is_none());
+}
+
+/// Where the host keeps no files (the browser), your pictures are greyed out with the reason.
+#[test]
+fn stamps_of_your_own_are_greyed_out_without_files() {
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Stamp));
+    h.get_by_label_contains("not in the browser");
+    assert!(egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label("Add a Picture…")).is_disabled());
+    shot(&mut h, "stamp-library-browser");
+}
+
+/// A computer with one font, "Test Mono" (the bundled typewriter's file under another name).
+struct OneFont;
+
+impl screengrabcraft_render::text::FontSource for OneFont {
+    fn face(&self, family: &str, _bold: bool) -> Option<(Vec<u8>, u32)> {
+        let mono = screengrabcraft_render::text::font_files().into_iter().find(|(n, _)| *n == "mono").map(|(_, b)| b.to_vec());
+        if family == "Test Mono" { mono.map(|b| (b, 0)) } else { None }
+    }
+
+    fn families(&self) -> Vec<String> {
+        vec!["Test Mono".to_string(), "Unused Serif".to_string()]
+    }
+}
+
+/// The Text tool's font menu lists the computer's fonts with a search; text typed in one is
+/// shown in it as it is typed, and keeps its name.
+#[test]
+fn text_takes_a_font_from_the_computer() {
+    screengrabcraft_render::text::set_font_source(Box::new(OneFont));
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Text));
+    click(&mut h, crate::props::FONT_MENU);
+    h.get_by_label(crate::props::BUNDLED_FONT);
+    h.get_by_label("Unused Serif");
+    click(&mut h, crate::props::FONT_SEARCH);
+    h.event(egui::Event::Text("mono".into()));
+    h.run_steps(3);
+    assert!(h.query_by_label("Unused Serif").is_none(), "the search leaves it out");
+    shot(&mut h, "font-menu");
+    click(&mut h, "Test Mono");
+    assert_eq!(h.state().tool_style(Kind::Text).font.as_str(), "Test Mono");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let p = at(&h, 60.0, 60.0);
+    crate::tests::click_at(&mut h, p);
+    h.event(egui::Event::Text("iiii".into()));
+    h.run_steps(4);
+    assert!(h.state().egui_fonts.contains("computer:Test Mono:bold"), "handed to egui to type in (text is bold at first)");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    let o = h.state().session.doc.objects.last().cloned().unwrap();
+    assert_eq!((o.shape.text(), o.style.font.as_str()), (Some("iiii"), "Test Mono"));
+    shot(&mut h, "font-text");
+}
+
+/// The effects added later are in the pane too: the colour changes keep to the area selected on
+/// the picture, perspective tilts it, a watermark of words or of a chosen picture, the capture's
+/// details.
+#[test]
+fn more_effects_in_the_pane_and_the_colours_keep_to_an_area() {
+    use screengrabcraft_model::{Document, ImageFormat, Raster};
+    let mut ed = editor();
+    ed.session.replace(Document::new(Raster::filled(400, 300, Color::rgb(200, 40, 40)).unwrap()));
+    ed.session.doc.meta.source = Some("A window".into());
+    // Effects with most of the height, so an opened one is in sight.
+    ed.settings.properties_share = Some(0.2);
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1200.0));
+    h.run_steps(4);
+    for name in [
+        "Brightness and Contrast",
+        "Hue, Saturation and Gamma",
+        crate::effects::COLOURS,
+        "Sharpen",
+        "Blur",
+        "Border",
+        "Drop Shadow",
+        "Round Corners",
+        "Torn Edge",
+        "Wavy Edge",
+        "Faded Edge",
+        "Bevel",
+        "Perspective",
+        "Page Curl",
+        "Reflection",
+        "Watermark",
+        "Capture Details",
+    ] {
+        h.get_by_label(name);
+    }
+    // An area selected: Sepia browns it alone.
+    h.state_mut().area = Some(Rect::new(20.0, 20.0, 100.0, 80.0));
+    click(&mut h, crate::effects::COLOURS);
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-area");
+    click(&mut h, "Sepia");
+    let base = h.state().session.doc.base.clone();
+    assert_eq!(h.state().session.undo_label(), Some("Sepia"));
+    assert_ne!(base.pixel(50, 50), Some(Color::rgb(200, 40, 40)), "in the area");
+    assert_eq!(base.pixel(300, 200), Some(Color::rgb(200, 40, 40)), "not outside it");
+    click(&mut h, crate::effects::COLOURS);
+    h.state_mut().area = None;
+    // A watermark of words, at its settings as they start.
+    click(&mut h, "Watermark");
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-watermark");
+    click(&mut h, "Apply Watermark");
+    assert_eq!(h.state().session.undo_label(), Some("Watermark"));
+    // Of a picture: chosen, it is named in the section and used.
+    let logo = Raster::filled(20, 20, Color::rgb(0, 0, 255)).unwrap();
+    let bytes = screengrabcraft_render::encode(&logo, ImageFormat::Png, 92).unwrap();
+    let ctx = h.ctx.clone();
+    h.state_mut().watermark_file(&ctx, &crate::services::OpenedFile { name: "logo.png".into(), path: None, bytes });
+    h.run_steps(3);
+    h.get_by_label("logo.png");
+    let before = h.state().session.doc.base.pixel(200, 150).unwrap();
+    click(&mut h, "Apply Watermark");
+    assert!(h.state().session.lent.is_empty(), "lent only while it is applied");
+    let mid = h.state().session.doc.base.pixel(200, 150).unwrap();
+    assert!(mid.b > before.b + 30 && mid.r < before.r, "the blue picture is in the middle: {before:?} → {mid:?}");
+    click(&mut h, "Watermark");
+    // The capture's details, with what the picture is of.
+    click(&mut h, "Capture Details");
+    h.run_steps(20);
+    shot(&mut h, "effects-pane-details");
+    click(&mut h, "Apply Capture Details");
+    assert_eq!(h.state().session.undo_label(), Some("Capture Details"));
+    click(&mut h, "Capture Details");
+    // Perspective changes the picture's size.
+    click(&mut h, "Perspective");
+    h.run_steps(20);
+    click(&mut h, "Apply Perspective");
+    assert!(h.state().session.doc.width() < 400);
+    click(&mut h, "Perspective");
+    h.run_steps(10);
+    shot(&mut h, "effects-applied");
+    // The Effects menu has them all.
+    click(&mut h, "Effects");
+    for name in ["Hue, Saturation and Gamma…", "Sepia", "Wavy Edge…", "Page Curl…", "Reflection…", "Watermark…", "Capture Details…"] {
+        h.get_by_label(name);
+    }
+    shot(&mut h, "effects-menu");
+}
+
+/// Replace a Colour, from the Effects pane: the colour picked from the picture with the
+/// eyedropper, replaced everywhere or only where it joins the point picked; from the Effects
+/// menu it is a window of its own.
+#[test]
+fn a_colour_picked_from_the_picture_is_replaced_everywhere_or_where_it_joins() {
+    use crate::dialogs::{REPLACE_JOINED, REPLACE_PICK};
+    use screengrabcraft_model::{Document, Raster};
+    let (blue, red, yellow) = (Color::rgb(30, 90, 200), Color::rgb(229, 57, 53), Color::rgb(0xFF, 0xD6, 0x00));
+    // Blue, with a big red square in the middle and a small one at the top left.
+    let mut pic = Raster::filled(400, 300, blue).unwrap();
+    for (x0, y0, side) in [(150, 100, 100), (20, 20, 30)] {
+        for y in y0..y0 + side {
+            for x in x0..x0 + side {
+                let i = (y * 400 + x) * 4;
+                pic.pixels_mut()[i..i + 4].copy_from_slice(&[red.r, red.g, red.b, 255]);
+            }
+        }
+    }
+    let mut ed = editor();
+    ed.session.replace(Document::new(pic));
+    ed.settings.properties_share = Some(0.2);
+    let mut h = crate::tests::harness_sized(ed, egui::vec2(1200.0, 1200.0));
+    h.run_steps(4);
+    click(&mut h, "Replace a Colour");
+    h.run_steps(20);
+    assert!(
+        egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label(REPLACE_JOINED)).is_disabled(),
+        "nothing picked yet, so there is no point to join"
+    );
+    // The eyedropper out, a click on the big square takes its colour and where it was.
+    click(&mut h, REPLACE_PICK);
+    assert!(crate::eyedropper::active(&h.ctx));
+    let p = at(&h, 200.0, 150.0);
+    crate::tests::click_at(&mut h, p);
+    h.run_steps(3);
+    assert!(!crate::eyedropper::active(&h.ctx));
+    assert!(!egui_kittest::kittest::NodeT::accesskit_node(&h.get_by_label(REPLACE_JOINED)).is_disabled(), "a point picked");
+    click(&mut h, REPLACE_JOINED);
+    h.run_steps(2);
+    shot(&mut h, "replace-colour-pane");
+    click(&mut h, "Apply Replace a Colour");
+    let ed = h.state();
+    assert_eq!(ed.session.undo_label(), Some("Replace a Colour"));
+    let base = &ed.session.doc.base;
+    assert_eq!(base.pixel(200, 150), Some(yellow), "the square clicked");
+    assert_eq!(base.pixel(30, 30), Some(red), "not the one it doesn't join");
+    assert_eq!(base.pixel(5, 5), Some(blue));
+    // Undone, and everywhere: both squares.
+    let ctx = h.ctx.clone();
+    h.state_mut().run(&ctx, "edit.undo", serde_json::json!({}));
+    click(&mut h, REPLACE_JOINED);
+    click(&mut h, "Apply Replace a Colour");
+    let base = &h.state().session.doc.base;
+    assert_eq!((base.pixel(200, 150), base.pixel(30, 30), base.pixel(5, 5)), (Some(yellow), Some(yellow), Some(blue)));
+    click(&mut h, "Replace a Colour");
+    // From the Effects menu, a window with Apply: the blue page becomes yellow too.
+    click(&mut h, "Effects");
+    click(&mut h, "Replace a Colour…");
+    h.run_steps(10);
+    assert!(matches!(h.state().dialog, Some(crate::dialogs::Dialog::Replace { .. })));
+    if let Some(crate::dialogs::Dialog::Replace { from, .. }) = &mut h.state_mut().dialog {
+        *from = crate::to_color32(blue);
+    }
+    h.run_steps(2);
+    shot(&mut h, "replace-colour-window");
+    click(&mut h, "Apply");
+    assert!(h.state().dialog.is_none());
+    assert_eq!(h.state().session.doc.base.pixel(5, 5), Some(yellow));
 }

@@ -1,10 +1,12 @@
 //! Quick styles: ready-made looks for each tool, made from a theme (a set of four colours), and
 //! the looks the owner stars as favourites (kept in the editor's settings).
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
-use crate::object::{ArrowHeads, CalloutForm, Kind, ShapeOptions, StampKind, Style, TailSpot};
+use crate::object::{ArrowHeads, BadgeShape, CalloutForm, Gradient, GradientKind, Kind, ShapeOptions, Style, TailSpot};
 
 /// A look for a tool: the style it draws with, and what it sets about the shape.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -32,7 +34,7 @@ impl QuickStyle {
     }
 
     /// Whether this look describes `current` (a tool's look, or an annotation's): the same tool,
-    /// the same style (the text size aside, unless the look sets it), and every option it sets
+    /// the same style (the text size aside, unless the look sets it, and the font aside), and every option it sets
     /// the same (a tail's spot only where `current` knows it).
     pub fn matches(&self, current: &QuickStyle) -> bool {
         let o = &self.options;
@@ -40,13 +42,19 @@ impl QuickStyle {
         let same = |a: Option<bool>, b: Option<bool>| a.is_none() || a == b;
         let size = if self.sized { self.style.font_size } else { current.style.font_size };
         self.kind.family() == current.kind.family()
-            && Style { font_size: size, ..self.style } == current.style
+            && Style { font_size: size, font: current.style.font, ..self.style } == current.style
             && (o.heads.is_none() || o.heads == c.heads)
             && (o.radius.is_none() || o.radius == c.radius)
             && (o.form.is_none() || o.form == c.form)
             && (o.tail.is_none() || c.tail.is_none() || o.tail == c.tail)
             && (o.stamp.is_none() || o.stamp == c.stamp)
             && same(o.round, c.round)
+            && (o.labels.is_none() || o.labels == c.labels)
+            && (o.badge.is_none() || o.badge == c.badge)
+            && (o.bend.is_none() || o.bend == c.bend)
+            && (o.head.is_none() || o.head == c.head)
+            && (o.sides.is_none() || o.sides == c.sides)
+            && (o.star.is_none() || o.star == c.star)
     }
 }
 
@@ -57,30 +65,31 @@ pub const MAX_FAVORITES: usize = 48;
 pub const TITLE_SIZE: f32 = 56.0;
 
 /// A colour of a theme, its name, and the colour of text on it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Swatch {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub color: Color,
     pub ink: Color,
 }
 
-/// A set of four colours the quick styles are made in.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A set of four colours the quick styles are made in: one of the built-in ones, or one of the
+/// owner's own.
+#[derive(Clone, Debug, PartialEq)]
 pub struct QuickTheme {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub swatches: [Swatch; 4],
 }
 
 const DARK_INK: Color = Color::rgb(0x11, 0x11, 0x11);
 
 const fn swatch(name: &'static str, color: Color, ink: Color) -> Swatch {
-    Swatch { name, color, ink }
+    Swatch { name: Cow::Borrowed(name), color, ink }
 }
 
 /// The themes, the first the one a new editor starts with.
 pub static THEMES: [QuickTheme; 4] = [
     QuickTheme {
-        name: "Bold",
+        name: Cow::Borrowed("Bold"),
         swatches: [
             swatch("Red", Color::rgb(0xE5, 0x39, 0x35), Color::WHITE),
             swatch("Green", Color::rgb(0x43, 0xA0, 0x47), Color::WHITE),
@@ -89,7 +98,7 @@ pub static THEMES: [QuickTheme; 4] = [
         ],
     },
     QuickTheme {
-        name: "Soft",
+        name: Cow::Borrowed("Soft"),
         swatches: [
             swatch("Coral", Color::rgb(0xF2, 0x8B, 0x82), DARK_INK),
             swatch("Mint", Color::rgb(0x81, 0xC9, 0x95), DARK_INK),
@@ -98,7 +107,7 @@ pub static THEMES: [QuickTheme; 4] = [
         ],
     },
     QuickTheme {
-        name: "Vivid",
+        name: Cow::Borrowed("Vivid"),
         swatches: [
             swatch("Pink", Color::rgb(0xEC, 0x40, 0x7A), Color::WHITE),
             swatch("Orange", Color::rgb(0xFB, 0x8C, 0x00), Color::WHITE),
@@ -107,7 +116,7 @@ pub static THEMES: [QuickTheme; 4] = [
         ],
     },
     QuickTheme {
-        name: "Mono",
+        name: Cow::Borrowed("Mono"),
         swatches: [
             swatch("Black", DARK_INK, Color::WHITE),
             swatch("Gray", Color::rgb(0x75, 0x75, 0x75), Color::WHITE),
@@ -117,10 +126,110 @@ pub static THEMES: [QuickTheme; 4] = [
     },
 ];
 
-/// The theme with this name, or the first one.
-pub fn theme(name: &str) -> &'static QuickTheme {
+/// The theme with this name: a built-in one or one of `own`, or the first built-in one.
+pub fn theme(name: &str, own: &[OwnTheme]) -> QuickTheme {
     let [first, ..] = &THEMES;
-    THEMES.iter().find(|t| t.name.eq_ignore_ascii_case(name)).unwrap_or(first)
+    if let Some(t) = THEMES.iter().find(|t| t.name.eq_ignore_ascii_case(name)) {
+        return t.clone();
+    }
+    own.iter().find(|t| t.name.eq_ignore_ascii_case(name)).map(OwnTheme::theme).unwrap_or_else(|| first.clone())
+}
+
+/// Every theme: the built-in ones, then `own`.
+pub fn themes(own: &[OwnTheme]) -> Vec<QuickTheme> {
+    THEMES.iter().cloned().chain(own.iter().map(OwnTheme::theme)).collect()
+}
+
+/// Whether `name` is a built-in theme's.
+pub fn is_built_in(name: &str) -> bool {
+    THEMES.iter().any(|t| t.name.eq_ignore_ascii_case(name.trim()))
+}
+
+/// The most themes of their own the owner keeps.
+pub const MAX_OWN_THEMES: usize = 16;
+/// The longest a theme's name is, in characters.
+pub const MAX_THEME_NAME: usize = 32;
+
+/// A theme of the owner's own: a name and four colours, kept in the editor's settings and shown
+/// with the built-in ones.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnTheme {
+    pub name: String,
+    pub colors: [Color; 4],
+}
+
+impl OwnTheme {
+    /// The theme its colours make: each named for what it looks like (a second of a name
+    /// numbered), with text that reads on it, see-through ones made solid.
+    pub fn theme(&self) -> QuickTheme {
+        let mut names: Vec<String> = Vec::with_capacity(4);
+        let swatches = self.colors.map(|c| {
+            let c = c.with_alpha(255);
+            let plain = colour_name(c);
+            let same = names.iter().filter(|n| n.split(' ').next() == Some(plain)).count();
+            let name = if same == 0 { plain.to_string() } else { format!("{plain} {}", same + 1) };
+            names.push(name.clone());
+            let ink = if c.luminance() > 0.4 { DARK_INK } else { Color::WHITE };
+            Swatch { name: Cow::Owned(name), color: c, ink }
+        });
+        QuickTheme { name: Cow::Owned(self.name.clone()), swatches }
+    }
+}
+
+/// A theme's name made fit to keep: trimmed, without control characters, at most
+/// [`MAX_THEME_NAME`] characters; none when nothing is left.
+pub fn theme_name(name: &str) -> Option<String> {
+    let kept: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(MAX_THEME_NAME).collect();
+    let kept = kept.trim().to_string();
+    (!kept.is_empty()).then_some(kept)
+}
+
+/// The four colours a new theme starts with: the ones in use (`in_use`, see-through ones made
+/// solid, each once), then `fallback`'s for the rest.
+pub fn colours_for_theme(in_use: &[Color], fallback: &QuickTheme) -> [Color; 4] {
+    let mut out: Vec<Color> = Vec::with_capacity(4);
+    for c in in_use.iter().filter(|c| c.a > 0).map(|c| c.with_alpha(255)).chain(fallback.swatches.iter().map(|s| s.color)) {
+        if out.len() < 4 && !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    let at = |i: usize| out.get(i).copied().unwrap_or(Color::WHITE);
+    [at(0), at(1), at(2), at(3)]
+}
+
+/// What a colour is called, plainly: the nearest of a few names by its hue and lightness.
+pub fn colour_name(c: Color) -> &'static str {
+    let (r, g, b) = (f32::from(c.r) / 255.0, f32::from(c.g) / 255.0, f32::from(c.b) / 255.0);
+    let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+    let light = (hi + lo) / 2.0;
+    let chroma = hi - lo;
+    if chroma < 0.12 {
+        return match light {
+            l if l < 0.18 => "Black",
+            l if l > 0.92 => "White",
+            l if l > 0.65 => "Silver",
+            _ => "Gray",
+        };
+    }
+    let hue = if hi == r {
+        60.0 * ((g - b) / chroma).rem_euclid(6.0)
+    } else if hi == g {
+        60.0 * ((b - r) / chroma + 2.0)
+    } else {
+        60.0 * ((r - g) / chroma + 4.0)
+    };
+    match hue {
+        h if (15.0..45.0).contains(&h) && light < 0.38 => "Brown",
+        h if !(15.0..345.0).contains(&h) => "Red",
+        h if h < 42.0 => "Orange",
+        h if h < 68.0 => "Yellow",
+        h if h < 160.0 => "Green",
+        h if h < 195.0 => "Teal",
+        h if h < 255.0 => "Blue",
+        h if h < 290.0 => "Purple",
+        _ => "Pink",
+    }
 }
 
 /// A quick style with the name the panel gives it.
@@ -180,6 +289,12 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
             row("outline", &|s| (Style { stroke: s.color, fill: Color::TRANSPARENT, width: 4.0, shadow: true, ..base }, none));
             row("tinted", &|s| (Style { stroke: s.color, fill: s.color.with_alpha(64), width: 3.0, shadow: false, ..base }, none));
             row("solid", &|s| (Style { stroke: darker(s.color), fill: s.color, width: 2.0, shadow: true, ..base }, none));
+            // From the colour down to a lighter one of it (a darker one for the lightest colours).
+            row("gradient", &|s| {
+                let to = if s.color.luminance() > 0.7 { s.color.mix(Color::BLACK, 0.25) } else { s.color.mix(Color::WHITE, 0.55) };
+                let gradient = Gradient { kind: GradientKind::Linear, to, angle: 90.0 };
+                (Style { stroke: darker(s.color), fill: s.color, gradient, width: 2.0, shadow: true, ..base }, none)
+            });
         }
         Kind::Text => {
             let plain = Style { stroke: Color::TRANSPARENT, fill: Color::TRANSPARENT, width: 0.0, bold: true, shadow: false, ..base };
@@ -211,18 +326,24 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
             });
         }
         Kind::Step => {
-            row("badge", &|s| (Style { fill: s.color, text_color: s.ink, stroke: Color::WHITE, width: 2.0, ..base }, none));
-            row("ring", &|s| (Style { fill: Color::WHITE, text_color: on_white(s), stroke: s.color, width: 3.0, ..base }, none));
+            // The badge's outline comes with the look; how it counts (numbers, letters) doesn't.
+            let badge = |b: BadgeShape| ShapeOptions { badge: Some(b), ..none };
+            let solid = |s: &Swatch| Style { fill: s.color, text_color: s.ink, stroke: Color::WHITE, width: 2.0, ..base };
+            row("badge", &|s| (solid(s), badge(BadgeShape::Circle)));
+            row("ring", &|s| (Style { fill: Color::WHITE, text_color: on_white(s), stroke: s.color, width: 3.0, ..base }, badge(BadgeShape::Circle)));
+            row("square badge", &|s| (solid(s), badge(BadgeShape::Rounded)));
+            row("pin", &|s| (solid(s), badge(BadgeShape::Pin)));
         }
         Kind::Stamp => {
             drop(row);
-            for k in StampKind::ALL {
-                let look = QuickStyle::new(kind, Style { fill: k.color(), ..base }, ShapeOptions { stamp: Some(k), ..none });
-                out.push(Preset { name: k.label().to_string(), look });
-            }
-            // The stamp in use, in the theme's colours.
+            // The stamp in use (picked in the stamp library) in the theme's colours, with a white
+            // ring and with a dark one.
             for s in &theme.swatches {
                 out.push(Preset { name: s.name.to_string(), look: QuickStyle::new(kind, Style { fill: s.color, ..base }, none) });
+            }
+            for s in &theme.swatches {
+                let dark = Style { fill: s.color, stroke: DARK_INK, ..base };
+                out.push(Preset { name: format!("{}, dark ring", s.name), look: QuickStyle::new(kind, dark, none) });
             }
         }
         Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Magnify => {
@@ -241,7 +362,7 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
                 }
             }
         }
-        Kind::Ellipse | Kind::Image => drop(row),
+        Kind::Ellipse | Kind::Polygon | Kind::Image => drop(row),
     }
     out
 }
@@ -289,7 +410,7 @@ mod tests {
 
     #[test]
     fn callouts_come_with_tails_both_ways_and_as_arrows() {
-        let p = presets(Kind::Callout, theme("Bold"));
+        let p = presets(Kind::Callout, &theme("Bold", &[]));
         assert_eq!(p.len(), 16);
         let has = |form: CalloutForm, tail: TailSpot| p.iter().any(|q| q.look.options.form == Some(form) && q.look.options.tail == Some(tail));
         assert!(has(CalloutForm::Rounded, TailSpot::DownLeft));
@@ -303,8 +424,25 @@ mod tests {
     }
 
     #[test]
+    fn step_looks_set_the_badge_and_keep_the_count() {
+        let p = presets(Kind::Step, &theme("Bold", &[]));
+        assert_eq!(p.len(), 16);
+        assert!(p.iter().all(|q| q.look.options.labels.is_none() && q.look.options.badge.is_some()), "how it counts is the owner's");
+        for b in [BadgeShape::Circle, BadgeShape::Rounded, BadgeShape::Pin] {
+            assert!(p.iter().any(|q| q.look.options.badge == Some(b)), "{b:?}");
+        }
+        // A look matches a badge of its outline whatever it counts in, and not one of another.
+        let look = p.first().map(|q| q.look).unwrap();
+        let mut letters = look;
+        letters.options.labels = Some(crate::object::StepLabels::Upper);
+        assert!(look.matches(&letters));
+        letters.options.badge = Some(BadgeShape::Diamond);
+        assert!(!look.matches(&letters));
+    }
+
+    #[test]
     fn a_look_matches_what_it_was_applied_to_whatever_the_text_size() {
-        let p = presets(Kind::Callout, theme("Bold"));
+        let p = presets(Kind::Callout, &theme("Bold", &[]));
         let look = p.first().map(|q| q.look).unwrap();
         let mut current = look;
         current.style.font_size = 60.0;
@@ -312,22 +450,85 @@ mod tests {
         assert!(look.matches(&current), "the text size and an unknown tail don't count");
         current.style.fill = Color::BLACK;
         assert!(!look.matches(&current));
-        let shape = presets(Kind::Ellipse, theme("Bold"));
+        let shape = presets(Kind::Ellipse, &theme("Bold", &[]));
         let ellipse = QuickStyle { kind: Kind::Ellipse, ..shape.first().map(|q| q.look).unwrap() };
         assert!(shape.first().unwrap().look.matches(&ellipse), "rectangles and ellipses share their looks");
     }
 
     #[test]
     fn unknown_themes_are_the_first_and_fill_colours_end_with_none() {
-        assert_eq!(theme("teapot").name, "Bold");
-        assert_eq!(theme("mono").name, "Mono");
-        let fills = fill_colors(theme("Mono"));
+        assert_eq!(theme("teapot", &[]).name, "Bold");
+        assert_eq!(theme("mono", &[]).name, "Mono");
+        let fills = fill_colors(&theme("Mono", &[]));
         assert_eq!(fills.last().map(|(_, c)| *c), Some(Color::TRANSPARENT));
         assert_eq!(fills.iter().filter(|(_, c)| *c == Color::WHITE).count(), 1, "white only once");
         let json = r#"{"kind":"ellipse","style":{"width":1e9},"options":{"radius":-4}}"#;
         let q: QuickStyle = serde_json::from_str::<QuickStyle>(json).unwrap().clamped();
         assert_eq!((q.kind, q.options.radius), (Kind::Rect, Some(0.0)));
         assert!(q.style.width <= crate::object::MAX_WIDTH);
+    }
+
+    /// A theme of your own makes every tool's quick styles in its colours, each named for what
+    /// it looks like (a second of one name numbered), with text that reads on it; it is found
+    /// by name after the built-in ones, and a new one starts from the colours in use.
+    #[test]
+    fn own_themes_make_quick_styles_in_their_colours() {
+        let own = OwnTheme {
+            name: "Brand".into(),
+            colors: [Color::rgb(0x12, 0x34, 0x99), Color::rgb(0x20, 0x60, 0xF0), Color::rgba(0xFF, 0xEE, 0x00, 10), Color::rgb(0x55, 0x30, 0x10)],
+        };
+        let th = theme("brand", std::slice::from_ref(&own));
+        assert_eq!(th.name, "Brand");
+        let names: Vec<&str> = th.swatches.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, ["Blue", "Blue 2", "Yellow", "Brown"]);
+        assert_eq!(th.swatches.get(2).map(|s| (s.color.a, s.ink)), Some((255, DARK_INK)), "made solid, dark text on yellow");
+        assert_eq!(th.swatches.first().map(|s| s.ink), Some(Color::WHITE));
+        for k in Kind::ALL {
+            let p = presets(k, &th);
+            for (i, a) in p.iter().enumerate() {
+                assert!(p.iter().skip(i + 1).all(|b| b.name != a.name), "{k:?}: {} twice", a.name);
+            }
+        }
+        assert_eq!(presets(Kind::Callout, &th).first().map(|p| p.look.style.fill), Some(Color::rgb(0x12, 0x34, 0x99)));
+        let all = themes(std::slice::from_ref(&own));
+        assert_eq!(all.len(), THEMES.len() + 1);
+        assert_eq!(all.last().map(|t| t.name.as_ref()), Some("Brand"));
+        assert!(is_built_in(" vivid ") && !is_built_in("Brand"));
+        // A built-in name is always the built-in theme.
+        let shadow = OwnTheme { name: "Bold".into(), ..own.clone() };
+        assert_eq!(theme("Bold", &[shadow]).swatches.first().map(|s| s.color), Some(Color::rgb(0xE5, 0x39, 0x35)));
+        assert_eq!(theme_name("  \u{7}Team\n colours "), Some("Team colours".into()));
+        assert_eq!(theme_name(" \t "), None);
+        assert_eq!(theme_name(&"x".repeat(100)).map(|n| n.chars().count()), Some(MAX_THEME_NAME));
+        // A new theme: the colours in use (each once, solid), then the theme's for the rest.
+        let bold = theme("Bold", &[]);
+        let made = colours_for_theme(&[Color::rgb(1, 2, 3), Color::TRANSPARENT, Color::rgba(1, 2, 3, 40), Color::rgb(9, 9, 9)], &bold);
+        assert_eq!(made, [Color::rgb(1, 2, 3), Color::rgb(9, 9, 9), Color::rgb(0xE5, 0x39, 0x35), Color::rgb(0x43, 0xA0, 0x47)]);
+        for (c, name) in [
+            (Color::rgb(0xE5, 0x39, 0x35), "Red"),
+            (Color::rgb(0xFB, 0x8C, 0x00), "Orange"),
+            (Color::rgb(0x43, 0xA0, 0x47), "Green"),
+            (Color::rgb(0x00, 0x89, 0x7B), "Teal"),
+            (Color::rgb(0x8E, 0x24, 0xAA), "Purple"),
+            (Color::rgb(0xEC, 0x40, 0x7A), "Pink"),
+            (Color::rgb(0x11, 0x11, 0x11), "Black"),
+            (Color::rgb(0x75, 0x75, 0x75), "Gray"),
+            (Color::rgb(0xBD, 0xBD, 0xBD), "Silver"),
+            (Color::WHITE, "White"),
+        ] {
+            assert_eq!(colour_name(c), name, "{}", c.to_hex());
+        }
+    }
+
+    /// Shapes come with a gradient look too, from the colour to a lighter one of it.
+    #[test]
+    fn shapes_have_a_gradient_quick_style() {
+        let p = presets(Kind::Rect, &theme("Mono", &[]));
+        let g: Vec<&Preset> = p.iter().filter(|q| !q.look.style.gradient.is_none()).collect();
+        assert_eq!(g.len(), 4);
+        for q in g {
+            assert_ne!(q.look.style.fill, q.look.style.gradient.to, "{} goes somewhere", q.name);
+        }
     }
 }
 
@@ -337,7 +538,7 @@ mod text_tests {
 
     #[test]
     fn text_comes_outlined_shadowed_on_boxes_and_as_titles() {
-        let p = presets(Kind::Text, theme("Bold"));
+        let p = presets(Kind::Text, &theme("Bold", &[]));
         assert_eq!(p.len(), 28);
         let any = |f: &dyn Fn(&QuickStyle) -> bool| p.iter().any(|q| f(&q.look));
         assert!(any(&|l| l.style.has_text_outline() && l.style.fill.a == 0), "outlined text");
@@ -354,7 +555,7 @@ mod text_tests {
 
     #[test]
     fn a_title_matches_only_text_of_its_size() {
-        let p = presets(Kind::Text, theme("Bold"));
+        let p = presets(Kind::Text, &theme("Bold", &[]));
         let title = p.iter().find(|q| q.look.sized).map(|q| q.look).unwrap();
         let mut small = title;
         small.sized = false;

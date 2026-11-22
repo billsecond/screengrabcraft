@@ -23,7 +23,10 @@ use screengrabcraft_ui::services::{
 /// Files larger than this are not opened.
 const MAX_OPEN: u64 = 512 * 1024 * 1024;
 const THUMB: u32 = 200;
+/// The pictures the video editor brings in (Import Media).
 const PICTURES: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp"];
+/// The pictures the picture editor opens and lists in its strip: those, and TIFF.
+const STILLS: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff"];
 /// Videos in the strip too: recordings to edit, and MP4s that play in the system's player.
 const VIDEOS: &[&str] = &[REC, "mp4"];
 /// The extension of a video recording.
@@ -127,7 +130,7 @@ fn captures_in(dirs: &[PathBuf]) -> Vec<RecentItem> {
         .filter(|e| {
             e.path().extension().and_then(|x| x.to_str()).is_some_and(|x| {
                 let x = x.to_ascii_lowercase();
-                PICTURES.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
+                STILLS.contains(&x.as_str()) || VIDEOS.contains(&x.as_str())
             })
         })
         .filter_map(|e| {
@@ -232,12 +235,12 @@ impl Services for DesktopServices {
                     .set_title("Open a Recording")
                     .set_directory(&start)
                     .add_filter("Video recording", &[REC])
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
             } else {
                 rfd::AsyncFileDialog::new()
                     .set_title("Open")
                     .set_directory(&start)
-                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", PROJECT_EXT, REC])
+                    .add_filter("Pictures, projects and recordings", &["png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", PROJECT_EXT, REC])
                     .add_filter("ScreenGrabCraft project", &[PROJECT_EXT])
                     .add_filter("Video recording", &[REC])
             };
@@ -355,7 +358,7 @@ impl Services for DesktopServices {
         let start = paths::captures_dir(&store::load_settings());
         let _ = std::thread::Builder::new().name("pictures-dialog".into()).spawn(move || {
             let picked = pollster::block_on(
-                rfd::AsyncFileDialog::new().set_title("Pictures to Change").set_directory(&start).add_filter("Pictures", PICTURES).pick_files(),
+                rfd::AsyncFileDialog::new().set_title("Pictures to Change").set_directory(&start).add_filter("Pictures", STILLS).pick_files(),
             );
             let answer = match picked {
                 Some(files) if !files.is_empty() => DialogResult::Pictures(files.iter().map(|f| f.path().to_string_lossy().to_string()).collect()),
@@ -731,6 +734,79 @@ impl Services for DesktopServices {
         self.text_ready.get_or_init(screengrabcraft_desktop::text::ready).clone()?;
         Ok(Arc::new(SystemText))
     }
+
+    fn keeps_own_stamps(&self) -> bool {
+        stamps_dir().is_some()
+    }
+
+    fn own_stamps(&self) -> Vec<String> {
+        let Some(dir) = stamps_dir() else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut names: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                let png = p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("png"));
+                if png { p.file_stem().and_then(|s| s.to_str()).map(str::to_string) } else { None }
+            })
+            .filter(|n| stamp_name_ok(n))
+            .collect();
+        names.sort();
+        names.truncate(screengrabcraft_ui::stamps::MAX_OWN);
+        names
+    }
+
+    fn own_stamp(&self, name: &str) -> Option<Raster> {
+        let bytes = read_limited(&stamp_file(name)?).ok()?;
+        screengrabcraft_render::codec::decode(&bytes).ok()
+    }
+
+    fn add_own_stamp(&self, png: &[u8]) -> Result<String, String> {
+        let dir = stamps_dir().ok_or("this run keeps no settings, so no stamps of your own")?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let base = format!("stamp-{ms}");
+        let mut name = base.clone();
+        for i in 1..1000 {
+            if !dir.join(format!("{name}.png")).exists() {
+                break;
+            }
+            name = format!("{base}-{i}");
+        }
+        store::write_atomic(&dir.join(format!("{name}.png")), png).map_err(|e| e.to_string())?;
+        log::info!("kept a picture as a stamp: {name}.png, {} bytes", png.len());
+        Ok(name)
+    }
+
+    fn remove_own_stamp(&self, name: &str) -> Result<(), String> {
+        let file = stamp_file(name).ok_or("there is no such stamp")?;
+        std::fs::remove_file(&file).map_err(|e| e.to_string())?;
+        log::info!("took {name}.png out of the stamps");
+        Ok(())
+    }
+}
+
+/// The folder pictures of your own are kept in as stamps: `stamps` in the settings folder (none
+/// in a run that keeps no settings).
+fn stamps_dir() -> Option<PathBuf> {
+    if paths::no_prefs() {
+        return None;
+    }
+    Some(paths::settings_dir()?.join("stamps"))
+}
+
+/// Whether `name` is one the editor gives a stamp (letters, figures, - and _): nothing that
+/// reaches out of the folder.
+fn stamp_name_ok(name: &str) -> bool {
+    !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// A stamp's file, for a name the editor gave it.
+fn stamp_file(name: &str) -> Option<PathBuf> {
+    if !stamp_name_ok(name) {
+        return None;
+    }
+    Some(stamps_dir()?.join(format!("{name}.png")))
 }
 
 /// Grab Text with the system's own text reader ([`screengrabcraft_desktop::text`]).
@@ -738,8 +814,7 @@ struct SystemText;
 
 impl ReadText for SystemText {
     fn read(&self, picture: &Raster) -> Result<Vec<TextLine>, String> {
-        let lines = screengrabcraft_desktop::text::read(picture)?;
-        Ok(lines.into_iter().map(|l| TextLine { text: l.text, rect: screengrabcraft_model::Rect::new(l.x, l.y, l.w, l.h) }).collect())
+        screengrabcraft_desktop::text::read(picture)
     }
 }
 

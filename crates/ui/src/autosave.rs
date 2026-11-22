@@ -350,7 +350,7 @@ impl Editor {
             .extension()
             .and_then(|e| e.to_str())
             .and_then(ImageFormat::from_extension)
-            .filter(|f| matches!(f, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Bmp));
+            .filter(|f| matches!(f, ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Webp | ImageFormat::Bmp | ImageFormat::Tiff));
         if format.is_none() {
             self.saver.say_once(format!("{} is kept as it is; the changes are in {}", file_name(&picture), file_name(&project)));
         }

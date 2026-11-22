@@ -4,7 +4,9 @@
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::quick::{self, QuickStyle};
-use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Pt, Raster, Rect, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
+use screengrabcraft_model::{
+    BadgeShape, Color, Document, Kind, Object, ObjectId, Pt, Raster, Rect, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign,
+};
 use serde_json::json;
 
 use crate::editor::{Editor, Tool};
@@ -34,7 +36,8 @@ pub(crate) fn tool_name(kind: Kind) -> &'static str {
 pub(crate) fn tool_look(ed: &Editor, kind: Kind) -> QuickStyle {
     let mut options = ed.tool_options(kind);
     if kind.family() == Kind::Rect {
-        options.round = Some(kind == Kind::Ellipse);
+        // A polygon is said by its corners; round or square says an ellipse or a rectangle.
+        options.round = if kind == Kind::Polygon { None } else { Some(kind == Kind::Ellipse) };
     }
     QuickStyle::new(kind.family(), ed.tool_style(kind), options)
 }
@@ -105,7 +108,7 @@ fn paint_page(base: &mut Raster) {
 }
 
 /// A look drawn on a small made-up picture: what its tool would draw with it.
-pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> Option<Raster> {
+pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind, corners: (u32, bool)) -> Option<Raster> {
     let (w, h) = PREVIEW;
     // A light outline round letters only shows on something darker than paper.
     let light_outline = look.style.has_text_outline() && look.style.text_outline.luminance() > 0.5;
@@ -118,8 +121,14 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
     let mut style = look.style;
     let o = &look.options;
     let shape = match look.kind.family() {
-        Kind::Arrow => Shape::Arrow { from: Pt::new(18.0, 62.0), to: Pt::new(90.0, 18.0), heads: o.heads.unwrap_or_default() },
-        Kind::Line => Shape::Line { from: Pt::new(16.0, 62.0), to: Pt::new(92.0, 18.0) },
+        Kind::Arrow => Shape::Arrow {
+            from: Pt::new(18.0, 62.0),
+            to: Pt::new(90.0, 18.0),
+            heads: o.heads.unwrap_or_default(),
+            bend: o.bend.unwrap_or(0.0),
+            head: o.head.unwrap_or_default(),
+        },
+        Kind::Line => Shape::Line { from: Pt::new(16.0, 62.0), to: Pt::new(92.0, 18.0), bend: 0.0 },
         Kind::Pen => Shape::Pen {
             points: (0..=24)
                 .map(|i| {
@@ -131,7 +140,15 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
         Kind::Highlight => Shape::highlight(Rect::new(12.0, 20.0, 84.0, 22.0)),
         Kind::Rect => {
             let rect = Rect::new(16.0, 14.0, 76.0, 52.0);
-            if o.round.unwrap_or(shape == Kind::Ellipse) { Shape::Ellipse { rect } } else { Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) } }
+            let round = o.round.unwrap_or(shape == Kind::Ellipse);
+            let polygon = !round && (o.sides.is_some() || (o.round.is_none() && shape == Kind::Polygon));
+            if round {
+                Shape::Ellipse { rect }
+            } else if polygon {
+                Shape::Polygon { rect, sides: o.sides.unwrap_or(corners.0), star: o.star.unwrap_or(corners.1), corners: Vec::new() }
+            } else {
+                Shape::Rect { rect, radius: o.radius.unwrap_or(0.0) }
+            }
         }
         Kind::Text => {
             // A title is drawn bigger than the rest, its outline in step.
@@ -147,18 +164,21 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
             let form = o.form.unwrap_or_default();
             let spot = o.tail.unwrap_or_default();
             let rect = callout_box(spot);
-            Shape::Callout { rect, tail: spot.place(form, rect), text: "Aa".into(), form }
+            Shape::Callout { rect, tail: spot.place(form, rect), text: "Aa".into(), form, tails: Vec::new() }
         }
         Kind::Step => {
             style.font_size = 22.0;
-            Shape::Step { center: Pt::new(54.0, 40.0), number: 1 }
+            // A pin stands a little higher, for its point to show.
+            let badge = o.badge.unwrap_or_default();
+            let y = if badge == BadgeShape::Pin { 30.0 } else { 40.0 };
+            Shape::Step { center: Pt::new(54.0, y), number: 1, labels: o.labels.unwrap_or_default(), badge }
         }
         Kind::Stamp => Shape::Stamp { rect: Rect::new(30.0, 16.0, 48.0, 48.0), stamp: o.stamp.unwrap_or(stamp) },
         Kind::Blur => Shape::Blur { rect: Rect::new(10.0, 10.0, 88.0, 60.0) },
         Kind::Pixelate => Shape::Pixelate { rect: Rect::new(10.0, 10.0, 88.0, 60.0) },
         Kind::Spotlight => Shape::Spotlight { rect: Rect::new(32.0, 18.0, 46.0, 40.0), ellipse: o.round.unwrap_or(false) },
         Kind::Magnify => Shape::Magnify { rect: Rect::new(30.0, 12.0, 56.0, 56.0) },
-        Kind::Ellipse | Kind::Image => return None,
+        Kind::Ellipse | Kind::Polygon | Kind::Image => return None,
     };
     doc.add(shape, style.clamped()).ok()?;
     screengrabcraft_render::render(&doc)
@@ -167,14 +187,22 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
 /// A look's preview on the GPU, drawn the first time it is asked for.
 pub(crate) fn preview(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle, shape: Kind) -> Option<egui::TextureId> {
     let stamp = ed.stamp();
-    let key = format!("{shape:?}|{stamp:?}|{}", serde_json::to_string(look).unwrap_or_default());
+    // A polygon's corners: the selected one's, or the tool's.
+    let corners = match selected_of(ed, Kind::Rect).map(|o| &o.shape) {
+        Some(Shape::Polygon { sides, star, .. }) => (*sides, *star),
+        _ => {
+            let t = ed.tool_options(Kind::Polygon);
+            (t.sides.unwrap_or(screengrabcraft_model::object::MIN_SIDES), t.star.unwrap_or(false))
+        }
+    };
+    let key = format!("{shape:?}|{stamp:?}|{corners:?}|{}", serde_json::to_string(look).unwrap_or_default());
     if let Some(t) = ed.previews.get(&key) {
         return Some(t.id());
     }
     if ed.previews.len() >= MAX_PREVIEWS {
         ed.previews.clear();
     }
-    let pic = draw_preview(look, shape, stamp)?;
+    let pic = draw_preview(look, shape, stamp, corners)?;
     let image = egui::ColorImage::from_rgba_unmultiplied([pic.width() as usize, pic.height() as usize], pic.pixels());
     let handle = ctx.load_texture(format!("quick-style-{}", ed.previews.len()), image, egui::TextureOptions::LINEAR);
     let id = handle.id();
@@ -184,7 +212,7 @@ pub(crate) fn preview(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle, s
 
 /// What a tile shows.
 #[derive(Clone, Copy)]
-enum Face {
+pub(crate) enum Face {
     Picture(Option<egui::TextureId>),
     Colour(Color),
 }
@@ -214,7 +242,7 @@ pub(crate) fn paint_star(p: &egui::Painter, c: egui::Pos2, r: f32, filled: bool,
 
 /// A tile: its face, a ring when it is the look in use, and a star when it can be starred.
 /// Returns whether it was clicked, and whether its star was.
-fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, starred: Option<bool>) -> (bool, bool) {
+pub(crate) fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, starred: Option<bool>) -> (bool, bool) {
     let t = Tokens::get(ui.ctx());
     let (rect, resp) = ui.allocate_exact_size(size, Sense::click());
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
@@ -266,58 +294,168 @@ fn tile(ui: &mut Ui, face: Face, name: &str, size: egui::Vec2, active: bool, sta
     (resp.clicked() && !star_clicked, star_clicked)
 }
 
-/// The tile size for the width there is.
-fn tile_size(ui: &Ui) -> egui::Vec2 {
-    let w = ((ui.available_width() - GAP * (COLUMNS - 1) as f32) / COLUMNS as f32).floor().max(30.0);
+/// The tile size for the width there is, `columns` to a row.
+fn tile_size(ui: &Ui, columns: usize) -> egui::Vec2 {
+    let w = ((ui.available_width() - GAP * (columns - 1) as f32) / columns as f32).floor().max(30.0);
     vec2(w, (w * 0.74).round())
 }
 
 /// Lays `n` tiles out in rows of four.
-fn grid(ui: &mut Ui, n: usize, mut each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
-    let size = tile_size(ui);
+pub(crate) fn grid(ui: &mut Ui, n: usize, each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
+    grid_of(ui, n, COLUMNS, each);
+}
+
+/// Lays `n` tiles out in rows of `columns`.
+pub(crate) fn grid_of(ui: &mut Ui, n: usize, columns: usize, mut each: impl FnMut(&mut Ui, usize, egui::Vec2)) {
+    let columns = columns.max(1);
+    let size = tile_size(ui, columns);
     let mut i = 0;
     while i < n {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing = vec2(GAP, GAP);
-            for j in i..(i + COLUMNS).min(n) {
+            for j in i..(i + columns).min(n) {
                 each(ui, j, size);
             }
         });
         ui.add_space(GAP - ui.spacing().item_spacing.y.min(GAP));
-        i += COLUMNS;
+        i += columns;
     }
 }
 
-/// The heading of a quick styles section, with the theme menu.
-fn heading(ed: &mut Editor, ui: &mut Ui) {
+/// What the theme menu's entry for a theme of your own, and the form making one, are called.
+pub(crate) const THEME_MENU: &str = "Quick style theme";
+pub(crate) const NEW_THEME: &str = "New theme from the current colours…";
+pub(crate) const THEME_NAME: &str = "Theme name";
+pub(crate) const SAVE_THEME: &str = "Save theme";
+
+/// A theme of your own being made: its name and its four colours, as they are chosen.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ThemeDraft {
+    pub name: String,
+    pub colors: [Color; 4],
+    /// Why it couldn't be kept, the last time Save was clicked.
+    pub problem: Option<String>,
+}
+
+/// The colours in use where the panel is: the look of the tool (or the selection) shown, or the
+/// Fill tool's when there is no kind.
+fn colours_in_use(ed: &Editor, kind: Option<Kind>) -> Vec<Color> {
+    let Some(kind) = kind else {
+        let f = ed.settings.fill;
+        return if f.gradient.is_none() { vec![f.color] } else { vec![f.color, f.gradient.to] };
+    };
+    let s = current_look(ed, kind).style;
+    let mut out = vec![s.fill];
+    if !s.gradient.is_none() {
+        out.push(s.gradient.to);
+    }
+    out.extend([s.stroke, s.text_color, s.text_outline]);
+    out
+}
+
+/// A name for a new theme that no theme has yet.
+fn free_theme_name(ed: &Editor) -> String {
+    let taken = |n: &str| quick::is_built_in(n) || ed.settings.own_themes.iter().any(|t| t.name.eq_ignore_ascii_case(n));
+    (1..=quick::MAX_OWN_THEMES + 1)
+        .map(|i| if i == 1 { "My theme".to_string() } else { format!("My theme {i}") })
+        .find(|n| !taken(n))
+        .unwrap_or_else(|| "My theme".to_string())
+}
+
+/// The heading of a quick styles section, with the theme menu: the built-in themes, then those of
+/// your own, a new one made from the colours in use (`kind`'s, or the Fill tool's when none), and
+/// the one in use deleted when it is your own.
+fn heading(ed: &mut Editor, ui: &mut Ui, kind: Option<Kind>) {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Quick Styles").strong().color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let current = quick::theme(&ed.settings.quick_theme).name;
-            egui::ComboBox::from_id_salt("quick-theme")
-                .selected_text(current)
-                .width(86.0)
-                .show_ui(ui, |ui| {
-                    for th in &quick::THEMES {
-                        if ui.selectable_label(th.name == current, th.name).clicked() {
-                            ed.settings.quick_theme = th.name.to_string();
-                            ed.services.save_settings(&ed.settings);
-                        }
+            let current = ed.settings.quick_theme().name.to_string();
+            let own = !quick::is_built_in(&current);
+            let mut pick = None;
+            let mut new = false;
+            let mut forget = false;
+            let menu = egui::ComboBox::from_id_salt("quick-theme").selected_text(current.as_str()).width(96.0).show_ui(ui, |ui| {
+                ui.set_min_width(200.0);
+                for (i, th) in quick::themes(&ed.settings.own_themes).iter().enumerate() {
+                    if i == quick::THEMES.len() {
+                        ui.separator();
                     }
-                })
-                .response
-                .on_hover_text("The colours the quick styles come in");
+                    if ui.selectable_label(th.name == current, th.name.as_ref()).clicked() {
+                        pick = Some(th.name.to_string());
+                    }
+                }
+                ui.separator();
+                new = ui.selectable_label(false, NEW_THEME).on_hover_text("A theme of your own: four colours, named").clicked();
+                if own {
+                    forget = ui.selectable_label(false, format!("Delete {current}")).clicked();
+                }
+            });
+            menu.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, THEME_MENU));
+            menu.response.on_hover_text("The colours the quick styles come in");
+            if let Some(name) = pick {
+                ed.settings.quick_theme = name;
+                ed.services.save_settings(&ed.settings);
+            }
+            if new {
+                let colors = quick::colours_for_theme(&colours_in_use(ed, kind), &ed.settings.quick_theme());
+                ed.theme_draft = Some(ThemeDraft { name: free_theme_name(ed), colors, problem: None });
+            }
+            if forget {
+                ed.settings.forget_theme(&current);
+                ed.services.save_settings(&ed.settings);
+            }
         });
     });
     ui.add_space(4.0);
+    theme_form(ed, ui);
+}
+
+/// A theme of your own being made, under the heading: its name, its four colours (each with the
+/// colour menu), Save and Cancel.
+fn theme_form(ed: &mut Editor, ui: &mut Ui) {
+    let Some(mut draft) = ed.theme_draft.clone() else { return };
+    let t = Tokens::get(ui.ctx());
+    let mut done = false;
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.label(egui::RichText::new("New theme").strong());
+        ui.add_space(2.0);
+        let field = egui::TextEdit::singleline(&mut draft.name).hint_text(THEME_NAME).char_limit(quick::MAX_THEME_NAME).desired_width(f32::INFINITY);
+        ui.add(field).widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, THEME_NAME));
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
+            for (i, c) in draft.colors.iter_mut().enumerate() {
+                crate::props::colour_button(ui, &format!("Theme colour {}", i + 1), &format!("{}", i + 1), c, false, false);
+            }
+        });
+        if let Some(p) = &draft.problem {
+            ui.label(egui::RichText::new(p).size(12.0).color(t.danger));
+        }
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::new(SAVE_THEME).fill(t.accent)).clicked() {
+                match ed.settings.keep_theme(&draft.name, draft.colors) {
+                    Ok(_) => {
+                        ed.services.save_settings(&ed.settings);
+                        done = true;
+                    }
+                    Err(why) => draft.problem = Some(why),
+                }
+            }
+            if ui.button("Cancel").clicked() {
+                done = true;
+            }
+        });
+    });
+    ui.add_space(6.0);
+    ed.theme_draft = if done { None } else { Some(draft) };
 }
 
 /// The quick styles of a drawing tool, or of the selected annotations.
 pub(crate) fn section(ed: &mut Editor, ui: &mut Ui, kind: Kind) {
     let ctx = ui.ctx().clone();
-    heading(ed, ui);
-    let presets = quick::presets(kind, quick::theme(&ed.settings.quick_theme));
+    heading(ed, ui, Some(kind));
+    let presets = quick::presets(kind, &ed.settings.quick_theme());
     let current = current_look(ed, kind);
     let shape = shape_kind(ed, kind);
     let mut picked = None;
@@ -353,8 +491,8 @@ pub(crate) fn section(ed: &mut Editor, ui: &mut Ui, kind: Kind) {
 
 /// The Fill tool's colours, as tiles.
 pub(crate) fn fill_section(ed: &mut Editor, ui: &mut Ui) {
-    heading(ed, ui);
-    let colours = quick::fill_colors(quick::theme(&ed.settings.quick_theme));
+    heading(ed, ui, None);
+    let colours = quick::fill_colors(&ed.settings.quick_theme());
     let mut picked = None;
     let now = ed.settings.fill.color;
     grid(ui, colours.len(), |ui, i, size| {
@@ -386,7 +524,11 @@ pub(crate) fn favorites(ed: &mut Editor, ui: &mut Ui) {
     let mut unstar = None;
     grid(ui, favs.len(), |ui, i, size| {
         let Some(f) = favs.get(i) else { return };
-        let shape = if f.options.round == Some(true) { Kind::Ellipse } else { f.kind };
+        let shape = match (f.options.round, f.options.sides) {
+            (Some(true), _) => Kind::Ellipse,
+            (None, Some(_)) => Kind::Polygon,
+            _ => f.kind,
+        };
         let face = Face::Picture(preview(ed, &ctx, f, shape));
         let name = favorite_name(f, i);
         let (clicked, star) = tile(ui, face, &name, size, false, Some(true));
@@ -418,18 +560,25 @@ pub(crate) fn favorite_name(f: &QuickStyle, i: usize) -> String {
 /// that draws it.
 pub(crate) fn apply(ed: &mut Editor, ctx: &egui::Context, look: &QuickStyle) {
     let look = look.clamped();
+    // A drawn stamp picked: no longer a picture of your own.
+    if look.kind == Kind::Stamp && look.options.stamp.is_some() {
+        ed.own_stamp = None;
+    }
     let family = look.kind;
     let draw = match (family, look.options.round) {
         (Kind::Rect, Some(true)) => Kind::Ellipse,
         (Kind::Rect, Some(false)) => Kind::Rect,
+        (Kind::Rect, None) if look.options.sides.is_some() => Kind::Polygon,
         (Kind::Rect, None) => ed.shape_tool().kind().unwrap_or(Kind::Rect),
         (k, _) => k,
     };
     // The tool keeps the look; its text size stays what it was.
-    let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse] } else { std::slice::from_ref(&family) };
+    let kinds: &[Kind] = if family == Kind::Rect { &[Kind::Rect, Kind::Ellipse, Kind::Polygon] } else { std::slice::from_ref(&family) };
     for k in kinds {
         let size = if look.sized { look.style.font_size } else { ed.tool_style(*k).font_size };
-        ed.settings.styles.insert(*k, Style { font_size: size, ..look.style }.clamped());
+        // The font stays too, unless the look (a favourite) has one of its own.
+        let font = if look.style.font.is_bundled() { ed.tool_style(*k).font } else { look.style.font };
+        ed.settings.styles.insert(*k, Style { font_size: size, font, ..look.style }.clamped());
     }
     ed.set_tool_options(family, look.options);
     let ids: Vec<ObjectId> =

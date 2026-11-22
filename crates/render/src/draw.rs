@@ -2,11 +2,13 @@
 //! pixels under them (blur, pixelate, spotlight, magnify) work on what has been drawn so far, so
 //! a blur hides an arrow drawn before it and not one drawn after.
 
-use screengrabcraft_model::object::{arrow_head, step_radius};
-use screengrabcraft_model::{ArrowHeads, CalloutForm, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::object::{PIN_POINT, arrow_head, bent_points, polygon_outline, step_radius};
+use screengrabcraft_model::{
+    ArrowHeads, BadgeShape, CalloutForm, Color, Document, Gradient, GradientKind, HeadShape, Object, ObjectId, Pt, Raster, Rect, Shape, Style,
+};
 use tiny_skia::{
-    BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
-    Transform,
+    BlendMode, FillRule, FilterQuality, GradientStop, LineCap, LineJoin, LinearGradient, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint,
+    RadialGradient, SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 use crate::canvas;
@@ -193,21 +195,55 @@ fn with_style(canvas: &mut Pixmap, bounds: Rect, style: &Style, draw: &dyn Fn(&m
     }
 }
 
+/// How far round a turned annotation its layer reaches, for its shadow.
+const TURNED_MARGIN: f32 = 64.0;
+
+/// A turned annotation: drawn square on a layer of its own, then put on the canvas turned round
+/// its middle (only the part that can land on the canvas is drawn).
+fn draw_turned(canvas: &mut Pixmap, doc: &Document, o: &Object, turn: f32) {
+    let style = o.style.clamped();
+    let c = o.shape.pivot();
+    let full = Rect::new(0.0, 0.0, canvas.width() as f32, canvas.height() as f32);
+    let reach = screengrabcraft_model::object::turned_box(full, c, -turn);
+    let Some(area) = o.shape.bounds(&style).inflate(TURNED_MARGIN).intersect(reach) else { return };
+    let (x, y) = (area.x.floor(), area.y.floor());
+    let (w, h) = ((area.right().ceil() - x).max(1.0) as u32, (area.bottom().ceil() - y).max(1.0) as u32);
+    let Some(mut layer) = canvas::blank(w, h) else { return };
+    let mut square = o.clone();
+    square.rotation = 0.0;
+    square.shape.translate(Pt::new(-x, -y));
+    draw_object(&mut layer, doc, &square);
+    // A highlight multiplies into what is under it, turned or not.
+    let blend = if o.shape.kind() == screengrabcraft_model::Kind::Highlight { BlendMode::Multiply } else { BlendMode::SourceOver };
+    let paint = PixmapPaint { opacity: 1.0, blend_mode: blend, quality: FilterQuality::Bilinear };
+    canvas.draw_pixmap(0, 0, layer.as_ref(), &paint, Transform::from_rotate_at(turn, c.x, c.y).pre_translate(x, y), None);
+}
+
 /// Draws one annotation onto the canvas.
 pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
+    let turn = o.turn();
+    if turn != 0.0 {
+        draw_turned(canvas, doc, o, turn);
+        return;
+    }
     let style = o.style.clamped();
     let bounds = o.shape.bounds(&style);
     match &o.shape {
-        Shape::Arrow { from, to, heads } => {
-            let (from, to, heads) = (*from, *to, *heads);
-            with_style(canvas, bounds, &style, &|c, t| draw_arrow(c, t, from, to, heads, &style));
+        Shape::Arrow { from, to, heads, bend, head } => {
+            let (from, to, heads, bend, head) = (*from, *to, *heads, *bend, *head);
+            with_style(canvas, bounds, &style, &|c, t| draw_arrow(c, t, (from, to, bend), heads, head, &style));
         }
-        Shape::Line { from, to } => {
-            let (from, to) = (*from, *to);
+        Shape::Line { from, to, bend } => {
+            let points = bent_points(*from, *to, *bend, 64);
             with_style(canvas, bounds, &style, &|c, t| {
                 let mut pb = PathBuilder::new();
-                pb.move_to(from.x, from.y);
-                pb.line_to(to.x, to.y);
+                for (i, p) in points.iter().enumerate() {
+                    if i == 0 {
+                        pb.move_to(p.x, p.y);
+                    } else {
+                        pb.line_to(p.x, p.y);
+                    }
+                }
                 if let Some(path) = pb.finish() {
                     c.stroke_path(&path, &paint(style.stroke), &stroke_of(style.width, style.dashed, LineCap::Round), t, None);
                 }
@@ -225,6 +261,14 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let rect = *rect;
             with_style(canvas, bounds, &style, &|c, t| {
                 if let Some(path) = oval(rect) {
+                    fill_and_stroke(c, &path, &style, t);
+                }
+            });
+        }
+        Shape::Polygon { rect, sides, star, corners } => {
+            let corners = polygon_outline(*rect, *sides, *star, corners);
+            with_style(canvas, bounds, &style, &|c, t| {
+                if let Some(path) = polygon(&corners) {
                     fill_and_stroke(c, &path, &style, t);
                 }
             });
@@ -253,18 +297,21 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
             let rect = *rect;
             with_style(canvas, bounds, &style, &|c, t| draw_text_box(c, t, rect, body, &style));
         }
-        Shape::Callout { rect, tail, text: body, form } => {
-            let (rect, tail, form) = (*rect, *tail, *form);
+        Shape::Callout { rect, tail, text: body, form, tails } => {
+            let (rect, form) = (*rect, *form);
+            let all: Vec<Pt> = std::iter::once(*tail).chain(tails.iter().copied()).collect();
             with_style(canvas, bounds, &style, &|c, t| {
-                for path in callout_paths(rect, tail, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
-                    fill_and_stroke(c, &path, &style, t);
+                for path in callout_paths_with(rect, &all, form, (style.font_size * 0.6).clamp(4.0, 24.0)) {
+                    // One gradient over the box: its tails (a cloud's bubbles) take the colour where they are.
+                    fill_and_stroke_over(c, &path, &style, t, rect);
                 }
                 draw_text_centered(c, t, form.text_area(rect), body, &style);
             });
         }
-        Shape::Step { center, number } => {
-            let (center, number) = (*center, *number);
-            with_style(canvas, bounds, &style, &|c, t| draw_step(c, t, center, number, &style));
+        Shape::Step { center, number, labels, badge } => {
+            let (center, badge) = (*center, *badge);
+            let label = labels.text(*number);
+            with_style(canvas, bounds, &style, &|c, t| draw_step(c, t, center, &label, badge, &style));
         }
         Shape::Blur { rect } => {
             if let Some((x, y, w, h)) = rect.pixel_bounds(canvas.width(), canvas.height()) {
@@ -301,18 +348,99 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
     }
 }
 
+/// What fills an inside: the fill colour, or the style's gradient laid over `area`.
+fn fill_paint(style: &Style, area: Rect) -> Paint<'static> {
+    let mut p = paint(style.fill);
+    let g = style.gradient;
+    if g.is_none() {
+        return p;
+    }
+    let stops = vec![GradientStop::new(0.0, skia_color(style.fill, 1.0)), GradientStop::new(1.0, skia_color(g.to, 1.0))];
+    let shader = match g.kind {
+        GradientKind::None => None,
+        GradientKind::Linear => {
+            let (a, z) = g.ends(area);
+            LinearGradient::new(skia_point(a), skia_point(z), stops, SpreadMode::Pad, Transform::identity())
+        }
+        GradientKind::Radial => {
+            // A circle of radius 1 stretched to the area's own reach across and down.
+            let (rx, ry) = Gradient::radii(area);
+            let c = area.center();
+            let place = Transform::from_translate(c.x, c.y).pre_scale(rx, ry);
+            let o = tiny_skia::Point::from_xy(0.0, 0.0);
+            RadialGradient::new(o, 0.0, o, 1.0, stops, SpreadMode::Pad, place)
+        }
+    };
+    if let Some(shader) = shader {
+        p.shader = shader;
+    }
+    p
+}
+
+fn skia_point(p: Pt) -> tiny_skia::Point {
+    tiny_skia::Point::from_xy(p.x, p.y)
+}
+
+/// The bounds of a path, as a rectangle.
+fn path_area(path: &Path) -> Rect {
+    let b = path.bounds();
+    Rect::new(b.x(), b.y(), b.width(), b.height())
+}
+
 fn fill_and_stroke(c: &mut Pixmap, path: &Path, style: &Style, t: Transform) {
-    if visible(style.fill) {
-        c.fill_path(path, &paint(style.fill), FillRule::Winding, t, None);
+    fill_and_stroke_over(c, path, style, t, path_area(path));
+}
+
+/// A path filled and outlined, its gradient (if it has one) laid over `area`.
+fn fill_and_stroke_over(c: &mut Pixmap, path: &Path, style: &Style, t: Transform, area: Rect) {
+    if style.has_fill() {
+        c.fill_path(path, &fill_paint(style, area), FillRule::Winding, t, None);
     }
     if style.width > 0.0 && visible(style.stroke) {
         c.stroke_path(path, &paint(style.stroke), &stroke_of(style.width, style.dashed, LineCap::Round), t, None);
     }
 }
 
-fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads, style: &Style) {
-    let d = to.sub(from);
-    let len = d.length();
+/// The point `dist` along a line through `points` from its start, and the index of the piece
+/// it's on; the end when the line is shorter.
+fn along(points: &[Pt], dist: f32) -> (Pt, usize) {
+    let mut left = dist.max(0.0);
+    for (i, w) in points.windows(2).enumerate() {
+        if let [a, b] = w {
+            let l = a.distance(*b);
+            if l >= left && l > 0.0 {
+                return (a.lerp(*b, left / l), i);
+            }
+            left -= l;
+        }
+    }
+    (points.last().copied().unwrap_or(Pt::ZERO), points.len().saturating_sub(2))
+}
+
+/// The line through `points` with `start` taken off its start and `end` off its end.
+fn trimmed(points: &[Pt], start: f32, end: f32) -> Vec<Pt> {
+    let total: f32 = points.windows(2).map(|w| if let [a, b] = w { a.distance(*b) } else { 0.0 }).sum();
+    if total <= start + end {
+        let (p, _) = along(points, total / 2.0);
+        return vec![p, p];
+    }
+    let (a, ia) = along(points, start);
+    let (b, ib) = along(points, total - end);
+    let mut out = vec![a];
+    out.extend(points.iter().skip(ia + 1).take(ib.saturating_sub(ia)));
+    out.push(b);
+    out
+}
+
+fn line_length(points: &[Pt]) -> f32 {
+    points.windows(2).map(|w| if let [a, b] = w { a.distance(*b) } else { 0.0 }).sum()
+}
+
+/// An arrow along `line` (from, to, bend), with `heads` shaped `shape`.
+fn draw_arrow(c: &mut Pixmap, t: Transform, line: (Pt, Pt, f32), heads: ArrowHeads, shape: HeadShape, style: &Style) {
+    let (from, to, bend) = line;
+    let points = bent_points(from, to, bend, 64);
+    let len = line_length(&points);
     let ink = paint(style.stroke);
     if len < 0.5 {
         if let Some(dot) = circle(from, style.width / 2.0) {
@@ -320,8 +448,6 @@ fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads,
         }
         return;
     }
-    let dir = d.scale(1.0 / len);
-    let normal = Pt::new(-dir.y, dir.x);
     let (mut head_len, mut head_half) = arrow_head(style.width);
     let n_heads = match heads {
         ArrowHeads::None => 0.0,
@@ -336,44 +462,80 @@ fn draw_arrow(c: &mut Pixmap, t: Transform, from: Pt, to: Pt, heads: ArrowHeads,
     }
     let start_head = matches!(heads, ArrowHeads::Start | ArrowHeads::Both);
     let end_head = matches!(heads, ArrowHeads::End | ArrowHeads::Both);
-    let a = if start_head { from.add(dir.scale(head_len * 0.7)) } else { from };
-    let b = if end_head { to.sub(dir.scale(head_len * 0.7)) } else { to };
-    let mut pb = PathBuilder::new();
-    pb.move_to(a.x, a.y);
-    pb.line_to(b.x, b.y);
-    if let Some(shaft) = pb.finish() {
-        c.stroke_path(
-            &shaft,
-            &ink,
-            &stroke_of(style.width, style.dashed, if heads == ArrowHeads::None { LineCap::Round } else { LineCap::Butt }),
-            t,
-            None,
-        );
-    }
-    let head = |tip: Pt, dir: Pt| -> Option<Path> {
-        let base = tip.sub(dir.scale(head_len));
-        let notch = tip.sub(dir.scale(head_len * 0.78));
-        let left = base.add(normal.scale(head_half));
-        let right = base.sub(normal.scale(head_half));
-        let mut pb = PathBuilder::new();
-        pb.move_to(tip.x, tip.y);
-        pb.line_to(left.x, left.y);
-        pb.line_to(notch.x, notch.y);
-        pb.line_to(right.x, right.y);
-        pb.close();
-        pb.finish()
+    // How much of the line a head covers: the shaft stops under it.
+    let under = match shape {
+        HeadShape::Notched | HeadShape::Triangle => head_len * 0.7,
+        HeadShape::Open => style.width * 0.5,
+        HeadShape::Dot => head_half * 0.5,
+        HeadShape::Bar => 0.0,
     };
-    if end_head && let Some(p) = head(to, dir) {
-        c.fill_path(&p, &ink, FillRule::Winding, t, None);
+    let shaft = trimmed(&points, if start_head { under } else { 0.0 }, if end_head { under } else { 0.0 });
+    if let Some(path) = open_line(&shaft) {
+        let cap = if heads == ArrowHeads::None || shape == HeadShape::Open { LineCap::Round } else { LineCap::Butt };
+        c.stroke_path(&path, &ink, &stroke_of(style.width, style.dashed, cap), t, None);
     }
-    if start_head && let Some(p) = head(from, dir.scale(-1.0)) {
-        c.fill_path(&p, &ink, FillRule::Winding, t, None);
+    // Each head points the way the line runs over its own length.
+    let head = |c: &mut Pixmap, tip: Pt, back: Pt| {
+        let d = tip.sub(back);
+        let l = d.length();
+        if l <= 0.0 {
+            return;
+        }
+        let dir = d.scale(1.0 / l);
+        let normal = Pt::new(-dir.y, dir.x);
+        let base = tip.sub(dir.scale(head_len));
+        let (left, right) = (base.add(normal.scale(head_half)), base.sub(normal.scale(head_half)));
+        let fill = |c: &mut Pixmap, path: Option<Path>| {
+            if let Some(p) = path {
+                c.fill_path(&p, &ink, FillRule::Winding, t, None);
+            }
+        };
+        let line = |c: &mut Pixmap, pts: &[Pt]| {
+            if let Some(p) = open_line(pts) {
+                let s = Stroke { width: style.width.max(1.0), line_cap: LineCap::Round, line_join: LineJoin::Round, ..Stroke::default() };
+                c.stroke_path(&p, &ink, &s, t, None);
+            }
+        };
+        match shape {
+            HeadShape::Notched => fill(c, polygon(&[tip, left, tip.sub(dir.scale(head_len * 0.78)), right])),
+            HeadShape::Triangle => fill(c, polygon(&[tip, left, right])),
+            // The lines' round ends reach past their points: the point is drawn that much back.
+            HeadShape::Open => {
+                let w = style.width.max(1.0) * 0.5;
+                let back = dir.scale(w);
+                line(c, &[left.sub(back), tip.sub(back), right.sub(back)]);
+            }
+            HeadShape::Dot => fill(c, circle(tip.sub(dir.scale(head_half * 0.6)), head_half * 0.6)),
+            HeadShape::Bar => line(c, &[tip.add(normal.scale(head_half)), tip.sub(normal.scale(head_half))]),
+        }
+    };
+    if end_head {
+        let (back, _) = along(&points, len - head_len);
+        head(c, to, back);
     }
+    if start_head {
+        let (back, _) = along(&points, head_len);
+        head(c, from, back);
+    }
+}
+
+/// An open line through `points`.
+fn open_line(points: &[Pt]) -> Option<Path> {
+    let (first, rest) = points.split_first()?;
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.x, first.y);
+    if rest.is_empty() {
+        pb.line_to(first.x + 0.01, first.y);
+    }
+    for p in rest {
+        pb.line_to(p.x, p.y);
+    }
+    pb.finish()
 }
 
 fn draw_text_box(c: &mut Pixmap, t: Transform, rect: Rect, body: &str, style: &Style) {
     let pad = text::padding(style);
-    if (visible(style.fill) || (style.width > 0.0 && visible(style.stroke)))
+    if (style.has_fill() || (style.width > 0.0 && visible(style.stroke)))
         && let Some(bg) = rounded_rect(rect, pad.min(10.0))
     {
         fill_and_stroke(c, &bg, style, t);
@@ -412,30 +574,110 @@ pub fn centered_label(label: &str, style: &Style, center: Pt) -> Option<Path> {
     path.transform(Transform::from_translate(center.x - cx, center.y - cy))
 }
 
-fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, number: u32, style: &Style) {
+/// A closed outline through `points`.
+fn polygon(points: &[Pt]) -> Option<Path> {
+    let (first, rest) = points.split_first()?;
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.x, first.y);
+    for p in rest {
+        pb.line_to(p.x, p.y);
+    }
+    pb.close();
+    pb.finish()
+}
+
+/// The outline of a step badge of radius `r` round `center`.
+pub fn badge_path(badge: BadgeShape, center: Pt, r: f32) -> Option<Path> {
+    let r = r.max(0.5);
+    let (side, up, _) = badge.reach(r);
+    let (x, y) = (center.x, center.y);
+    match badge {
+        BadgeShape::Circle => circle(center, r),
+        BadgeShape::Rounded => rounded_rect(Rect::new(x - side, y - up, 2.0 * side, 2.0 * up), r * 0.42),
+        BadgeShape::Square => rounded_rect(Rect::new(x - side, y - up, 2.0 * side, 2.0 * up), 0.0),
+        BadgeShape::Diamond => polygon(&[Pt::new(x, y - up), Pt::new(x + side, y), Pt::new(x, y + up), Pt::new(x - side, y)]),
+        BadgeShape::Hexagon => {
+            let corners: Vec<Pt> = (0..6)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_3;
+                    Pt::new(x + up * a.cos(), y + up * a.sin())
+                })
+                .collect();
+            polygon(&corners)
+        }
+        BadgeShape::Pin => {
+            // A round head, its sides running down into the point where they meet the circle
+            // at a tangent.
+            let tip = Pt::new(x, y + r * PIN_POINT);
+            let d = PIN_POINT * r;
+            let half = (r / d).clamp(-1.0, 1.0).acos();
+            let down = std::f32::consts::FRAC_PI_2;
+            let (from, to) = (down + half, down - half + std::f32::consts::TAU);
+            let steps = 40;
+            let mut points = Vec::with_capacity(steps + 2);
+            points.push(tip);
+            for i in 0..=steps {
+                let a = from + (to - from) * i as f32 / steps as f32;
+                points.push(Pt::new(x + r * a.cos(), y + r * a.sin()));
+            }
+            polygon(&points)
+        }
+    }
+}
+
+fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, label: &str, badge: BadgeShape, style: &Style) {
     let r = step_radius(style.font_size);
-    let Some(disc) = circle(center, r) else { return };
-    c.fill_path(&disc, &paint(if visible(style.fill) { style.fill } else { Color::RED }), FillRule::Winding, t, None);
+    let Some(outline) = badge_path(badge, center, r) else { return };
+    let inside = if style.has_fill() { fill_paint(style, path_area(&outline)) } else { paint(Color::RED) };
+    c.fill_path(&outline, &inside, FillRule::Winding, t, None);
     if style.width > 0.0 && visible(style.stroke) {
-        c.stroke_path(&disc, &paint(style.stroke), &stroke_of(style.width, false, LineCap::Round), t, None);
+        c.stroke_path(&outline, &paint(style.stroke), &stroke_of(style.width, false, LineCap::Round), t, None);
     }
-    let label = number.to_string();
-    let size = if label.len() > 2 { style.font_size * 0.7 } else { style.font_size };
-    let s = Style { font_size: size, bold: true, mono: false, italic: false, ..*style };
-    if let Some(path) = centered_label(&label, &s, center) {
-        c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
+    // Three figures or more are smaller; a label still too wide for the badge (VIII, AB) is
+    // made to fit across it.
+    let size = if label.chars().count() > 2 { style.font_size * 0.7 } else { style.font_size };
+    let mut s = Style { font_size: size, bold: true, mono: false, italic: false, ..*style };
+    let wide = text::layout(label, &s, None).width;
+    let room = badge.label_room(r);
+    if wide > room && wide > 0.0 {
+        s.font_size = (size * room / wide).max(size * 0.35);
     }
+    let Some(mut path) = centered_label(label, &s, center) else { return };
+    // Smaller than the smallest letters (a count in the thousands in Roman numerals): the
+    // letters themselves are made smaller.
+    let w = path.bounds().width();
+    if w > room && w > 0.0 {
+        let f = room / w;
+        let squeeze = Transform::from_translate(center.x, center.y).pre_scale(f, f).pre_translate(-center.x, -center.y);
+        match path.clone().transform(squeeze) {
+            Some(p) => path = p,
+            None => return,
+        }
+    }
+    c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
 }
 
 /// The outlines of a callout of any form, in drawing order: one for most, the cloud and then
 /// each of the bubbles of its tail for a cloud.
 pub fn callout_paths(rect: Rect, tail: Pt, form: CalloutForm, radius: f32) -> Vec<Path> {
+    callout_paths_with(rect, &[tail], form, radius)
+}
+
+/// The same with several tails, each to a point of `tails`.
+pub fn callout_paths_with(rect: Rect, tails: &[Pt], form: CalloutForm, radius: f32) -> Vec<Path> {
     match form {
-        CalloutForm::Rounded => callout_path(rect, tail, radius).into_iter().collect(),
-        CalloutForm::Square => callout_path(rect, tail, 0.0).into_iter().collect(),
-        CalloutForm::Oval => oval_callout_path(rect, tail).into_iter().collect(),
-        CalloutForm::Cloud => cloud_paths(rect, tail, form.bulge(rect)),
-        CalloutForm::Arrow => arrow_callout_path(rect, tail).into_iter().collect(),
+        CalloutForm::Rounded => callout_path_with(rect, tails, radius).into_iter().collect(),
+        CalloutForm::Square => callout_path_with(rect, tails, 0.0).into_iter().collect(),
+        CalloutForm::Oval => oval_callout_path_with(rect, tails).into_iter().collect(),
+        CalloutForm::Cloud => {
+            let mut out = cloud_paths(rect, tails.first().copied().unwrap_or(rect.center()), form.bulge(rect));
+            // The other tails' bubbles (the cloud itself is drawn once).
+            for t in tails.iter().skip(1) {
+                out.extend(cloud_paths(rect, *t, form.bulge(rect)).into_iter().skip(1));
+            }
+            out
+        }
+        CalloutForm::Arrow => arrow_callout_path_with(rect, tails).into_iter().collect(),
     }
 }
 
@@ -454,13 +696,31 @@ fn facing_side(rect: Rect, p: Pt) -> u8 {
 
 /// A box whose side facing `tail` narrows to a point at `tail`: an arrow with room for text.
 pub fn arrow_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
-    if rect.is_empty() || rect.inflate(-1.0).contains(tail) {
+    arrow_callout_path_with(rect, &[tail])
+}
+
+/// The tails outside `rect` that leave from `side` (0 top, 1 right, 2 bottom, 3 left), in the
+/// order the outline goes round (clockwise: left to right along the top, and so on).
+fn tails_on(rect: Rect, tails: &[Pt], side: u8) -> Vec<Pt> {
+    let mut on: Vec<Pt> = tails.iter().copied().filter(|t| !rect.inflate(-1.0).contains(*t) && facing_side(rect, *t) == side).collect();
+    let key = |p: &Pt| match side {
+        0 => p.x,
+        1 => p.y,
+        2 => -p.x,
+        _ => -p.y,
+    };
+    on.sort_by(|a, b| key(a).total_cmp(&key(b)));
+    on
+}
+
+/// A box with a point out to each of `tails`, from the side each faces.
+pub fn arrow_callout_path_with(rect: Rect, tails: &[Pt]) -> Option<Path> {
+    if rect.is_empty() || tails.iter().all(|t| rect.inflate(-1.0).contains(*t)) {
         return rounded_rect(rect, 0.0);
     }
     let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
     let corners = [Pt::new(x0, y0), Pt::new(x1, y0), Pt::new(x1, y1), Pt::new(x0, y1)];
-    // The point goes between the two corners of the side it leaves from.
-    let side = usize::from(facing_side(rect, tail));
+    // Each point goes between the two corners of the side it leaves from.
     let mut pb = PathBuilder::new();
     for (i, p) in corners.iter().enumerate() {
         if i == 0 {
@@ -468,8 +728,8 @@ pub fn arrow_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
         } else {
             pb.line_to(p.x, p.y);
         }
-        if i == side {
-            pb.line_to(tail.x, tail.y);
+        for t in tails_on(rect, tails, i as u8) {
+            pb.line_to(t.x, t.y);
         }
     }
     pb.close();
@@ -490,12 +750,47 @@ fn ellipse_steps(rx: f32, ry: f32) -> usize {
 
 /// An oval with a tail from its edge to `tail`, as one outline.
 pub fn oval_callout_path(rect: Rect, tail: Pt) -> Option<Path> {
+    oval_callout_path_with(rect, &[tail])
+}
+
+/// An oval with a tail out to each of `tails` (those outside it), as one outline.
+pub fn oval_callout_path_with(rect: Rect, tails: &[Pt]) -> Option<Path> {
     let c = rect.center();
     let (rx, ry) = (rect.w / 2.0, rect.h / 2.0);
-    let (nx, ny) = if rx >= 1.0 && ry >= 1.0 { ((tail.x - c.x) / rx, (tail.y - c.y) / ry) } else { (0.0, 0.0) };
-    if nx * nx + ny * ny <= 1.0 || !(nx.is_finite() && ny.is_finite()) {
-        return oval(rect);
+    let angle = |t: &Pt| {
+        let (nx, ny) = if rx >= 1.0 && ry >= 1.0 { ((t.x - c.x) / rx, (t.y - c.y) / ry) } else { (0.0, 0.0) };
+        (nx * nx + ny * ny > 1.0 && nx.is_finite() && ny.is_finite()).then(|| (ny.atan2(nx), *t))
+    };
+    let mut out: Vec<(f32, Pt)> = tails.iter().filter_map(angle).collect();
+    if out.len() > 1 {
+        // Round the ellipse once, going out to each tail at its angle.
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let half = 0.24;
+        let steps = ellipse_steps(rx, ry);
+        let mut pb = PathBuilder::new();
+        let start = out.first().map_or(0.0, |(a, _)| *a) + half;
+        let first = on_ellipse(c, rx, ry, start);
+        pb.move_to(first.x, first.y);
+        let mut at = start;
+        for k in 1..=out.len() {
+            let (a, t) = out.get(k % out.len()).copied().unwrap_or((start, c));
+            let a = if k == out.len() { a + std::f32::consts::TAU } else { a };
+            let to = (a - half).max(at);
+            let n = ((to - at) / std::f32::consts::TAU * steps as f32).ceil().max(1.0) as usize;
+            for i in 1..=n {
+                let p = on_ellipse(c, rx, ry, at + (to - at) * i as f32 / n as f32);
+                pb.line_to(p.x, p.y);
+            }
+            pb.line_to(t.x, t.y);
+            at = (a + half).max(to);
+            let p = on_ellipse(c, rx, ry, at);
+            pb.line_to(p.x, p.y);
+        }
+        pb.close();
+        return pb.finish();
     }
+    let Some((_, tail)) = out.first().copied() else { return oval(rect) };
+    let (nx, ny) = ((tail.x - c.x) / rx, (tail.y - c.y) / ry);
     // Round the ellipse the long way, from one side of the tail's base to the other, then out
     // to the tail and back.
     let a = ny.atan2(nx);
@@ -566,53 +861,66 @@ pub fn cloud_paths(rect: Rect, tail: Pt, bulge: f32) -> Vec<Path> {
 
 /// A rounded box with a tail running from the side facing `tail` to `tail`, as one outline.
 pub fn callout_path(rect: Rect, tail: Pt, radius: f32) -> Option<Path> {
+    callout_path_with(rect, &[tail], radius)
+}
+
+/// A rounded box with a tail to each of `tails` (those outside it), each from the side facing it,
+/// as one outline.
+pub fn callout_path_with(rect: Rect, tails: &[Pt], radius: f32) -> Option<Path> {
     let rad = radius.max(0.0).min(rect.w / 2.0).min(rect.h / 2.0);
-    if rect.inflate(-1.0).contains(tail) || rect.is_empty() {
+    if rect.is_empty() || tails.iter().all(|t| rect.inflate(-1.0).contains(*t)) {
         return rounded_rect(rect, rad);
     }
     let c = rect.center();
-    let d = tail.sub(c);
-    let side = facing_side(rect, tail);
-    // Where on that side the line from the centre to the tail crosses, kept clear of the corners.
-    let base_half = (if side.is_multiple_of(2) { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
-    let (lo_x, hi_x) = (rect.x + rad + base_half, rect.right() - rad - base_half);
-    let (lo_y, hi_y) = (rect.y + rad + base_half, rect.bottom() - rad - base_half);
     let cross = |along: f32, lo: f32, hi: f32| if lo <= hi { along.clamp(lo, hi) } else { (lo + hi) / 2.0 };
-    let at_x = |y: f32| if d.y.abs() > f32::EPSILON { c.x + d.x * (y - c.y) / d.y } else { c.x };
-    let at_y = |x: f32| if d.x.abs() > f32::EPSILON { c.y + d.y * (x - c.x) / d.x } else { c.y };
+    // Where on its side the line from the centre to a tail crosses, kept clear of the corners,
+    // and how wide the tail is there.
+    let base = |tail: Pt, side: u8| -> (f32, f32) {
+        let d = tail.sub(c);
+        let base_half = (if side.is_multiple_of(2) { rect.w } else { rect.h } * 0.14).clamp(6.0, 36.0);
+        let at_x = |y: f32| if d.y.abs() > f32::EPSILON { c.x + d.x * (y - c.y) / d.y } else { c.x };
+        let at_y = |x: f32| if d.x.abs() > f32::EPSILON { c.y + d.y * (x - c.x) / d.x } else { c.y };
+        let m = match side {
+            0 => cross(at_x(rect.y), rect.x + rad + base_half, rect.right() - rad - base_half),
+            2 => cross(at_x(rect.bottom()), rect.x + rad + base_half, rect.right() - rad - base_half),
+            1 => cross(at_y(rect.right()), rect.y + rad + base_half, rect.bottom() - rad - base_half),
+            _ => cross(at_y(rect.x), rect.y + rad + base_half, rect.bottom() - rad - base_half),
+        };
+        (m, base_half)
+    };
     let k = 0.552_284_8 * rad;
     let (x0, y0, x1, y1) = (rect.x, rect.y, rect.right(), rect.bottom());
     let mut pb = PathBuilder::new();
     pb.move_to(x0 + rad, y0);
-    if side == 0 {
-        let m = cross(at_x(y0), lo_x, hi_x);
-        pb.line_to(m - base_half, y0);
+    for tail in tails_on(rect, tails, 0) {
+        let (m, b) = base(tail, 0);
+        pb.line_to(m - b, y0);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(m + base_half, y0);
+        pb.line_to(m + b, y0);
     }
     pb.line_to(x1 - rad, y0);
     pb.cubic_to(x1 - rad + k, y0, x1, y0 + rad - k, x1, y0 + rad);
-    if side == 1 {
-        let m = cross(at_y(x1), lo_y, hi_y);
-        pb.line_to(x1, m - base_half);
+    for tail in tails_on(rect, tails, 1) {
+        let (m, b) = base(tail, 1);
+        pb.line_to(x1, m - b);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(x1, m + base_half);
+        pb.line_to(x1, m + b);
     }
     pb.line_to(x1, y1 - rad);
     pb.cubic_to(x1, y1 - rad + k, x1 - rad + k, y1, x1 - rad, y1);
-    if side == 2 {
-        let m = cross(at_x(y1), lo_x, hi_x);
-        pb.line_to(m + base_half, y1);
+    for tail in tails_on(rect, tails, 2) {
+        let (m, b) = base(tail, 2);
+        pb.line_to(m + b, y1);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(m - base_half, y1);
+        pb.line_to(m - b, y1);
     }
     pb.line_to(x0 + rad, y1);
     pb.cubic_to(x0 + rad - k, y1, x0, y1 - rad + k, x0, y1 - rad);
-    if side == 3 {
-        let m = cross(at_y(x0), lo_y, hi_y);
-        pb.line_to(x0, m + base_half);
+    for tail in tails_on(rect, tails, 3) {
+        let (m, b) = base(tail, 3);
+        pb.line_to(x0, m + b);
         pb.line_to(tail.x, tail.y);
-        pb.line_to(x0, m - base_half);
+        pb.line_to(x0, m - b);
     }
     pb.line_to(x0, y0 + rad);
     pb.cubic_to(x0, y0 + rad - k, x0 + rad - k, y0, x0 + rad, y0);
@@ -674,15 +982,63 @@ mod tests {
         r.pixel(x, y).unwrap()
     }
 
+    /// A gradient fill goes from the fill colour to its second one across a box, or out from its
+    /// middle; a callout's is laid over its box, a step badge's over the badge.
+    #[test]
+    fn gradients_fill_shapes_callouts_and_badges() {
+        use screengrabcraft_model::{Gradient, GradientKind};
+        let linear = Gradient { kind: GradientKind::Linear, to: Color::rgb(0, 0, 255), angle: 0.0 };
+        let style =
+            Style { fill: Color::rgb(255, 0, 0), stroke: Color::TRANSPARENT, width: 0.0, shadow: false, gradient: linear, ..Style::default() };
+        let mut d = doc();
+        d.add(Shape::Rect { rect: Rect::new(20.0, 20.0, 160.0, 40.0), radius: 0.0 }, style).unwrap();
+        let out = render(&d).unwrap();
+        let (left, mid, right) = (px(&out, 22, 40), px(&out, 100, 40), px(&out, 177, 40));
+        assert!(left.r > 240 && left.b < 15, "red at the left: {left:?}");
+        assert!(right.b > 240 && right.r < 15, "blue at the right: {right:?}");
+        assert!((100..156).contains(&mid.r) && (100..156).contains(&mid.b), "between in the middle: {mid:?}");
+        assert_eq!(px(&out, 100, 70), Color::WHITE, "only inside");
+        // Turned down: the top is red, the bottom blue, the same all along.
+        let mut d = doc();
+        d.add(Shape::Ellipse { rect: Rect::new(20.0, 10.0, 160.0, 100.0) }, Style { gradient: Gradient { angle: 90.0, ..linear }, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        assert!(px(&out, 100, 14).r > px(&out, 100, 105).r && px(&out, 100, 105).b > 200);
+        // Radial: the fill colour in the middle, the second colour towards the corners.
+        let mut d = doc();
+        let radial = Gradient { kind: GradientKind::Radial, ..linear };
+        d.add(Shape::Rect { rect: Rect::new(20.0, 20.0, 160.0, 80.0), radius: 0.0 }, Style { gradient: radial, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        let (middle, corner) = (px(&out, 100, 60), px(&out, 21, 21));
+        assert!(middle.r > 240 && corner.b > 200 && corner.r < 60, "{middle:?} {corner:?}");
+        // A callout's gradient is over its box; a badge's over the badge.
+        let mut d = doc();
+        let callout = Shape::Callout {
+            rect: Rect::new(20.0, 10.0, 160.0, 50.0),
+            tail: Pt::new(40.0, 110.0),
+            text: String::new(),
+            form: CalloutForm::Cloud,
+            tails: Vec::new(),
+        };
+        d.add(callout, style).unwrap();
+        let out = render(&d).unwrap();
+        assert!(px(&out, 30, 35).r > px(&out, 170, 35).r && px(&out, 170, 35).b > 200, "across the box");
+        let mut d = doc();
+        let step = Shape::Step { center: Pt::new(100.0, 60.0), number: 1, labels: Default::default(), badge: BadgeShape::Square };
+        d.add(step, Style { font_size: 40.0, ..style }).unwrap();
+        let out = render(&d).unwrap();
+        let r = step_radius(40.0) as u32;
+        assert!(px(&out, 100 - r + 2, 60 - r + 2).r > 200 && px(&out, 100 + r - 2, 60 + r - 2).b > 200, "the badge from red to blue");
+    }
+
     #[test]
     fn every_kind_draws_without_panicking() {
         let mut d = doc();
         let key = d.add_image(Raster::filled(10, 10, Color::BLACK).unwrap()).unwrap();
         let r = Rect::new(20.0, 20.0, 80.0, 50.0);
         let shapes = vec![
-            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(150.0, 100.0), heads: ArrowHeads::Both },
-            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(5.2, 5.0), heads: ArrowHeads::End },
-            Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(199.0, 119.0) },
+            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(150.0, 100.0), heads: ArrowHeads::Both, bend: 0.0, head: Default::default() },
+            Shape::Arrow { from: Pt::new(5.0, 5.0), to: Pt::new(5.2, 5.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+            Shape::Line { from: Pt::new(0.0, 0.0), to: Pt::new(199.0, 119.0), bend: 0.0 },
             Shape::Rect { rect: r, radius: 12.0 },
             Shape::Ellipse { rect: r },
             Shape::Pen { points: vec![Pt::new(1.0, 1.0), Pt::new(30.0, 40.0), Pt::new(60.0, 10.0)] },
@@ -690,13 +1046,19 @@ mod tests {
             Shape::highlight(Rect::new(10.0, 50.0, 180.0, 20.0)),
             Shape::highlight(Rect::new(-40.0, 100.0, 400.0, 0.0)),
             Shape::Text { rect: r, text: "Hello, world".into() },
-            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded },
-            Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square },
-            Shape::Callout { rect: r, tail: Pt::new(180.0, 45.0), text: "Oval".into(), form: CalloutForm::Oval },
-            Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud },
-            Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow },
-            Shape::Callout { rect: Rect::new(10.0, 10.0, 0.5, 0.5), tail: Pt::new(f32::NAN, 1.0), text: String::new(), form: CalloutForm::Cloud },
-            Shape::Step { center: Pt::new(150.0, 30.0), number: 7 },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 110.0), text: "Look here".into(), form: CalloutForm::Rounded, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(5.0, 110.0), text: "Square".into(), form: CalloutForm::Square, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(180.0, 45.0), text: "Oval".into(), form: CalloutForm::Oval, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud, tails: Vec::new() },
+            Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow, tails: Vec::new() },
+            Shape::Callout {
+                rect: Rect::new(10.0, 10.0, 0.5, 0.5),
+                tail: Pt::new(f32::NAN, 1.0),
+                text: String::new(),
+                form: CalloutForm::Cloud,
+                tails: Vec::new(),
+            },
+            Shape::step(Pt::new(150.0, 30.0), 7),
             Shape::Blur { rect: r },
             Shape::Pixelate { rect: Rect::new(-50.0, -50.0, 500.0, 500.0) },
             Shape::Spotlight { rect: r, ellipse: true },
@@ -710,8 +1072,144 @@ mod tests {
         for k in StampKind::ALL {
             d.add(Shape::Stamp { rect: Rect::new(150.0, 70.0, 40.0, 40.0), stamp: k }, Kind::Stamp.default_style()).unwrap();
         }
+        for (i, badge) in screengrabcraft_model::BadgeShape::ALL.into_iter().enumerate() {
+            for labels in screengrabcraft_model::StepLabels::ALL {
+                let center = Pt::new(20.0 + i as f32 * 30.0, 100.0);
+                d.add(Shape::Step { center, number: 3888, labels, badge }, Kind::Step.default_style()).unwrap();
+            }
+        }
         let out = render(&d).unwrap();
         assert_eq!((out.width(), out.height()), (200, 120));
+    }
+
+    /// A filled triangle and star colour their inside and leave their box's corners alone; a
+    /// curved arrow is drawn along its bow, with its heads at its ends, and every polygon and
+    /// bend draws.
+    #[test]
+    fn polygons_fill_their_outline_and_arrows_bow() {
+        let style = Style { fill: Color::BLACK, stroke: Color::BLACK, width: 2.0, shadow: false, ..Style::default() };
+        let mut d = doc();
+        d.add(Shape::Polygon { rect: Rect::new(10.0, 10.0, 80.0, 70.0), sides: 3, star: false, corners: Vec::new() }, style).unwrap();
+        d.add(Shape::Polygon { rect: Rect::new(110.0, 10.0, 80.0, 80.0), sides: 5, star: true, corners: Vec::new() }, style).unwrap();
+        let out = render(&d).unwrap();
+        assert_eq!(px(&out, 50, 60), Color::BLACK, "inside the triangle");
+        assert_eq!(px(&out, 14, 14), Color::WHITE, "a corner of its box");
+        assert_eq!(px(&out, 150, 52), Color::BLACK, "the star's middle");
+        assert_eq!(px(&out, 114, 86), Color::WHITE, "between its points");
+        let mut d = doc();
+        let ink = Style { stroke: Color::BLACK, width: 4.0, shadow: false, ..Style::default() };
+        d.add(
+            Shape::Arrow { from: Pt::new(20.0, 100.0), to: Pt::new(180.0, 100.0), heads: ArrowHeads::Both, bend: 0.3, head: Default::default() },
+            ink,
+        )
+        .unwrap();
+        let out = render(&d).unwrap();
+        let top = screengrabcraft_model::object::bend_middle(Pt::new(20.0, 100.0), Pt::new(180.0, 100.0), 0.3);
+        assert_eq!(px(&out, top.x as u32, top.y as u32), Color::BLACK, "along the bow at {top:?}");
+        assert_eq!(px(&out, 100, 98), Color::WHITE, "not where a straight one would be");
+        for (x, y) in [(21, 99), (179, 99)] {
+            assert!(px(&out, x, y).r < 160, "a head at each end, at {x},{y}");
+        }
+        // Every head shape is drawn at the tip; an open head leaves the inside of its V empty,
+        // a filled one doesn't.
+        for shape in HeadShape::ALL {
+            let mut d = doc();
+            d.add(Shape::Arrow { from: Pt::new(20.0, 60.0), to: Pt::new(180.0, 60.0), heads: ArrowHeads::End, bend: 0.0, head: shape }, ink).unwrap();
+            let out = render(&d).unwrap();
+            let (hl, hh) = arrow_head(4.0);
+            let near_tip = (0..6).any(|dx| px(&out, 179 - dx, 60).r < 100);
+            assert!(near_tip, "{shape:?}: drawn at its tip");
+            // Inside the head, between its edge and the shaft (behind the notch, for the notched one).
+            let notched = px(&out, (180.0 - hl * 0.85) as u32, (60.0 - hh * 0.55) as u32);
+            let inside = px(&out, (180.0 - hl * 0.9) as u32, (60.0 - hh * 0.38) as u32);
+            match shape {
+                HeadShape::Notched => assert!(notched.r < 128, "{shape:?} is filled there: {notched:?}"),
+                HeadShape::Triangle => assert!(inside.r < 128, "{shape:?} is filled there: {inside:?}"),
+                HeadShape::Open => assert!(inside.r > 128, "{shape:?} is open there: {inside:?}"),
+                _ => {}
+            }
+        }
+        let mut d = doc();
+        for sides in 0..14 {
+            for star in [false, true] {
+                d.add(
+                    Shape::Polygon {
+                        rect: Rect::new(f32::from(sides as u8) * 12.0, 5.0, 10.0 + f32::from(sides as u8), 30.0),
+                        sides,
+                        star,
+                        corners: Vec::new(),
+                    },
+                    style,
+                )
+                .unwrap();
+            }
+        }
+        for bend in [-2.0, -0.5, 0.0, 0.01, 1.5, f32::NAN] {
+            d.add(Shape::Arrow { from: Pt::new(10.0, 60.0), to: Pt::new(11.0, 61.0), heads: ArrowHeads::Both, bend, head: Default::default() }, ink)
+                .unwrap();
+            d.add(
+                Shape::Arrow { from: Pt::new(10.0, 60.0), to: Pt::new(190.0, 110.0), heads: ArrowHeads::Start, bend, head: Default::default() },
+                ink,
+            )
+            .unwrap();
+        }
+        assert!(render(&d).is_some());
+    }
+
+    /// Each badge is drawn in its own outline, its label inside it: a diamond leaves the corners
+    /// of its box alone, a square fills them, a pin reaches down to its point; and a long label
+    /// (Roman numerals) is made to fit.
+    #[test]
+    fn step_badges_take_their_shape_and_fit_their_labels() {
+        use screengrabcraft_model::{BadgeShape, StepLabels};
+        let style = Style { fill: Color::BLACK, stroke: Color::TRANSPARENT, text_color: Color::WHITE, shadow: false, ..Kind::Step.default_style() };
+        let r = step_radius(style.font_size);
+        let c = Pt::new(60.0, 50.0);
+        let draw = |badge: BadgeShape, labels: StepLabels, number: u32| {
+            let mut d = doc();
+            d.add(Shape::Step { center: c, number, labels, badge }, style).unwrap();
+            render(&d).unwrap()
+        };
+        let corner = |out: &Raster| px(out, (c.x + r * 0.8) as u32, (c.y - r * 0.8) as u32);
+        assert_eq!(corner(&draw(BadgeShape::Square, StepLabels::Numbers, 1)), Color::BLACK);
+        assert_eq!(corner(&draw(BadgeShape::Diamond, StepLabels::Numbers, 1)), Color::WHITE);
+        assert_eq!(corner(&draw(BadgeShape::Circle, StepLabels::Numbers, 1)), Color::WHITE);
+        let pin = draw(BadgeShape::Pin, StepLabels::Numbers, 1);
+        assert_eq!(px(&pin, c.x as u32, (c.y + r * 1.6) as u32), Color::BLACK, "the pin's point");
+        assert_eq!(px(&draw(BadgeShape::Circle, StepLabels::Numbers, 1), c.x as u32, (c.y + r * 1.6) as u32), Color::WHITE);
+        // Every label shows, in the badge's middle, and stays clear of its sides, however long.
+        for badge in BadgeShape::ALL {
+            for (labels, n) in [(StepLabels::Roman, 38), (StepLabels::Upper, 702), (StepLabels::Numbers, 9999), (StepLabels::RomanLower, 8)] {
+                let out = draw(badge, labels, n);
+                let side = badge.reach(r).0;
+                let mut letters = 0;
+                for y in (c.y - r * 0.4) as u32..(c.y + r * 0.4) as u32 {
+                    for x in (c.x - side * 0.5) as u32..(c.x + side * 0.5) as u32 {
+                        if px(&out, x, y).r > 200 {
+                            letters += 1;
+                        }
+                    }
+                }
+                assert!(letters > 4, "{badge:?} {labels:?}: the label shows ({letters})");
+                for y in (c.y - r * 0.3) as u32..(c.y + r * 0.3) as u32 {
+                    // How far the badge reaches to each side on this row.
+                    let dy = (y as f32 + 0.5 - c.y).abs();
+                    let half = match badge {
+                        BadgeShape::Diamond => side * (1.0 - dy / badge.reach(r).1),
+                        BadgeShape::Circle | BadgeShape::Pin => (r * r - dy * dy).sqrt(),
+                        _ => side,
+                    };
+                    for x in [(c.x - half + 3.0) as u32, (c.x + half - 3.0) as u32] {
+                        assert_eq!(px(&out, x, y), Color::BLACK, "{badge:?} {labels:?}: the label is clear of the side at {x},{y}");
+                    }
+                }
+                // Outside its box nothing is drawn.
+                let b = Shape::Step { center: c, number: n, labels, badge }.bounds(&style);
+                for (x, y) in [(b.x as u32 - 2, c.y as u32), (b.right() as u32 + 2, c.y as u32)] {
+                    assert_eq!(px(&out, x, y), Color::WHITE, "{badge:?} {labels:?} at {x},{y}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -788,6 +1286,53 @@ mod tests {
     }
 
     #[test]
+    fn a_callout_reaches_each_of_several_tails_in_every_form() {
+        let r = Rect::new(100.0, 100.0, 120.0, 60.0);
+        // Two below (left and right), one to the right, one above.
+        let tails = [Pt::new(90.0, 230.0), Pt::new(240.0, 230.0), Pt::new(300.0, 130.0), Pt::new(160.0, 30.0)];
+        for form in CalloutForm::ALL {
+            let paths = callout_paths_with(r, &tails, form, 10.0);
+            let reach = 0.5 + if form == CalloutForm::Cloud { 3.0 } else { 0.0 };
+            for t in tails {
+                let near = paths.iter().any(|p| {
+                    let b = p.bounds();
+                    b.left() <= t.x + reach && b.right() >= t.x - reach && b.top() <= t.y + reach && b.bottom() >= t.y - reach
+                });
+                assert!(near, "{form:?} {t:?}");
+            }
+        }
+        // Drawn: each tail's tip is inked, and the box still holds its text.
+        let mut d = Document::new(Raster::filled(320, 260, Color::WHITE).unwrap());
+        let style = Style { stroke: Color::rgb(200, 0, 0), fill: Color::WHITE, width: 3.0, shadow: false, ..Style::default() };
+        let (tail, more) = (Pt::new(120.0, 220.0), vec![Pt::new(200.0, 220.0), Pt::new(300.0, 130.0)]);
+        d.add(Shape::Callout { rect: r, tail, text: String::new(), form: CalloutForm::Rounded, tails: more.clone() }, style).unwrap();
+        let out = render(&d).unwrap();
+        for t in std::iter::once(tail).chain(more) {
+            let (x, y) = (t.x as u32, t.y as u32);
+            let inked = (x.saturating_sub(3)..x + 3)
+                .any(|px| (y.saturating_sub(3)..y + 3).any(|py| out.pixel(px, py).is_some_and(|c| c.r > 150 && c.g < 80)));
+            assert!(inked, "{t:?}");
+        }
+    }
+
+    #[test]
+    fn a_polygon_of_points_and_a_bent_line_are_drawn() {
+        let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
+        let style = Style { stroke: Color::BLACK, fill: Color::rgb(0, 0, 200), width: 2.0, shadow: false, ..Style::default() };
+        let shape = screengrabcraft_model::object::polygon_through(&[Pt::new(10.0, 10.0), Pt::new(90.0, 10.0), Pt::new(10.0, 90.0)]).unwrap();
+        d.add(shape, style).unwrap();
+        let line = Style { stroke: Color::rgb(0, 150, 0), width: 4.0, shadow: false, ..Style::default() };
+        d.add(Shape::Line { from: Pt::new(110.0, 100.0), to: Pt::new(190.0, 100.0), bend: 0.4 }, line).unwrap();
+        let out = render(&d).unwrap();
+        // Inside the triangle's corner, not across its long side.
+        assert_eq!(out.pixel(25, 25), Some(Color::rgb(0, 0, 200)));
+        assert_eq!(out.pixel(80, 80), Some(Color::WHITE));
+        // The line bows up: its middle is well above its ends, and the straight way is empty.
+        assert!(out.pixel(150, 68).is_some_and(|c| c.g > 100 && c.r < 80), "{:?}", out.pixel(150, 68));
+        assert_eq!(out.pixel(150, 100), Some(Color::WHITE));
+    }
+
+    #[test]
     fn every_callout_form_reaches_its_tail_and_holds_its_box() {
         let r = Rect::new(100.0, 100.0, 120.0, 60.0);
         for form in CalloutForm::ALL {
@@ -854,9 +1399,15 @@ mod tests {
         let mut d = doc();
         let style = Style { fill: Color::rgb(0, 0, 255), stroke: Color::TRANSPARENT, width: 0.0, shadow: false, ..Style::default() };
         let rect = Rect::new(20.0, 30.0, 100.0, 60.0);
-        d.add(Shape::Callout { rect, tail: Pt::new(170.0, 60.0), text: String::new(), form: CalloutForm::Arrow }, style).unwrap();
+        d.add(Shape::Callout { rect, tail: Pt::new(170.0, 60.0), text: String::new(), form: CalloutForm::Arrow, tails: Vec::new() }, style).unwrap();
         d.add(
-            Shape::Callout { rect: Rect::new(150.0, 5.0, 40.0, 20.0), tail: Pt::new(170.0, 15.0), text: String::new(), form: CalloutForm::Oval },
+            Shape::Callout {
+                rect: Rect::new(150.0, 5.0, 40.0, 20.0),
+                tail: Pt::new(170.0, 15.0),
+                text: String::new(),
+                form: CalloutForm::Oval,
+                tails: Vec::new(),
+            },
             style,
         )
         .unwrap();
@@ -950,5 +1501,30 @@ mod stroke_tests {
         for (x, y) in [(38, 50), (142, 50), (90, 38), (90, 82), (10, 10)] {
             assert_eq!(out.pixel(x, y), Some(Color::WHITE), "nothing outside at {x},{y}");
         }
+    }
+
+    #[test]
+    fn a_turned_annotation_is_drawn_turned_round_its_middle() {
+        let mut d = Document::new(Raster::filled(200, 120, Color::WHITE).unwrap());
+        let style = Style { fill: Color::RED, stroke: Color::TRANSPARENT, width: 0.0, shadow: false, ..Style::default() };
+        let id = d.add(Shape::Rect { rect: Rect::new(60.0, 55.0, 80.0, 10.0), radius: 0.0 }, style).unwrap();
+        let red = |out: &Raster, x, y| out.pixel(x, y) == Some(Color::RED);
+        let flat = render(&d).unwrap();
+        assert!(red(&flat, 65, 60) && !red(&flat, 100, 25));
+        d.get_mut(id).unwrap().rotation = 90.0;
+        let out = render(&d).unwrap();
+        assert!(red(&out, 100, 25) && red(&out, 100, 95), "tall and narrow now");
+        assert!(!red(&out, 65, 60) && !red(&out, 135, 60));
+        // A highlight turned still multiplies into the picture; a blur doesn't turn.
+        let hl = d.add(Shape::highlight(Rect::new(10.0, 10.0, 40.0, 10.0)), Kind::Highlight.default_style()).unwrap();
+        d.get_mut(hl).unwrap().rotation = 45.0;
+        let out = render(&d).unwrap();
+        assert!(out.pixel(30, 15).is_some_and(|c| c.b < 200 && c.r > 200), "{:?}", out.pixel(30, 15));
+        let blur = d.add(Shape::Blur { rect: Rect::new(150.0, 80.0, 30.0, 30.0) }, Style::default()).unwrap();
+        d.get_mut(blur).unwrap().rotation = 30.0;
+        assert_eq!(d.get(blur).unwrap().turn(), 0.0);
+        // Far off the picture, nothing to draw.
+        d.get_mut(id).unwrap().shape.translate(Pt::new(1.0e6, 1.0e6));
+        assert!(render(&d).is_some());
     }
 }

@@ -327,10 +327,13 @@ fn picture_editor(settings: &EditorSettings) -> Result<Editor, String> {
     add(&mut doc, Shape::Blur { rect: Rect::new(512.0, 534.0, 236.0, 124.0) });
     add(&mut doc, Shape::highlight(Rect::new(777.0, 537.0, 84.0, 22.0)));
     add(&mut doc, Shape::Rect { rect: Rect::new(502.0, 84.0, 284.0, 108.0), radius: 12.0 });
-    add(&mut doc, Shape::Arrow { from: Pt::new(1052.0, 624.0), to: Pt::new(992.0, 586.0), heads: ArrowHeads::End });
-    add(&mut doc, Shape::Step { center: Pt::new(164.0, 130.0), number: 1 });
-    add(&mut doc, Shape::Step { center: Pt::new(504.0, 86.0), number: 2 });
-    add(&mut doc, Shape::Step { center: Pt::new(222.0, 460.0), number: 3 });
+    add(
+        &mut doc,
+        Shape::Arrow { from: Pt::new(1052.0, 624.0), to: Pt::new(992.0, 586.0), heads: ArrowHeads::End, bend: 0.0, head: Default::default() },
+    );
+    add(&mut doc, Shape::step(Pt::new(164.0, 130.0), 1));
+    add(&mut doc, Shape::step(Pt::new(504.0, 86.0), 2));
+    add(&mut doc, Shape::step(Pt::new(222.0, 460.0), 3));
     let callout = add(
         &mut doc,
         Shape::Callout {
@@ -338,6 +341,7 @@ fn picture_editor(settings: &EditorSettings) -> Result<Editor, String> {
             tail: Pt::new(618.0, 284.0),
             text: "Saturday was the busiest day".into(),
             form: CalloutForm::Rounded,
+            tails: Vec::new(),
         },
     );
     ed.session.replace(doc);

@@ -5,11 +5,14 @@
 //! Parameters are JSON and can come from anywhere (a script, the command line): every one is
 //! checked, and a command given nonsense returns an error and changes nothing.
 
-use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Order, Pt, Raster, Rect, Shape, ShapeOptions, Style};
-use screengrabcraft_render::effects;
+use screengrabcraft_model::{Color, Document, Gradient, GradientKind, Kind, Object, ObjectId, Order, Pt, Rect, Shape, ShapeOptions, Style};
 use screengrabcraft_render::matte::{self, Region};
+use screengrabcraft_render::{effects, region};
 use serde_json::{Value, json};
 
+use crate::arrange;
+use crate::compose;
+use crate::fx;
 use crate::session::Session;
 use crate::{EngineError, Result};
 
@@ -91,7 +94,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Add Annotation",
         "Annotate",
         None,
-        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?}, stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
+        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}} (both also "bend"?: 0.3, how far the middle bows to the left of the way it points as a share of its length, -1.5 to 1.5; an arrow also "head"?: "notched"|"triangle"|"open"|"dot"|"bar"), boxes {"rect":{"x","y","w","h"}}, polygon {"rect", "sides"?: 3 (3 to 12), "star"?: false} or {"points": [{"x", "y"}, …]} (through points clicked one by one), pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail", and "tails"?: [{"x", "y"}] for more), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"|"plus"|"minus"|"arrowUp"|"arrowDown"|"arrowLeft"|"arrowRight"|"noEntry"|"idea"|"pin"|"flag"|"lock"|"clock"|"search"|"bookmark"|"gear"|"home"|"mail"|"pencil"|"happy"|"laughing"|"wink"|"neutral"|"sad"|"surprised"|"angry"|"love"|"cool"}"##,
         always,
         add_object
     ),
@@ -109,7 +112,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Change Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, …}}"##,
+        r##"{"ids"?: [id], "style": {"stroke"?: "#RRGGBB", "fill"?, "width"?, "opacity"?, "shadow"?, "fontSize"?, "bold"?, "font"?: "a font on the computer by name (empty for the built-in one)", "gradient"?: {"kind": "none"|"linear"|"radial", "to": "#RRGGBB", "angle"?: 90} (the inside from the fill colour to "to"), …}}"##,
         has_selection,
         restyle
     ),
@@ -118,12 +121,94 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Apply Quick Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
+        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true, "bend"?: 0.3, "head"?: "notched"|"triangle"|"open"|"dot"|"bar", "sides"?: 5, "star"?: true, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
         has_selection,
         apply_look
     ),
     cmd!("object.text", "Change Text", "Annotate", None, r#"{"id": id, "text": "…"}"#, has_objects, set_text),
+    cmd!(
+        "object.addTail",
+        "Add a Tail",
+        "Annotate",
+        None,
+        r#"{"id"?: id (default: the callout selected), "at"?: {"x", "y"}} → {"tails": n} — another tail on a callout (8 in all at most), pointing at "at" (default: across from its first)"#,
+        has_objects,
+        add_tail
+    ),
+    cmd!(
+        "object.measure",
+        "Measure",
+        "Annotate",
+        None,
+        r##"{"from": {"x", "y"}, "to": {"x", "y"}, "color"?: "#E53935", "width"?: 2 (1 to 20), "fontSize"?: 16} → {"ids", "length", "text"} — a dimension line between the two points (a bar at each end) and its length in pixels on a label beside it, grouped and selected"##,
+        always,
+        crate::measure::measure
+    ),
+    cmd!(
+        "object.removeTail",
+        "Remove a Tail",
+        "Annotate",
+        None,
+        r#"{"id"?: id (default: the callout selected), "index"?: n (of its other tails, from 0; default: the last)} → {"tails": n}"#,
+        has_objects,
+        remove_tail
+    ),
     cmd!("object.order", "Arrange", "Annotate", None, r#"{"to": "front"|"back"|"forward"|"backward", "ids"?: [id]}"#, has_selection, order),
+    cmd!(
+        "object.rotate",
+        "Rotate",
+        "Annotate",
+        None,
+        r#"{"degrees": 15, "ids"?: [id]} turns them by that much round the middle of them all (the way a clock goes), or {"angle": 0} turns each box to that angle round its own middle. Boxes keep their turn; lines, arrows and strokes have their points turned; blur, pixelate, spotlight and magnify stay square"#,
+        has_selection,
+        arrange::rotate
+    ),
+    cmd!(
+        "object.group",
+        "Group",
+        "Annotate",
+        Some("Ctrl+G"),
+        r#"{"ids"?: [id]} (two or more) → {"group": n}: selected, moved, turned and lined up as one"#,
+        has_selection,
+        arrange::group
+    ),
+    cmd!("object.ungroup", "Ungroup", "Annotate", Some("Ctrl+Shift+G"), r#"{"ids"?: [id]} → {"ungrouped": n}"#, has_selection, arrange::ungroup),
+    cmd!(
+        "object.align",
+        "Align",
+        "Annotate",
+        None,
+        r#"{"to": "left"|"center"|"right"|"top"|"middle"|"bottom", "ids"?: [id], "picture"?: false} — on the box round them all (a group as one); one alone, or with "picture", on the picture"#,
+        has_selection,
+        arrange::align
+    ),
+    cmd!(
+        "object.distribute",
+        "Distribute",
+        "Annotate",
+        None,
+        r#"{"horizontal"?: true, "ids"?: [id]} — three or more (a group as one) spread out evenly across (or down), the first and the last staying"#,
+        has_selection,
+        arrange::distribute
+    ),
+    cmd!(
+        "object.flip",
+        "Flip Annotations",
+        "Annotate",
+        None,
+        r#"{"horizontal"?: true, "ids"?: [id]} — mirrored round the middle of them all; words and pictures still read the right way round"#,
+        has_selection,
+        arrange::flip
+    ),
+    cmd!(
+        "edit.selectKind",
+        "Select All of a Kind",
+        "Edit",
+        None,
+        r#"{"kind"?: "arrow"|"line"|"rect"|"ellipse"|"polygon"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp"|"image"} (default: the kinds selected) → {"selected": n}"#,
+        has_objects,
+        arrange::select_kind
+    ),
     cmd!(
         "object.flatten",
         "Flatten",
@@ -138,7 +223,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Move Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — takes that area out of the picture as a placed picture, selected, leaving it see-through; returns {"id": id}"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: "rect"|"ellipse"|"freehand"|"wand", "points"?: [{"x", "y"}] (freehand), "seed"?: {"x", "y"}, "tolerance"?: 32, "contiguous"?: true (wand), "invert"?: false, "fill"?: false} — takes that part out of the picture as a placed picture, selected, leaving it see-through (with "fill", filled from round it); returns {"id": id}"#,
         always,
         lift
     ),
@@ -147,11 +232,55 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Delete Area",
         "Image",
         None,
-        r#"{"x": 0, "y": 0, "w": 100, "h": 100} — makes that area of the picture see-through"#,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false, "fill"?: false} (as image.lift) — makes that part of the picture see-through, or with "fill" fills it from round it (takes something out of the picture)"#,
         always,
         erase
     ),
-    cmd!("image.crop", "Crop", "Image", None, r#"{"x": 0, "y": 0, "w": 100, "h": 100}"#, always, crop),
+    cmd!(
+        "image.crop",
+        "Crop",
+        "Image",
+        None,
+        r#"{"x": 0, "y": 0, "w": 100, "h": 100, "shape"?: …, "invert"?: false} (as image.lift: a shape is cropped to the box round it, see-through outside it)"#,
+        always,
+        crop
+    ),
+    cmd!(
+        "image.hideDetails",
+        "Hide Personal Details",
+        "Image",
+        None,
+        r##"{"lines"?: [{"text": "…", "rect": {"x", "y", "w", "h"}, "words"?: [{"text", "rect"}]}] (the text read off the picture, in its pixels; without them the text reader the host lent reads the picture as shown), "find"?: ["email", "phone", "card", "address"] (default: all four), "cover"?: "blur"|"pixelate"|"box", "color"?: "#000000" (the box's), "area"?: {"x", "y", "w", "h"} (only there), "select"?: true} → {"hidden": n, "ids": [id], "email": n, "phone": n, "card": n, "address": n, "lines": n} — each email address, phone number, card number (Luhn's check) and line like a postal address found is covered by an annotation of its own, to move or delete. Faces aren't found"##,
+        always,
+        crate::details::hide
+    ),
+    cmd!(
+        "image.editText",
+        "Edit Text in the Picture",
+        "Image",
+        None,
+        r##"{"line": {"text": "…", "rect": {"x", "y", "w", "h"}} (a line read off the picture, in its pixels), "text"?: "the new words (default: the line's)", "color"?: "#RRGGBB" (the letters'; default: found), "background"?: "#RRGGBB" (default: the colour round the line), "fontSize"?: px (default: as tall as the line's letters), "font"?: "a font on the computer", "bold"?: false} → {"cover": id, "text": id, "fontSize", "color", "background"} — the line covered with its background's colour and a text annotation put in its place, its letters where the old ones were, selected"##,
+        always,
+        crate::edit_text::edit_text
+    ),
+    cmd!(
+        "image.simplify",
+        "Simplify",
+        "Image",
+        None,
+        r##"{"tolerance"?: 12 (0 to 64 a channel: how far apart neighbouring pixels of one area may be), "lines"?: [{"text", "rect", "words"?}] (the lines of text read; without them the reader the host lent reads them, unless "read" is false, else they are found from the marks), "read"?: true, "area"?: {"x", "y", "w", "h"}, "background"?: true, "group"?: true} → {"ids": [id], "blocks": n, "bars": n, "marks": n} — the picture's parts drawn over it as plain shapes under the other annotations: a box of its background's colour, flat boxes for areas of one colour, small boxes for icons and grey bars for lines of text, as one group"##,
+        always,
+        crate::simplify::simplify
+    ),
+    cmd!(
+        "image.eraseStroke",
+        "Erase",
+        "Image",
+        None,
+        r##"{"points": [{"x", "y"}], "width"?: 20, "color"?: "#RRGGBB"} — the eraser: what the stroke passes over becomes see-through (or the colour)"##,
+        always,
+        erase_stroke
+    ),
     cmd!(
         "image.resize",
         "Resize Image",
@@ -170,9 +299,35 @@ pub static COMMANDS: &[CommandSpec] = &[
         always,
         canvas
     ),
-    cmd!("image.rotate", "Rotate", "Image", None, r#"{"degrees": 90|180|270}"#, always, rotate),
+    cmd!(
+        "image.rotate",
+        "Rotate",
+        "Image",
+        None,
+        r##"{"degrees": 90 (clockwise, any angle), "color"?: "#FFFFFF" (the corners round a picture turned by other than quarter turns; see-through when not given)} — the annotations turn with it"##,
+        always,
+        rotate
+    ),
     cmd!("image.flip", "Flip", "Image", None, r#"{"horizontal": true}"#, always, flip),
     cmd!("image.trim", "Trim Borders", "Image", None, r#"{"tolerance"?: 8}"#, always, trim),
+    cmd!(
+        "image.combine",
+        "Combine Pictures",
+        "Image",
+        None,
+        r##"{"layout"?: "across"|"down"|"grid", "columns"?: 2 (grid), "gap"?: 16 (0 to 400 px), "background"?: "#FFFFFF"} — this picture and the ones the host lent (the command line's --picture) side by side, stacked or in a grid, on one picture; the annotations stay on this one"##,
+        always,
+        compose::combine
+    ),
+    cmd!(
+        "image.template",
+        "Template",
+        "Image",
+        None,
+        r##"{"layout"?: "stepsAcross"|"stepsDown"|"beforeAfter"|"grid", "title"?: "…", "steps"?: ["the words of each step"], "background"?: "#F4F6FA", "accent"?: "#1E88E5", "size"?: 480} — this picture (as shown) and the ones lent, laid out on a page with a title, step numbers and their words, all annotations to change"##,
+        always,
+        compose::template
+    ),
     cmd!(
         "image.cutOut",
         "Cut Out",
@@ -187,7 +342,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Fill",
         "Image",
         None,
-        r##"{"x": px, "y": px, "color": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 32} → {"filled": pixels} — the area round the pixel at x, y that is within tolerance (0 to 255 a channel) of its colour becomes the colour (a transparent one clears it)"##,
+        r##"{"x": px, "y": px, "color": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 32, "gradient"?: {"kind": "linear"|"radial", "to": "#RRGGBB", "angle"?: 90 (linear: 0 left to right, 90 top to bottom)}} → {"filled": pixels} — the area round the pixel at x, y that is within tolerance (0 to 255 a channel) of its colour becomes the colour (a transparent one clears it), or a gradient from it to "to" across the area"##,
         always,
         fill_area
     ),
@@ -249,20 +404,127 @@ pub static COMMANDS: &[CommandSpec] = &[
         torn
     ),
     cmd!("effect.roundCorners", "Round Corners", "Effects", None, r#"{"radius"?: 16}"#, always, round),
-    cmd!("effect.grayscale", "Grayscale", "Effects", None, "{}", always, |s, _| {
-        s.doc.base = effects::grayscale(&s.doc.base);
-        Ok(Value::Null)
-    }),
-    cmd!("effect.invert", "Invert Colors", "Effects", None, "{}", always, |s, _| {
-        s.doc.base = effects::invert(&s.doc.base);
-        Ok(Value::Null)
-    }),
-    cmd!("effect.brightness", "Brightness and Contrast", "Effects", None, r#"{"brightness"?: 0, "contrast"?: 0} (-100 to 100)"#, always, |s, p| {
-        let b = num(p, "brightness").unwrap_or(0.0);
-        let c = num(p, "contrast").unwrap_or(0.0);
-        s.doc.base = effects::brightness_contrast(&s.doc.base, b, c);
-        Ok(Value::Null)
-    }),
+    cmd!(
+        "effect.wavyEdge",
+        "Wavy Edge",
+        "Effects",
+        None,
+        r#"{"top"?: false, "right"?: false, "bottom"?: true, "left"?: false, "depth"?: 10 (2 to 100), "length"?: 40 (8 to 400, from crest to crest)}"#,
+        always,
+        fx::wavy
+    ),
+    cmd!(
+        "effect.fadedEdge",
+        "Faded Edge",
+        "Effects",
+        None,
+        r#"{"top"?: true, "right"?: true, "bottom"?: true, "left"?: true, "width"?: 30 (2 to 400)} — the picture fades away to see-through at those sides"#,
+        always,
+        fx::faded
+    ),
+    cmd!(
+        "effect.bevel",
+        "Bevel",
+        "Effects",
+        None,
+        r#"{"width"?: 8 (1 to 100), "strength"?: 50 (0 to 100)} — a raised edge, lit from the top left"#,
+        always,
+        fx::bevel
+    ),
+    cmd!(
+        "effect.perspective",
+        "Perspective",
+        "Effects",
+        None,
+        r#"{"horizontal"?: 30, "vertical"?: 0} (-100 to 100) — tilts the picture away: the right side (the left below nought), the bottom (the top); the annotations move with it"#,
+        always,
+        fx::perspective
+    ),
+    cmd!(
+        "effect.pageCurl",
+        "Page Curl",
+        "Effects",
+        None,
+        r#"{"corner"?: "bottomRight"|"bottomLeft"|"topRight"|"topLeft", "size"?: 20 (5 to 60, hundredths of the shorter side)}"#,
+        always,
+        fx::page_curl
+    ),
+    cmd!(
+        "effect.reflection",
+        "Reflection",
+        "Effects",
+        None,
+        r#"{"height"?: 35 (5 to 100, hundredths of the picture's height), "opacity"?: 40 (0 to 100), "gap"?: 0 (0 to 200 px)} — the picture grows downwards to hold it"#,
+        always,
+        fx::reflection
+    ),
+    cmd!("effect.grayscale", "Grayscale", "Effects", None, r#"{"area"?: {"x", "y", "w", "h"}} (default: all of the picture)"#, always, fx::grayscale),
+    cmd!("effect.invert", "Invert Colors", "Effects", None, r#"{"area"?: {"x", "y", "w", "h"}}"#, always, fx::invert),
+    cmd!("effect.sepia", "Sepia", "Effects", None, r#"{"amount"?: 100 (0 to 100), "area"?: {"x", "y", "w", "h"}}"#, always, fx::sepia),
+    cmd!(
+        "effect.brightness",
+        "Brightness and Contrast",
+        "Effects",
+        None,
+        r#"{"brightness"?: 0, "contrast"?: 0 (-100 to 100), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::brightness
+    ),
+    cmd!(
+        "effect.hueSaturation",
+        "Hue, Saturation and Gamma",
+        "Effects",
+        None,
+        r#"{"hue"?: 0 (-180 to 180 degrees round the colour wheel), "saturation"?: 0, "lightness"?: 0 (-100 to 100), "gamma"?: 1 (0.2 to 5; above 1 lightens the mid-tones), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::hue_saturation
+    ),
+    cmd!(
+        "effect.replaceColor",
+        "Replace a Colour",
+        "Effects",
+        None,
+        r##"{"color"?: "#RRGGBB" (or the pixel at x, y), "x"?: px, "y"?: px, "with": "#RRGGBB"|"#RRGGBBAA", "tolerance"?: 24 (0 to 255 a channel), "contiguous"?: false, "area"?: {"x", "y", "w", "h"}} → {"replaced": pixels, "softened": pixels} — the colour, and the colours that close to it, become `with` everywhere, or only where they join x, y; the smooth edges round them are mixed with the new colour instead of the old"##,
+        always,
+        fx::replace_color
+    ),
+    cmd!(
+        "effect.sharpen",
+        "Sharpen",
+        "Effects",
+        None,
+        r#"{"amount"?: 60 (0 to 300), "radius"?: 1.5 (0.5 to 10 px), "area"?: {"x", "y", "w", "h"}}"#,
+        always,
+        fx::sharpen
+    ),
+    cmd!("effect.blur", "Blur", "Effects", None, r#"{"radius"?: 4 (0.5 to 100 px), "area"?: {"x", "y", "w", "h"}}"#, always, fx::blur),
+    cmd!(
+        "effect.watermark",
+        "Watermark",
+        "Effects",
+        None,
+        r##"{"text"?: "…" or "picture"?: 0 (a picture the host lent: the editor's chosen one, the command line's --picture), "place"?: "center"|"tiled"|"topLeft"|"top"|"topRight"|"left"|"right"|"bottomLeft"|"bottom"|"bottomRight", "size"?: 30 (2 to 100, hundredths of the picture's width), "angle"?: 0 (-90 to 90), "opacity"?: 30 (0 to 100), "under"?: false (under: on the plain parts only, never over words and lines), "color"?: "#FFFFFF", "bold"?: true, "font"?: "a font on the computer"}"##,
+        always,
+        fx::watermark
+    ),
+    cmd!(
+        "effect.captureDetails",
+        "Capture Details",
+        "Effects",
+        None,
+        r##"{"time"?: true|false|"…", "program"?: true|false|"…", "size"?: true, "place"?: "bottomRight"|"bottomLeft"|"topRight"|"topLeft"|"below", "fontSize"?: 14, "color"?: "#FFFFFF", "background"?: "#000000A0"} — writes when it was captured, what of, and its size on it (true: as the document knows them; text: written as given); "below" adds a strip under the picture → {"text"}"##,
+        always,
+        fx::capture_details
+    ),
+    cmd!(
+        "effect.preset",
+        "Effect Preset",
+        "Effects",
+        None,
+        r#"{"steps": [{"effect": "effect.border", "params"?: {…}}, …] (up to 8 of the picture's effects, one after another) or {"name": "Soft Shadow"} (a ready-made preset: Soft Shadow, Photo Frame, Rounded Card, Torn Paper, Old Photo, Faded Edges, Thin Line, Black and White)} → {"applied": n} — one undo step"#,
+        always,
+        apply_preset
+    ),
     CommandSpec {
         id: "doc.info",
         label: "Document Information",
@@ -290,7 +552,7 @@ pub fn find(id: &str) -> Option<&'static CommandSpec> {
 
 // ---- parameters ----
 
-fn num(p: &Value, key: &str) -> Option<f32> {
+pub(crate) fn num(p: &Value, key: &str) -> Option<f32> {
     p.get(key).and_then(Value::as_f64).map(|v| v as f32).filter(|v| v.is_finite())
 }
 
@@ -306,7 +568,7 @@ fn opt(p: &Value, key: &str) -> Result<Option<f32>> {
     }
 }
 
-fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
+pub(crate) fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(v) => {
@@ -316,11 +578,11 @@ fn int(p: &Value, key: &str, default: i64, lo: i64, hi: i64) -> Result<i64> {
     }
 }
 
-fn boolean(p: &Value, key: &str, default: bool) -> bool {
+pub(crate) fn boolean(p: &Value, key: &str, default: bool) -> bool {
     p.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
-fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
+pub(crate) fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
     match p.get(key) {
         None | Some(Value::Null) => Ok(default),
         Some(Value::String(s)) => Color::from_hex(s).ok_or_else(|| EngineError::Params(format!("`{key}` must be a colour like #RRGGBB"))),
@@ -328,8 +590,39 @@ fn color(p: &Value, key: &str, default: Color) -> Result<Color> {
     }
 }
 
+/// A gradient: none when not given; otherwise its kind, the colour it ends in and, for a linear
+/// one, its angle. Nonsense is an error.
+pub(crate) fn gradient_param(p: &Value) -> Result<Gradient> {
+    let g = match p.get("gradient") {
+        None | Some(Value::Null) => return Ok(Gradient::default()),
+        Some(g @ Value::Object(_)) => g,
+        Some(_) => {
+            return Err(EngineError::Params("`gradient` is {\"kind\": \"linear\"|\"radial\", \"to\": \"#RRGGBB\", \"angle\"?: 90}".to_string()));
+        }
+    };
+    let kind = match g.get("kind").and_then(Value::as_str) {
+        Some(k) => GradientKind::ALL
+            .into_iter()
+            .find(|g| g.name().eq_ignore_ascii_case(k.trim()))
+            .ok_or_else(|| EngineError::Params("a gradient's `kind` is \"linear\", \"radial\" or \"none\"".to_string()))?,
+        None => return Err(EngineError::Params("a gradient's `kind` is \"linear\", \"radial\" or \"none\"".to_string())),
+    };
+    if kind == GradientKind::None {
+        return Ok(Gradient::default());
+    }
+    if g.get("to").is_none_or(Value::is_null) {
+        return Err(EngineError::Params("a gradient's `to` is the colour it ends in, like #RRGGBB".to_string()));
+    }
+    let to = color(g, "to", Color::WHITE)?;
+    let angle = match g.get("angle") {
+        None | Some(Value::Null) => Gradient::default().angle,
+        Some(_) => num(g, "angle").ok_or_else(|| EngineError::Params("a gradient's `angle` is in degrees".to_string()))?,
+    };
+    Ok(Gradient { kind, to, angle }.clamped())
+}
+
 /// The ids a command acts on: `ids` if given, else the selection (unless `required`).
-fn ids_param(s: &Session, p: &Value, default_selection: bool) -> Result<Vec<ObjectId>> {
+pub(crate) fn ids_param(s: &Session, p: &Value, default_selection: bool) -> Result<Vec<ObjectId>> {
     match p.get("ids") {
         None | Some(Value::Null) if default_selection => Ok(s.selected()),
         None | Some(Value::Null) => Err(EngineError::Params("`ids` is a list of annotation ids".to_string())),
@@ -387,14 +680,29 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
     let further = |a: f32, b: f32| if a.abs() >= b.abs() { a } else { b };
     let d = Pt::new(further(on.x, back.x), further(on.y, back.y));
     let mut new_ids = Vec::new();
+    // Copies of a group are a group of their own.
+    let mut groups: Vec<(u64, u64)> = Vec::new();
     for id in ids {
         if let Some(o) = s.doc.get(id).cloned() {
             let mut shape = o.shape.clone();
             shape.translate(d);
-            if let Shape::Step { number, .. } = &mut shape {
-                *number = s.doc.next_step_number();
+            if let Shape::Step { number, labels, .. } = &mut shape {
+                *number = s.doc.next_step_number(*labels);
             }
-            new_ids.push(s.doc.add(shape, o.style)?);
+            let copy = s.doc.add(shape, o.style)?;
+            let group = o.group.map(|g| match groups.iter().find(|(old, _)| *old == g) {
+                Some((_, new)) => *new,
+                None => {
+                    let new = s.doc.next_group();
+                    groups.push((g, new));
+                    new
+                }
+            });
+            if let Some(c) = s.doc.get_mut(copy) {
+                c.rotation = o.rotation;
+                c.group = group;
+            }
+            new_ids.push(copy);
         }
     }
     s.selection = new_ids.clone();
@@ -428,7 +736,24 @@ pub fn parse_object(v: &Value) -> Result<(Shape, Style)> {
     if fields.get("type").and_then(Value::as_str) == Some("step") && !fields.contains_key("number") {
         fields.insert("number".to_string(), json!(0));
     }
-    let shape: Shape = serde_json::from_value(Value::Object(fields)).map_err(|e| EngineError::Params(format!("object: {e}")))?;
+    let points = match fields.get("points") {
+        Some(Value::Array(a)) if fields.get("type").and_then(Value::as_str) == Some("polygon") => Some(a),
+        _ => None,
+    };
+    let shape: Shape = match points {
+        // A polygon through points clicked one by one, on the picture.
+        Some(a) => {
+            let pts = a
+                .iter()
+                .take(screengrabcraft_model::object::MAX_CORNERS)
+                .map(|v| serde_json::from_value::<Pt>(v.clone()))
+                .collect::<std::result::Result<Vec<Pt>, _>>()
+                .map_err(|_| EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string()))?;
+            screengrabcraft_model::object::polygon_through(&pts)
+                .ok_or_else(|| EngineError::Params("a polygon of points needs three or more, apart".to_string()))?
+        }
+        None => serde_json::from_value(Value::Object(fields)).map_err(|e| EngineError::Params(format!("object: {e}")))?,
+    };
     let kind = shape.kind();
     let style = match style_patch {
         Some(p) => merge_style(&kind.default_style(), &p)?,
@@ -440,10 +765,10 @@ pub fn parse_object(v: &Value) -> Result<(Shape, Style)> {
 fn add_object(s: &mut Session, p: &Value) -> Result<Value> {
     let v = p.get("object").ok_or_else(|| EngineError::Params("`object` is required".to_string()))?;
     let (mut shape, style) = parse_object(v)?;
-    if let Shape::Step { number, .. } = &mut shape
+    if let Shape::Step { number, labels, .. } = &mut shape
         && *number == 0
     {
-        *number = s.doc.next_step_number();
+        *number = s.doc.next_step_number(*labels);
     }
     let id = s.doc.add(shape, style)?;
     s.selection = vec![id];
@@ -562,6 +887,55 @@ fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
     }
 }
 
+/// The callout a tail command is for: `id`, or the one callout selected.
+fn callout_param(s: &Session, p: &Value) -> Result<ObjectId> {
+    let id = match p.get("id") {
+        None | Some(Value::Null) => match s.selected().as_slice() {
+            [one] => *one,
+            _ => return Err(EngineError::Params("give the `id` of a callout, or select one".to_string())),
+        },
+        Some(_) => id_param(s, p)?,
+    };
+    match s.doc.get(id).map(|o| &o.shape) {
+        Some(Shape::Callout { .. }) => Ok(id),
+        _ => Err(EngineError::Params(format!("annotation {} is no callout", id.0))),
+    }
+}
+
+fn add_tail(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = callout_param(s, p)?;
+    let picture = s.doc.bounds();
+    let at = match p.get("at") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(serde_json::from_value::<Pt>(v.clone()).map_err(|_| EngineError::Params("`at` is {\"x\", \"y\"}".to_string()))?.finite()),
+    };
+    let Some(Shape::Callout { rect, tail, tails, .. }) = s.doc.get_mut(id).map(|o| &mut o.shape) else { return Err(EngineError::NoObject(id.0)) };
+    if tails.len() + 1 >= screengrabcraft_model::object::MAX_TAILS {
+        return Err(EngineError::Failed(format!("a callout has {} tails at most", screengrabcraft_model::object::MAX_TAILS)));
+    }
+    // Across from the first: mirrored over the box's middle, or beside it when that's the same spot.
+    let c = rect.center();
+    let across = Pt::new(2.0 * c.x - tail.x, tail.y);
+    let across = if across.distance(*tail) < 8.0 { Pt::new(tail.x + rect.w * 0.6, tail.y) } else { across };
+    tails.push(picture.nearest(at.unwrap_or(across)));
+    Ok(json!({ "tails": tails.len() + 1 }))
+}
+
+fn remove_tail(s: &mut Session, p: &Value) -> Result<Value> {
+    let id = callout_param(s, p)?;
+    let index = match p.get("index") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_u64().ok_or_else(|| EngineError::Params("`index` is a number from 0".to_string()))? as usize),
+    };
+    let Some(Shape::Callout { tails, .. }) = s.doc.get_mut(id).map(|o| &mut o.shape) else { return Err(EngineError::NoObject(id.0)) };
+    let i = index.unwrap_or(tails.len().saturating_sub(1));
+    if i >= tails.len() {
+        return Err(EngineError::Params("the callout has no such tail (its first stays)".to_string()));
+    }
+    tails.remove(i);
+    Ok(json!({ "tails": tails.len() + 1 }))
+}
+
 fn order(s: &mut Session, p: &Value) -> Result<Value> {
     let ids = ids_param(s, p, true)?;
     let to: Order = serde_json::from_value(p.get("to").cloned().unwrap_or(Value::Null))
@@ -594,35 +968,42 @@ fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// The part of the picture a command works on: the box `x`, `y`, `w`, `h`, or with `"shape"`
+/// an ellipse in that box, a freehand outline (`"points"`) or the pixels of a colour (the magic
+/// wand: `"seed"`, `"tolerance"`, `"contiguous"`); with `"invert"` everything else.
+pub(crate) fn region_param(s: &Session, p: &Value) -> Result<region::Region> {
+    let shape = match p.get("shape") {
+        None | Some(Value::Null) => region::AreaShape::Rect,
+        Some(_) => serde_json::from_value::<region::AreaShape>(p.clone())
+            .map_err(|e| {
+                EngineError::Params(format!("`shape` is \"rect\", \"ellipse\", \"freehand\" (with \"points\") or \"wand\" (with \"seed\"): {e}"))
+            })?
+            .sanitized(),
+    };
+    let area = match shape {
+        region::AreaShape::Rect | region::AreaShape::Ellipse => Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite(),
+        _ => Rect::default(),
+    };
+    region::region(&s.doc.base, area, &shape, boolean(p, "invert", false))
+        .ok_or_else(|| EngineError::Params("the area is outside the picture, or nothing is in it".to_string()))
+}
+
+fn lift(s: &mut Session, p: &Value) -> Result<Value> {
+    let reg = region_param(s, p)?;
+    let piece = region::piece(&s.doc.base, &reg).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    let key = s.doc.add_image(piece)?;
+    s.doc.base = if boolean(p, "fill", false) { region::fill_around(&s.doc.base, &reg) } else { region::erase(&s.doc.base, &reg) };
+    // Where it was, looking as it did (no shadow, no border).
+    let style = Style { shadow: false, ..Kind::Image.default_style() };
+    let id = s.doc.add(Shape::Image { rect: reg.rect(), image: key }, style)?;
+    s.selection = vec![id];
+    Ok(json!({ "id": id.0 }))
+}
+
 /// An area of the picture from `x`, `y`, `w`, `h`, in whole pixels inside it.
 fn area_param(s: &Session, p: &Value) -> Result<(u32, u32, u32, u32)> {
     let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
     area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))
-}
-
-/// Makes an area of a picture see-through.
-fn clear_area(r: &mut Raster, x: u32, y: u32, w: u32, h: u32) {
-    let width = r.width() as usize;
-    let px = r.pixels_mut();
-    for row in y..y.saturating_add(h) {
-        let Some(start) = (row as usize).checked_mul(width).and_then(|v| v.checked_add(x as usize)).and_then(|v| v.checked_mul(4)) else { return };
-        let Some(end) = (w as usize).checked_mul(4).and_then(|n| start.checked_add(n)) else { return };
-        if let Some(line) = px.get_mut(start..end) {
-            line.fill(0);
-        }
-    }
-}
-
-fn lift(s: &mut Session, p: &Value) -> Result<Value> {
-    let (x, y, w, h) = area_param(s, p)?;
-    let piece = s.doc.base.crop(x, y, w, h).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
-    let key = s.doc.add_image(piece)?;
-    clear_area(&mut s.doc.base, x, y, w, h);
-    // Where it was, looking as it did (no shadow, no border).
-    let style = Style { shadow: false, ..Kind::Image.default_style() };
-    let id = s.doc.add(Shape::Image { rect: Rect::new(x as f32, y as f32, w as f32, h as f32), image: key }, style)?;
-    s.selection = vec![id];
-    Ok(json!({ "id": id.0 }))
 }
 
 /// The QR codes in the picture as shown (or in an area of it), where each is on the picture.
@@ -668,8 +1049,26 @@ fn make_qr(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn erase(s: &mut Session, p: &Value) -> Result<Value> {
-    let (x, y, w, h) = area_param(s, p)?;
-    clear_area(&mut s.doc.base, x, y, w, h);
+    let reg = region_param(s, p)?;
+    s.doc.base = if boolean(p, "fill", false) { region::fill_around(&s.doc.base, &reg) } else { region::erase(&s.doc.base, &reg) };
+    Ok(Value::Null)
+}
+
+/// The eraser: what a stroke passes over made see-through, or a colour.
+fn erase_stroke(s: &mut Session, p: &Value) -> Result<Value> {
+    let points: Vec<Pt> = match p.get("points") {
+        Some(Value::Array(a)) => {
+            a.iter().take(region::MAX_OUTLINE).map(|v| serde_json::from_value::<Pt>(v.clone())).collect::<std::result::Result<_, _>>()
+        }
+        _ => return Err(EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string())),
+    }
+    .map_err(|_| EngineError::Params("`points` is a list of {\"x\", \"y\"}".to_string()))?;
+    let width = num(p, "width").unwrap_or(20.0);
+    let colour = color(p, "color", Color::TRANSPARENT)?;
+    let Some(reg) = region::stroke(s.doc.width(), s.doc.height(), &points, width)? else {
+        return Err(EngineError::Params("the stroke doesn't pass over the picture".to_string()));
+    };
+    s.doc.base = region::paint(&s.doc.base, &reg, colour);
     Ok(Value::Null)
 }
 
@@ -680,12 +1079,11 @@ fn shift_all(doc: &mut Document, dx: f32, dy: f32) {
     doc.map_objects(&|q| Pt::new(q.x + dx, q.y + dy), 1.0);
 }
 
+/// Crop: to the box (or the box round a shape, see-through outside it).
 fn crop(s: &mut Session, p: &Value) -> Result<Value> {
-    let area = Rect::new(need(p, "x")?, need(p, "y")?, need(p, "w")?, need(p, "h")?).finite();
-    let (x, y, _, _) =
-        area.pixel_bounds(s.doc.width(), s.doc.height()).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
-    s.doc.base = effects::crop(&s.doc.base, area)?;
-    shift_all(&mut s.doc, -(x as f32), -(y as f32));
+    let reg = region_param(s, p)?;
+    s.doc.base = region::piece(&s.doc.base, &reg).ok_or_else(|| EngineError::Params("the area is outside the picture".to_string()))?;
+    shift_all(&mut s.doc, -(reg.x as f32), -(reg.y as f32));
     Ok(json!({ "width": s.doc.width(), "height": s.doc.height() }))
 }
 
@@ -750,11 +1148,25 @@ fn canvas(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn rotate(s: &mut Session, p: &Value) -> Result<Value> {
-    let deg = int(p, "degrees", 90, -36_000, 36_000)?;
-    if deg % 90 != 0 {
-        return Err(EngineError::Params("`degrees` is a multiple of 90".to_string()));
+    let deg = match p.get("degrees") {
+        None | Some(Value::Null) => 90.0,
+        Some(_) => num(p, "degrees").ok_or_else(|| EngineError::Params("`degrees` is how far to turn it, clockwise".to_string()))?,
     }
-    let quarters = (deg / 90).rem_euclid(4) as u32;
+    .rem_euclid(360.0);
+    let colour = color(p, "color", Color::TRANSPARENT)?;
+    let quarter = (deg / 90.0).round();
+    if (deg - quarter * 90.0).abs() > 0.001 {
+        // Any other angle: the picture grows to hold the turned one, and every annotation turns
+        // round its middle with it.
+        let c = s.doc.bounds().center();
+        let (picture, shift) = effects::rotate_by(&s.doc.base, deg, colour)?;
+        let ids: Vec<ObjectId> = s.doc.objects.iter().map(|o| o.id).collect();
+        s.doc.rotate_objects(&ids, deg, c);
+        s.doc.map_objects(&|q| q.add(shift), 1.0);
+        s.doc.base = picture;
+        return Ok(Value::Null);
+    }
+    let quarters = (quarter as i64).rem_euclid(4) as u32;
     let (w, h) = (s.doc.width() as f32, s.doc.height() as f32);
     s.doc.base = effects::rotate(&s.doc.base, quarters)?;
     let f: Box<dyn Fn(Pt) -> Pt> = match quarters {
@@ -765,6 +1177,45 @@ fn rotate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     s.doc.map_objects(&*f, 1.0);
     Ok(Value::Null)
+}
+
+/// Several effects one after another, as one step: the steps given, or a ready-made preset's.
+fn apply_preset(s: &mut Session, p: &Value) -> Result<Value> {
+    use screengrabcraft_model::presets::{self, EffectStep, MAX_STEPS};
+    let steps: Vec<EffectStep> = match (p.get("steps"), p.get("name").and_then(Value::as_str)) {
+        (Some(Value::Array(list)), _) => list
+            .iter()
+            .map(|v| serde_json::from_value::<EffectStep>(v.clone()))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|_| EngineError::Params("each step is {\"effect\": \"effect.…\", \"params\"?: {…}}".to_string()))?,
+        (None | Some(Value::Null), Some(name)) => presets::ready_made()
+            .into_iter()
+            .find(|r| r.name.eq_ignore_ascii_case(name.trim()))
+            .map(|r| r.steps)
+            .ok_or_else(|| EngineError::Params(format!("there is no ready-made preset called {name:?}")))?,
+        _ => return Err(EngineError::Params("give `steps`, or the `name` of a ready-made preset".to_string())),
+    };
+    if steps.is_empty() || steps.len() > MAX_STEPS {
+        return Err(EngineError::Params(format!("a preset has 1 to {MAX_STEPS} steps")));
+    }
+    // Every step is checked before any is run.
+    let mut runs = Vec::with_capacity(steps.len());
+    for step in &steps {
+        let spec = find(&step.effect)
+            .filter(|c| presets::is_effect(c.id))
+            .ok_or_else(|| EngineError::Params(format!("{:?} is not one of the picture's effects", step.effect)))?;
+        let params = match &step.params {
+            Value::Null => json!({}),
+            v @ Value::Object(_) => v.clone(),
+            _ => return Err(EngineError::Params(format!("the parameters of {} are an object", spec.id))),
+        };
+        runs.push((spec, params));
+    }
+    // A step that fails puts the picture back as it was (the session undoes the whole command).
+    for (spec, params) in &runs {
+        (spec.run)(s, params)?;
+    }
+    Ok(json!({ "applied": runs.len() }))
 }
 
 fn flip(s: &mut Session, p: &Value) -> Result<Value> {
@@ -792,7 +1243,8 @@ fn fill_area(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let colour = color(p, "color", Color::TRANSPARENT)?;
     let tolerance = int(p, "tolerance", 32, 0, 255)? as u8;
-    let (picture, filled) = effects::fill(&s.doc.base, x, y, colour, tolerance)?;
+    let gradient = gradient_param(p)?;
+    let (picture, filled) = effects::fill_with(&s.doc.base, x, y, colour, gradient, tolerance)?;
     if filled > 0 {
         s.doc.base = picture;
     }
@@ -830,7 +1282,7 @@ fn remove_solid_background(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// The pixel at `x`, `y`, if they are given.
-fn pixel_param(s: &Session, p: &Value) -> Result<Option<(u32, u32)>> {
+pub(crate) fn pixel_param(s: &Session, p: &Value) -> Result<Option<(u32, u32)>> {
     let given = |k: &str| p.get(k).is_some_and(|v| !v.is_null());
     if !given("x") && !given("y") {
         return Ok(None);

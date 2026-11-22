@@ -4,7 +4,11 @@
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
-use screengrabcraft_model::{ArrowHeads, CalloutForm, Color, Kind, Object, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
+use screengrabcraft_model::object::{MAX_SIDES, MIN_SIDES};
+use screengrabcraft_model::{
+    ArrowHeads, BadgeShape, CalloutForm, Color, FontName, Gradient, GradientKind, HeadShape, Kind, Object, Pt, Rect, Shape, ShapeOptions, StampKind,
+    StepLabels, Style, TailSpot, TextAlign,
+};
 
 use crate::editor::{Editor, Tool};
 use crate::icons::{self, Icon};
@@ -14,6 +18,13 @@ use crate::{from_color32, to_color32};
 
 /// How wide the panes are, usually.
 pub const PANEL_WIDTH: f32 = 272.0;
+
+/// The polygons the Shape tool's picker offers: their names, corners (a star's points) and whether
+/// each is a star.
+const POLYGONS: [(&str, u32, bool); 6] =
+    [("Triangle", 3, false), ("Diamond", 4, false), ("Pentagon", 5, false), ("Hexagon", 6, false), ("Octagon", 8, false), ("Star", 5, true)];
+/// How far the arrow picker's curved arrows bow, as a share of their length.
+const CURVE: f32 = 0.3;
 
 /// Copies onto `target` the fields that differ between `old` and `new`.
 fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
@@ -35,7 +46,9 @@ fn apply_changes(old: &Style, new: &Style, target: &mut Style) {
         align,
         strength,
         text_outline,
-        text_outline_width
+        text_outline_width,
+        font,
+        gradient
     );
 }
 
@@ -126,7 +139,7 @@ fn prop_button(ui: &mut Ui, name: &str, caption: &str, face: &dyn Fn(&egui::Pain
 }
 
 /// A colour button and its menu.
-fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
+pub(crate) fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_none: bool, keep_alpha: bool) -> bool {
     let mut changed = false;
     // A colour taken from the picture with this button's eyedropper.
     if let Some(p) = crate::eyedropper::take(ui.ctx(), name) {
@@ -149,6 +162,95 @@ fn colour_button(ui: &mut Ui, name: &str, caption: &str, c: &mut Color, allow_no
         ui.label(egui::RichText::new(name).strong());
         ui.add_space(4.0);
         changed |= colour_choices(ui, name, c, allow_none, keep_alpha);
+    });
+    changed
+}
+
+/// What the gradient's second colour is called (its button and its eyedropper).
+pub const GRADIENT_TO: &str = "Gradient's second colour";
+
+/// A fill, `from` going on to the gradient's second colour as it does in a shape, painted in `r`.
+fn paint_gradient(p: &egui::Painter, r: egui::Rect, from: Color, g: Gradient) {
+    if g.is_none() {
+        paint_colour(p, r, from);
+        return;
+    }
+    p.rect_filled(r, 4.0, Color32::WHITE);
+    let area = Rect::new(r.left(), r.top(), r.width(), r.height());
+    let at = |q: egui::Pos2| crate::to_color32(from.mix(g.to, g.share(area, Pt::new(q.x, q.y))));
+    // A fan of triangles from the middle: exact for a linear gradient, near enough for a radial one.
+    let ring = [r.left_top(), r.center_top(), r.right_top(), r.right_center(), r.right_bottom(), r.center_bottom(), r.left_bottom(), r.left_center()];
+    let mut mesh = egui::Mesh::default();
+    mesh.colored_vertex(r.center(), at(r.center()));
+    for q in ring {
+        mesh.colored_vertex(q, at(q));
+    }
+    for i in 0..ring.len() as u32 {
+        mesh.add_triangle(0, 1 + i, 1 + (i + 1) % ring.len() as u32);
+    }
+    p.add(egui::Shape::mesh(mesh));
+}
+
+/// How a fill's gradient goes: one colour, linear or radial, its angle, and its two colours
+/// swapped. `from` is the fill colour, which a gradient starts from. True when it changed.
+fn gradient_choices(ui: &mut Ui, from: &mut Color, g: &mut Gradient, stroke: Color) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let before = (*from, *g);
+    ui.label(egui::RichText::new("Gradient").size(12.0).color(t.muted));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+        for kind in GradientKind::ALL {
+            let name = match kind {
+                GradientKind::None => "One colour",
+                GradientKind::Linear => "Linear gradient",
+                GradientKind::Radial => "Radial gradient",
+            };
+            if ui.selectable_label(g.kind == kind, kind.label()).on_hover_text(name).clicked() {
+                g.kind = kind;
+            }
+        }
+    });
+    if !g.is_none() && before.1.is_none() && from.a == 0 {
+        // A gradient from nothing would hardly show: it starts in the outline's colour.
+        *from = if stroke.a > 0 { stroke.with_alpha(255) } else { PALETTE.get(4).copied().unwrap_or(Color::BLACK) };
+    }
+    if g.kind == GradientKind::Linear {
+        ui.add_space(2.0);
+        slider(ui, "Angle", &mut g.angle, 0.0..=359.0, 1.0, "°");
+    }
+    if !g.is_none() && ui.button("Swap the two colours").on_hover_text("The gradient the other way round").clicked() {
+        std::mem::swap(from, &mut g.to);
+    }
+    (*from, *g) != before
+}
+
+/// The fill colour's button, its face showing the gradient when there is one, and its menu: the
+/// colours, then how the gradient goes.
+fn fill_button(ui: &mut Ui, name: &str, caption: &str, s: &mut Style) -> bool {
+    let mut changed = false;
+    if let Some(p) = crate::eyedropper::take(ui.ctx(), name) {
+        s.fill = p;
+        changed = true;
+    }
+    let (shown, g) = (s.fill, s.gradient);
+    let picking = crate::eyedropper::for_button(ui.ctx()).is_some_and(|b| b == name);
+    let resp = prop_button(ui, name, caption, &|p, r| {
+        paint_gradient(p, r, shown, g);
+        p.rect_stroke(r, 4.0, Stroke::new(1.0, Color32::from_black_alpha(50)), StrokeKind::Inside);
+    });
+    if picking {
+        let t = Tokens::get(ui.ctx());
+        ui.painter().rect_stroke(resp.rect.shrink2(vec2(0.0, 8.0)).translate(vec2(0.0, -8.0)), 5.0, Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        ui.set_width(204.0);
+        ui.label(egui::RichText::new(name).strong());
+        ui.add_space(4.0);
+        changed |= colour_choices(ui, name, &mut s.fill, true, false);
+        ui.add_space(4.0);
+        ui.separator();
+        let stroke = s.stroke;
+        changed |= gradient_choices(ui, &mut s.fill, &mut s.gradient, stroke);
     });
     changed
 }
@@ -353,6 +455,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             cut_out_panel(ed, ui);
             return;
         }
+        (None, Tool::Eraser) => {
+            crate::selection::eraser_panel(ed, ui);
+            return;
+        }
         (None, Tool::Fill) => {
             ui.heading("Fill");
             ui.add_space(6.0);
@@ -393,6 +499,10 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
             return;
         }
         (None, Tool::Favorites) => return,
+        (None, Tool::Measure) => {
+            measure_panel(ed, ui);
+            return;
+        }
     };
     let sel = ed.session.selected();
     let title = if sel.len() > 1 {
@@ -404,11 +514,20 @@ fn contents(ed: &mut Editor, ui: &mut Ui) {
     };
     ui.heading(title);
     if sel.is_empty() {
-        ui.label(egui::RichText::new(how_to(kind)).size(12.0).color(t.muted));
+        let how = if ed.tool == Tool::Draw(Kind::Polygon) && ed.polygon_points {
+            "Click each corner on the picture. A double click, a click on the first corner or Enter closes it; Backspace takes the last back."
+        } else {
+            how_to(kind)
+        };
+        ui.label(egui::RichText::new(how).size(12.0).color(t.muted));
     }
     ui.add_space(8.0);
     if kind != Kind::Image {
         quick::section(ed, ui, kind);
+        ui.add_space(8.0);
+    }
+    if kind == Kind::Stamp {
+        crate::stamps::library(ed, ui);
         ui.add_space(8.0);
     }
     // A quick style may just have changed the selection.
@@ -467,7 +586,9 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     ui.heading("Selection");
     ui.add_space(6.0);
-    ui.label("Drag on the picture to select an area of it. Drag inside the area to move that part of the picture.");
+    crate::selection::mode_panel(ed, ui);
+    ui.add_space(6.0);
+    ui.label("Select an area of the picture, then drag inside it to move that part of the picture.");
     ui.add_space(8.0);
     let ctx = ui.ctx().clone();
     let any = ed.area.is_some();
@@ -488,7 +609,25 @@ fn area_panel(ed: &mut Editor, ui: &mut Ui) {
         if ui.button("Select All").on_hover_text("The whole picture (Ctrl+A)").clicked() {
             ed.select_whole_area();
         }
+        if ui.add_enabled(any, egui::Button::new("Invert")).on_hover_text("Everything but the area (Ctrl+Shift+I)").clicked() {
+            ed.invert_area();
+        }
+        if ui
+            .add_enabled(any, egui::Button::new("Fill from Round It"))
+            .on_hover_text("Take what is in the area out of the picture: the colours round it close over it")
+            .clicked()
+        {
+            ed.fill_area_from_round(&ctx);
+        }
     });
+    ui.add_space(8.0);
+    if ui
+        .checkbox(&mut ed.settings.fill_lifted, "Fill where a moved part was")
+        .on_hover_text("A part of the picture dragged away leaves its place filled from the colours round it, not see-through")
+        .changed()
+    {
+        ed.services.save_settings(&ed.settings);
+    }
     ui.add_space(8.0);
     ui.label(
         egui::RichText::new(
@@ -503,10 +642,12 @@ pub(crate) fn how_to(kind: Kind) -> &'static str {
     match kind {
         Kind::Arrow => "Drag on the picture, from where it starts to what it points at. Shift keeps it straight.",
         Kind::Line => "Drag on the picture to draw one. Shift keeps it straight.",
-        Kind::Rect | Kind::Ellipse => "Drag on the picture to draw one. Shift makes it a square or a circle.",
+        Kind::Rect | Kind::Ellipse | Kind::Polygon => {
+            "Drag on the picture to draw one. Shift makes it a square or a circle. Shape picks triangles, polygons and stars."
+        }
         Kind::Text => "Click the picture where the words go, or drag out a box, then type.",
         Kind::Callout => "Click what it's about, or drag out a box, then type. Its tail can be dragged.",
-        Kind::Step => "Click the picture: each click puts the next number there.",
+        Kind::Step => "Click the picture: each click puts the next number there. Shape sets letters, Roman numerals or another badge.",
         Kind::Stamp => "Click the picture to put one there, or drag for its size.",
         Kind::Pen => "Draw on the picture with the button held down.",
         Kind::Highlight => "Drag a box over what should stand out. Its handles resize it after.",
@@ -570,22 +711,33 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
         None => ed.tool_style(kind),
     };
     let mut s = old;
-    let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
+    let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
     let outline = !matches!(kind, Kind::Blur | Kind::Pixelate);
-    let picker = matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Stamp | Kind::Spotlight);
+    let picker = matches!(
+        kind,
+        Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step
+    );
     let shadow = !matches!(kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Highlight);
-    let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Pen | Kind::Callout);
+    let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Polygon | Kind::Pen | Kind::Callout);
     // Text and callouts can have an outline round their letters too.
     let letters = matches!(kind, Kind::Text | Kind::Callout);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = vec2(5.0, 6.0);
         if fill {
             let (name, caption) = if kind == Kind::Text { ("Background colour", "Fill") } else { ("Fill colour", "Fill") };
-            colour_button(ui, name, caption, &mut s.fill, true, false);
+            if kind == Kind::Stamp {
+                // A stamp's fill is its colour: one colour.
+                colour_button(ui, name, caption, &mut s.fill, true, false);
+            } else {
+                fill_button(ui, name, caption, &mut s);
+                if !s.gradient.is_none() {
+                    colour_button(ui, GRADIENT_TO, "To", &mut s.gradient.to, true, false);
+                }
+            }
         }
         if outline {
             let (name, caption) = outline_name(kind);
-            let none = !matches!(kind, Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight | Kind::Rect | Kind::Ellipse);
+            let none = !matches!(kind, Kind::Arrow | Kind::Line | Kind::Pen | Kind::Highlight | Kind::Rect | Kind::Ellipse | Kind::Polygon);
             colour_button(ui, name, caption, &mut s.stroke, none, kind == Kind::Highlight);
         }
         if kind.has_text() {
@@ -622,6 +774,10 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
 
     if kind.has_text() {
         slider(ui, "Text size", &mut s.font_size, 8.0..=120.0, 1.0, " px");
+        if letters {
+            font_menu(ed, ui, &mut s.font);
+            ui.add_space(2.0);
+        }
         if kind != Kind::Step {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -699,24 +855,81 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
 
     if kind == Kind::Step {
         ui.add_space(6.0);
-        if let Some(Shape::Step { number, .. }) = first.map(|o| &o.shape) {
-            let mut n = *number;
+        if let Some(Shape::Step { number, labels, .. }) = first.map(|o| &o.shape) {
+            let (mut n, labels) = (*number, *labels);
             ui.label(egui::RichText::new("Number").size(12.0).color(t.muted));
-            if ui.add(egui::DragValue::new(&mut n).range(0..=9999)).changed() {
-                set_on_selection(ed, &|s| {
-                    if let Shape::Step { number, .. } = s {
-                        *number = n;
-                    }
-                });
-            }
+            ui.horizontal(|ui| {
+                if ui.add(egui::DragValue::new(&mut n).range(0..=9999)).changed() {
+                    set_on_selection(ed, &|s| {
+                        if let Shape::Step { number, .. } = s {
+                            *number = n;
+                        }
+                    });
+                }
+                // Its place in the count, as the badge writes it.
+                if labels != StepLabels::Numbers {
+                    ui.label(egui::RichText::new(format!("shows {}", labels.text(n))).color(t.muted));
+                }
+            });
         } else {
-            ui.label(egui::RichText::new(format!("The next step is {}.", ed.session.doc.next_step_number())).color(t.muted));
+            let labels = ed.tool_options(Kind::Step).labels.unwrap_or_default();
+            let next = labels.text(ed.session.doc.next_step_number(labels));
+            ui.label(egui::RichText::new(format!("The next step is {next}.")).color(t.muted));
         }
     }
 
     if s != old {
         commit_style(ed, kind, &old, &s, first.is_some());
     }
+}
+
+/// What the font menu, its search and the bundled font in it are called.
+pub const FONT_MENU: &str = "Choose a font";
+pub const FONT_SEARCH: &str = "Search fonts";
+pub const BUNDLED_FONT: &str = "Built-in font";
+/// The most fonts the menu lists at once (the search finds the rest).
+const MAX_LISTED: usize = 400;
+
+/// The font menu of text and callouts: the built-in font, then the fonts on the computer, with a
+/// search. Greyed out, with the reason, where there is no way to them (the browser).
+fn font_menu(ed: &mut Editor, ui: &mut Ui, font: &mut FontName) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(egui::RichText::new("Font").size(12.0).color(t.muted));
+    let shown = if font.is_bundled() { BUNDLED_FONT.to_string() } else { font.as_str().to_string() };
+    if !screengrabcraft_render::text::has_font_source() {
+        ui.add_enabled_ui(false, |ui| {
+            egui::ComboBox::from_id_salt("font-menu").width(ui.available_width()).selected_text(shown).show_ui(ui, |_| {});
+        })
+        .response
+        .on_disabled_hover_text("The browser can't use the computer's fonts: text is in the built-in font");
+        return;
+    }
+    let resp = egui::ComboBox::from_id_salt("font-menu")
+        .width(ui.available_width())
+        .height(320.0)
+        .selected_text(shown)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show_ui(ui, |ui| {
+            let search = ui.add(egui::TextEdit::singleline(&mut ed.font_query).hint_text("Search").desired_width(f32::INFINITY));
+            search.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::TextEdit, true, FONT_SEARCH));
+            if ui.selectable_label(font.is_bundled(), BUNDLED_FONT).on_hover_text("PatroneOS Sans, or PatroneOS Mono for Mono").clicked() {
+                *font = FontName::BUNDLED;
+            }
+            let list = ed.font_list.get_or_insert_with(|| screengrabcraft_render::text::font_families().unwrap_or_default()).clone();
+            let query = ed.font_query.trim().to_lowercase();
+            let found: Vec<&String> = list.iter().filter(|n| query.is_empty() || n.to_lowercase().contains(&query)).take(MAX_LISTED).collect();
+            for name in &found {
+                if ui.selectable_label(font.as_str() == name.as_str(), name.as_str()).clicked() {
+                    *font = FontName::new(name);
+                }
+            }
+            if found.is_empty() {
+                ui.label(egui::RichText::new("No font on this computer goes by that name.").size(12.0).color(t.muted));
+            }
+        });
+    resp.response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ComboBox, true, FONT_MENU));
+    let _ =
+        resp.response.on_hover_text("A font on this computer for the text (projects keep its name; a computer without it shows the built-in font)");
 }
 
 /// The Cut Out tool's panel: what it takes out (columns or rows) and how the parts meet.
@@ -755,6 +968,63 @@ fn cut_out_panel(ed: &mut Editor, ui: &mut Ui) {
     crate::widgets::tips(ui, &[("Drag", "across the part to take out."), ("Undo", "puts it back (Ctrl+Z).")]);
 }
 
+/// What the Measure panel's switch and button are called.
+pub const KEEP_EACH: &str = "Keep each measurement on the picture";
+pub const KEEP_THIS: &str = "Keep This One on the Picture";
+
+/// The Measure tool's panel: how to use it, the last measurement, keeping it on the picture.
+fn measure_panel(ed: &mut Editor, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let ctx = ui.ctx().clone();
+    ui.heading("Measure");
+    ui.label(
+        egui::RichText::new("Drag across the picture to measure a distance. Shift keeps the line level, upright or at 15° steps.")
+            .size(12.0)
+            .color(t.muted),
+    );
+    ui.add_space(8.0);
+    match ed.measured {
+        Some((a, b)) => {
+            let rows = [
+                ("Length", screengrabcraft_engine::measure::length_text(a, b)),
+                ("Across", format!("{:.0} px", (b.x - a.x).abs())),
+                ("Down", format!("{:.0} px", (b.y - a.y).abs())),
+                ("Angle", format!("{:.1}°", screengrabcraft_engine::measure::angle(a, b))),
+                ("From", format!("{:.0}, {:.0}", a.x, a.y)),
+                ("To", format!("{:.0}, {:.0}", b.x, b.y)),
+            ];
+            egui::Grid::new("measured").num_columns(2).spacing([16.0, 4.0]).show(ui, |ui| {
+                for (name, value) in rows {
+                    ui.label(egui::RichText::new(name).color(t.muted));
+                    ui.label(egui::RichText::new(value).strong());
+                    ui.end_row();
+                }
+            });
+            ui.add_space(6.0);
+            if ui.button(KEEP_THIS).on_hover_text("A line with a bar at each end and its length, grouped, to move or delete").clicked() {
+                crate::canvas::keep_measurement(ed, &ctx);
+            }
+        }
+        None => {
+            ui.label(egui::RichText::new("Nothing measured yet.").color(t.muted));
+        }
+    }
+    ui.add_space(10.0);
+    ui.separator();
+    ui.label(egui::RichText::new("Tool properties").strong());
+    ui.add_space(4.0);
+    let mut m = ed.settings.measure;
+    ui.checkbox(&mut m.keep, KEEP_EACH).on_hover_text("Each line measured stays on the picture as an annotation; otherwise it shows until the next");
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        colour_button(ui, "Measure colour", "Colour", &mut m.color, false, false);
+    });
+    if m != ed.settings.measure {
+        ed.settings.measure = m;
+        ed.services.save_settings(&ed.settings);
+    }
+}
+
 /// The Fill tool's own settings, under its colours: any other colour, and the tolerance.
 fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
@@ -768,8 +1038,13 @@ fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
     let mut f = ed.settings.fill;
     ui.horizontal(|ui| {
         colour_button(ui, "Fill colour", "Colour", &mut f.color, true, false);
+        if !f.gradient.is_none() {
+            colour_button(ui, GRADIENT_TO, "To", &mut f.gradient.to, true, false);
+        }
     });
     ui.label(egui::RichText::new("None makes the area see-through.").size(12.0).color(t.muted));
+    ui.add_space(8.0);
+    gradient_choices(ui, &mut f.color, &mut f.gradient, Color::TRANSPARENT);
     ui.add_space(8.0);
     let mut pct = (f32::from(f.tolerance) / 2.55).round();
     ui.label(egui::RichText::new("Tolerance").size(12.0).color(t.muted));
@@ -793,7 +1068,7 @@ fn fill_settings(ed: &mut Editor, ui: &mut Ui) {
 
 pub(crate) fn commit_style(ed: &mut Editor, kind: Kind, old: &Style, new: &Style, on_selection: bool) {
     // The tool keeps the look for the next one, too (the Shape tool's two kinds alike).
-    let kinds: &[Kind] = if kind.family() == Kind::Rect { &[Kind::Rect, Kind::Ellipse] } else { std::slice::from_ref(&kind) };
+    let kinds: &[Kind] = if kind.family() == Kind::Rect { &[Kind::Rect, Kind::Ellipse, Kind::Polygon] } else { std::slice::from_ref(&kind) };
     for k in kinds {
         let mut remembered = ed.tool_style(*k);
         apply_changes(old, new, &mut remembered);
@@ -854,6 +1129,9 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
     let opts = options_of(shape, ed.tool_options(kind));
     let mut chosen: Option<ShapeOptions> = None;
     let mut new_tool: Option<Tool> = None;
+    // A polygon of clicked points picked (Some(true)), or another shape (Some(false)).
+    let mut by_points: Option<bool> = None;
+    let (mut add_tail, mut remove_tail) = (false, false);
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_min_width(220.0);
         let none = ShapeOptions::default();
@@ -873,17 +1151,98 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         }
                     }
                 });
+                ui.add_space(6.0);
+                ui.label(small("Head shape"));
+                ui.horizontal_wrapped(|ui| {
+                    for s in HeadShape::ALL {
+                        if ui.selectable_label(opts.head.unwrap_or_default() == s, s.label()).clicked() {
+                            chosen = Some(ShapeOptions { head: Some(s), ..none });
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(small("Line"));
+                ui.horizontal_wrapped(|ui| {
+                    let bend = opts.bend.unwrap_or(0.0);
+                    for (b, label, name) in [
+                        (0.0, "Straight", "A straight arrow"),
+                        (CURVE, "Curved", "Bowed to the left of the way it points"),
+                        (-CURVE, "Curved the other way", "Bowed to the right of the way it points"),
+                    ] {
+                        let on = if b == 0.0 { bend == 0.0 } else { bend * b > 0.0 };
+                        if ui.selectable_label(on, label).on_hover_text(name).clicked() {
+                            chosen = Some(ShapeOptions { bend: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Drag the diamond in a selected arrow's middle to bend it as you like."));
             }
-            Kind::Rect | Kind::Ellipse => {
-                let ellipse = shown_kind == Kind::Ellipse;
+            Kind::Line => {
+                ui.label(small("Line"));
+                ui.horizontal_wrapped(|ui| {
+                    let bend = opts.bend.unwrap_or(0.0);
+                    for (b, label, name) in [
+                        (0.0, "Straight", "A straight line"),
+                        (CURVE, "Curved", "Bowed to the left of the way it was drawn"),
+                        (-CURVE, "Curved the other way", "Bowed to the right of the way it was drawn"),
+                    ] {
+                        let on = if b == 0.0 { bend == 0.0 } else { bend * b > 0.0 };
+                        if ui.selectable_label(on, label).on_hover_text(name).clicked() {
+                            chosen = Some(ShapeOptions { bend: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Drag the diamond in a selected line's middle to bend it as you like."));
+            }
+            Kind::Rect | Kind::Ellipse | Kind::Polygon => {
                 let radius = opts.radius.unwrap_or(0.0);
                 for (label, round, rounded) in [("Rectangle", false, false), ("Rounded rectangle", false, true), ("Ellipse", true, false)] {
-                    let on = ellipse == round && (round || (radius > 0.0) == rounded);
+                    let on = match shown_kind {
+                        Kind::Ellipse => round,
+                        Kind::Rect => !round && (radius > 0.0) == rounded,
+                        _ => false,
+                    };
+                    let on = on && !ed.polygon_points;
                     if ui.selectable_label(on, label).clicked() {
+                        by_points = Some(false);
                         let r = if rounded { if radius > 0.0 { radius } else { 14.0 } } else { 0.0 };
                         chosen = Some(ShapeOptions { round: Some(round), radius: (!round).then_some(r), ..none });
                         new_tool = Some(Tool::Draw(if round { Kind::Ellipse } else { Kind::Rect }));
                     }
+                }
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    for (label, sides, star) in POLYGONS {
+                        let on = shown_kind == Kind::Polygon && opts.sides == Some(sides) && opts.star.unwrap_or(false) == star && !ed.polygon_points;
+                        if ui.selectable_label(on, label).clicked() {
+                            by_points = Some(false);
+                            chosen = Some(ShapeOptions { sides: Some(sides), star: Some(star), ..none });
+                            new_tool = Some(Tool::Draw(Kind::Polygon));
+                        }
+                    }
+                });
+                let free = shape.is_some_and(|s| matches!(s, Shape::Polygon { corners, .. } if !corners.is_empty()));
+                if ui
+                    .selectable_label(free || (shape.is_none() && ed.polygon_points), "Points clicked")
+                    .on_hover_text("A polygon of points clicked one by one: a double click or Enter closes it")
+                    .clicked()
+                {
+                    by_points = Some(true);
+                }
+                if shown_kind == Kind::Polygon && !free && !ed.polygon_points {
+                    let star = opts.star.unwrap_or(false);
+                    ui.add_space(6.0);
+                    ui.label(small(if star { "Points" } else { "Corners" }));
+                    ui.horizontal_wrapped(|ui| {
+                        for n in MIN_SIDES..=MAX_SIDES {
+                            let name = if star { format!("{n} points") } else { format!("{n} corners") };
+                            if ui.selectable_label(opts.sides == Some(n), n.to_string()).on_hover_text(name).clicked() {
+                                chosen = Some(ShapeOptions { sides: Some(n), star: Some(star), ..none });
+                            }
+                        }
+                    });
                 }
             }
             Kind::Callout => {
@@ -904,6 +1263,27 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         }
                     }
                 });
+                if let Some(Shape::Callout { tails, .. }) = shape {
+                    ui.add_space(6.0);
+                    ui.label(small("Tails"));
+                    ui.horizontal(|ui| {
+                        let room = tails.len() + 1 < screengrabcraft_model::object::MAX_TAILS;
+                        if ui
+                            .add_enabled(room, egui::Button::new("Add a Tail"))
+                            .on_hover_text("Another tail, to point at something else too")
+                            .clicked()
+                        {
+                            add_tail = true;
+                        }
+                        if ui
+                            .add_enabled(!tails.is_empty(), egui::Button::new("Remove a Tail"))
+                            .on_hover_text("Takes away the tail added last")
+                            .clicked()
+                        {
+                            remove_tail = true;
+                        }
+                    });
+                }
             }
             Kind::Stamp => {
                 ui.label(small("Stamp"));
@@ -924,15 +1304,54 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                     }
                 });
             }
+            Kind::Step => {
+                ui.label(small("Count in"));
+                ui.horizontal_wrapped(|ui| {
+                    for l in StepLabels::ALL {
+                        if ui.selectable_label(opts.labels == Some(l), l.label()).on_hover_text(l.name()).clicked() {
+                            chosen = Some(ShapeOptions { labels: Some(l), ..none });
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(small("Badge"));
+                ui.horizontal_wrapped(|ui| {
+                    for b in BadgeShape::ALL {
+                        if ui.selectable_label(opts.badge == Some(b), b.label()).clicked() {
+                            chosen = Some(ShapeOptions { badge: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Each way of counting counts on its own: 1, 2, 3 can have a, b, c beside them."));
+            }
             _ => {}
         }
     });
+    if add_tail || remove_tail {
+        ed.run(&ctx, if add_tail { "object.addTail" } else { "object.removeTail" }, serde_json::json!({}));
+    }
+    match by_points {
+        Some(true) => {
+            ed.polygon_points = true;
+            ed.polygon_draft.clear();
+            if ed.session.selected().is_empty() {
+                ed.set_tool(Tool::Draw(Kind::Polygon));
+                ed.polygon_points = true;
+            }
+        }
+        Some(false) => ed.polygon_points = false,
+        None => {}
+    }
     if let Some(o) = chosen {
-        // Each stamp starts in its own colour.
+        // A rectangle or an ellipse picked: the Shape tool draws no polygon until one is picked.
+        if o.round.is_some() && kind.family() == Kind::Rect {
+            ed.settings.options.entry(Kind::Rect).or_default().sides = None;
+        }
         if let Some(k) = o.stamp {
-            let mut style = ed.tool_style(Kind::Stamp);
-            style.fill = k.color();
-            ed.settings.styles.insert(Kind::Stamp, style);
+            ed.own_stamp = None;
+            choose_stamp(ed, &ctx, k);
+            return;
         }
         set_options(ed, &ctx, kind, o);
         if let Some(tool) = new_tool
@@ -941,6 +1360,27 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
             ed.set_tool(tool);
         }
     }
+}
+
+/// Picks a stamp for the Stamp tool, in its own colour, and puts it (and its colour) on the
+/// selected stamps, one undo step.
+pub(crate) fn choose_stamp(ed: &mut Editor, ctx: &egui::Context, k: StampKind) {
+    let mut style = ed.tool_style(Kind::Stamp);
+    style.fill = k.color();
+    ed.settings.styles.insert(Kind::Stamp, style);
+    ed.set_tool_options(Kind::Stamp, ShapeOptions { stamp: Some(k), ..ShapeOptions::default() });
+    let ids: Vec<u64> = ed
+        .session
+        .selected()
+        .into_iter()
+        .filter(|id| ed.session.doc.get(*id).is_some_and(|o| o.shape.kind() == Kind::Stamp))
+        .map(|id| id.0)
+        .collect();
+    if !ids.is_empty() {
+        let fill = serde_json::to_value(k.color()).unwrap_or(serde_json::Value::Null);
+        ed.run(ctx, "object.look", serde_json::json!({ "ids": ids, "options": { "stamp": k }, "style": { "fill": fill } }));
+    }
+    ed.services.save_settings(&ed.settings);
 }
 
 /// A button with an arrow pointing where a callout's tail goes.
