@@ -999,6 +999,42 @@ impl VideoView {
         self.fix_selection();
     }
 
+    /// How long a frame is held, as the menus and the panel offer it (seconds).
+    const HOLDS: [u64; 4] = [1, 2, 3, 5];
+
+    /// Holds the picture at a moment for `secs` (a freeze frame): every track waits; the held
+    /// frame is selected, to make it longer or shorter.
+    pub fn hold_frame(&mut self, ed: &mut Editor, ctx: &egui::Context, at: u64, secs: u64) {
+        self.pause();
+        let at = at.min(self.length());
+        match self.session.execute("video.holdFrame", &json!({"at": at, "len": secs.saturating_mul(1_000_000)})) {
+            Ok(_) => {
+                self.range = None;
+                self.item = None;
+                self.playhead = at;
+                let tl = &self.session.timeline;
+                self.selected = tl.tracks.iter().enumerate().find_map(|(i, t)| t.clips.iter().position(|c| c.hold && c.at == at).map(|k| (i, k)));
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
+    }
+
+    /// A menu of how long to hold the frame at `at`.
+    fn hold_menu(&mut self, ed: &mut Editor, ui: &mut Ui, ctx: &egui::Context, label: &str, at: u64) {
+        ui.menu_button(label, |ui| {
+            for secs in Self::HOLDS {
+                let words = if secs == 1 { "For 1 Second".to_string() } else { format!("For {secs} Seconds") };
+                let b = egui::Button::new(words);
+                if ui.add(if secs == 2 { b.shortcut_text("H") } else { b }).clicked() {
+                    self.hold_frame(ed, ctx, at, secs);
+                    ui.close();
+                }
+            }
+        })
+        .response
+        .on_hover_text("The picture stays still for a while; every track waits, the sound is silent meanwhile");
+    }
+
     /// Marks a moment (a chapter of the video made), named for its place; a moment already
     /// marked is said so.
     pub fn add_marker(&mut self, ed: &mut Editor, ctx: &egui::Context, at: u64) {
@@ -1268,6 +1304,9 @@ impl VideoView {
         if plain(Key::M) {
             self.add_marker(ed, ctx, self.playhead);
         }
+        if plain(Key::H) {
+            self.hold_frame(ed, ctx, self.playhead, 2);
+        }
         if plain(Key::Delete) || plain(Key::Backspace) {
             self.delete(ed, ctx);
         }
@@ -1415,6 +1454,7 @@ impl VideoView {
                         self.add_marker(ed, &ctx, self.playhead);
                         ui.close();
                     }
+                    self.hold_menu(ed, ui, &ctx, "Hold the Frame at the Playhead", self.playhead);
                     let what = if self.item.is_some() {
                         "Delete the Item"
                     } else if self.range.is_some() {
@@ -1641,7 +1681,8 @@ impl VideoView {
         let pointer = !self.rec.pointer.is_empty();
         let t = Tokens::get(ui.ctx());
         // The clip chosen on a track: what it is, where it starts and ends.
-        let clip = self.selected.and_then(|(ti, ci)| {
+        let held = self.selected.and_then(|(ti, ci)| self.session.timeline.tracks.get(ti)?.clips.get(ci).filter(|c| c.hold).map(|c| (ti, ci, *c)));
+        let clip = self.selected.filter(|_| held.is_none()).and_then(|(ti, ci)| {
             let track = self.session.timeline.tracks.get(ti)?;
             let c = track.clips.get(ci)?;
             let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
@@ -1661,7 +1702,46 @@ impl VideoView {
                         ui.add_enabled(enabled, egui::Button::new(label).min_size(vec2(((wide - 6.0) / 2.0).floor(), 28.0)))
                     };
                     let mut first = true;
-                    if let Some((name, at, len, end, speed, sound)) = clip {
+                    if let Some((ti, ci, c)) = held {
+                        // A held frame: how long, and a way to take it out again.
+                        ui.label(RichText::new("Held frame").size(16.0).color(t.text));
+                        note(
+                            ui,
+                            format!(
+                                "The picture recorded at {} held from {} for {}: every track waits, the sound is silent meanwhile.",
+                                clock(c.from),
+                                clock(c.at),
+                                clock(c.len)
+                            ),
+                        );
+                        section(ui, "Held for", &mut false);
+                        let w = ((ui.available_width() - 18.0) / 4.0).floor();
+                        let mut chosen = None;
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            for secs in Self::HOLDS {
+                                let on = c.len == secs * 1_000_000;
+                                if ui.add(egui::Button::new(format!("{secs} s")).selected(on).min_size(vec2(w, 26.0))).clicked() {
+                                    chosen = Some(secs * 1_000_000);
+                                }
+                            }
+                        });
+                        ui.add_space(8.0);
+                        let take_out = ui
+                            .add(egui::Button::new("Take the Hold Out").min_size(vec2(wide, 28.0)))
+                            .on_hover_text("The video plays straight on again")
+                            .clicked();
+                        ui.add_space(6.0);
+                        note(ui, "Drag its end on the timeline to hold it any length.".to_string());
+                        if let Some(len) = chosen {
+                            self.run(ed, &ctx, "video.holdLength", json!({"track": ti, "clip": ci, "len": len}));
+                        }
+                        if take_out {
+                            self.selected = None;
+                            self.run(ed, &ctx, "video.cut", json!({"from": c.at, "to": c.end()}));
+                        }
+                        first = false;
+                    } else if let Some((name, at, len, end, speed, sound)) = clip {
                         // What's chosen, said, with what's most often done to it.
                         ui.label(RichText::new(format!("{name} clip")).size(16.0).color(t.text));
                         let pace = if speed == screengrabcraft_media::timeline::NORMAL_SPEED {
@@ -2688,6 +2768,7 @@ impl VideoView {
                     self.add_marker(ed, ctx, at);
                     ui.close();
                 }
+                self.hold_menu(ed, ui, ctx, "Hold This Frame", at);
                 if ui.button("Save This Frame as a Picture").on_hover_text("In the captures folder; it opens in the Image Editor").clicked() {
                     self.seek(ed, at, now);
                     self.save_frame(ed, ctx);
@@ -2948,10 +3029,11 @@ impl VideoView {
                             ));
                             painter.line_segment([pos2(edge, r.max.y), pos2(inner, r.min.y)], Stroke::new(1.5, Color32::WHITE));
                         }
-                        // Faster or slower than recorded: its speed in its top right corner.
-                        if clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED && r.width() > 34.0 {
+                        // Faster or slower than recorded: its speed in its top right corner (a
+                        // held frame says so).
+                        if (clip.hold || clip.speed != screengrabcraft_media::timeline::NORMAL_SPEED) && r.width() > 34.0 {
                             let font = egui::FontId::proportional(11.0);
-                            let words = speed_label(clip.speed);
+                            let words = if clip.hold { "Held".to_string() } else { speed_label(clip.speed) };
                             let size = painter.layout_no_wrap(words.clone(), font.clone(), Color32::WHITE).size();
                             let right = r.max.x.min(lane.max.x);
                             let tag = Rect::from_min_size(pos2((right - size.x - 10.0).max(r.min.x + 2.0), r.min.y + 3.0), size + vec2(6.0, 2.0));
@@ -3364,9 +3446,20 @@ impl VideoView {
                             self.selected = None;
                         }
                         Drag::Trim { track, clip, start } => {
-                            let id = if start { "video.trimStart" } else { "video.trimEnd" };
                             caught = nearest(us, &edges(Some((track, clip)), None));
-                            let _ = self.session.drag(id, &json!({"track": track, "clip": clip, "to": caught.unwrap_or(us)}));
+                            let to = caught.unwrap_or(us);
+                            // A held frame's end holds it longer or shorter, every track with it.
+                            let held = self.session.timeline.tracks.get(track).and_then(|t| t.clips.get(clip)).filter(|c| c.hold).map(|c| c.at);
+                            match held {
+                                Some(at) if !start => {
+                                    let _ =
+                                        self.session.drag("video.holdLength", &json!({"track": track, "clip": clip, "len": to.saturating_sub(at)}));
+                                }
+                                _ => {
+                                    let id = if start { "video.trimStart" } else { "video.trimEnd" };
+                                    let _ = self.session.drag(id, &json!({"track": track, "clip": clip, "to": to}));
+                                }
+                            }
                         }
                         Drag::Move { track, clip, grab } => {
                             let len = tracks.get(track).and_then(|tr| tr.clips.get(clip)).map_or(0, |c| c.len);

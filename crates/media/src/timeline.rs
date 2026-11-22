@@ -62,14 +62,23 @@ pub struct Clip {
     /// How long its sound takes to go down to silence at its end.
     #[serde(default, rename = "fadeOut", skip_serializing_if = "is_zero")]
     pub fade_out: u64,
+    /// A held frame: the picture at `from` shown for all its length (a picture track only).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hold: bool,
 }
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// The longest fade.
 pub const MAX_FADE_US: u64 = 30_000_000;
+/// The longest a frame is held.
+pub const MAX_HOLD_US: u64 = 600_000_000;
 
 impl Default for Clip {
     fn default() -> Clip {
@@ -80,7 +89,12 @@ impl Default for Clip {
 impl Clip {
     /// A clip playing as recorded.
     pub const fn new(at: u64, from: u64, len: u64) -> Clip {
-        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0 }
+        Clip { at, from, len, speed: NORMAL_SPEED, fade_in: 0, fade_out: 0, hold: false }
+    }
+
+    /// A held frame: the picture recorded at `from`, shown from `at` for `len`.
+    pub const fn held(at: u64, from: u64, len: u64) -> Clip {
+        Clip { hold: true, ..Clip::new(at, from, len) }
     }
 
     pub fn end(&self) -> u64 {
@@ -136,13 +150,20 @@ impl Clip {
         self.pace() as f64 / 100.0
     }
 
-    /// Where in the recording it is `d` µs after its start on the timeline.
+    /// Where in the recording it is `d` µs after its start on the timeline (a held frame: where
+    /// it was held, all along).
     pub fn source_at(&self, d: u64) -> u64 {
+        if self.hold {
+            return self.from;
+        }
         self.from.saturating_add(scale(d, self.pace(), 100))
     }
 
-    /// How much of the recording it plays (µs).
+    /// How much of the recording it plays (µs): none for a held frame.
     pub fn source_len(&self) -> u64 {
+        if self.hold {
+            return 0;
+        }
         scale(self.len, self.pace(), 100)
     }
 
@@ -354,6 +375,15 @@ impl Timeline {
                 .clips
                 .iter()
                 .filter_map(|c| {
+                    // A held frame: a picture track's, of a moment recorded, not too long.
+                    if c.hold {
+                        let len = c.len.min(MAX_HOLD_US);
+                        return (!sound && source > 0 && len >= MIN_CLIP_US).then_some(Clip::held(
+                            c.at.min(u64::MAX / 4),
+                            c.from.min(source - 1),
+                            len,
+                        ));
+                    }
                     let speed = c.speed.clamp(MIN_SPEED, MAX_SPEED);
                     let from = c.from.min(source);
                     let most = Clip { speed, ..Clip::new(0, from, 0) }.played(source - from);
@@ -366,6 +396,7 @@ impl Timeline {
                         speed,
                         fade_in: fade(c.fade_in),
                         fade_out: fade(c.fade_out),
+                        hold: false,
                     })
                 })
                 .take(10_000)
@@ -483,6 +514,91 @@ impl Timeline {
         Ok(t)
     }
 
+    /// Pushes everything from `at` on along by `len` on every track and layer, leaving a gap
+    /// there: a clip playing at `at` is split and its second half moved. Items over `at` that
+    /// show something (titles, overlays, pictures) stay on through the gap; a sound's or a video's
+    /// goes on after it. Markers after `at` move along.
+    fn insert_time(&mut self, at: u64, len: u64) {
+        for t in &mut self.tracks {
+            let mut out = Vec::with_capacity(t.clips.len() + 1);
+            for c in &t.clips {
+                if c.end() <= at {
+                    out.push(*c);
+                } else if c.at >= at {
+                    out.push(Clip { at: c.at.saturating_add(len), ..*c });
+                } else {
+                    out.push(c.head(at - c.at));
+                    let mut after = c.tail(at - c.at);
+                    after.at = at.saturating_add(len);
+                    out.push(after);
+                }
+            }
+            out.retain(|c| c.len >= MIN_CLIP_US);
+            t.clips = out;
+        }
+        self.insert_time_layers(at, len);
+        for m in &mut self.markers {
+            if m.at > at {
+                m.at = m.at.saturating_add(len);
+            }
+        }
+    }
+
+    /// Holds the picture at `at` for `len` (a freeze frame): every track waits meanwhile and
+    /// what follows moves along by `len`, the sound silent while it's held. Each picture track
+    /// holds the moment it showed at `at` (or, at the end of a clip, its last); one with no
+    /// picture there shows none. Returns the stretch held.
+    pub fn hold_frame(&mut self, at: u64, len: u64) -> Result<(u64, u64), EditError> {
+        if len < MIN_CLIP_US {
+            return Err(EditError::Invalid("a frame is held for a moment at least".to_string()));
+        }
+        let (at, len) = (at.min(u64::MAX / 4), len.min(MAX_HOLD_US));
+        let held: Vec<(usize, u64)> = self
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.kind.is_video())
+            .filter_map(|(i, t)| {
+                let playing = t.clips.iter().find(|c| c.at <= at && at < c.end()).map(|c| c.source_at(at - c.at));
+                let ending = || t.clips.iter().find(|c| c.end() == at).map(|c| c.source_at(c.len.saturating_sub(1)));
+                playing.or_else(ending).map(|src| (i, src))
+            })
+            .collect();
+        if held.is_empty() {
+            return Err(EditError::Invalid("there's no picture to hold there".to_string()));
+        }
+        self.insert_time(at, len);
+        for (i, src) in held {
+            let t = self.track_mut(i)?;
+            let k = t.clips.partition_point(|c| c.at < at);
+            t.clips.insert(k, Clip::held(at, src, len));
+        }
+        Ok((at, at.saturating_add(len)))
+    }
+
+    /// A held frame held for `len` instead (every picture track's hold there with it): longer,
+    /// what follows moves along; shorter, it moves up.
+    pub fn set_hold(&mut self, track: usize, clip: usize, len: u64) -> Result<(), EditError> {
+        let c = *self.track(track)?.clips.get(clip).ok_or(EditError::NoClip(track, clip))?;
+        if !c.hold {
+            return Err(EditError::Invalid("that clip isn't a held frame".to_string()));
+        }
+        let len = len.clamp(MIN_CLIP_US, MAX_HOLD_US);
+        let (a, e) = (c.at, c.end());
+        if len > c.len {
+            let more = len - c.len;
+            self.insert_time(e, more);
+            for t in &mut self.tracks {
+                for h in t.clips.iter_mut().filter(|h| h.hold && h.at == a && h.end() == e) {
+                    h.len = len;
+                }
+            }
+        } else if len < c.len {
+            self.cut(a.saturating_add(len), e)?;
+        }
+        Ok(())
+    }
+
     /// Takes `from..to` out of one track (or every track) and leaves the gap: silence, or no
     /// picture, there; nothing after it moves, so the other tracks stay in time with it.
     pub fn lift(&mut self, from: u64, to: u64, track: Option<usize>) -> Result<(), EditError> {
@@ -561,8 +677,18 @@ impl Timeline {
     /// trimmed), up to the clip before and the start of the recording.
     pub fn trim_start(&mut self, track: usize, clip: usize, to: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
+        let before = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0);
+        if c.hold {
+            // A held frame holds the same picture longer or shorter.
+            let floor = before.max(c.end().saturating_sub(MAX_HOLD_US));
+            let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
+            if let Some(slot) = clips.get_mut(clip) {
+                *slot = Clip::held(to, c.from, c.end().saturating_sub(to));
+            }
+            return Ok(());
+        }
         // Not before the clip before, nor before where the recording's start would play.
-        let floor = clip.checked_sub(1).and_then(|p| clips.get(p)).map(Clip::end).unwrap_or(0).max(c.at.saturating_sub(c.played(c.from)));
+        let floor = before.max(c.at.saturating_sub(c.played(c.from)));
         let to = to.clamp(floor, c.end().saturating_sub(MIN_CLIP_US).max(floor));
         let from = if to >= c.at { c.source_at(to - c.at) } else { c.from.saturating_sub(scale(c.at - to, c.pace(), 100)) };
         let moved = Clip { at: to, from, len: c.end().saturating_sub(to), ..c };
@@ -577,7 +703,8 @@ impl Timeline {
     pub fn trim_end(&mut self, track: usize, clip: usize, to: u64, source: u64) -> Result<(), EditError> {
         let (clips, c) = self.clip_mut(track, clip)?;
         let next = clips.get(clip + 1).map(|n| n.at).unwrap_or(u64::MAX);
-        let ceiling = next.min(c.at.saturating_add(c.played(source.saturating_sub(c.from))));
+        let most = if c.hold { MAX_HOLD_US } else { c.played(source.saturating_sub(c.from)) };
+        let ceiling = next.min(c.at.saturating_add(most));
         let to = to.clamp(c.at + MIN_CLIP_US, ceiling.max(c.at + MIN_CLIP_US));
         if let Some(slot) = clips.get_mut(clip) {
             slot.len = to - c.at;
@@ -1065,6 +1192,10 @@ mod tests {
         assert_eq!((clips[0].speed, clips[1].speed), (MIN_SPEED, MAX_SPEED));
         assert_eq!(clips[0].len, 9_000_000, "4 s at a tenth of the speed is 40 s");
         assert_eq!(clips[1].len, 400_000, "4 s at ten times is 0.4 s");
+        // A held frame from a file: of a moment recorded, no longer than a hold can be.
+        let held = r#"{"tracks":[{"stream":0,"kind":"screen","clips":[{"at":0,"from":99000000,"len":999000000000,"hold":true}]}]}"#;
+        let t = serde_json::from_str::<Timeline>(held).unwrap().checked(&rec);
+        assert_eq!(t.tracks[0].clips, vec![Clip::held(0, 3_999_999, MAX_HOLD_US)]);
     }
 
     #[test]
@@ -1132,6 +1263,52 @@ mod tests {
         // Saved and read back.
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
+    }
+
+    #[test]
+    fn a_held_frame_shows_one_picture_while_every_track_waits() {
+        use crate::layers::Item;
+        let mut t = two_tracks();
+        t.add_marker(5_000_000, Some("Later")).unwrap();
+        let (layer, title) = t.place(Item { len: 2_000_000, ..Item::default() }, None, 2_000_000).unwrap();
+        let (_, after) = t.place(Item { len: 1_000_000, ..Item::default() }, Some(layer), 6_000_000).unwrap();
+        assert_eq!(t.hold_frame(3_000_000, 2_000_000).unwrap(), (3_000_000, 5_000_000));
+        assert_eq!(t.length(), 12_000_000);
+        // The screen shows what it had at 3 s all through the hold, then plays on from there.
+        assert_eq!(t.source_time(0, 3_000_000), Some(3_000_000));
+        assert_eq!(t.source_time(0, 4_900_000), Some(3_000_000));
+        assert_eq!(t.source_time(0, 5_500_000), Some(3_500_000));
+        assert_eq!(t.tracks[0].clips[1], Clip::held(3_000_000, 3_000_000, 2_000_000));
+        // The sound is silent meanwhile and in step after.
+        assert_eq!(t.source_time(1, 4_000_000), None);
+        assert_eq!(t.source_time(1, 5_500_000), Some(3_500_000));
+        // The title over it stays on through it; the one after, and the marker, move along.
+        assert_eq!(t.item(layer, title).map(|i| (i.at, i.len)), Some((2_000_000, 4_000_000)));
+        assert_eq!(t.item(layer, after).map(|i| i.at), Some(8_000_000));
+        assert_eq!(t.markers[0].at, 7_000_000);
+        // Held longer: everything after moves along again; shorter: up. Its trims keep its picture.
+        t.set_hold(0, 1, 3_000_000).unwrap();
+        assert_eq!((t.length(), t.tracks[0].clips[1].len, t.source_time(0, 6_500_000)), (13_000_000, 3_000_000, Some(3_500_000)));
+        t.set_hold(0, 1, 500_000).unwrap();
+        assert_eq!((t.length(), t.source_time(0, 3_400_000), t.source_time(0, 4_000_000)), (10_500_000, Some(3_000_000), Some(3_500_000)));
+        assert!(t.set_hold(0, 0, 1_000_000).is_err() && t.set_hold(1, 1, 1_000_000).is_err(), "not a held frame");
+        t.trim_end(0, 1, 9_000_000, 10_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[1].end(), 3_500_000, "up to the clip after");
+        t.trim_start(0, 1, 2_000_000).unwrap();
+        assert_eq!(t.tracks[0].clips[1].at, 3_000_000, "up to the clip before");
+        // Cut through it, split in it, sped up: a held frame stays held.
+        t.split(3_200_000, None).unwrap();
+        assert!(t.tracks[0].clips[1].hold && t.tracks[0].clips[2].hold && t.source_time(0, 3_300_000) == Some(3_000_000));
+        // At the end: the last picture held. Nothing to hold, or no time: errors.
+        let end = t.length();
+        t.hold_frame(end, 1_000_000).unwrap();
+        assert_eq!(t.source_time(0, end + 500_000), Some(9_999_999));
+        assert!(t.hold_frame(end + 5_000_000, 1_000_000).is_err() && t.hold_frame(1_000_000, 5).is_err());
+        // Saved and read back.
+        let json = serde_json::to_string(&t).unwrap();
+        assert!(json.contains("\"hold\":true"));
+        assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
+        assert!(!serde_json::to_string(&two_tracks()).unwrap().contains("hold"), "clips as recorded say nothing of it");
     }
 
     #[test]

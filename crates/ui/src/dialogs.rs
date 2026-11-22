@@ -273,6 +273,7 @@ fn video_shortcuts(ui: &mut Ui) {
             ("S", "Split at the playhead: the selected clip's track, or every track"),
             ("T", "Put words on the video at the playhead, then type them"),
             ("M", "Mark the moment at the playhead (a chapter of the video made)"),
+            ("H", "Hold the frame at the playhead for 2 seconds (every track waits)"),
             ("Delete", "Delete what's selected, or cut the chosen stretch out of every track"),
             ("Ctrl+X", "Cut the chosen stretch"),
             ("Ctrl+A", "Choose the whole video"),

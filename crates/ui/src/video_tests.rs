@@ -670,6 +670,60 @@ fn a_frame_is_saved_as_a_picture_and_opened_in_the_image_editor() {
 }
 
 #[test]
+fn h_holds_the_frame_its_panel_holds_it_longer_and_takes_it_out() {
+    let mut h = harness();
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 1_500_000;
+    }
+    h.run_steps(1);
+    h.key_press(egui::Key::H);
+    h.run_steps(2);
+    assert_eq!(length(&h), 6_000_000, "two seconds held, everything after moved along");
+    {
+        let v = h.state().video.as_ref().unwrap();
+        let (t, c) = v.selected.expect("the held frame is chosen");
+        let clip = v.session.timeline.tracks[t].clips[c];
+        assert!(clip.hold && clip.at == 1_500_000 && clip.len == 2_000_000);
+        // The screen (and the camera) hold the picture, the microphone waits.
+        let mic = v.session.timeline.find(StreamKind::Microphone).unwrap();
+        assert_eq!(v.session.timeline.source_time(0, 3_000_000), Some(1_500_000));
+        assert_eq!(v.session.timeline.source_time(mic, 3_000_000), None);
+        assert_eq!(v.session.timeline.source_time(mic, 3_600_000), Some(1_600_000));
+    }
+    assert!(h.query_all_by_label("Held frame").next().is_some());
+    shot(&mut h, "video-held-frame");
+    // Held 3 s from the panel; the picture under it is the moment held.
+    h.get_by_label("3 s").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 7_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        v.playhead = 4_000_000;
+    }
+    h.run_steps(2);
+    // Undone, then taken out from the panel: as it was.
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.run_steps(2);
+    assert_eq!(length(&h), 6_000_000);
+    if let Some(v) = h.state_mut().video.as_mut() {
+        let (t, c) = (0, v.session.timeline.tracks[0].clips.iter().position(|c| c.hold).unwrap());
+        v.selected = Some((t, c));
+    }
+    h.run_steps(2);
+    h.get_by_label("Take the Hold Out").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 4_000_000);
+    assert!(h.state().video.as_ref().unwrap().session.timeline.tracks.iter().all(|t| t.clips.iter().all(|c| !c.hold)));
+    // The ruler's right button holds the frame there, from its menu.
+    let (lane, _) = h.state().video.as_ref().unwrap().lane_rect.unwrap();
+    right_click(&mut h, egui::pos2(lane.min.x + (lane.width() - 24.0) * 0.5, lane.min.y + 8.0));
+    h.get_by_label_contains("Hold This Frame").hover();
+    h.run_steps(2);
+    h.get_by_label("For 1 Second").click();
+    h.run_steps(2);
+    assert_eq!(length(&h), 5_000_000);
+}
+
+#[test]
 fn captions_can_be_asked_for_and_appear_when_theyre_made() {
     let host = CaptionHost::default();
     let mut h = caption_harness(meeting(), host.clone());
