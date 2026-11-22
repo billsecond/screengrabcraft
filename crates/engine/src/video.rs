@@ -716,12 +716,14 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
     use screengrabcraft_media::layers::{AnimKind, BlendMode, MaskShape, What};
     let (title, subtitle, color) = (text(p, "title")?, text(p, "subtitle")?, text(p, "color")?);
     let (x, y, w, opacity) = (number(p, "x")?, number(p, "y")?, number(p, "w")?, number(p, "opacity")?);
+    // A frozen region's height.
+    let freeze_h = number(p, "h")?;
     let anim = |k: &str| -> Result<Option<AnimKind>> {
         match p.get(k) {
             None => Ok(None),
             Some(v) => serde_json::from_value::<AnimKind>(v.clone())
                 .map(Some)
-                .map_err(|_| EngineError::Params(format!("`{k}` is none, fade, slideLeft, slideRight, slideUp or pop"))),
+                .map_err(|_| EngineError::Params(format!("`{k}` is none, fade, slideLeft, slideRight, slideUp, pop or write"))),
         }
     };
     let (intro, outro) = (anim("intro")?, anim("outro")?);
@@ -826,6 +828,9 @@ fn set_item(s: &mut VideoSession, p: &Value) -> Result<Value> {
             }
             if let Some(v) = pin {
                 i.look.pin = v;
+            }
+            if let (Some(v), What::Freeze { h }) = (freeze_h, &mut i.what) {
+                *h = v;
             }
             if let What::Text { title: t, subtitle: st, color: c, .. } = &mut i.what {
                 if let Some(v) = title {
@@ -1019,6 +1024,23 @@ fn motion_blur(s: &mut VideoSession, p: &Value) -> Result<Value> {
     b.amount = amount.unwrap_or(b.amount);
     s.timeline.motion_blur = b.checked();
     Ok(json!({}))
+}
+
+/// A rectangle of the screen frozen for a stretch: held as it was at the stretch's start while the
+/// rest plays on, on a layer of its own.
+fn freeze_region(s: &mut VideoSession, p: &Value) -> Result<Value> {
+    let (from, to) = (int(p, "from")?, int(p, "to")?);
+    if to <= from {
+        return Err(EngineError::Params("the stretch to freeze is empty".to_string()));
+    }
+    let screen = s.timeline.find(screengrabcraft_media::recording::StreamKind::Screen);
+    if screen.and_then(|i| s.timeline.source_time(i, from)).is_none() {
+        return Err(EngineError::Params("the screen isn't playing where the stretch starts".to_string()));
+    }
+    let v = |k: &str, or: f32| -> Result<f32> { Ok(number(p, k)?.unwrap_or(or)) };
+    let item = screengrabcraft_media::layers::freeze_item(v("x", 0.5)?, v("y", 0.5)?, v("w", 0.4)?, v("h", 0.3)?, to - from);
+    let (layer, item) = s.timeline.place(item, layer_or_new(p, "layer")?, from).map_err(edit_err)?;
+    Ok(json!({"layer": layer, "item": item}))
 }
 
 /// The pointer hidden over a stretch of the timeline.
@@ -1556,6 +1578,12 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
         run: motion_blur,
     },
     VideoCommand {
+        id: "video.freezeRegion",
+        label: "Freeze a Region",
+        params: r#"{"from": µs, "to": µs, "x"?, "y"?: its middle, "w"?, "h"?: its size (shares of the screen; 0.5, 0.5, 0.4, 0.3), "layer"?: id}: a rectangle of the screen held as it was at `from` until `to` while the rest plays on (an item on a layer, moved, resized and timed like any other; `video.setItem`'s `h` changes its height). The pointer still shows over it"#,
+        run: freeze_region,
+    },
+    VideoCommand {
         id: "video.hidePointer",
         label: "Hide the Pointer",
         params: r#"{"from": µs, "to": µs}: the mouse pointer (and its clicks, seen and heard) hidden over that stretch of the timeline; it stays hidden over what the screen showed there through later edits"#,
@@ -1806,7 +1834,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.setItem",
         label: "Change",
-        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop", "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
+        params: r##"{"layer": id, "item": id, "title"?, "subtitle"?, "color"?: "#rrggbb", "x"?, "y"?, "w"?, "opacity"?: 0..1, "intro"?, "outro"?: "none"|"fade"|"slideLeft"|"slideRight"|"slideUp"|"pop"|"write" (write: words written on letter by letter, anything else wiped on from its left), "introLen"?, "outroLen"?: µs, "rotate"?: -180..180 degrees, "crop"?: [left, top, right, bottom] 0..0.45 shares, "border"?: 0..0.1 of its width, "borderColour"?: "#rrggbb", "radius"?: 0..0.5, "shadow"?: bool, "blend"?: "normal"|"multiply"|"screen"|"overlay"|"darken"|"lighten", "mask"?: "none"|"rectangle"|"rounded"|"ellipse"|"diamond"|"star"|"heart", "maskArea"?: [x, y, width, height] shares of the item, "maskCut"?: bool, "device"?: "none"|"laptop"|"phone"|"browser", "silent"?: bool (a video's sound not heard with it), "path"?: bool (its keyframes a path: through their places on a smooth curve, not stopping at them), "pinned"?: bool, "pin"?: [[x, y] ×4] (a picture or a video drawn in perspective between its corners, each moved by these shares of the video: top left, top right, bottom right, bottom left), "h"?: 0.02..1 (a frozen region's height, a share of the screen)} (a picture or a video is cut down, bordered, rounded and shadowed, and has a device drawn round it; words and graphics are only turned; anything but a blur or a transition can be masked, shown only inside the shape or with it cut out, and blended with what's under it)"##,
         run: set_item,
     },
     VideoCommand {
@@ -1947,6 +1975,36 @@ mod tests {
         ] {
             assert!(s.execute("video.mono", &bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_region_is_frozen_for_a_stretch_and_words_write_themselves_on() {
+        use screengrabcraft_media::layers::{AnimKind, What};
+        let mut s = session();
+        let made = s.execute("video.freezeRegion", &json!({"from": 500_000, "to": 1_500_000, "x": 0.8, "y": 0.2, "w": 0.3, "h": 0.2})).unwrap();
+        assert_eq!(s.undo_label(), Some("Freeze a Region"));
+        let (l, i) = (made["layer"].as_u64().unwrap() as u32, made["item"].as_u64().unwrap() as u32);
+        let it = s.timeline.item(l, i).unwrap().clone();
+        assert!(matches!(it.what, What::Freeze { h } if (h - 0.2).abs() < 1e-6));
+        assert_eq!((it.at, it.len, it.place.x), (500_000, 1_000_000, 0.8));
+        // Its height changed like the rest of it, kept within the screen.
+        s.execute("video.setItem", &json!({"layer": l, "item": i, "h": 7, "w": 0.5})).unwrap();
+        let it = s.timeline.item(l, i).unwrap();
+        assert!(matches!(it.what, What::Freeze { h } if h == 1.0) && it.place.w == 0.5);
+        for bad in [
+            json!({"from": 5, "to": 5}),
+            json!({"from": 1}),
+            json!({"from": 0, "to": 10, "x": "left"}),
+            json!({"from": 90_000_000, "to": 99_000_000}),
+        ] {
+            assert!(s.execute("video.freezeRegion", &bad).is_err(), "{bad}");
+        }
+        // A title written on and rubbed off.
+        let t = s.execute("video.place", &json!({"template": "title", "at": 0})).unwrap();
+        s.execute("video.setItem", &json!({"layer": t["layer"], "item": t["item"], "intro": "write", "outro": "write"})).unwrap();
+        let it = s.timeline.item(t["layer"].as_u64().unwrap() as u32, t["item"].as_u64().unwrap() as u32).unwrap();
+        assert!(it.intro.kind == AnimKind::Write && it.outro.kind == AnimKind::Write);
+        assert!(s.execute("video.setItem", &json!({"layer": t["layer"], "item": t["item"], "intro": "scribble"})).is_err());
     }
 
     #[test]

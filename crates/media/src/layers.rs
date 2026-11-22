@@ -98,10 +98,14 @@ pub enum AnimKind {
     SlideUp,
     /// Growing from (or shrinking to) nothing.
     Pop,
+    /// Words written on letter by letter, line by line, as if by a pen (or rubbed off the same
+    /// way); anything else wiped on from its left (or off to its right).
+    Write,
 }
 
 impl AnimKind {
-    pub const ALL: [AnimKind; 6] = [AnimKind::None, AnimKind::Fade, AnimKind::SlideLeft, AnimKind::SlideRight, AnimKind::SlideUp, AnimKind::Pop];
+    pub const ALL: [AnimKind; 7] =
+        [AnimKind::None, AnimKind::Fade, AnimKind::SlideLeft, AnimKind::SlideRight, AnimKind::SlideUp, AnimKind::Pop, AnimKind::Write];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -111,6 +115,7 @@ impl AnimKind {
             AnimKind::SlideRight => "Slide from the right",
             AnimKind::SlideUp => "Slide up",
             AnimKind::Pop => "Pop",
+            AnimKind::Write => "Write on",
         }
     }
 }
@@ -316,6 +321,17 @@ pub enum What {
     /// Zooms the screen into part of it for as long as it lasts, its frame where its place says
     /// (see [`crate::zoom`]).
     Zoom,
+    /// A rectangle of the screen held as it was at the item's start, for as long as it lasts, while
+    /// the rest plays on: its middle where its place says, as wide as its place's width and `h`
+    /// high (shares of the screen).
+    Freeze {
+        #[serde(default = "freeze_h")]
+        h: f32,
+    },
+}
+
+fn freeze_h() -> f32 {
+    0.3
 }
 
 impl Default for What {
@@ -739,6 +755,7 @@ impl Item {
             What::Text { style, .. } => style_name(*style).to_string(),
             What::Transition { kind } => transition_name(*kind).to_string(),
             What::Zoom => "Zoom".to_string(),
+            What::Freeze { .. } => "Frozen region".to_string(),
         }
     }
 }
@@ -992,6 +1009,26 @@ pub fn library() -> Vec<Template> {
 /// A ready-made item by its key.
 pub fn template(key: &str) -> Option<Template> {
     library().into_iter().find(|t| t.key == key)
+}
+
+/// A frozen region's height as it's kept: a share of the screen, 0.02 to 1.
+pub fn freeze_height(h: f32) -> f32 {
+    if h.is_finite() { h.clamp(0.02, 1.0) } else { freeze_h() }
+}
+
+/// A frozen region: the rectangle `w × h` (shares of the screen) round `(x, y)` held as the screen
+/// was at its start, for `len` µs, while the rest plays on.
+pub fn freeze_item(x: f32, y: f32, w: f32, h: f32, len: u64) -> Item {
+    let none = Anim { kind: AnimKind::None, len: 0 };
+    let n = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+    Item {
+        len,
+        what: What::Freeze { h: freeze_height(h) },
+        place: Placement { x: n(x, 0.0, 1.0, 0.5), y: n(y, 0.0, 1.0, 0.5), w: n(w, 0.02, 1.0, 0.3), opacity: 1.0 },
+        intro: none,
+        outro: none,
+        ..Item::default()
+    }
 }
 
 /// The colour of `#rrggbb`, or `or`.
@@ -1296,6 +1333,9 @@ impl Timeline {
             *subtitle = clip_text(subtitle, MAX_TEXT);
             *color = clip_text(color, 9);
         }
+        if let What::Freeze { h } = &mut i.what {
+            *h = freeze_height(*h);
+        }
         Ok(())
     }
 
@@ -1576,6 +1616,9 @@ impl Timeline {
                     *title = clip_text(title, MAX_TEXT);
                     *subtitle = clip_text(subtitle, MAX_TEXT);
                     *color = clip_text(color, 9);
+                }
+                if let What::Freeze { h } = &mut i.what {
+                    *h = freeze_height(*h);
                 }
             }
             l.items.sort_by_key(|i| i.at);

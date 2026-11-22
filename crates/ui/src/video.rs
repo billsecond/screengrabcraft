@@ -1580,6 +1580,23 @@ impl VideoView {
                         ui.close();
                     }
                     self.hold_menu(ed, ui, &ctx, "Hold the Frame at the Playhead", self.playhead);
+                    let screen_here = self
+                        .session
+                        .timeline
+                        .find(StreamKind::Screen)
+                        .and_then(|i| self.session.timeline.source_time(i, self.range.map_or(self.playhead, |r| r.0)))
+                        .is_some();
+                    if ui
+                        .add_enabled(screen_here, egui::Button::new("Freeze a Region"))
+                        .on_hover_text(
+                            "A rectangle of the screen held as it was while the rest plays on: over the chosen stretch, or for 3 seconds from the playhead",
+                        )
+                        .on_disabled_hover_text("The screen isn't playing there")
+                        .clicked()
+                    {
+                        self.freeze_region(ed, &ctx);
+                        ui.close();
+                    }
                     if ui
                         .add_enabled(self.session.has_clicks(), egui::Button::new("Zoom on the Clicks"))
                         .on_hover_text("A zoom for each run of clicks: ordinary zooms, to change or delete")
@@ -3003,6 +3020,16 @@ impl VideoView {
                     ui.close();
                 }
                 self.speed_menu(ed, ui, ctx);
+                if track.kind == StreamKind::Screen
+                    && ui
+                        .add_enabled(chosen, egui::Button::new("Freeze a Region in the Selection"))
+                        .on_hover_text("A rectangle of the screen held as it was at the stretch's start while the rest plays on")
+                        .on_disabled_hover_text(first_choose)
+                        .clicked()
+                {
+                    self.freeze_region(ed, ctx);
+                    ui.close();
+                }
                 if track.kind == StreamKind::Screen && !self.rec.pointer.is_empty() {
                     ui.separator();
                     if ui

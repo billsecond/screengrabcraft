@@ -161,6 +161,12 @@ the picture editor to the video editor. Its timeline has a row for each track:
 - **Corner pin**: a picture's or a video's panel has Corner Pin. Its four round handles are then
   dragged anywhere on the picture, and it's drawn in perspective between them (a screen seen at an
   angle, a poster on a wall).
+- **Words that write themselves on**: a title's, a lower third's or a callout's Entrance (or Exit)
+  can be Write on: its words appear letter by letter from the first, as if written (and are rubbed
+  off the same way going). Anything without words is wiped on from its left.
+- **Freeze a region**: Edit › Freeze a Region (or the screen track's right button, with a stretch
+  chosen) holds a rectangle of the screen as it was while the rest plays on: a clock, a message
+  that popped up. Drag it and its corners on the picture; its panel sizes it too.
 - **Replace media, copy effects**: an item's right button (or its panel's Effects) has Replace
   With, to show another file of the Media bin in its place, keeping its time, place, look, motion
   and animations. Copy Effects and Paste Effects put one item's look, entrance, exit and motion on

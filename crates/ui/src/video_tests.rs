@@ -1316,6 +1316,75 @@ fn media_is_replaced_keeping_its_effects_and_effects_are_pasted_on_another() {
 }
 
 #[test]
+fn a_region_of_the_screen_is_frozen_from_the_edit_menu_and_a_title_writes_itself_on() {
+    use screengrabcraft_media::layers::{AnimKind, What};
+    let mut h = harness();
+    // The purple block moves right across the white screen; frozen from 0.5 s to 2 s.
+    h.state_mut().video.as_mut().unwrap().range = Some((500_000, 2_000_000));
+    h.run_steps(2);
+    h.get_by_label("Edit").click();
+    h.run_steps(2);
+    h.get_by_label("Freeze a Region").click();
+    h.run_steps(3);
+    let (layer, item) = h.state().video.as_ref().unwrap().item.expect("the frozen region is chosen");
+    let it = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.item(layer, item).unwrap().clone();
+    assert!(matches!(it(&h).what, What::Freeze { .. }) && it(&h).at == 500_000 && it(&h).end() == 2_000_000);
+    assert!(h.query_by_label("Frozen Region").is_some() && h.query_by_label("Height").is_some());
+    // Its corner dragged out: larger, wider than it's high as it was dragged.
+    let r = h.state().video.as_ref().unwrap().chosen_on_screen().unwrap();
+    crate::tests::drag(&mut h, r.right_bottom(), r.right_bottom() + egui::vec2(60.0, 10.0));
+    let after = it(&h);
+    let tall = match after.what {
+        What::Freeze { h } => h,
+        _ => 0.0,
+    };
+    assert!(after.place.w > 0.45 && tall > 0.3 && tall < after.place.w, "{} {tall}", after.place.w);
+    assert_eq!(h.state().video.as_ref().unwrap().session.undo_label(), Some("Resize"));
+    shot(&mut h, "video-freeze-region");
+    // Over the left half of the screen: at 1.5 s the block (at 90 to 140 by then) is still where it
+    // was at 0.5 s (30 to 80), and the screen beyond the region plays on.
+    {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.session.execute("video.setItem", &serde_json::json!({"layer": layer, "item": item, "x": 0.25, "y": 0.5, "w": 0.5, "h": 1.0})).unwrap();
+    }
+    let f = h.state_mut().video.as_mut().unwrap().frame_at(1_500_000);
+    let (sx, sy) = (f.width() as f32 / 320.0, f.height() as f32 / 180.0);
+    let purple = |x: f32, y: f32| f.pixel((x * sx) as u32, (y * sy) as u32).is_some_and(|p| p.b > 140 && p.r < 120);
+    assert!(purple(55.0, 65.0) && !purple(115.0, 65.0), "held as at 0.5 s");
+    let g = h.state_mut().video.as_mut().unwrap().frame_at(2_500_000);
+    assert!(g.pixel((175.0 * sx) as u32, (65.0 * sy) as u32).is_some_and(|p| p.b > 140 && p.r < 120), "after it, the block plays on");
+    // A title written on: its Entrance, Write on.
+    {
+        let ctx = egui::Context::default();
+        let ed = h.state_mut();
+        let mut v = ed.video.take().unwrap();
+        v.range = None;
+        v.drop_on_timeline(ed, &ctx, &crate::video::LibDrop::Template("title-box"), None, 0);
+        ed.video = Some(v);
+    }
+    h.run_steps(3);
+    let (tl, ti) = h.state().video.as_ref().unwrap().item.unwrap();
+    h.state_mut().video.as_mut().unwrap().session.execute("video.setItem", &serde_json::json!({"layer": tl, "item": ti, "intro": "fade"})).unwrap();
+    h.run_steps(2);
+    scroll_side_panel_to(&mut h, "Entrance");
+    scroll_side_panel(&mut h, 3);
+    h.get_by_value("Fade").click();
+    h.run_steps(2);
+    h.get_by_label("Write on").click();
+    h.run_steps(3);
+    let title = h.state().video.as_ref().unwrap().session.timeline.item(tl, ti).unwrap().clone();
+    assert_eq!(title.intro.kind, AnimKind::Write);
+    assert!(title.intro.len >= 1_200_000, "writing takes a while");
+    // Part way in, it isn't all written yet.
+    let frame = |h: &mut Harness<'_, Editor>, t: u64| h.state_mut().video.as_mut().unwrap().frame_at(t);
+    let (part, all) = (frame(&mut h, title.intro.len / 3), frame(&mut h, title.intro.len + 100_000));
+    assert!(part.pixels() != all.pixels());
+    h.state_mut().video.as_mut().unwrap().playhead = title.intro.len / 2;
+    h.run_steps(3);
+    shot(&mut h, "video-write-on");
+}
+
+#[test]
 fn a_picture_moves_along_a_curved_path_and_is_pinned_by_its_corners() {
     use crate::services::DialogResult;
     let host = MediaHost::default();

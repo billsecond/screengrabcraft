@@ -35,6 +35,10 @@ pub struct Composer {
     /// The screen's other clip while a transition turns one into the other (decoded on its own,
     /// so the one playing goes on forward).
     screen_other: Option<ScreenDecoder>,
+    /// The screen decoded on its own again for the moments frozen regions hold (so the one
+    /// playing goes on forward), and the pictures of the last few such moments.
+    screen_held: Option<ScreenDecoder>,
+    held: Vec<(u64, Raster)>,
     camera: Option<(usize, u8)>,
     /// The last camera picture decoded, and which it was (and the other clip's, in a transition).
     camera_frame: Option<(usize, Raster)>,
@@ -60,9 +64,12 @@ impl Composer {
         let screen = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i).map(|t| (i, ScreenDecoder::new(t.stream))));
         let camera = timeline.find(StreamKind::Camera).and_then(|i| timeline.tracks.get(i).map(|t| (i, t.stream)));
         let screen_other = screen.as_ref().map(|(_, d)| ScreenDecoder::new(d.stream()));
+        let screen_held = screen.as_ref().map(|(_, d)| ScreenDecoder::new(d.stream()));
         Composer {
             rec,
             screen,
+            screen_held,
+            held: Vec::new(),
             screen_other,
             camera,
             camera_frame: None,
@@ -123,9 +130,16 @@ impl Composer {
                 scale(&pic, w, h)
             }
         };
+        // The regions frozen now: each the part of the screen it holds, as it was at its start.
+        let frozen = if screen_shown { self.frozen(timeline, t) } else { Vec::new() };
         let mut out = match &mut self.screen {
             Some((i, dec)) if screen_shown => {
-                let pic = timeline.source_time(*i, t).and_then(|src| dec.frame_at(&self.rec, src)).and_then(fit).unwrap_or_else(black);
+                let pic = timeline
+                    .source_time(*i, t)
+                    .and_then(|src| dec.frame_at(&self.rec, src))
+                    .map(|p| hold_regions(p, &frozen))
+                    .and_then(fit)
+                    .unwrap_or_else(black);
                 // In a transition between two of its clips, the other one's picture with it: the
                 // one going before the cut, the one coming after it.
                 match (timeline.blend_at(*i, t), &mut self.screen_other) {
@@ -221,6 +235,44 @@ impl Composer {
         self.captions = cues;
     }
 
+    /// The frozen regions showing at `t`: for each, where it goes on the screen's own picture (its
+    /// pixels) and what it holds there, the screen as it was at the region's start.
+    fn frozen(&mut self, timeline: &Timeline, t: u64) -> Vec<(u32, u32, Raster)> {
+        use crate::layers::{LayerKind, What};
+        let Some(i) = self.screen.as_ref().map(|(i, _)| *i) else { return Vec::new() };
+        let regions: Vec<(u64, screengrabcraft_model::Rect)> = timeline
+            .layers
+            .iter()
+            .filter(|l| l.kind == LayerKind::Picture && !l.hidden)
+            .filter_map(|l| l.items.iter().find(|it| it.at <= t && t < it.end()))
+            .filter_map(|it| match it.what {
+                What::Freeze { h } => Some((it.at, crate::layer_draw::freeze_rect(it.place_at(t), h))),
+                _ => None,
+            })
+            .take(8)
+            .collect();
+        let mut out = Vec::new();
+        for (at, r) in regions {
+            let Some(src) = timeline.source_time(i, at) else { continue };
+            if !self.held.iter().any(|(k, _)| *k == src) {
+                let Some(pic) = self.screen_held.as_mut().and_then(|d| d.frame_at(&self.rec, src)) else { continue };
+                // A few moments kept: regions held from different moments showing together.
+                if self.held.len() >= 3 {
+                    self.held.remove(0);
+                }
+                self.held.push((src, pic));
+            }
+            let Some((_, pic)) = self.held.iter().find(|(k, _)| *k == src) else { continue };
+            let (pw, ph) = (pic.width() as f32, pic.height() as f32);
+            let (x, y) = ((r.x * pw).floor().max(0.0) as u32, (r.y * ph).floor().max(0.0) as u32);
+            let (w, h) = ((r.w * pw).ceil().max(1.0) as u32, (r.h * ph).ceil().max(1.0) as u32);
+            if let Some(part) = pic.crop(x, y, w, h) {
+                out.push((x, y, part));
+            }
+        }
+        out
+    }
+
     /// The camera's picture at `src`: the last one up to then, unless the camera had stopped
     /// sending (none for over two seconds), when there's none.
     fn camera_at(&mut self, stream: u8, src: u64, other: bool) -> Option<Raster> {
@@ -240,6 +292,31 @@ impl Composer {
         let slot = if other { &mut self.camera_other } else { &mut self.camera_frame };
         *slot = Some((i, pic.clone()));
         Some(pic)
+    }
+}
+
+/// The screen's picture with each frozen region's part (see [`Composer::frozen`]) laid where it
+/// was.
+fn hold_regions(mut pic: Raster, frozen: &[(u32, u32, Raster)]) -> Raster {
+    for (x, y, part) in frozen {
+        paste(&mut pic, part, *x, *y);
+    }
+    pic
+}
+
+/// `part` copied onto `out` with its top left at `(x, y)`, as much of it as fits.
+fn paste(out: &mut Raster, part: &Raster, x: u32, y: u32) {
+    let (ow, oh) = (out.width() as usize, out.height() as usize);
+    let (x, y, pw) = (x as usize, y as usize, part.width() as usize);
+    let w = pw.min(ow.saturating_sub(x));
+    let h = (part.height() as usize).min(oh.saturating_sub(y));
+    let src = part.pixels();
+    let dst = out.pixels_mut();
+    for row in 0..h {
+        let (d, s) = (((y + row) * ow + x) * 4, row * pw * 4);
+        if let (Some(d), Some(s)) = (dst.get_mut(d..d + w * 4), src.get(s..s + w * 4)) {
+            d.copy_from_slice(s);
+        }
     }
 }
 
@@ -1244,6 +1321,31 @@ mod tests {
         assert_eq!(c.frame(&tl, 100_000).pixel(3, 3).unwrap().r, 10);
         // Past the end, black.
         assert_eq!(c.frame(&tl, 5_000_000).pixel(3, 3).unwrap(), Color::BLACK);
+    }
+
+    #[test]
+    fn a_frozen_region_holds_the_screen_as_it_was_while_the_rest_plays_on() {
+        let r = rec();
+        let mut tl = Timeline::new(&r);
+        // The right half of the screen held from 0.5 s for a second.
+        let freeze = crate::layers::freeze_item(0.75, 0.5, 0.5, 1.0, 1_000_000);
+        tl.place(freeze, None, 500_000).unwrap();
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        let at = |c: &mut Composer, tl: &Timeline, t: u64| {
+            let f = c.frame(tl, t);
+            (f.pixel(10, 20).unwrap().r, f.pixel(50, 20).unwrap().r)
+        };
+        assert_eq!(at(&mut c, &tl, 300_000), (30, 30), "before it, all of it plays");
+        assert_eq!(at(&mut c, &tl, 1_200_000), (120, 50), "the left plays on, the right is as it was at 0.5 s");
+        assert_eq!(at(&mut c, &tl, 1_600_000), (160, 160), "after it, all of it plays again");
+        // A cut before it moves it, and what it holds with it.
+        tl.cut(0, 200_000).unwrap();
+        let mut c = Composer::new(r.clone(), &tl, 64, 48);
+        assert_eq!(at(&mut c, &tl, 1_000_000), (120, 50));
+        // Hidden with its layer, nothing's held.
+        let l = tl.layers[0].id;
+        tl.set_layer(l, Some(true), None, None).unwrap();
+        assert_eq!(at(&mut c, &tl, 1_000_000), (120, 120));
     }
 
     #[test]

@@ -739,6 +739,15 @@ impl VideoView {
                     };
                     let place = item.place_at(self.playhead);
                     let mut first = true;
+                    if matches!(item.what, What::Freeze { .. }) {
+                        self.freeze_panel(ui, &item, &set);
+                        ui.add_space(16.0);
+                        if widgets::button(ui, "Delete").on_hover_text("Take it off the timeline (Del)").clicked() {
+                            self.run(ed, &ctx, "video.deleteItem", json!({"layer": layer, "item": id}));
+                            self.item = None;
+                        }
+                        return;
+                    }
                     if matches!(item.what, What::Zoom) {
                         self.zoom_panel(ui, &item, place, &set);
                         super::section(ui, "Motion", &mut false);
@@ -816,7 +825,11 @@ impl VideoView {
                                 egui::ComboBox::from_id_salt(("anim", key)).width(150.0).selected_text(anim.kind.label()).show_ui(ui, |ui| {
                                     for k in AnimKind::ALL {
                                         if ui.selectable_label(anim.kind == k, k.label()).clicked() {
-                                            set(self, json!({ key: k }), false);
+                                            // Writing takes a while longer than the others: a second
+                                            // or more (of no more than half of it).
+                                            let len_key = if key == "intro" { "introLen" } else { "outroLen" };
+                                            let len = if k == AnimKind::Write { anim.len.max(1_200_000) } else { anim.len };
+                                            set(self, json!({ key: k, len_key: len }), false);
                                         }
                                     }
                                 });
@@ -1030,9 +1043,53 @@ impl VideoView {
         }
     }
 
-    /// Whether the item chosen is a zoom (the picture then shows all of the screen, to place it).
+    /// Whether the item chosen is a zoom or a frozen region (the picture then shows all of the
+    /// screen, to place it).
     pub(super) fn zoom_chosen(&self) -> bool {
-        self.item.and_then(|(l, i)| self.session.timeline.item(l, i)).is_some_and(|it| matches!(it.what, What::Zoom))
+        self.item.and_then(|(l, i)| self.session.timeline.item(l, i)).is_some_and(|it| matches!(it.what, What::Zoom | What::Freeze { .. }))
+    }
+
+    /// A frozen region's panel: where it is and how large, and what it does.
+    fn freeze_panel(&mut self, ui: &mut Ui, item: &Item, set: &dyn Fn(&mut VideoView, serde_json::Value, bool)) {
+        let t = Tokens::get(ui.ctx());
+        let mut first = true;
+        let h = match item.what {
+            What::Freeze { h } => h,
+            _ => return,
+        };
+        let place = item.place;
+        super::section(ui, "Frozen Region", &mut first);
+        ui.label(
+            RichText::new("This part of the screen stays as it was when the item starts, while the rest plays on. Drag it on the picture, and its corners to size it; drag its ends on the timeline for how long.")
+                .size(12.0)
+                .color(t.muted),
+        );
+        ui.add_space(6.0);
+        self.slider(ui, "Width", place.w, 0.02, 1.0, "w", set);
+        self.slider(ui, "Height", h, 0.02, 1.0, "h", set);
+        super::section(ui, "Position", &mut first);
+        self.slider(ui, "Across", place.x, 0.0, 1.0, "x", set);
+        self.slider(ui, "Down", place.y, 0.0, 1.0, "y", set);
+        ui.add_space(4.0);
+        ui.label(RichText::new("The mouse pointer still shows over it.").size(12.0).color(t.muted));
+    }
+
+    /// A rectangle of the screen frozen over the chosen stretch, or for three seconds from the
+    /// playhead: chosen, to place and size it.
+    pub(super) fn freeze_region(&mut self, ed: &mut Editor, ctx: &egui::Context) {
+        let (from, to) = self.range.unwrap_or((self.playhead, self.playhead.saturating_add(3_000_000).min(self.length().max(self.playhead + 1))));
+        match self.session.execute("video.freezeRegion", &json!({"from": from, "to": to})) {
+            Ok(v) => {
+                let n = |k: &str| v.get(k).and_then(serde_json::Value::as_u64).and_then(|n| u32::try_from(n).ok());
+                if let (Some(l), Some(i)) = (n("layer"), n("item")) {
+                    self.item = Some((l, i));
+                    self.camera_chosen = false;
+                    self.pause();
+                    self.playhead = from;
+                }
+            }
+            Err(e) => ed.error(ctx, e.to_string()),
+        }
     }
 
     /// A text being typed: each change one step of a single undo step, kept when typing stops.
@@ -1475,7 +1532,13 @@ impl VideoView {
                         };
                         let _ = s.session.drag(cmd, &params);
                     };
+                    let frozen = self.session.timeline.item(layer, item).is_some_and(|i| matches!(i.what, What::Freeze { .. }));
                     let params = match resize {
+                        // A frozen region: the corner where the pointer is, its middle staying put.
+                        Some(_) if frozen => {
+                            let centre = self.chosen_rect(pic).map(|r| video_at(r.center())).unwrap_or(v);
+                            json!({"layer": layer, "item": item, "w": 2.0 * (v.x - centre.x).abs() / vw, "h": 2.0 * (v.y - centre.y).abs() / vh})
+                        }
                         Some((w0, d0)) => {
                             let centre = self.chosen_rect(pic).map(|r| video_at(r.center())).unwrap_or(v);
                             json!({"layer": layer, "item": item, "w": w0 * ((v - centre).length() / d0)})
@@ -1537,6 +1600,7 @@ pub fn item_colour(item: &Item, media: &[layers::MediaItem]) -> Color32 {
         What::Text { .. } => Color32::from_rgb(0xD9, 0x7B, 0x29),
         What::Transition { .. } => Color32::from_rgb(0x8A, 0x8A, 0x96),
         What::Zoom => Color32::from_rgb(0x3B, 0x8E, 0xD0),
+        What::Freeze { .. } => Color32::from_rgb(0x5B, 0xA8, 0xC8),
     }
 }
 
