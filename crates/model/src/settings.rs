@@ -1752,8 +1752,11 @@ mod tests {
         assert_eq!((p.folder, p.effects.round_corners), (None, PRESET_RADIUS_MAX));
         let old: CapturePreset = serde_json::from_str(r#"{"name": "Old", "area": "window"}"#).unwrap();
         assert_eq!((old.effects, old.folder, old.format), (none, None, None));
-        let odd: CapturePreset = serde_json::from_str(r#"{"name": "Odd", "effects": 5, "folder": [1], "format": "tiff"}"#).unwrap();
+        let odd: CapturePreset = serde_json::from_str(r#"{"name": "Odd", "effects": 5, "folder": [1], "format": "heif"}"#).unwrap();
         assert_eq!((odd.name.as_str(), odd.effects, odd.folder, odd.format), ("Odd", none, None, None));
+        // TIFF is one of the formats a preset can keep its captures in.
+        let tiff: CapturePreset = serde_json::from_str(r#"{"name": "Scans", "format": "tiff"}"#).unwrap();
+        assert_eq!(tiff.format, Some(ImageFormat::Tiff));
     }
 
     #[test]

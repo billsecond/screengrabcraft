@@ -1956,31 +1956,35 @@ impl Editor {
                         self.set_tool(Tool::Area);
                         ui.close();
                     }
+                    // What is done to the area selected, in a menu of its own (the Image menu
+                    // stays short enough for a small screen).
                     let area = self.area.is_some();
-                    if ui.add_enabled(area, egui::Button::new("Cut Area").shortcut_text("Ctrl+X")).clicked() {
-                        self.cut_area(&ctx);
-                        ui.close();
-                    }
-                    if ui.add_enabled(area, egui::Button::new("Delete Area").shortcut_text("Del")).clicked() {
-                        self.erase_area(&ctx);
-                        ui.close();
-                    }
-                    if ui
-                        .add_enabled(area, egui::Button::new("Fill Area from Round It"))
-                        .on_hover_text("Takes what is in the area out of the picture: the colours round it close over it")
-                        .clicked()
-                    {
-                        self.fill_area_from_round(&ctx);
-                        ui.close();
-                    }
-                    if ui.add_enabled(area, egui::Button::new("Crop to Selection")).clicked() {
-                        self.crop_to_area(&ctx);
-                        ui.close();
-                    }
-                    if ui.add_enabled(area, egui::Button::new("Invert Selection").shortcut_text("Ctrl+Shift+I")).clicked() {
-                        self.invert_area();
-                        ui.close();
-                    }
+                    ui.menu_button("Selected Area", |ui| {
+                        if ui.add_enabled(area, egui::Button::new("Cut Area").shortcut_text("Ctrl+X")).clicked() {
+                            self.cut_area(&ctx);
+                            ui.close();
+                        }
+                        if ui.add_enabled(area, egui::Button::new("Delete Area").shortcut_text("Del")).clicked() {
+                            self.erase_area(&ctx);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(area, egui::Button::new("Fill Area from Round It"))
+                            .on_hover_text("Takes what is in the area out of the picture: the colours round it close over it")
+                            .clicked()
+                        {
+                            self.fill_area_from_round(&ctx);
+                            ui.close();
+                        }
+                        if ui.add_enabled(area, egui::Button::new("Crop to Selection")).clicked() {
+                            self.crop_to_area(&ctx);
+                            ui.close();
+                        }
+                        if ui.add_enabled(area, egui::Button::new("Invert Selection").shortcut_text("Ctrl+Shift+I")).clicked() {
+                            self.invert_area();
+                            ui.close();
+                        }
+                    });
                     if ui.add(egui::Button::new("Magic Wand")).on_hover_text("Select the pixels of a colour with a click").clicked() {
                         self.set_tool(Tool::Area);
                         self.area_mode = crate::selection::AreaMode::Wand;
@@ -2008,25 +2012,27 @@ impl Editor {
                         ui.close();
                     }
                     ui.separator();
-                    for (label, deg) in [("Rotate Right", 90), ("Rotate Left", 270), ("Rotate 180°", 180)] {
-                        if ui.button(label).clicked() {
-                            self.run(&ctx, "image.rotate", json!({"degrees": deg}));
-                            self.view.fit_pending = true;
+                    ui.menu_button("Rotate and Flip", |ui| {
+                        for (label, deg) in [("Rotate Right", 90), ("Rotate Left", 270), ("Rotate 180°", 180)] {
+                            if ui.button(label).clicked() {
+                                self.run(&ctx, "image.rotate", json!({"degrees": deg}));
+                                self.view.fit_pending = true;
+                                ui.close();
+                            }
+                        }
+                        if ui.button("Rotate by an Angle…").on_hover_text("Turn the picture by any angle; the annotations turn with it").clicked() {
+                            self.dialog = Some(Dialog::rotate_any());
                             ui.close();
                         }
-                    }
-                    if ui.button("Rotate by an Angle…").on_hover_text("Turn the picture by any angle; the annotations turn with it").clicked() {
-                        self.dialog = Some(Dialog::rotate_any());
-                        ui.close();
-                    }
-                    if ui.button("Flip Horizontal").clicked() {
-                        self.run(&ctx, "image.flip", json!({"horizontal": true}));
-                        ui.close();
-                    }
-                    if ui.button("Flip Vertical").clicked() {
-                        self.run(&ctx, "image.flip", json!({"horizontal": false}));
-                        ui.close();
-                    }
+                        if ui.button("Flip Horizontal").clicked() {
+                            self.run(&ctx, "image.flip", json!({"horizontal": true}));
+                            ui.close();
+                        }
+                        if ui.button("Flip Vertical").clicked() {
+                            self.run(&ctx, "image.flip", json!({"horizontal": false}));
+                            ui.close();
+                        }
+                    });
                     ui.separator();
                     if ui.button("Combine Pictures…").on_hover_text("This picture and others side by side, stacked or in a grid").clicked() {
                         self.open_compose(crate::compose::ComposeKind::Combine);

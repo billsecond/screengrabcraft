@@ -131,6 +131,9 @@ fn the_camera_moves_to_another_corner_and_becomes_a_circle() {
 #[test]
 fn the_camera_is_mirrored_and_given_a_border_of_its_own_colour() {
     let mut h = harness();
+    // Below the panel's markers: scrolled to, as it would be by hand.
+    h.get_by_label("Mirror").scroll_to_me();
+    h.run_steps(4);
     h.get_by_label("Mirror").click();
     h.run_steps(2);
     let cam = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.camera;
@@ -2080,6 +2083,9 @@ fn the_cameras_green_screen_or_its_background_is_taken_away_from_its_panel() {
     shot(&mut h, "video-camera-green-screen");
     // Behind you: your room blurred instead of the screen.
     let before = h.state_mut().video.as_mut().unwrap().frame_at(500_000);
+    // Below the camera's border and mirror: scrolled to, as it would be by hand.
+    h.get_by_value("The screen").scroll_to_me();
+    h.run_steps(4);
     h.get_by_value("The screen").click();
     h.run_steps(2);
     h.get_by_label("Your room, blurred").click();

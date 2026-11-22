@@ -155,7 +155,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Feature | Status | Notes |
 |---|---|---|
 | Resize, rotate a quarter turn, flip | Has | |
-| **Rotate by any angle** | Has | Image › Rotate by an Angle…: the picture grows to hold the turned one, the corners see-through or a colour, the annotations turned with it |
+| **Rotate by any angle** | Has | Image › Rotate and Flip › Rotate by an Angle…: the picture grows to hold the turned one, the corners see-through or a colour, the annotations turned with it |
 | **Templates: pictures laid out in a frame with words** | Has | Image › Template…: steps in a row, down the page, in a grid, or before and after, with a title and each step's words; every part stays an annotation |
 | **Several pictures combined into one** | Has | Image › Combine Pictures…: side by side, stacked or in a grid, with recent captures or picture files |
 | Many pictures changed at once (batch) | Has | Batch Changes (File menu, or All captures for the pictures shown): resize, the effects, grayscale, invert, trim, in order; a format and a name pattern; each saved beside its picture, none written over |

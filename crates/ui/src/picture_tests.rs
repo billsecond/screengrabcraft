@@ -203,6 +203,12 @@ fn the_picture_rotates_by_any_angle() {
     ed.session.doc.add(Shape::Rect { rect: Rect::new(160.0, 110.0, 80.0, 80.0), radius: 0.0 }, Kind::Rect.default_style()).unwrap();
     let mut h = ready_tall(ed, Tool::Select);
     click(&mut h, "Image");
+    // Its submenu opens under the pointer.
+    let sub = h.get_by_label_contains("Rotate and Flip").rect().center();
+    h.hover_at(sub);
+    h.run_steps(3);
+    h.get_by_label_contains("Rotate and Flip").click();
+    h.run_steps(3);
     click(&mut h, "Rotate by an Angle…");
     h.get_by_label("Angle");
     shot(&mut h, "rotate-any");

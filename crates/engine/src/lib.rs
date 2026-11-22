@@ -4,14 +4,14 @@
 //! Layer L4: no I/O and no UI; it builds for the browser.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
-pub mod batch;
-pub mod guide;
-pub mod library;
 pub mod arrange;
+pub mod batch;
 pub mod compose;
 pub mod details;
 pub mod edit_text;
 pub mod fx;
+pub mod guide;
+pub mod library;
 pub mod measure;
 pub mod registry;
 pub mod session;

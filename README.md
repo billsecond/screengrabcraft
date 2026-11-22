@@ -392,7 +392,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   eyedropper and the Fill tool's pail are the pointer, their tip on the spot they act on.
 - **Selection** (Q): select part of the picture itself to move, copy, cut, delete or crop to: a
   box, an ellipse, a freehand outline, or a colour with the magic wand; Invert Selection
-  (Ctrl+Shift+I) takes everything else. **Eraser** (E): rubs the picture out to see-through or
+  (Ctrl+Shift+I) takes everything else. What is done to a selected area is also under Image ›
+  Selected Area. **Eraser** (E): rubs the picture out to see-through or
   to a colour. With "Fill where a moved part was" ticked, a part dragged away (a button, a block)
   leaves its place filled from the colours round it; **Fill from Round It** takes something out
   of the picture that way.
@@ -436,8 +437,8 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
 - **Fill** (F): click the picture to fill an area of one colour (a tolerance takes in colours
   close to it; none makes it see-through), or click a box, ellipse, callout or text box to fill it;
   a linear or radial gradient to a second colour, too.
-- **Crop**, **resize**, canvas size, rotate (a quarter turn, or any angle with Image › Rotate by an
-  Angle…: the corners see-through or a colour, the annotations turned with it), flip, trim borders.
+- **Crop**, **resize**, canvas size, rotate (a quarter turn, or any angle with Image › Rotate and
+  Flip › Rotate by an Angle…: the corners see-through or a colour, the annotations turned with it), flip, trim borders.
 - **Cut Out** (U): drag across the picture over what to take out (columns, or rows) and the rest
   is joined, straight or with a saw or a wave and a thin see-through gap. Annotations past the strip
   move with the picture. An area chosen with the Selection tool can be cut out from its right-click

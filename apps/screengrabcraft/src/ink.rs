@@ -359,7 +359,10 @@ mod tests {
         ink.begin(Pt::new(50.0, 5.0), t0);
         let shapes: Vec<Shape> = ink.objects(t0).into_iter().map(|o| o.shape).collect();
         assert!(matches!(&shapes[0], Shape::Pen { points } if points.len() == 3));
-        assert_eq!(shapes[1], Shape::Arrow { from: Pt::new(100.0, 100.0), to: Pt::new(150.0, 120.0), heads: ArrowHeads::End, bend: 0.0, head: HeadShape::default() });
+        assert_eq!(
+            shapes[1],
+            Shape::Arrow { from: Pt::new(100.0, 100.0), to: Pt::new(150.0, 120.0), heads: ArrowHeads::End, bend: 0.0, head: HeadShape::default() }
+        );
         assert_eq!(shapes[2], Shape::Rect { rect: Rect::new(40.0, 30.0, 40.0, 60.0), radius: 0.0 }, "dragged up and left, the right way round");
         assert_eq!(shapes[3], Shape::Step { center: Pt::new(5.0, 5.0), number: 1, labels: StepLabels::default(), badge: BadgeShape::default() });
         assert_eq!(shapes[4], Shape::Step { center: Pt::new(50.0, 5.0), number: 2, labels: StepLabels::default(), badge: BadgeShape::default() });
@@ -372,7 +375,10 @@ mod tests {
         ink.begin(Pt::new(1.0, 1.0), t0);
         ink.clear();
         ink.begin(Pt::new(1.0, 1.0), t0);
-        assert_eq!(ink.objects(t0).first().map(|o| o.shape.clone()), Some(Shape::Step { center: Pt::new(1.0, 1.0), number: 1, labels: StepLabels::default(), badge: BadgeShape::default() }));
+        assert_eq!(
+            ink.objects(t0).first().map(|o| o.shape.clone()),
+            Some(Shape::Step { center: Pt::new(1.0, 1.0), number: 1, labels: StepLabels::default(), badge: BadgeShape::default() })
+        );
     }
 
     #[test]

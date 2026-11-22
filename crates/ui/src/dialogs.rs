@@ -793,7 +793,10 @@ pub(crate) fn command(d: &Dialog) -> Option<(&'static str, Value)> {
             if !*words {
                 return None;
             }
-            ("effect.watermark", json!({"text": text, "color": hex(*color), "place": place, "size": size, "angle": angle, "opacity": opacity, "under": under}))
+            (
+                "effect.watermark",
+                json!({"text": text, "color": hex(*color), "place": place, "size": size, "angle": angle, "opacity": opacity, "under": under}),
+            )
         }
         Dialog::Details { time, time_text, program, program_text, size, place, font_size, color, background } => {
             let said = |on: bool, t: &str| {

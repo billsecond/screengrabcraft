@@ -800,7 +800,13 @@ pub fn overlay_picture(out: &mut Raster, pic: &Raster, layout: &crate::timeline:
 
 /// Draws `cam` in the camera's place on `out`: in its shape, with its border, what the layout
 /// takes away from it showing what's under it (or what `picture` puts behind).
-fn overlay_in_place(out: &mut Raster, cam: &Raster, layout: &crate::timeline::CameraLayout, plate: Option<&crate::keyer::Plate>, picture: Option<&Raster>) {
+fn overlay_in_place(
+    out: &mut Raster,
+    cam: &Raster,
+    layout: &crate::timeline::CameraLayout,
+    plate: Option<&crate::keyer::Plate>,
+    picture: Option<&Raster>,
+) {
     let layout = *layout;
     let (ow, oh) = (out.width() as f32, out.height() as f32);
     let aspect = cam.width() as f32 / cam.height().max(1) as f32;
