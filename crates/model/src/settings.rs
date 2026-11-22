@@ -1001,6 +1001,11 @@ impl EditorSettings {
             },
             Kind::Stamp => ShapeOptions { stamp: Some(self.stamp.unwrap_or_default()), ..ShapeOptions::default() },
             Kind::Spotlight => ShapeOptions { round: Some(false), ..ShapeOptions::default() },
+            Kind::Step => ShapeOptions {
+                labels: Some(crate::object::StepLabels::Numbers),
+                badge: Some(crate::object::BadgeShape::Circle),
+                ..ShapeOptions::default()
+            },
             _ => ShapeOptions::default(),
         };
         // A rectangle's and an ellipse's are kept as one, the Shape tool's; which of the two it

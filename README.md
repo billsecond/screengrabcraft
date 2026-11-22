@@ -188,8 +188,10 @@ Annotations stay editable (move them, resize them, restyle them) until you flatt
   and dragged anywhere; in PatroneOS Sans or PatroneOS Mono, bold, italic, left, centred or right.
   Text overlays: an outline round the letters, a shadow, a filled or see-through box behind
   them, and big titles, each a quick style of the Text tool.
-- **Step** numbers that count themselves, and **stamps** (check, cross, star, question, warning,
-  information, heart).
+- **Step** badges that count themselves, in numbers, capital or small letters, or Roman numerals
+  (each way counts on its own, so 1, 2, 3 can have a, b, c beside them), on a circle, a rounded
+  or square box, a diamond, a hexagon or a pin (Shape, in the Step tool's properties), and
+  **stamps** (check, cross, star, question, warning, information, heart).
 - **Blur**, **pixelate**, **spotlight** (darken everything else) and **magnify** (a lens).
 - Colours (a palette that reads well for people who see red and green alike, and any colour),
   thickness, opacity, shadows, dashes.

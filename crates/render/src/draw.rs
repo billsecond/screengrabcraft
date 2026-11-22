@@ -2,8 +2,8 @@
 //! pixels under them (blur, pixelate, spotlight, magnify) work on what has been drawn so far, so
 //! a blur hides an arrow drawn before it and not one drawn after.
 
-use screengrabcraft_model::object::{arrow_head, step_radius};
-use screengrabcraft_model::{ArrowHeads, CalloutForm, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
+use screengrabcraft_model::object::{PIN_POINT, arrow_head, step_radius};
+use screengrabcraft_model::{ArrowHeads, BadgeShape, CalloutForm, Color, Document, Object, ObjectId, Pt, Raster, Rect, Shape, Style};
 use tiny_skia::{
     BlendMode, FillRule, FilterQuality, LineCap, LineJoin, Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, SpreadMode, Stroke, StrokeDash,
     Transform,
@@ -262,9 +262,10 @@ pub fn draw_object(canvas: &mut Pixmap, doc: &Document, o: &Object) {
                 draw_text_centered(c, t, form.text_area(rect), body, &style);
             });
         }
-        Shape::Step { center, number } => {
-            let (center, number) = (*center, *number);
-            with_style(canvas, bounds, &style, &|c, t| draw_step(c, t, center, number, &style));
+        Shape::Step { center, number, labels, badge } => {
+            let (center, badge) = (*center, *badge);
+            let label = labels.text(*number);
+            with_style(canvas, bounds, &style, &|c, t| draw_step(c, t, center, &label, badge, &style));
         }
         Shape::Blur { rect } => {
             if let Some((x, y, w, h)) = rect.pixel_bounds(canvas.width(), canvas.height()) {
@@ -412,19 +413,86 @@ pub fn centered_label(label: &str, style: &Style, center: Pt) -> Option<Path> {
     path.transform(Transform::from_translate(center.x - cx, center.y - cy))
 }
 
-fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, number: u32, style: &Style) {
+/// A closed outline through `points`.
+fn polygon(points: &[Pt]) -> Option<Path> {
+    let (first, rest) = points.split_first()?;
+    let mut pb = PathBuilder::new();
+    pb.move_to(first.x, first.y);
+    for p in rest {
+        pb.line_to(p.x, p.y);
+    }
+    pb.close();
+    pb.finish()
+}
+
+/// The outline of a step badge of radius `r` round `center`.
+pub fn badge_path(badge: BadgeShape, center: Pt, r: f32) -> Option<Path> {
+    let r = r.max(0.5);
+    let (side, up, _) = badge.reach(r);
+    let (x, y) = (center.x, center.y);
+    match badge {
+        BadgeShape::Circle => circle(center, r),
+        BadgeShape::Rounded => rounded_rect(Rect::new(x - side, y - up, 2.0 * side, 2.0 * up), r * 0.42),
+        BadgeShape::Square => rounded_rect(Rect::new(x - side, y - up, 2.0 * side, 2.0 * up), 0.0),
+        BadgeShape::Diamond => polygon(&[Pt::new(x, y - up), Pt::new(x + side, y), Pt::new(x, y + up), Pt::new(x - side, y)]),
+        BadgeShape::Hexagon => {
+            let corners: Vec<Pt> = (0..6)
+                .map(|i| {
+                    let a = -std::f32::consts::FRAC_PI_2 + i as f32 * std::f32::consts::FRAC_PI_3;
+                    Pt::new(x + up * a.cos(), y + up * a.sin())
+                })
+                .collect();
+            polygon(&corners)
+        }
+        BadgeShape::Pin => {
+            // A round head, its sides running down into the point where they meet the circle
+            // at a tangent.
+            let tip = Pt::new(x, y + r * PIN_POINT);
+            let d = PIN_POINT * r;
+            let half = (r / d).clamp(-1.0, 1.0).acos();
+            let down = std::f32::consts::FRAC_PI_2;
+            let (from, to) = (down + half, down - half + std::f32::consts::TAU);
+            let steps = 40;
+            let mut points = Vec::with_capacity(steps + 2);
+            points.push(tip);
+            for i in 0..=steps {
+                let a = from + (to - from) * i as f32 / steps as f32;
+                points.push(Pt::new(x + r * a.cos(), y + r * a.sin()));
+            }
+            polygon(&points)
+        }
+    }
+}
+
+fn draw_step(c: &mut Pixmap, t: Transform, center: Pt, label: &str, badge: BadgeShape, style: &Style) {
     let r = step_radius(style.font_size);
-    let Some(disc) = circle(center, r) else { return };
-    c.fill_path(&disc, &paint(if visible(style.fill) { style.fill } else { Color::RED }), FillRule::Winding, t, None);
+    let Some(outline) = badge_path(badge, center, r) else { return };
+    c.fill_path(&outline, &paint(if visible(style.fill) { style.fill } else { Color::RED }), FillRule::Winding, t, None);
     if style.width > 0.0 && visible(style.stroke) {
-        c.stroke_path(&disc, &paint(style.stroke), &stroke_of(style.width, false, LineCap::Round), t, None);
+        c.stroke_path(&outline, &paint(style.stroke), &stroke_of(style.width, false, LineCap::Round), t, None);
     }
-    let label = number.to_string();
-    let size = if label.len() > 2 { style.font_size * 0.7 } else { style.font_size };
-    let s = Style { font_size: size, bold: true, mono: false, italic: false, ..*style };
-    if let Some(path) = centered_label(&label, &s, center) {
-        c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
+    // Three figures or more are smaller; a label still too wide for the badge (VIII, AB) is
+    // made to fit across it.
+    let size = if label.chars().count() > 2 { style.font_size * 0.7 } else { style.font_size };
+    let mut s = Style { font_size: size, bold: true, mono: false, italic: false, ..*style };
+    let wide = text::layout(label, &s, None).width;
+    let room = badge.label_room(r);
+    if wide > room && wide > 0.0 {
+        s.font_size = (size * room / wide).max(size * 0.35);
     }
+    let Some(mut path) = centered_label(label, &s, center) else { return };
+    // Smaller than the smallest letters (a count in the thousands in Roman numerals): the
+    // letters themselves are made smaller.
+    let w = path.bounds().width();
+    if w > room && w > 0.0 {
+        let f = room / w;
+        let squeeze = Transform::from_translate(center.x, center.y).pre_scale(f, f).pre_translate(-center.x, -center.y);
+        match path.clone().transform(squeeze) {
+            Some(p) => path = p,
+            None => return,
+        }
+    }
+    c.fill_path(&path, &paint(style.text_color), FillRule::Winding, t, None);
 }
 
 /// The outlines of a callout of any form, in drawing order: one for most, the cloud and then
@@ -696,7 +764,7 @@ mod tests {
             Shape::Callout { rect: r, tail: Pt::new(150.0, 115.0), text: "Cloud".into(), form: CalloutForm::Cloud },
             Shape::Callout { rect: r, tail: Pt::new(140.0, 45.0), text: "Arrow".into(), form: CalloutForm::Arrow },
             Shape::Callout { rect: Rect::new(10.0, 10.0, 0.5, 0.5), tail: Pt::new(f32::NAN, 1.0), text: String::new(), form: CalloutForm::Cloud },
-            Shape::Step { center: Pt::new(150.0, 30.0), number: 7 },
+            Shape::step(Pt::new(150.0, 30.0), 7),
             Shape::Blur { rect: r },
             Shape::Pixelate { rect: Rect::new(-50.0, -50.0, 500.0, 500.0) },
             Shape::Spotlight { rect: r, ellipse: true },
@@ -710,8 +778,70 @@ mod tests {
         for k in StampKind::ALL {
             d.add(Shape::Stamp { rect: Rect::new(150.0, 70.0, 40.0, 40.0), stamp: k }, Kind::Stamp.default_style()).unwrap();
         }
+        for (i, badge) in screengrabcraft_model::BadgeShape::ALL.into_iter().enumerate() {
+            for labels in screengrabcraft_model::StepLabels::ALL {
+                let center = Pt::new(20.0 + i as f32 * 30.0, 100.0);
+                d.add(Shape::Step { center, number: 3888, labels, badge }, Kind::Step.default_style()).unwrap();
+            }
+        }
         let out = render(&d).unwrap();
         assert_eq!((out.width(), out.height()), (200, 120));
+    }
+
+    /// Each badge is drawn in its own outline, its label inside it: a diamond leaves the corners
+    /// of its box alone, a square fills them, a pin reaches down to its point; and a long label
+    /// (Roman numerals) is made to fit.
+    #[test]
+    fn step_badges_take_their_shape_and_fit_their_labels() {
+        use screengrabcraft_model::{BadgeShape, StepLabels};
+        let style = Style { fill: Color::BLACK, stroke: Color::TRANSPARENT, text_color: Color::WHITE, shadow: false, ..Kind::Step.default_style() };
+        let r = step_radius(style.font_size);
+        let c = Pt::new(60.0, 50.0);
+        let draw = |badge: BadgeShape, labels: StepLabels, number: u32| {
+            let mut d = doc();
+            d.add(Shape::Step { center: c, number, labels, badge }, style).unwrap();
+            render(&d).unwrap()
+        };
+        let corner = |out: &Raster| px(out, (c.x + r * 0.8) as u32, (c.y - r * 0.8) as u32);
+        assert_eq!(corner(&draw(BadgeShape::Square, StepLabels::Numbers, 1)), Color::BLACK);
+        assert_eq!(corner(&draw(BadgeShape::Diamond, StepLabels::Numbers, 1)), Color::WHITE);
+        assert_eq!(corner(&draw(BadgeShape::Circle, StepLabels::Numbers, 1)), Color::WHITE);
+        let pin = draw(BadgeShape::Pin, StepLabels::Numbers, 1);
+        assert_eq!(px(&pin, c.x as u32, (c.y + r * 1.6) as u32), Color::BLACK, "the pin's point");
+        assert_eq!(px(&draw(BadgeShape::Circle, StepLabels::Numbers, 1), c.x as u32, (c.y + r * 1.6) as u32), Color::WHITE);
+        // Every label shows, in the badge's middle, and stays clear of its sides, however long.
+        for badge in BadgeShape::ALL {
+            for (labels, n) in [(StepLabels::Roman, 38), (StepLabels::Upper, 702), (StepLabels::Numbers, 9999), (StepLabels::RomanLower, 8)] {
+                let out = draw(badge, labels, n);
+                let side = badge.reach(r).0;
+                let mut letters = 0;
+                for y in (c.y - r * 0.4) as u32..(c.y + r * 0.4) as u32 {
+                    for x in (c.x - side * 0.5) as u32..(c.x + side * 0.5) as u32 {
+                        if px(&out, x, y).r > 200 {
+                            letters += 1;
+                        }
+                    }
+                }
+                assert!(letters > 4, "{badge:?} {labels:?}: the label shows ({letters})");
+                for y in (c.y - r * 0.3) as u32..(c.y + r * 0.3) as u32 {
+                    // How far the badge reaches to each side on this row.
+                    let dy = (y as f32 + 0.5 - c.y).abs();
+                    let half = match badge {
+                        BadgeShape::Diamond => side * (1.0 - dy / badge.reach(r).1),
+                        BadgeShape::Circle | BadgeShape::Pin => (r * r - dy * dy).sqrt(),
+                        _ => side,
+                    };
+                    for x in [(c.x - half + 3.0) as u32, (c.x + half - 3.0) as u32] {
+                        assert_eq!(px(&out, x, y), Color::BLACK, "{badge:?} {labels:?}: the label is clear of the side at {x},{y}");
+                    }
+                }
+                // Outside its box nothing is drawn.
+                let b = Shape::Step { center: c, number: n, labels, badge }.bounds(&style);
+                for (x, y) in [(b.x as u32 - 2, c.y as u32), (b.right() as u32 + 2, c.y as u32)] {
+                    assert_eq!(px(&out, x, y), Color::WHITE, "{badge:?} {labels:?} at {x},{y}");
+                }
+            }
+        }
     }
 
     #[test]

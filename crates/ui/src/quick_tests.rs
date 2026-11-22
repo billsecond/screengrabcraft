@@ -152,6 +152,64 @@ fn the_shape_button_draws_a_rectangle_or_an_ellipse() {
     assert!(matches!(last, Some(Shape::Rect { radius, .. }) if radius > 0.0), "{last:?}");
 }
 
+/// The Step tool's Shape options: steps in capital letters, then a pin; the badges count on in
+/// letters beside the numbered one; a quick style gives a selected badge another outline and
+/// keeps its letter.
+#[test]
+fn steps_count_in_letters_on_badges_of_other_shapes() {
+    use screengrabcraft_model::{BadgeShape, StepLabels};
+    let mut h = ready_tall(editor(), Tool::Draw(Kind::Step));
+    let label = |h: &Harness<'_, Editor>, i: usize| h.state().session.doc.objects.get(i).and_then(|o| o.shape.step_label());
+    let p = at(&h, 40.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    assert_eq!(label(&h, 0).as_deref(), Some("1"));
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    shot(&mut h, "step-shape-options");
+    click(&mut h, "A, B, C");
+    assert_eq!(h.state().tool_options(Kind::Step).labels, Some(StepLabels::Upper));
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.get_by_label_contains("The next step is A.");
+    let p = at(&h, 100.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    h.state_mut().session.select(Vec::new());
+    h.run_steps(2);
+    click(&mut h, "Shape options");
+    click(&mut h, "Pin");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let p = at(&h, 160.0, 40.0);
+    crate::tests::click_at(&mut h, p);
+    assert_eq!((label(&h, 1).as_deref(), label(&h, 2).as_deref()), (Some("A"), Some("B")), "letters count on their own");
+    let badge = |h: &Harness<'_, Editor>, i: usize| match h.state().session.doc.objects.get(i).map(|o| &o.shape) {
+        Some(Shape::Step { badge, .. }) => Some(*badge),
+        _ => None,
+    };
+    assert_eq!((badge(&h, 0), badge(&h, 1), badge(&h, 2)), (Some(BadgeShape::Circle), Some(BadgeShape::Circle), Some(BadgeShape::Pin)));
+    // The letter badge selected, a square look: square, and still A.
+    let id = h.state().session.doc.objects.get(1).map(|o| o.id).unwrap();
+    h.state_mut().set_tool(Tool::Select);
+    h.state_mut().session.select(vec![id]);
+    h.run_steps(3);
+    click(&mut h, "Green, square badge");
+    assert_eq!((badge(&h, 1), label(&h, 1).as_deref()), (Some(BadgeShape::Rounded), Some("A")));
+    assert_eq!(h.state().session.undo_label(), Some("Apply Quick Style"));
+    h.get_by_label_contains("shows A");
+    // Every badge and way of counting, for the picture of it.
+    for (i, badge) in BadgeShape::ALL.into_iter().enumerate() {
+        for (j, labels) in StepLabels::ALL.into_iter().enumerate() {
+            let center = Pt::new(40.0 + i as f32 * 60.0, 110.0 + j as f32 * 36.0);
+            let style = Kind::Step.default_style();
+            h.state_mut().session.doc.add(Shape::Step { center, number: [1, 2, 4, 9, 38][j], labels, badge }, style).unwrap();
+        }
+    }
+    h.state_mut().session.touch();
+    h.run_steps(3);
+    shot(&mut h, "step-badges");
+}
+
 #[test]
 fn a_quick_style_restyles_the_selected_callout_in_one_undo_step() {
     let mut ed = editor();

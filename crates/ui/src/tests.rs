@@ -816,7 +816,7 @@ fn a_thicker_line_or_bigger_badge_stays_on_the_picture() {
     let mut ed = editor();
     let style = Kind::Step.default_style();
     let center = screengrabcraft_model::Pt::new(385.0, 150.0);
-    let id = ed.session.doc.add(Shape::Step { center, number: 1 }, style).unwrap();
+    let id = ed.session.doc.add(Shape::step(center, 1), style).unwrap();
     ed.session.doc.bring_inside(id);
     ed.session.select(vec![id]);
     let bigger = screengrabcraft_model::Style { font_size: 60.0, ..style };

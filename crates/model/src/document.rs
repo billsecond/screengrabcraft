@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::geom::{Pt, Rect};
-use crate::object::{Kind, Object, ObjectId, Shape, Style};
+use crate::object::{Kind, Object, ObjectId, Shape, StepLabels, Style};
 use crate::raster::Raster;
 
 /// The most annotations one document holds.
@@ -257,12 +257,14 @@ impl Document {
         }
     }
 
-    /// The number the next step badge gets: one more than the highest so far.
-    pub fn next_step_number(&self) -> u32 {
+    /// The number the next step badge written with `labels` gets: one more than the highest so
+    /// far of those written the same way (numbers, letters and Roman numerals each count on
+    /// their own, so 1, 2, 3 can have a, b, c beside them).
+    pub fn next_step_number(&self, labels: StepLabels) -> u32 {
         self.objects
             .iter()
             .filter_map(|o| match o.shape {
-                Shape::Step { number, .. } => Some(number),
+                Shape::Step { number, labels: l, .. } if l == labels => Some(number),
                 _ => None,
             })
             .max()
@@ -440,9 +442,13 @@ mod tests {
     #[test]
     fn steps_count_up_and_images_are_pruned() {
         let mut d = doc();
-        assert_eq!(d.next_step_number(), 1);
-        d.add(Shape::Step { center: Pt::ZERO, number: 4 }, Style::default()).unwrap();
-        assert_eq!(d.next_step_number(), 5);
+        assert_eq!(d.next_step_number(StepLabels::Numbers), 1);
+        d.add(Shape::step(Pt::ZERO, 4), Style::default()).unwrap();
+        assert_eq!(d.next_step_number(StepLabels::Numbers), 5);
+        // Letters count on their own.
+        assert_eq!(d.next_step_number(StepLabels::Lower), 1);
+        d.add(Shape::Step { center: Pt::ZERO, number: 2, labels: StepLabels::Lower, badge: Default::default() }, Style::default()).unwrap();
+        assert_eq!((d.next_step_number(StepLabels::Lower), d.next_step_number(StepLabels::Numbers)), (3, 5));
         assert!(d.add(Shape::Image { rect: Rect::default(), image: 9 }, Style::default()).is_err());
         let key = d.add_image(Raster::filled(2, 2, Color::BLACK).unwrap()).unwrap();
         let id = d.add(Shape::Image { rect: Rect::new(0.0, 0.0, 2.0, 2.0), image: key }, Style::default()).unwrap();

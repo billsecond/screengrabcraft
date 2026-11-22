@@ -4,7 +4,9 @@
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::quick::{self, QuickStyle};
-use screengrabcraft_model::{Color, Document, Kind, Object, ObjectId, Pt, Raster, Rect, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
+use screengrabcraft_model::{
+    BadgeShape, Color, Document, Kind, Object, ObjectId, Pt, Raster, Rect, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign,
+};
 use serde_json::json;
 
 use crate::editor::{Editor, Tool};
@@ -151,7 +153,10 @@ pub(crate) fn draw_preview(look: &QuickStyle, shape: Kind, stamp: StampKind) -> 
         }
         Kind::Step => {
             style.font_size = 22.0;
-            Shape::Step { center: Pt::new(54.0, 40.0), number: 1 }
+            // A pin stands a little higher, for its point to show.
+            let badge = o.badge.unwrap_or_default();
+            let y = if badge == BadgeShape::Pin { 30.0 } else { 40.0 };
+            Shape::Step { center: Pt::new(54.0, y), number: 1, labels: o.labels.unwrap_or_default(), badge }
         }
         Kind::Stamp => Shape::Stamp { rect: Rect::new(30.0, 16.0, 48.0, 48.0), stamp: o.stamp.unwrap_or(stamp) },
         Kind::Blur => Shape::Blur { rect: Rect::new(10.0, 10.0, 88.0, 60.0) },

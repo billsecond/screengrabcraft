@@ -91,7 +91,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Add Annotation",
         "Annotate",
         None,
-        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?}, stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
+        r##"{"object": {"type": "arrow"|"line"|"rect"|"ellipse"|"pen"|"highlight"|"text"|"callout"|"step"|"blur"|"pixelate"|"spotlight"|"magnify"|"stamp", …its fields, "style"?: {…}}} → {"id": id}. Shapes are in picture pixels: arrow/line {"from":{"x","y"},"to":{"x","y"}}, boxes {"rect":{"x","y","w","h"}}, pen {"points":[…]} (highlight is a box: points are made the box round them), text/callout {"text": "…"} (callout also "tail"), step {"center", "number"?, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"} (a step without a number counts on from the others written the same way), stamp {"stamp": "check"|"cross"|"star"|"question"|"warning"|"info"|"heart"}"##,
         always,
         add_object
     ),
@@ -118,7 +118,7 @@ pub static COMMANDS: &[CommandSpec] = &[
         "Apply Quick Style",
         "Annotate",
         None,
-        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
+        r##"{"ids"?: [id], "style"?: {…the look's style}, "options"?: {"heads"?: "end"|"start"|"both"|"none", "radius"?: 8, "form"?: "rounded"|"square"|"oval"|"cloud"|"arrow", "tail"?: "downLeft"|"downRight"|"upLeft"|"upRight"|"left"|"right"|"up"|"down", "stamp"?: "check"|…, "round"?: true, "labels"?: "numbers"|"upper"|"lower"|"roman"|"romanLower", "badge"?: "circle"|"rounded"|"square"|"diamond"|"hexagon"|"pin"}, "keepTextSize"?: true} — a quick style on the selection (the text size stays unless keepTextSize is false)"##,
         has_selection,
         apply_look
     ),
@@ -364,8 +364,8 @@ fn duplicate(s: &mut Session, p: &Value) -> Result<Value> {
         if let Some(o) = s.doc.get(id).cloned() {
             let mut shape = o.shape.clone();
             shape.translate(d);
-            if let Shape::Step { number, .. } = &mut shape {
-                *number = s.doc.next_step_number();
+            if let Shape::Step { number, labels, .. } = &mut shape {
+                *number = s.doc.next_step_number(*labels);
             }
             new_ids.push(s.doc.add(shape, o.style)?);
         }
@@ -413,10 +413,10 @@ pub fn parse_object(v: &Value) -> Result<(Shape, Style)> {
 fn add_object(s: &mut Session, p: &Value) -> Result<Value> {
     let v = p.get("object").ok_or_else(|| EngineError::Params("`object` is required".to_string()))?;
     let (mut shape, style) = parse_object(v)?;
-    if let Shape::Step { number, .. } = &mut shape
+    if let Shape::Step { number, labels, .. } = &mut shape
         && *number == 0
     {
-        *number = s.doc.next_step_number();
+        *number = s.doc.next_step_number(*labels);
     }
     let id = s.doc.add(shape, style)?;
     s.selection = vec![id];

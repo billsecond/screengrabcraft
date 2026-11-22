@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
-use crate::object::{ArrowHeads, CalloutForm, Kind, ShapeOptions, StampKind, Style, TailSpot};
+use crate::object::{ArrowHeads, BadgeShape, CalloutForm, Kind, ShapeOptions, StampKind, Style, TailSpot};
 
 /// A look for a tool: the style it draws with, and what it sets about the shape.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -47,6 +47,8 @@ impl QuickStyle {
             && (o.tail.is_none() || c.tail.is_none() || o.tail == c.tail)
             && (o.stamp.is_none() || o.stamp == c.stamp)
             && same(o.round, c.round)
+            && (o.labels.is_none() || o.labels == c.labels)
+            && (o.badge.is_none() || o.badge == c.badge)
     }
 }
 
@@ -211,8 +213,13 @@ pub fn presets(kind: Kind, theme: &QuickTheme) -> Vec<Preset> {
             });
         }
         Kind::Step => {
-            row("badge", &|s| (Style { fill: s.color, text_color: s.ink, stroke: Color::WHITE, width: 2.0, ..base }, none));
-            row("ring", &|s| (Style { fill: Color::WHITE, text_color: on_white(s), stroke: s.color, width: 3.0, ..base }, none));
+            // The badge's outline comes with the look; how it counts (numbers, letters) doesn't.
+            let badge = |b: BadgeShape| ShapeOptions { badge: Some(b), ..none };
+            let solid = |s: &Swatch| Style { fill: s.color, text_color: s.ink, stroke: Color::WHITE, width: 2.0, ..base };
+            row("badge", &|s| (solid(s), badge(BadgeShape::Circle)));
+            row("ring", &|s| (Style { fill: Color::WHITE, text_color: on_white(s), stroke: s.color, width: 3.0, ..base }, badge(BadgeShape::Circle)));
+            row("square badge", &|s| (solid(s), badge(BadgeShape::Rounded)));
+            row("pin", &|s| (solid(s), badge(BadgeShape::Pin)));
         }
         Kind::Stamp => {
             drop(row);
@@ -300,6 +307,23 @@ mod tests {
         assert_eq!(names, ["Red, tail down left", "Green, tail down left", "Blue, tail down left", "Yellow, tail down left"]);
         let yellow = p.get(3).map(|q| q.look.style).unwrap();
         assert!(yellow.text_color.luminance() < 0.1, "dark text on yellow");
+    }
+
+    #[test]
+    fn step_looks_set_the_badge_and_keep_the_count() {
+        let p = presets(Kind::Step, theme("Bold"));
+        assert_eq!(p.len(), 16);
+        assert!(p.iter().all(|q| q.look.options.labels.is_none() && q.look.options.badge.is_some()), "how it counts is the owner's");
+        for b in [BadgeShape::Circle, BadgeShape::Rounded, BadgeShape::Pin] {
+            assert!(p.iter().any(|q| q.look.options.badge == Some(b)), "{b:?}");
+        }
+        // A look matches a badge of its outline whatever it counts in, and not one of another.
+        let look = p.first().map(|q| q.look).unwrap();
+        let mut letters = look;
+        letters.options.labels = Some(crate::object::StepLabels::Upper);
+        assert!(look.matches(&letters));
+        letters.options.badge = Some(BadgeShape::Diamond);
+        assert!(!look.matches(&letters));
     }
 
     #[test]

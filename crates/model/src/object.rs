@@ -185,6 +185,187 @@ impl TailSpot {
     }
 }
 
+/// How a step badge writes its place in the count.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StepLabels {
+    /// 1, 2, 3
+    #[default]
+    Numbers,
+    /// A, B, C … Z, AA, AB
+    Upper,
+    /// a, b, c … z, aa, ab
+    Lower,
+    /// I, II, III, IV
+    Roman,
+    /// i, ii, iii, iv
+    RomanLower,
+}
+
+impl StepLabels {
+    pub const ALL: [StepLabels; 5] = [StepLabels::Numbers, StepLabels::Upper, StepLabels::Lower, StepLabels::Roman, StepLabels::RomanLower];
+
+    /// The first three, as the panel offers them.
+    pub fn label(self) -> &'static str {
+        match self {
+            StepLabels::Numbers => "1, 2, 3",
+            StepLabels::Upper => "A, B, C",
+            StepLabels::Lower => "a, b, c",
+            StepLabels::Roman => "I, II, III",
+            StepLabels::RomanLower => "i, ii, iii",
+        }
+    }
+
+    /// What they are called, for a tooltip.
+    pub fn name(self) -> &'static str {
+        match self {
+            StepLabels::Numbers => "Numbers",
+            StepLabels::Upper => "Capital letters",
+            StepLabels::Lower => "Small letters",
+            StepLabels::Roman => "Roman numerals",
+            StepLabels::RomanLower => "Small Roman numerals",
+        }
+    }
+
+    /// What the badge numbered `n` shows. Nought is 0 whatever the labels, and Roman numerals
+    /// past 3999 (which they have no way to write) are figures.
+    pub fn text(self, n: u32) -> String {
+        if n == 0 {
+            return "0".to_string();
+        }
+        match self {
+            StepLabels::Numbers => n.to_string(),
+            StepLabels::Upper => letters(n),
+            StepLabels::Lower => letters(n).to_lowercase(),
+            StepLabels::Roman => roman(n).unwrap_or_else(|| n.to_string()),
+            StepLabels::RomanLower => roman(n).map_or_else(|| n.to_string(), |r| r.to_lowercase()),
+        }
+    }
+}
+
+/// A count in letters, as columns of a sheet are: A … Z, AA … AZ, BA …
+fn letters(n: u32) -> String {
+    let mut n = n;
+    let mut out = Vec::new();
+    while n > 0 && out.len() < 8 {
+        n -= 1;
+        out.push(char::from(b'A' + (n % 26) as u8));
+        n /= 26;
+    }
+    out.iter().rev().collect()
+}
+
+/// A count in Roman numerals, 1 to 3999.
+fn roman(n: u32) -> Option<String> {
+    if !(1..=3999).contains(&n) {
+        return None;
+    }
+    const PARTS: [(u32, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for (value, part) in PARTS {
+        while n >= value {
+            out.push_str(part);
+            n -= value;
+        }
+    }
+    Some(out)
+}
+
+/// A step badge's outline.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BadgeShape {
+    #[default]
+    Circle,
+    /// A square with round corners.
+    Rounded,
+    Square,
+    Diamond,
+    Hexagon,
+    /// A circle with a point under it, as a pin on a map: it points at what's below it.
+    Pin,
+}
+
+impl BadgeShape {
+    pub const ALL: [BadgeShape; 6] =
+        [BadgeShape::Circle, BadgeShape::Rounded, BadgeShape::Square, BadgeShape::Diamond, BadgeShape::Hexagon, BadgeShape::Pin];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BadgeShape::Circle => "Circle",
+            BadgeShape::Rounded => "Rounded square",
+            BadgeShape::Square => "Square",
+            BadgeShape::Diamond => "Diamond",
+            BadgeShape::Hexagon => "Hexagon",
+            BadgeShape::Pin => "Pin",
+        }
+    }
+
+    /// How far a badge of radius `r` reaches from its middle (where its label is): to each side,
+    /// up and down. Each is about as heavy as a circle of that radius.
+    pub fn reach(self, r: f32) -> (f32, f32, f32) {
+        match self {
+            BadgeShape::Circle => (r, r, r),
+            BadgeShape::Rounded | BadgeShape::Square => (r * 0.9, r * 0.9, r * 0.9),
+            BadgeShape::Diamond => (r * 1.25, r * 1.25, r * 1.25),
+            // A hexagon standing on a point: its sides are upright.
+            BadgeShape::Hexagon => (r * 1.1 * 0.866, r * 1.1, r * 1.1),
+            BadgeShape::Pin => (r, r, r * PIN_POINT),
+        }
+    }
+
+    /// How wide its label may be, for a badge of radius `r`: what fits across its middle.
+    pub fn label_room(self, r: f32) -> f32 {
+        match self {
+            BadgeShape::Rounded | BadgeShape::Square => r * 1.35,
+            BadgeShape::Diamond => r * 1.3,
+            BadgeShape::Hexagon => r * 1.4,
+            BadgeShape::Circle | BadgeShape::Pin => r * 1.5,
+        }
+    }
+
+    /// The box round a badge of radius `r` at `center`.
+    pub fn bounds(self, center: Pt, r: f32) -> Rect {
+        let (side, up, down) = self.reach(r);
+        Rect::new(center.x - side, center.y - up, 2.0 * side, up + down)
+    }
+
+    /// Whether `p` is on a badge of radius `r` at `center`, within `reach`.
+    pub fn hit(self, center: Pt, r: f32, p: Pt, reach: f32) -> bool {
+        let (dx, dy) = (p.x - center.x, p.y - center.y);
+        match self {
+            BadgeShape::Circle => p.distance(center) <= r + reach,
+            BadgeShape::Diamond => {
+                let half = self.reach(r).0;
+                dx.abs() + dy.abs() <= half + reach * std::f32::consts::SQRT_2
+            }
+            // The pin's round head, and its point.
+            BadgeShape::Pin => {
+                p.distance(center) <= r + reach || (self.bounds(center, r).inflate(reach).contains(p) && dy > 0.0 && dx.abs() <= r * 0.6 + reach)
+            }
+            _ => self.bounds(center, r).inflate(reach).contains(p),
+        }
+    }
+}
+
+/// How far below a pin's middle its point is, in radii.
+pub const PIN_POINT: f32 = 1.9;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TextAlign {
@@ -245,10 +426,15 @@ pub enum Shape {
         #[serde(default)]
         form: CalloutForm,
     },
-    /// A numbered badge, for steps in an explanation.
+    /// A numbered badge, for steps in an explanation: its place in the count, written as a
+    /// number, a letter or a Roman numeral, on a circle or another shape.
     Step {
         center: Pt,
         number: u32,
+        #[serde(default)]
+        labels: StepLabels,
+        #[serde(default)]
+        badge: BadgeShape,
     },
     /// Hides what is under it by blurring it.
     Blur {
@@ -494,8 +680,8 @@ impl Style {
 pub const MAX_RADIUS: f32 = 400.0;
 
 /// What a tool, or a quick style, sets about a shape besides its style: an arrow's heads, a
-/// rectangle's corners, a callout's form and tail, the stamp, a round spotlight or an ellipse.
-/// What is none is left as it is.
+/// rectangle's corners, a callout's form and tail, the stamp, a round spotlight or an ellipse, a
+/// step badge's labels and outline. What is none is left as it is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ShapeOptions {
@@ -513,6 +699,12 @@ pub struct ShapeOptions {
     /// spotlight.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub round: Option<bool>,
+    /// How a step badge writes its count.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<StepLabels>,
+    /// A step badge's outline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub badge: Option<BadgeShape>,
 }
 
 impl ShapeOptions {
@@ -541,6 +733,9 @@ impl ShapeOptions {
             }
             Shape::Stamp { rect, stamp } => Shape::Stamp { rect, stamp: o.stamp.unwrap_or(stamp) },
             Shape::Spotlight { rect, ellipse } => Shape::Spotlight { rect, ellipse: o.round.unwrap_or(ellipse) },
+            Shape::Step { center, number, labels, badge } => {
+                Shape::Step { center, number, labels: o.labels.unwrap_or(labels), badge: o.badge.unwrap_or(badge) }
+            }
             other => other,
         }
     }
@@ -555,6 +750,7 @@ impl ShapeOptions {
             Shape::Callout { form, .. } => ShapeOptions { form: Some(*form), ..none },
             Shape::Stamp { stamp, .. } => ShapeOptions { stamp: Some(*stamp), ..none },
             Shape::Spotlight { ellipse, .. } => ShapeOptions { round: Some(*ellipse), ..none },
+            Shape::Step { labels, badge, .. } => ShapeOptions { labels: Some(*labels), badge: Some(*badge), ..none },
             _ => none,
         }
     }
@@ -568,6 +764,8 @@ impl ShapeOptions {
             tail: other.tail.or(self.tail),
             stamp: other.stamp.or(self.stamp),
             round: other.round.or(self.round),
+            labels: other.labels.or(self.labels),
+            badge: other.badge.or(self.badge),
         }
     }
 }
@@ -741,10 +939,7 @@ impl Shape {
             }
             Shape::Line { from, to } => Rect::from_points(*from, *to).inflate(half),
             Shape::Pen { points } => Rect::bounding(points).inflate(half),
-            Shape::Step { center, .. } => {
-                let r = step_radius(style.font_size) + half;
-                Rect::new(center.x - r, center.y - r, 2.0 * r, 2.0 * r)
-            }
+            Shape::Step { center, badge, .. } => badge.bounds(*center, step_radius(style.font_size)).inflate(half),
             Shape::Callout { rect, tail, form, .. } => rect.inflate(form.bulge(*rect)).union(Rect::new(tail.x, tail.y, 0.0, 0.0)).inflate(half),
             // A highlight is its box, with no line round it.
             Shape::Spotlight { rect, .. } | Shape::Blur { rect } | Shape::Pixelate { rect } | Shape::Highlight { rect, .. } => *rect,
@@ -786,7 +981,7 @@ impl Shape {
                 let d = (dx * dx + dy * dy).sqrt();
                 if !style.fill.is_transparent() { d <= 1.0 + reach / rx.min(ry) } else { (d - 1.0).abs() * rx.min(ry) <= reach }
             }
-            Shape::Step { center, .. } => p.distance(*center) <= step_radius(style.font_size) + reach,
+            Shape::Step { center, badge, .. } => badge.hit(*center, step_radius(style.font_size), p, reach),
             Shape::Callout { rect, tail, .. } => rect.inflate(reach).contains(p) || distance_to_segment(p, rect.center(), *tail) <= reach.max(6.0),
             _ => self.rect().is_some_and(|r| r.inflate(tol).contains(p)),
         }
@@ -882,6 +1077,19 @@ impl Shape {
         Shape::Highlight { rect, stroke: Vec::new() }
     }
 
+    /// A step badge numbered `number` at `center`: a number on a circle.
+    pub fn step(center: Pt, number: u32) -> Shape {
+        Shape::Step { center, number, labels: StepLabels::default(), badge: BadgeShape::default() }
+    }
+
+    /// What a step badge shows; none for anything else.
+    pub fn step_label(&self) -> Option<String> {
+        match self {
+            Shape::Step { number, labels, .. } => Some(labels.text(*number)),
+            _ => None,
+        }
+    }
+
     /// The same shape with every coordinate finite and every list bounded, for anything read from
     /// outside. A highlighter stroke of an older file is made the box round it, its line `width`
     /// (`style.width`) included.
@@ -967,7 +1175,7 @@ mod tests {
         let ell = Shape::Ellipse { rect: Rect::new(0.0, 0.0, 100.0, 50.0) };
         assert!(ell.hit(&s, Pt::new(100.0, 25.0), 2.0));
         assert!(!ell.hit(&s, Pt::new(50.0, 25.0), 2.0));
-        let step = Shape::Step { center: Pt::new(10.0, 10.0), number: 1 };
+        let step = Shape::step(Pt::new(10.0, 10.0), 1);
         assert!(step.hit(&Kind::Step.default_style(), Pt::new(20.0, 10.0), 0.0));
         let pen = Shape::Pen { points: vec![Pt::new(0.0, 0.0), Pt::new(10.0, 10.0)] };
         assert!(pen.hit(&s, Pt::new(5.0, 5.0), 0.0));
@@ -1119,6 +1327,58 @@ mod tests {
         assert_eq!(serde_json::to_string(&round).unwrap(), r#"{"round":true}"#);
         assert_eq!(Kind::Ellipse.family(), Kind::Rect);
         assert_eq!(Kind::Callout.family(), Kind::Callout);
+    }
+
+    #[test]
+    fn steps_count_in_letters_and_roman_numerals() {
+        let all = |l: StepLabels, ns: &[u32]| ns.iter().map(|n| l.text(*n)).collect::<Vec<_>>().join(" ");
+        assert_eq!(all(StepLabels::Numbers, &[1, 2, 10, 9999]), "1 2 10 9999");
+        assert_eq!(all(StepLabels::Upper, &[1, 2, 26, 27, 28, 52, 53, 702, 703]), "A B Z AA AB AZ BA ZZ AAA");
+        assert_eq!(all(StepLabels::Lower, &[1, 3, 27]), "a c aa");
+        assert_eq!(all(StepLabels::Roman, &[1, 4, 9, 14, 40, 90, 400, 1994, 3999]), "I IV IX XIV XL XC CD MCMXCIV MMMCMXCIX");
+        assert_eq!(all(StepLabels::RomanLower, &[2, 19]), "ii xix");
+        // Past what Roman numerals write, and nought, are figures.
+        assert_eq!(all(StepLabels::Roman, &[4000, 0]), "4000 0");
+        assert_eq!(StepLabels::Upper.text(0), "0");
+        let most = StepLabels::Upper.text(u32::MAX);
+        assert!(!most.is_empty() && most.len() <= 8 && most.chars().all(|c| c.is_ascii_uppercase()), "{most}");
+        // Old files (before labels and badges) read as numbers on circles, and new ones round trip.
+        let old: Object = serde_json::from_str(r#"{"id":1,"type":"step","center":{"x":5,"y":6},"number":3}"#).unwrap();
+        assert_eq!(old.shape, Shape::step(Pt::new(5.0, 6.0), 3));
+        let new = Shape::Step { center: Pt::ZERO, number: 2, labels: StepLabels::RomanLower, badge: BadgeShape::Hexagon };
+        let v = serde_json::to_value(&new).unwrap();
+        assert_eq!((v["labels"].as_str(), v["badge"].as_str()), (Some("romanLower"), Some("hexagon")));
+        assert_eq!(serde_json::from_value::<Shape>(v).unwrap(), new);
+        assert_eq!(new.step_label().as_deref(), Some("ii"));
+        assert!(serde_json::from_str::<Shape>(r#"{"type":"step","center":{"x":0,"y":0},"number":1,"badge":"teapot"}"#).is_err());
+    }
+
+    #[test]
+    fn badges_are_hit_and_bounded_by_their_shape() {
+        let s = Kind::Step.default_style();
+        let r = step_radius(s.font_size);
+        let c = Pt::new(100.0, 100.0);
+        for badge in BadgeShape::ALL {
+            let shape = Shape::Step { center: c, number: 1, labels: StepLabels::Numbers, badge };
+            assert!(shape.hit(&s, c, 0.0), "{badge:?} in its middle");
+            assert!(!shape.hit(&s, Pt::new(100.0 + r * 3.0, 100.0), 0.0), "{badge:?} far off");
+            let b = shape.bounds(&s);
+            assert!(b.contains(c) && b.w >= r && b.h >= r, "{badge:?} {b:?}");
+        }
+        // A diamond's corners are empty; a square's aren't.
+        let corner = Pt::new(100.0 + r * 0.85, 100.0 + r * 0.85);
+        let diamond = Shape::Step { center: c, number: 1, labels: StepLabels::Numbers, badge: BadgeShape::Diamond };
+        let square = Shape::Step { center: c, number: 1, labels: StepLabels::Numbers, badge: BadgeShape::Square };
+        assert!(!diamond.hit(&s, corner, 0.0) && square.hit(&s, corner, 0.0));
+        // A pin reaches down to its point, and its bounds hold it.
+        let pin = Shape::Step { center: c, number: 1, labels: StepLabels::Numbers, badge: BadgeShape::Pin };
+        let tip = Pt::new(100.0, 100.0 + r * (PIN_POINT - 0.1));
+        assert!(pin.hit(&s, tip, 0.0) && !Shape::step(c, 1).hit(&s, tip, 0.0));
+        assert!(pin.bounds(&s).bottom() >= 100.0 + r * PIN_POINT);
+        // Options set the labels and the badge and keep the number.
+        let o = ShapeOptions { labels: Some(StepLabels::Upper), badge: Some(BadgeShape::Rounded), ..ShapeOptions::default() };
+        assert_eq!(o.applied(Shape::step(c, 4)), Shape::Step { center: c, number: 4, labels: StepLabels::Upper, badge: BadgeShape::Rounded });
+        assert_eq!(ShapeOptions::of(&o.applied(Shape::step(c, 4))), o);
     }
 
     #[test]

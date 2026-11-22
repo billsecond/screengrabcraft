@@ -153,6 +153,29 @@ fn steps_number_themselves_and_duplicates_count_on() {
     assert_eq!(num(&s, c), 3);
 }
 
+/// Steps in letters or Roman numerals count on their own beside numbered ones; a quick style or
+/// the picker changes how a badge counts and its outline, keeping its place in the count.
+#[test]
+fn steps_count_in_letters_on_their_own_and_change_their_badge() {
+    let mut s = session();
+    add(&mut s, json!({"type": "step", "center": {"x": 10, "y": 10}}));
+    let a = add(&mut s, json!({"type": "step", "center": {"x": 30, "y": 10}, "labels": "upper", "badge": "diamond"}));
+    let b = add(&mut s, json!({"type": "step", "center": {"x": 50, "y": 10}, "labels": "upper"}));
+    let label = |s: &Session, id| s.doc.get(id).unwrap().shape.step_label().unwrap();
+    assert_eq!((label(&s, a), label(&s, b)), ("A".to_string(), "B".to_string()));
+    let out = s.execute("edit.duplicate", &json!({"ids": [b.0]})).unwrap();
+    let c = ObjectId(out["ids"][0].as_u64().unwrap());
+    assert_eq!(label(&s, c), "C");
+    s.execute("object.look", &json!({"ids": [a.0, b.0], "options": {"labels": "roman", "badge": "pin"}})).unwrap();
+    assert_eq!((label(&s, a), label(&s, b)), ("I".to_string(), "II".to_string()));
+    assert!(matches!(s.doc.get(a).unwrap().shape, Shape::Step { badge: screengrabcraft_model::BadgeShape::Pin, .. }));
+    // Nonsense changes nothing.
+    let before = s.doc.clone();
+    assert!(s.execute("object.look", &json!({"ids": [a.0], "options": {"badge": "teapot"}})).is_err());
+    assert!(s.execute("object.add", &json!({"object": {"type": "step", "center": {"x": 1, "y": 1}, "labels": 5}})).is_err());
+    assert_eq!(s.doc, before);
+}
+
 #[test]
 fn text_order_flatten_and_info() {
     let mut s = session();

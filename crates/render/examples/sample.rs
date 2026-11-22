@@ -45,7 +45,7 @@ fn main() -> Result<(), String> {
         },
     ))?;
     for (i, c) in [(1u32, Pt::new(80.0, 90.0)), (2, Pt::new(350.0, 70.0)), (3, Pt::new(640.0, 70.0))] {
-        e(add(&mut d, Shape::Step { center: c, number: i }))?;
+        e(add(&mut d, Shape::step(c, i)))?;
     }
     e(add(&mut d, Shape::Blur { rect: Rect::new(340.0, 280.0, 200.0, 60.0) }))?;
     e(add(&mut d, Shape::Pixelate { rect: Rect::new(560.0, 270.0, 60.0, 80.0) }))?;

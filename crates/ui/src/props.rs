@@ -4,7 +4,9 @@
 
 use egui::{Color32, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use screengrabcraft_model::color::PALETTE;
-use screengrabcraft_model::{ArrowHeads, CalloutForm, Color, Kind, Object, Shape, ShapeOptions, StampKind, Style, TailSpot, TextAlign};
+use screengrabcraft_model::{
+    ArrowHeads, BadgeShape, CalloutForm, Color, Kind, Object, Shape, ShapeOptions, StampKind, StepLabels, Style, TailSpot, TextAlign,
+};
 
 use crate::editor::{Editor, Tool};
 use crate::icons::{self, Icon};
@@ -506,7 +508,7 @@ pub(crate) fn how_to(kind: Kind) -> &'static str {
         Kind::Rect | Kind::Ellipse => "Drag on the picture to draw one. Shift makes it a square or a circle.",
         Kind::Text => "Click the picture where the words go, or drag out a box, then type.",
         Kind::Callout => "Click what it's about, or drag out a box, then type. Its tail can be dragged.",
-        Kind::Step => "Click the picture: each click puts the next number there.",
+        Kind::Step => "Click the picture: each click puts the next number there. Shape sets letters, Roman numerals or another badge.",
         Kind::Stamp => "Click the picture to put one there, or drag for its size.",
         Kind::Pen => "Draw on the picture with the button held down.",
         Kind::Highlight => "Drag a box over what should stand out. Its handles resize it after.",
@@ -572,7 +574,7 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
     let mut s = old;
     let fill = matches!(kind, Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Text | Kind::Step | Kind::Stamp);
     let outline = !matches!(kind, Kind::Blur | Kind::Pixelate);
-    let picker = matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Stamp | Kind::Spotlight);
+    let picker = matches!(kind, Kind::Arrow | Kind::Rect | Kind::Ellipse | Kind::Callout | Kind::Stamp | Kind::Spotlight | Kind::Step);
     let shadow = !matches!(kind, Kind::Blur | Kind::Pixelate | Kind::Spotlight | Kind::Highlight);
     let dashed = matches!(kind, Kind::Arrow | Kind::Line | Kind::Rect | Kind::Ellipse | Kind::Pen | Kind::Callout);
     // Text and callouts can have an outline round their letters too.
@@ -699,18 +701,26 @@ fn properties(ed: &mut Editor, ui: &mut Ui, kind: Kind, first: Option<&Object>) 
 
     if kind == Kind::Step {
         ui.add_space(6.0);
-        if let Some(Shape::Step { number, .. }) = first.map(|o| &o.shape) {
-            let mut n = *number;
+        if let Some(Shape::Step { number, labels, .. }) = first.map(|o| &o.shape) {
+            let (mut n, labels) = (*number, *labels);
             ui.label(egui::RichText::new("Number").size(12.0).color(t.muted));
-            if ui.add(egui::DragValue::new(&mut n).range(0..=9999)).changed() {
-                set_on_selection(ed, &|s| {
-                    if let Shape::Step { number, .. } = s {
-                        *number = n;
-                    }
-                });
-            }
+            ui.horizontal(|ui| {
+                if ui.add(egui::DragValue::new(&mut n).range(0..=9999)).changed() {
+                    set_on_selection(ed, &|s| {
+                        if let Shape::Step { number, .. } = s {
+                            *number = n;
+                        }
+                    });
+                }
+                // Its place in the count, as the badge writes it.
+                if labels != StepLabels::Numbers {
+                    ui.label(egui::RichText::new(format!("shows {}", labels.text(n))).color(t.muted));
+                }
+            });
         } else {
-            ui.label(egui::RichText::new(format!("The next step is {}.", ed.session.doc.next_step_number())).color(t.muted));
+            let labels = ed.tool_options(Kind::Step).labels.unwrap_or_default();
+            let next = labels.text(ed.session.doc.next_step_number(labels));
+            ui.label(egui::RichText::new(format!("The next step is {next}.")).color(t.muted));
         }
     }
 
@@ -923,6 +933,27 @@ fn shape_button(ed: &mut Editor, ui: &mut Ui, kind: Kind, shape: Option<&Shape>)
                         }
                     }
                 });
+            }
+            Kind::Step => {
+                ui.label(small("Count in"));
+                ui.horizontal_wrapped(|ui| {
+                    for l in StepLabels::ALL {
+                        if ui.selectable_label(opts.labels == Some(l), l.label()).on_hover_text(l.name()).clicked() {
+                            chosen = Some(ShapeOptions { labels: Some(l), ..none });
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label(small("Badge"));
+                ui.horizontal_wrapped(|ui| {
+                    for b in BadgeShape::ALL {
+                        if ui.selectable_label(opts.badge == Some(b), b.label()).clicked() {
+                            chosen = Some(ShapeOptions { badge: Some(b), ..none });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                ui.label(small("Each way of counting counts on its own: 1, 2, 3 can have a, b, c beside them."));
             }
             _ => {}
         }

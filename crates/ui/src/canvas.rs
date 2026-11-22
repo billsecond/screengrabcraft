@@ -3,7 +3,7 @@
 
 use egui::{Color32, CursorIcon, Pos2, Sense, Stroke, StrokeKind, TextureOptions, Ui, pos2, vec2};
 use screengrabcraft_model::object::step_radius;
-use screengrabcraft_model::{ArrowHeads, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
+use screengrabcraft_model::{ArrowHeads, BadgeShape, Handle, Kind, ObjectId, Pt, Rect, Shape, ShapeOptions};
 use screengrabcraft_render::{Options, text};
 
 use crate::editor::{Editor, Tool};
@@ -210,7 +210,7 @@ fn shape_for(kind: Kind, start: Pt, now: Pt, shift: bool, opts: ShapeOptions, st
             let tail = area.nearest(opts.tail.unwrap_or_default().place(form, rect));
             Shape::Callout { rect, tail, text: String::new(), form }
         }
-        Kind::Step => Shape::Step { center: now, number: step },
+        Kind::Step => Shape::step(now, step),
         Kind::Blur => Shape::Blur { rect: boxed(false) },
         Kind::Pixelate => Shape::Pixelate { rect: boxed(false) },
         Kind::Spotlight => Shape::Spotlight { rect: boxed(false), ellipse: false },
@@ -712,7 +712,7 @@ fn input(ed: &mut Editor, ui: &mut Ui, resp: &egui::Response) {
                     ed.drag = Some(Drag::Move { ids: vec![id], last: start });
                     return;
                 }
-                let step = ed.session.doc.next_step_number();
+                let step = ed.session.doc.next_step_number(ed.tool_options(Kind::Step).labels.unwrap_or_default());
                 let shape = ed.with_defaults(shape_for(kind, start, start, false, ed.tool_options(kind), step, image_size));
                 let style = ed.tool_style(kind);
                 ed.session.begin(&format!("Draw {}", kind.label()));
@@ -1174,7 +1174,10 @@ fn click(ed: &mut Editor, ctx: &egui::Context, at: Option<Pos2>, shift: bool) {
                     let y = (p.y - off.y).min(h - bh).max(0.0);
                     Some(Shape::Callout { rect: Rect::new(x, y, bw, bh), tail: p, text: String::new(), form })
                 }
-                Kind::Step => Some(Shape::Step { center: p, number: ed.session.doc.next_step_number() }),
+                Kind::Step => {
+                    let labels = ed.tool_options(Kind::Step).labels.unwrap_or_default();
+                    Some(ed.with_defaults(Shape::step(p, ed.session.doc.next_step_number(labels))))
+                }
                 Kind::Stamp => {
                     let size = (w.min(h) * 0.08).clamp(32.0, 128.0).min(w).min(h);
                     Some(Shape::Stamp { rect: Rect::new(p.x - size / 2.0, p.y - size / 2.0, size, size), stamp: ed.stamp() })
@@ -1271,9 +1274,14 @@ fn paint(ed: &mut Editor, ui: &mut Ui, clip: egui::Rect) {
                     painter.rect_stroke(r, 1.5, Stroke::new(1.5, t.handle), StrokeKind::Middle);
                 }
             }
-            if let Shape::Step { center, .. } = o.shape {
-                let r = step_radius(o.style.font_size) * scale;
-                painter.circle_stroke(ed.view.to_screen(center), r + 3.0, Stroke::new(1.5, t.handle));
+            if let Shape::Step { center, badge, .. } = o.shape {
+                if badge == BadgeShape::Circle {
+                    let r = step_radius(o.style.font_size) * scale;
+                    painter.circle_stroke(ed.view.to_screen(center), r + 3.0, Stroke::new(1.5, t.handle));
+                } else {
+                    let b = ed.view.rect_to_screen(badge.bounds(center, step_radius(o.style.font_size)));
+                    painter.rect_stroke(b.expand(3.0), 3.0, Stroke::new(1.5, t.handle), StrokeKind::Outside);
+                }
             }
         }
     }
