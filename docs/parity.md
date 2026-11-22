@@ -296,7 +296,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 21. Device frames round the screen or an item; the screen made smaller on a background, rounded,
     bordered and shadowed (#111).
 22. Motion blur on moving items, zooms and pans; the pointer hidden for a stretch (#112).
-23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart).
+23. Zooms that follow the clicks; pictures put one after another (the voice recorded apart) (#113).
 
 **Still to build, in this order**
 
