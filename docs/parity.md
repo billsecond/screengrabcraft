@@ -285,7 +285,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 10. Several areas in one capture; a freehand area (#78).
 11. A multi-page PDF of several captures (#80).
 12. Captures pinned at the front of the Recent strip (#83).
-13. A countdown before a recording; a still from the camera.
+13. A countdown before a recording; a still from the camera (#84).
 
 **Still to build, in this order**
 
