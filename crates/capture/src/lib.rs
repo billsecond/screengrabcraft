@@ -38,10 +38,13 @@ use none as backend;
 
 #[cfg_attr(not(any(target_os = "windows", target_os = "macos", target_os = "linux")), allow(dead_code))]
 pub mod audio;
+// Open menus are looked for on Windows only; elsewhere there are none to add.
 pub mod camera;
 pub mod compose;
 #[cfg(any(test, all(unix, not(target_os = "macos"))))]
 mod decode;
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+mod menus;
 pub mod mouse;
 pub mod scroll;
 

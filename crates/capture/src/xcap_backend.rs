@@ -64,7 +64,11 @@ pub fn windows() -> Result<Vec<WindowInfo>, CaptureError> {
     }
     // Front first: xcap's z is larger for windows nearer the front.
     all.sort_by_key(|(z, _)| std::cmp::Reverse(*z));
-    Ok(all.into_iter().map(|(_, w)| w).collect())
+    let listed = all.into_iter().map(|(_, w)| w).collect();
+    // Open menus, drop-downs and tooltips (Windows doesn't list them) in front of them all.
+    #[cfg(target_os = "windows")]
+    let listed = crate::menus::in_front(crate::menus::open(), listed);
+    Ok(listed)
 }
 
 pub fn freeze() -> Result<Frozen, CaptureError> {

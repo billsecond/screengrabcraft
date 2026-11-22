@@ -24,7 +24,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Frozen screen while choosing, with a magnifier, crosshairs and the pixel's colour | Has | |
 | Arrow keys nudge the area, Shift+arrows resize it | Has | |
 | Windows snap under the pointer | Has | |
-| Open menus and tooltips caught as they were | Part | the screen is frozen when the key is pressed, so open menus are in it; menus aren't found and cut out by themselves |
+| Open menus and tooltips caught as they were | Has | the screen is frozen when the key is pressed, so open menus are in it; on Windows an open menu, drop-down (the system's, or the program in front's own) or tooltip is snapped to like a window, a click keeping just it; elsewhere it's dragged round |
 | Parts of a window (a button, a pane) snapped to | Missing | |
 | Freehand-shaped area | Has | Capture Freehand Area (the tray, the Capture page, a shortcut or a preset): drawn round with the button held down; what's outside the outline is see-through |
 | Several areas in one capture | Has | Alt (Option on a Mac) held as an area is let go keeps it and another is dragged out; the areas of one screen in one picture, laid out as they were, the rest see-through |
@@ -295,7 +295,8 @@ By how much someone using it every day would miss each one. Built ones move to a
 19. Captures kept in a preset's own folder listed in the Recent strip and All captures (#99).
 20. The how-to guide saved as a word-processor document and as slides (#101).
 21. A still from the camera at the camera's own size (#103).
-22. A recording cut short by a crash kept and said when the service starts again.
+22. A recording cut short by a crash kept and said when the service starts again (#104).
+23. Open menus, drop-downs and tooltips snapped to like windows (Windows; #107).
 
 **Still to build, in this order**
 
