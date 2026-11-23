@@ -1141,7 +1141,7 @@ impl Service {
         if self.restarting.is_none()
             && let Some(last) = self.held.drain(..).next_back()
         {
-            match launch::open_editor(&[last.to_string_lossy().to_string()]) {
+            match launch::open_editor(&launch::capture_args(&[last.to_string_lossy().to_string()])) {
                 Ok(()) => self.editor_aside = false,
                 Err(e) => log::warn!("opening the editor: {e}"),
             }
@@ -1324,8 +1324,12 @@ impl Service {
                 let name =
                     screengrabcraft_model::settings::expand_name(&self.settings.file_name, screengrabcraft_desktop::time::now(), "Recording", 1);
                 match place(&tmp, &dir, &name, "gif") {
-                    // Like any capture it goes to the editor, where it plays. That brings the editor back.
-                    Ok(path) if self.settings.after_capture.open_editor && launch::open_editor(&[path.to_string_lossy().to_string()]).is_ok() => {
+                    // Like any capture it goes to the editor, where it plays. That brings the editor back
+                    // (unless the owner minimized it).
+                    Ok(path)
+                        if self.settings.after_capture.open_editor
+                            && launch::open_editor(&launch::capture_args(&[path.to_string_lossy().to_string()])).is_ok() =>
+                    {
                         self.editor_aside = false;
                     }
                     Ok(path) => self.notify("GIF saved", format!("{frames} frames — {}", file_name(&path)), Some(path), None, false),
@@ -1347,7 +1351,7 @@ impl Service {
                     args.insert(0, launch::CAPTIONS_COMING.to_string());
                 }
                 // In the video editor, a window of its own: the picture editor comes back as it was.
-                if launch::open_video_editor(&args).is_err() {
+                if launch::open_video_editor(&launch::capture_args(&args)).is_err() {
                     self.notify("Recording saved", file_name(&path), Some(path), None, false);
                 }
             }
@@ -1751,7 +1755,7 @@ fn keep(
     let mut edited = false;
     if edit && let Ok((_, Some(p))) = &file {
         let t = Instant::now();
-        match launch::open_editor(&[p.to_string_lossy().to_string()]) {
+        match launch::open_editor(&launch::capture_args(&[p.to_string_lossy().to_string()])) {
             Ok(()) => {
                 edited = true;
                 log::info!("capture: handed to the editor in {} ms", t.elapsed().as_millis());

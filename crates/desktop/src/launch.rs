@@ -29,6 +29,11 @@ pub const ASK_CAPTIONS_AGAIN: &str = "--captions-again";
 /// What the service opens a recording in the editor with when its captions are being made
 /// (`--captions-coming <recording>`): the editor says so until they come.
 pub const CAPTIONS_COMING: &str = "--captions-coming";
+/// What the capture service hands a capture or a recording to an editor with, before its file
+/// (`--from-capture <file>`, [`capture_args`]): an editor the owner minimized opens it and stays
+/// minimized. A file the owner opens (from the file manager, the tray or a notice) brings the
+/// editor back.
+pub const FROM_CAPTURE: &str = "--from-capture";
 /// What the editor program is started with to be the video editor: a window of its own for
 /// recordings, beside the picture editor's (another copy of the same program).
 pub const VIDEO: &str = "--video";
@@ -117,6 +122,12 @@ fn editor_program() -> Option<PathBuf> {
 /// The arguments the video editor is started with: [`VIDEO`] first, then `args`.
 pub fn video_args(args: &[String]) -> Vec<String> {
     std::iter::once(VIDEO.to_string()).chain(args.iter().cloned()).collect()
+}
+
+/// The arguments a capture or a recording is handed to an editor with: [`FROM_CAPTURE`] first,
+/// then `args`.
+pub fn capture_args(args: &[String]) -> Vec<String> {
+    std::iter::once(FROM_CAPTURE.to_string()).chain(args.iter().cloned()).collect()
 }
 
 /// Opens the video editor with `args` (recordings to open); a running one takes them over, else
@@ -286,6 +297,15 @@ mod tests {
         assert_eq!(video_args(&[]), vec!["--video".to_string()]);
         assert_eq!(video_args(&[CAPTIONS_COMING.to_string(), "a.sgvideo".to_string()]), vec!["--video", "--captions-coming", "a.sgvideo"]);
         assert_ne!(VIDEO_INSTANCE, "editor", "it runs beside the picture editor, not instead of it");
+    }
+
+    #[test]
+    fn a_capture_is_handed_over_marked_as_one() {
+        assert_eq!(capture_args(&["shot.png".to_string()]), vec!["--from-capture", "shot.png"]);
+        // A recording for the video editor, with its captions coming, started afresh.
+        let rec = video_args(&capture_args(&[CAPTIONS_COMING.to_string(), "a.sgvideo".to_string()]));
+        assert_eq!(rec, vec!["--video", "--from-capture", "--captions-coming", "a.sgvideo"]);
+        assert!(FROM_CAPTURE.starts_with("--"), "never taken for a file to open");
     }
 
     #[test]
