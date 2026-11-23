@@ -63,6 +63,8 @@ pub struct Window {
 pub struct Done {
     pub saved: Option<PathBuf>,
     pub copied: bool,
+    /// Why it wasn't copied, when it was to be.
+    pub not_copied: Option<String>,
     pub edited: bool,
     pub thumb: Option<Raster>,
 }
@@ -608,10 +610,14 @@ impl Service {
             Msg::Saved(result) => {
                 self.keeping = false;
                 match result {
-                    // The picture brings the editor back.
+                    // The picture brings the editor back (and a notice says if it wasn't copied).
                     Ok(done) if done.edited => {
                         self.keeping_held = false;
                         self.editor_aside = false;
+                        if let Some((text, error)) = kept_notice(&done) {
+                            let detail = format!("{}. Copy it from the editor.", done.not_copied.unwrap_or_default());
+                            self.notify(text, detail, None, None, error);
+                        }
                     }
                     Ok(done) => {
                         // Taken while recording: it opens in the editor once the recording is over.
@@ -619,17 +625,15 @@ impl Service {
                         if held && let Some(p) = &done.saved {
                             self.held.push(p.clone());
                         }
-                        let text = match (&done.saved, done.copied) {
-                            (Some(_), true) => "Saved and copied",
-                            (Some(_), false) => "Saved",
-                            (None, true) => "Copied to the clipboard",
-                            (None, false) => "Captured",
-                        };
+                        let (text, error) = kept_notice(&done).unwrap_or(("Captured", false));
                         let mut detail = done.saved.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                        if let Some(e) = &done.not_copied {
+                            detail = if detail.is_empty() { e.clone() } else { format!("{e} \u{2014} {detail}") };
+                        }
                         if held {
                             detail = format!("{detail} \u{2014} it opens in the editor when the recording stops");
                         }
-                        self.notify(text, detail, done.saved.clone(), done.thumb, false);
+                        self.notify(text, detail, done.saved.clone(), done.thumb, error);
                     }
                     Err(e) => {
                         self.keeping_held = false;
@@ -1027,11 +1031,12 @@ impl Service {
         }
         let source = source.to_string();
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
-        // On Windows the picture goes to the clipboard on the worker, once the editor has it (a
-        // big picture takes a moment to copy, and the editor shows it first). Elsewhere it's
-        // copied here, on the window's thread, which some systems want.
+        // On Windows the picture goes to the clipboard on a worker, while the file is written and
+        // handed to the editor (a big picture takes a moment to copy, and the clipboard may be
+        // waited for while another program has it). Elsewhere it's copied here, on the window's
+        // thread, which some systems want.
         let copy_later = copy && cfg!(target_os = "windows");
-        let copied = copy && !copy_later && copy_to_clipboard(&pic);
+        let copied = (copy && !copy_later).then(|| copy_to_clipboard(&pic));
         let spawned = std::thread::Builder::new().name("keep".into()).spawn(move || {
             let r = keep(&pic, &source, window.as_ref(), &settings, (save, edit), copied, copy_later, pointer_doc.as_ref());
             let _ = tx.send(Msg::Saved(r));
@@ -1719,30 +1724,76 @@ fn enter_button(a: &AfterCapture) -> Action {
         .unwrap_or(Action::Default)
 }
 
-/// Puts a capture on the clipboard; false (and a line in the log) when it can't.
-fn copy_to_clipboard(pic: &Raster) -> bool {
-    match clipboard::copy_image(pic) {
-        Ok(()) => true,
-        Err(e) => {
-            log::warn!("copying the capture: {e}");
-            false
-        }
+/// Puts a capture on the clipboard, waiting a few seconds for it while another program has it
+/// open; why not (and a line in the log) when it can't.
+fn copy_to_clipboard(pic: &Raster) -> Result<(), String> {
+    let t = Instant::now();
+    let r = clipboard::copy_image(pic);
+    match &r {
+        Ok(()) => log::info!("capture: copied in {} ms", t.elapsed().as_millis()),
+        Err(e) => log::warn!("copying the capture: {e}"),
+    }
+    r
+}
+
+/// What the notice says of a kept capture, `None` when the editor shows it and nothing went
+/// wrong: (text, error). One that wasn't copied, when it was to be, is said plainly.
+fn kept_notice(done: &Done) -> Option<(&'static str, bool)> {
+    match (done.not_copied.is_some(), done.edited, done.saved.is_some()) {
+        (false, true, _) => None,
+        (true, false, true) => Some(("Saved, but not copied", true)),
+        (true, _, _) => Some(("The capture could not be copied", true)),
+        (false, false, true) => Some((if done.copied { "Saved and copied" } else { "Saved" }, false)),
+        (false, false, false) => Some((if done.copied { "Copied to the clipboard" } else { "Captured" }, false)),
     }
 }
 
-/// The file work of keeping a capture (on a worker thread): written, handed to the editor, then
-/// copied to the clipboard if that's left to do (`copy_later`), whether the file could be
-/// written or not.
+/// The file work of keeping a capture (on a worker thread): written and handed to the editor,
+/// and meanwhile copied to the clipboard if that's left to do (`copy_later`; `copied`, what came
+/// of copying it already), whether the file could be written or not. A capture that was only to
+/// be copied and couldn't be is saved in the captures folder instead, not lost.
 fn keep(
     pic: &Raster,
     source: &str,
     window: Option<&Window>,
     s: &Settings,
     (save, edit): (bool, bool),
-    copied: bool,
+    copied: Option<Result<(), String>>,
     copy_later: bool,
     side: Option<&screengrabcraft_model::Document>,
 ) -> Result<Done, String> {
+    std::thread::scope(|scope| {
+        // Copied on a thread of its own: the clipboard has it as soon as it can, and a clipboard
+        // another program holds for a moment holds up neither the file nor the editor.
+        let copying = copy_later.then(|| std::thread::Builder::new().name("copy".into()).spawn_scoped(scope, || copy_to_clipboard(pic)));
+        let (file, edited) = write_and_hand(pic, source, window, s, (save, edit), side);
+        let copy = match copying {
+            Some(Ok(t)) => Some(t.join().unwrap_or_else(|_| Err("the copy failed unexpectedly".to_string()))),
+            // No thread for it: copied here.
+            Some(Err(_)) => Some(copy_to_clipboard(pic)),
+            None => copied,
+        };
+        let not_copied = copy.as_ref().and_then(|r| r.as_ref().err().cloned());
+        let file = if not_copied.is_some() && !save && !edited { write_capture(pic, source, s, true, false) } else { file };
+        let (saved, _) = file?;
+        let thumb = {
+            let f = (96.0 / pic.width() as f32).min(64.0 / pic.height() as f32).min(1.0);
+            screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
+        };
+        Ok(Done { saved, copied: matches!(copy, Some(Ok(()))), not_copied, edited, thumb })
+    })
+}
+
+/// A capture written (where it was saved, and the file for the editor) and handed to the editor
+/// if it goes there (whether it went).
+fn write_and_hand(
+    pic: &Raster,
+    source: &str,
+    window: Option<&Window>,
+    s: &Settings,
+    (save, edit): (bool, bool),
+    side: Option<&screengrabcraft_model::Document>,
+) -> (Result<(Option<PathBuf>, Option<PathBuf>), String>, bool) {
     let file = write_capture(pic, source, s, save, edit);
     // A window's capture kept in the captures folder: the library notes its program and title.
     if let (Ok((Some(saved), _)), Some(w)) = (&file, window) {
@@ -1763,13 +1814,7 @@ fn keep(
             Err(e) => log::warn!("opening the editor: {e}"),
         }
     }
-    let copied = copied || (copy_later && copy_to_clipboard(pic));
-    let (saved, _) = file?;
-    let thumb = {
-        let f = (96.0 / pic.width() as f32).min(64.0 / pic.height() as f32).min(1.0);
-        screengrabcraft_render::effects::resize(pic, ((pic.width() as f32 * f) as u32).max(1), ((pic.height() as f32 * f) as u32).max(1)).ok()
-    };
-    Ok(Done { saved, copied, edited, thumb })
+    (file, edited)
 }
 
 /// A preset's effects added to its capture, by the editor's own commands (as Batch Changes adds
@@ -1858,6 +1903,65 @@ mod tests {
         assert_eq!(p.doc.objects.len(), 1, "the pointer");
         assert!(p.doc.base == plain && p.original == Some(plain), "under it, and as the original, the screen alone");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A capture that was only to be copied, when another program kept the clipboard busy: saved
+    /// in the captures folder instead (a made-up picture, in a folder of the test's own), and the
+    /// notice says it wasn't copied. Before, it was lost without a word.
+    #[test]
+    fn a_capture_that_could_not_be_copied_is_saved_instead_and_said() {
+        let dir = std::env::temp_dir().join(format!("sgc-not-copied-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Settings { folder: Some(dir.to_string_lossy().to_string()), format: ImageFormat::Png, ..Settings::default() };
+        let pic = Raster::filled(40, 30, screengrabcraft_model::Color::rgb(200, 60, 20)).unwrap();
+        let done = keep(&pic, "Region", None, &s, (false, false), Some(Err(clipboard::BUSY.to_string())), false, None).unwrap();
+        let saved = done.saved.clone().expect("saved instead");
+        assert!(saved.starts_with(&dir), "{}", saved.display());
+        let back = screengrabcraft_render::decode(&std::fs::read(&saved).unwrap()).unwrap();
+        assert!(back == pic, "the capture itself");
+        assert!(!done.copied && done.not_copied.as_deref() == Some(clipboard::BUSY));
+        assert_eq!(kept_notice(&done), Some(("Saved, but not copied", true)));
+        // Copied: nothing more is written.
+        let copied = keep(&pic, "Region", None, &s, (false, false), Some(Ok(())), false, None).unwrap();
+        assert!(copied.copied && copied.saved.is_none() && copied.not_copied.is_none());
+        assert_eq!(kept_notice(&copied), Some(("Copied to the clipboard", false)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows' way, on the real clipboard: the capture copied on a thread of its own while it's
+    /// saved (a made-up picture, in a folder of the test's own).
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "uses this computer's clipboard: leaves a small made-up picture on it"]
+    fn live_a_capture_is_copied_while_it_is_saved() {
+        let dir = std::env::temp_dir().join(format!("sgc-copied-meanwhile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let s = Settings { folder: Some(dir.to_string_lossy().to_string()), format: ImageFormat::Png, ..Settings::default() };
+        let pic = Raster::filled(120, 80, screengrabcraft_model::Color::rgb(20, 160, 90)).unwrap();
+        let done = keep(&pic, "Region", None, &s, (true, false), None, true, None).unwrap();
+        assert!(done.copied && done.not_copied.is_none() && done.saved.is_some());
+        assert_eq!(kept_notice(&done), Some(("Saved and copied", false)));
+        assert!(clipboard::paste_image().is_some_and(|p| p == pic), "the capture is on the clipboard");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_capture_not_copied_is_said_even_when_the_editor_shows_it() {
+        let done = |copied, not_copied: Option<&str>, edited, saved: bool| Done {
+            saved: saved.then(|| PathBuf::from("capture.png")),
+            copied,
+            not_copied: not_copied.map(str::to_string),
+            edited,
+            thumb: None,
+        };
+        assert_eq!(kept_notice(&done(true, None, true, true)), None, "the editor shows it, nothing to say");
+        assert_eq!(kept_notice(&done(false, Some(clipboard::BUSY), true, true)), Some(("The capture could not be copied", true)));
+        assert_eq!(kept_notice(&done(false, Some(clipboard::BUSY), true, false)), Some(("The capture could not be copied", true)));
+        assert_eq!(kept_notice(&done(false, Some(clipboard::BUSY), false, true)), Some(("Saved, but not copied", true)));
+        assert_eq!(kept_notice(&done(true, None, false, true)), Some(("Saved and copied", false)));
+        assert_eq!(kept_notice(&done(false, None, false, true)), Some(("Saved", false)));
+        assert_eq!(kept_notice(&done(true, None, false, false)), Some(("Copied to the clipboard", false)));
+        assert_eq!(kept_notice(&done(false, None, false, false)), Some(("Captured", false)));
     }
 
     #[test]
