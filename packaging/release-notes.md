@@ -1,3 +1,9 @@
+## What's new in 0.1.60
+
+### Fixed
+
+- **Captures are copied every time:** a capture often wasn't copied when another program (clipboard history, Remote Desktop, a clipboard manager) had the clipboard open for a moment. Copying now waits for it, and if a capture still can't be copied a notice says so, and one that was only to be copied is saved in the captures folder instead.
+
 ## What's new in 0.1.59
 
 ### Fixed
