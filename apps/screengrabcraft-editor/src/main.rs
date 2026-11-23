@@ -89,6 +89,14 @@ impl Aside {
     }
 }
 
+/// Whether what is handed to the window (`args`) brings it back to the owner: shown, restored and
+/// with the keyboard. It always does, but for a capture or a recording from the capture service
+/// while the owner has the window minimized: that is opened in it, and it stays minimized. Kept
+/// ready out of sight it's hidden, not minimized, and comes back with the capture.
+fn brought_back(args: &[String], minimized: bool, standby: bool) -> bool {
+    standby || !minimized || !args.iter().any(|a| a == launch::FROM_CAPTURE)
+}
+
 /// The window's taskbar button, there or not (Windows; elsewhere the taskbar has its own ways).
 #[cfg(target_os = "windows")]
 fn taskbar_button(frame: &eframe::Frame, shown: bool) {
@@ -296,6 +304,11 @@ impl eframe::App for App {
                 }
                 continue;
             }
+            // Minimized by the owner, a capture leaves it so (looked at before it's no longer kept
+            // ready: a window out of sight may say it's minimized).
+            let minimized =
+                frame.winit_window().and_then(|w| w.is_minimized()).unwrap_or_else(|| ctx.input(|i| i.viewport().minimized.unwrap_or(false)));
+            let back = brought_back(&args, minimized, self.standby);
             // A capture for the editor: drawn this frame while still cloaked (kept ready, it's
             // already shown, cloaked), and uncloaked on the next, so that it appears at once and
             // with the capture; then it has the keyboard. Hidden instead, it's shown.
@@ -318,11 +331,15 @@ impl eframe::App for App {
             if args.iter().any(|a| !a.starts_with("--")) {
                 log::info!("opened what was handed over in {} ms", t.elapsed().as_millis());
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            // Its size is looked at once it's back (a few frames, while it's restored).
-            self.size_check = 5;
+            if back {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                // Its size is looked at once it's back (a few frames, while it's restored).
+                self.size_check = 5;
+            } else {
+                log::info!("a capture came while the window is minimized: opened in it, and it stays minimized");
+            }
             ctx.request_repaint();
         }
         // Out of the picture for a capture by a service that has gone since (the watch thread
@@ -704,6 +721,28 @@ mod tests {
         let mut a = Aside::default();
         assert_eq!(a.hear(launch::EDITOR_HIDE, true, false, false), Move::Stay);
         assert_eq!(a.hear(launch::EDITOR_SHOW, true, false, false), Move::Stay);
+    }
+
+    #[test]
+    fn a_capture_for_a_window_the_owner_minimized_leaves_it_minimized() {
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        let capture = launch::capture_args(&s(&["shot.png"]));
+        assert!(!brought_back(&capture, true, false), "opened in it, it stays minimized");
+        assert!(brought_back(&capture, false, false), "on the screen, it comes forward with the capture");
+        // The video editor, minimized, as a recording comes with its captions to be made.
+        let recording = launch::capture_args(&s(&[launch::CAPTIONS_COMING, "a.sgvideo"]));
+        assert!(!brought_back(&recording, true, false));
+        // Kept ready out of sight it's hidden (whatever the system says of minimized): it comes back.
+        assert!(brought_back(&capture, true, true));
+        assert!(brought_back(&capture, false, true));
+    }
+
+    #[test]
+    fn what_the_owner_opens_brings_a_minimized_window_back() {
+        // A file from the file manager or a notice, and the tray's Open Editor (nothing to open).
+        assert!(brought_back(&["shot.png".to_string()], true, false));
+        assert!(brought_back(&[], true, false));
+        assert!(brought_back(&[launch::CAPTIONS_COMING.to_string(), "a.sgvideo".to_string()], true, false));
     }
 
     #[test]
