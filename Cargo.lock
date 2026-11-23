@@ -5413,7 +5413,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screengrabcraft"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "eframe",
  "egui",
@@ -5436,7 +5436,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-capture"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "async-io",
  "cpal",
@@ -5460,7 +5460,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-cli"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "screengrabcraft-capture",
  "screengrabcraft-desktop",
@@ -5473,7 +5473,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-desktop"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "ab_glyph",
  "arboard",
@@ -5503,7 +5503,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-editor"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "cpal",
  "eframe",
@@ -5528,7 +5528,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-engine"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "log",
  "proptest",
@@ -5542,7 +5542,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-matte"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "log",
  "prost",
@@ -5555,7 +5555,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-media"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "crc32fast",
  "image",
@@ -5577,7 +5577,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-model"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "proptest",
  "serde",
@@ -5587,7 +5587,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-render"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "ab_glyph",
  "base64 0.22.1",
@@ -5609,7 +5609,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-speech"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "bytemuck",
  "candle-core",
@@ -5623,7 +5623,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-ui"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "eframe",
  "egui",
@@ -5641,7 +5641,7 @@ dependencies = [
 
 [[package]]
 name = "screengrabcraft-web"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "eframe",
  "egui",
@@ -7870,7 +7870,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.1.57"
+version = "0.1.58"
 dependencies = [
  "image",
  "serde_json",
