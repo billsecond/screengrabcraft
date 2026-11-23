@@ -82,6 +82,12 @@ impl Purpose {
     fn drags_area(self) -> bool {
         !self.clicks_window() && self.fixed().is_none() && self != Purpose::Freehand
     }
+
+    /// Whether the frame of a recording, once chosen, has a grip in its middle to move it by (a
+    /// window clicked is that window's, so it isn't moved).
+    fn moves_by_grip(self) -> bool {
+        self.records() && !self.clicks_window()
+    }
 }
 
 /// The key held while dragging out an area to keep it and drag out another, as the hint says it.
@@ -184,12 +190,13 @@ pub enum Outcome {
     },
 }
 
+/// Where the choosing is. `Moving`'s `grip`: moved by the grip in a recording's frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Phase {
     Choosing,
     Dragging { start: (f32, f32) },
     Adjusting,
-    Moving { last: (f32, f32) },
+    Moving { last: (f32, f32), grip: bool },
     Resizing { handle: usize },
 }
 
@@ -230,6 +237,12 @@ pub struct Overlay {
 }
 
 const HANDLE: f32 = 9.0;
+/// How far the grip in a recording's frame reaches from its middle, in screen points.
+const GRIP_RADIUS: f32 = 17.0;
+/// How far an arrow key moves the area (or, with Shift, makes it larger), in pixels; with Ctrl
+/// (Cmd on a Mac) held, [`NUDGE_FAR`].
+const NUDGE: f32 = 1.0;
+const NUDGE_FAR: f32 = 10.0;
 /// The overlay's colour: the chosen area's edge and the capture bar's main buttons. Bright, to
 /// be seen on any picture.
 const ACCENT: Color32 = Color32::from_rgb(0x2E, 0xC4, 0xC0);
@@ -355,6 +368,34 @@ fn resize_cursor(handle: usize) -> CursorIcon {
     }
 }
 
+/// The middle of area `r`'s grip (a monitor of `mon` pixels, shown `scale` screen points to a
+/// pixel), where there's room for it clear of the handles and the area can move at all (it isn't
+/// the whole monitor).
+fn grip_at(r: Rect, mon: (f32, f32), scale: f32) -> Option<(f32, f32)> {
+    let room = GRIP_RADIUS * 2.0 + HANDLE * 4.0;
+    let scale = if scale.is_finite() { scale.max(0.01) } else { 1.0 };
+    let movable = r.w < mon.0 - 0.5 || r.h < mon.1 - 0.5;
+    (movable && r.w * scale >= room && r.h * scale >= room).then(|| (r.x + r.w / 2.0, r.y + r.h / 2.0))
+}
+
+/// The grip that moves a recording's frame, at `c` (screen points): a round button with arrows
+/// four ways, in the overlay's colour while it's under the pointer or held.
+fn paint_grip(painter: &egui::Painter, c: Pos2, hot: bool) {
+    let (fill, ink) =
+        if hot { (ACCENT, Color32::from_rgb(0x06, 0x24, 0x24)) } else { (Color32::from_rgba_unmultiplied(0x14, 0x16, 0x1C, 225), Color32::WHITE) };
+    painter.circle_filled(c + vec2(0.0, 2.0), GRIP_RADIUS + 1.0, Color32::from_black_alpha(90));
+    painter.circle(c, GRIP_RADIUS, fill, Stroke::new(2.0, ACCENT));
+    let arm = GRIP_RADIUS * 0.66;
+    let head = 4.6;
+    let line = Stroke::new(2.0, ink);
+    painter.line_segment([c - vec2(arm - head, 0.0), c + vec2(arm - head, 0.0)], line);
+    painter.line_segment([c - vec2(0.0, arm - head), c + vec2(0.0, arm - head)], line);
+    for d in [vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0)] {
+        let (tip, base, side) = (c + d * arm, c + d * (arm - head), vec2(-d.y, d.x) * head);
+        painter.add(egui::Shape::convex_polygon(vec![tip, base + side, base - side], ink, Stroke::NONE));
+    }
+}
+
 impl Overlay {
     pub fn new(monitors: Vec<OverlayMonitor>, windows: Vec<OverlayWindow>, purpose: Purpose) -> Overlay {
         let n = monitors.len();
@@ -454,6 +495,26 @@ impl Overlay {
     /// The areas kept so far on monitor `mi`.
     fn kept_on(&self, mi: usize) -> &[Rect] {
         if self.kept_on == mi { &self.kept } else { &[] }
+    }
+
+    /// Where the grip of a recording's frame on monitor `mi` (`size` pixels, shown `scale` points
+    /// to a pixel) is, while the frame is there to be adjusted and has room for it.
+    fn grip(&self, mi: usize, size: (f32, f32), scale: f32) -> Option<(f32, f32)> {
+        let (m, r) = self.sel?;
+        let shown = matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. });
+        if m != mi || !shown || !self.purpose.moves_by_grip() {
+            return None;
+        }
+        grip_at(r, size, scale)
+    }
+
+    /// Whether `p` (monitor `mi`'s pixels) is on the grip of the frame being adjusted.
+    fn over_grip(&self, mi: usize, p: (f32, f32), size: (f32, f32), scale: f32) -> bool {
+        let scale = if scale.is_finite() { scale.max(0.01) } else { 1.0 };
+        self.grip(mi, size, scale).is_some_and(|(cx, cy)| {
+            let (dx, dy) = ((p.0 - cx) * scale, (p.1 - cy) * scale);
+            dx * dx + dy * dy <= GRIP_RADIUS * GRIP_RADIUS
+        })
     }
 
     /// The box round the freehand outline drawn on a monitor of `size` pixels, if it's an area
@@ -559,7 +620,7 @@ impl Overlay {
         }
         self.input(&ctx, &resp, mi, &to_px, (pic_w, pic_h), sx);
         if let Some(h) = hover
-            && let Some(cursor) = self.adjusting_cursor(mi, to_px(h), HANDLE / sx.max(0.01))
+            && let Some(cursor) = self.adjusting_cursor(mi, to_px(h), (pic_w, pic_h), sx)
         {
             ctx.set_cursor_icon(cursor);
         }
@@ -629,6 +690,15 @@ impl Overlay {
                     painter.rect_stroke(hr, 2.0, Stroke::new(1.5, ACCENT), StrokeKind::Middle);
                 }
             }
+            // A recording's frame: the grip in its middle that moves it.
+            if let Some((gx, gy)) = self.grip(mi, (pic_w, pic_h), sx) {
+                let hot = match self.phase {
+                    Phase::Moving { grip, .. } => grip,
+                    Phase::Adjusting => self.pointer.is_some_and(|(m, p)| m == mi && self.over_grip(mi, p, (pic_w, pic_h), sx)),
+                    _ => false,
+                };
+                paint_grip(&painter, to_screen(gx, gy), hot);
+            }
             // The size, outside the top left corner (inside if there's no room).
             let mut label = format!("{} × {}", r.w.round() as i64, r.h.round() as i64);
             if let Some((w, h)) = self.held.filter(|_| self.title.is_none()) {
@@ -665,21 +735,33 @@ impl Overlay {
         }
         if self.sel.is_none() && self.phase == Phase::Choosing {
             self.hint(&painter, screen);
+        } else if let Some((m, r)) = self.sel
+            && m == mi
+            && self.purpose.moves_by_grip()
+            && matches!(self.phase, Phase::Adjusting | Phase::Moving { .. } | Phase::Resizing { .. })
+        {
+            self.move_hint(&painter, screen, rect_screen(r), self.grip(mi, (pic_w, pic_h), sx).is_some());
         }
     }
 
-    /// While the area is being adjusted, what the pointer at `p` (this monitor's pixels) shows a
-    /// press would do: arrows over a handle, a hand inside the area (a closed one while it's
-    /// moved), a crosshair outside it, where a drag starts a new area.
-    fn adjusting_cursor(&self, mi: usize, p: (f32, f32), tol: f32) -> Option<CursorIcon> {
+    /// While the area is being adjusted, what the pointer at `p` (this monitor's pixels, `size`
+    /// of them, shown `scale` points to a pixel) shows a press would do: arrows four ways over a
+    /// recording's grip (and while it's moved by it), arrows over a handle, a hand inside the area
+    /// (a closed one while it's moved), a crosshair outside it, where a drag starts a new area.
+    fn adjusting_cursor(&self, mi: usize, p: (f32, f32), size: (f32, f32), scale: f32) -> Option<CursorIcon> {
+        let tol = HANDLE / scale.max(0.01);
         match self.phase {
             Phase::Resizing { handle } => Some(resize_cursor(handle)),
+            Phase::Moving { grip: true, .. } => Some(CursorIcon::Move),
             Phase::Moving { .. } => Some(CursorIcon::Grabbing),
             Phase::Adjusting => {
                 let (m, r) = self.sel?;
                 // A freehand area isn't moved or pulled: a drag draws another.
                 if m != mi || self.purpose.clicks_window() || self.purpose == Purpose::Freehand {
                     return Some(CursorIcon::Crosshair);
+                }
+                if self.over_grip(mi, p, size, scale) {
+                    return Some(CursorIcon::Move);
                 }
                 // A fixed size has no handles: it's moved, not resized.
                 if self.purpose.fixed().is_none()
@@ -734,6 +816,24 @@ impl Overlay {
         if let Some(g) = small {
             painter.galley(pos2(screen.center().x - g.size().x / 2.0, below), g, Color32::from_gray(210));
         }
+    }
+
+    /// While a recording's frame (`frame`, on screen) is adjusted, how to move it: at the top of
+    /// the screen, else at the bottom where the frame is in the way, else not at all. `grip`:
+    /// whether the frame has room for its grip.
+    fn move_hint(&self, painter: &egui::Painter, screen: egui::Rect, frame: egui::Rect, grip: bool) {
+        const NUDGE_KEYS: &str = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        let drag = if grip { "Drag the middle to move the frame" } else { "Drag the frame to move it" };
+        let resize = if self.purpose.fixed().is_none() { "  ·  Shift+arrows: resize" } else { "" };
+        let text = format!("{drag}  ·  Arrow keys nudge it ({NUDGE_KEYS}: {} pixels){resize}", NUDGE_FAR as u32);
+        let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+        let size = galley.size() + vec2(24.0, 12.0);
+        let left = screen.center().x - size.x / 2.0;
+        let top = egui::Rect::from_min_size(pos2(left, screen.min.y + 28.0), size);
+        let bottom = egui::Rect::from_min_size(pos2(left, screen.max.y - 28.0 - size.y), size);
+        let Some(bg) = [top, bottom].into_iter().find(|r| !r.intersects(frame.expand(6.0))) else { return };
+        painter.rect_filled(bg, 8.0, Color32::from_black_alpha(190));
+        painter.galley(bg.min + vec2(12.0, 6.0), galley, Color32::WHITE);
     }
 
     fn loupe(&self, painter: &egui::Painter, tex: egui::TextureId, screen: egui::Rect, s: Pos2, p: (f32, f32), size: (f32, f32), mi: usize) {
@@ -906,28 +1006,38 @@ impl Overlay {
                 self.choose(Action::Save);
                 return;
             }
-            // Arrows move the area a pixel; with Shift they make it larger. (A freehand outline
-            // stays where it was drawn.)
+            // Arrows move the area a pixel (ten with Ctrl); with Shift they make it larger. It
+            // stays on its monitor. (A freehand outline stays where it was drawn.)
             if let Some((m, r)) = self.sel.as_mut()
                 && *m == mi
                 && self.purpose != Purpose::Freehand
             {
-                let shift = ctx.input(|i| i.modifiers.shift);
-                for (key, dx, dy) in [
-                    (egui::Key::ArrowLeft, -1.0, 0.0),
-                    (egui::Key::ArrowRight, 1.0, 0.0),
-                    (egui::Key::ArrowUp, 0.0, -1.0),
-                    (egui::Key::ArrowDown, 0.0, 1.0),
-                ] {
-                    if ctx.input(|i| i.key_pressed(key)) {
-                        // A fixed size keeps its size.
-                        if shift && self.purpose.fixed().is_none() {
-                            r.w = (r.w + dx).max(1.0);
-                            r.h = (r.h + dy).max(1.0);
-                        } else {
-                            r.x = (r.x + dx).clamp(0.0, (pw - r.w).max(0.0));
-                            r.y = (r.y + dy).clamp(0.0, (ph - r.h).max(0.0));
-                        }
+                // Each press (and each repeat of a key held down), with the keys held with it.
+                let presses: Vec<(egui::Key, egui::Modifiers)> = ctx.input(|i| {
+                    i.events
+                        .iter()
+                        .filter_map(|e| match e {
+                            egui::Event::Key { key, pressed: true, modifiers, .. } => Some((*key, *modifiers)),
+                            _ => None,
+                        })
+                        .collect()
+                });
+                for (key, mods) in presses {
+                    let step = if mods.command { NUDGE_FAR } else { NUDGE };
+                    let (dx, dy) = match key {
+                        egui::Key::ArrowLeft => (-step, 0.0),
+                        egui::Key::ArrowRight => (step, 0.0),
+                        egui::Key::ArrowUp => (0.0, -step),
+                        egui::Key::ArrowDown => (0.0, step),
+                        _ => continue,
+                    };
+                    // A fixed size keeps its size.
+                    if mods.shift && self.purpose.fixed().is_none() {
+                        r.w = (r.w + dx).min(pw - r.x).max(1.0);
+                        r.h = (r.h + dy).min(ph - r.y).max(1.0);
+                    } else {
+                        r.x = (r.x + dx).clamp(0.0, (pw - r.w).max(0.0));
+                        r.y = (r.y + dy).clamp(0.0, (ph - r.h).max(0.0));
                     }
                 }
             }
@@ -948,6 +1058,7 @@ impl Overlay {
             let p = to_px(start);
             let tol = HANDLE / scale.max(0.01);
             let more = ctx.input(|i| i.modifiers.alt) && self.purpose == Purpose::Picture;
+            let grip = self.phase == Phase::Adjusting && self.over_grip(mi, p, size, scale);
             self.phase = match (self.sel, self.purpose.fixed()) {
                 _ if self.purpose.clicks_window() => Phase::Choosing,
                 // A freehand outline starts again wherever the drag starts.
@@ -964,13 +1075,15 @@ impl Overlay {
                     if !inside {
                         self.sel = Some((mi, fixed_frame((w, h), p, (pw, ph))));
                     }
-                    Phase::Moving { last: p }
+                    Phase::Moving { last: p, grip }
                 }
+                // A recording's grip moves the frame, whatever is near it.
+                (Some((m, _)), _) if m == mi && grip => Phase::Moving { last: p, grip: true },
                 (Some((m, r)), _) if m == mi && self.phase == Phase::Adjusting => {
                     if let Some(h) = handle_under(r, p, tol) {
                         Phase::Resizing { handle: h }
                     } else if r.contains(screengrabcraft_model::Pt::new(p.0, p.1)) {
-                        Phase::Moving { last: p }
+                        Phase::Moving { last: p, grip: false }
                     } else {
                         // A new area: with the key held, the one adjusted is kept with it.
                         if more {
@@ -1011,12 +1124,13 @@ impl Overlay {
                     };
                     self.sel = r.intersect(monitor_rect).map(|r| (mi, r));
                 }
-                Phase::Moving { last } => {
+                Phase::Moving { last, grip } => {
+                    // The whole frame, its size kept, on its monitor.
                     if let Some((_, r)) = self.sel.as_mut() {
                         r.x = (r.x + p.0 - last.0).clamp(0.0, (pw - r.w).max(0.0));
                         r.y = (r.y + p.1 - last.1).clamp(0.0, (ph - r.h).max(0.0));
                     }
-                    self.phase = Phase::Moving { last: p };
+                    self.phase = Phase::Moving { last: p, grip };
                 }
                 Phase::Resizing { handle } => {
                     if let Some((_, r)) = self.sel.as_mut() {
@@ -1120,7 +1234,15 @@ impl Overlay {
                         self.choose(Action::Default);
                     }
                 }
-                Phase::Moving { .. } | Phase::Resizing { .. } => self.phase = Phase::Adjusting,
+                Phase::Moving { .. } => {
+                    // Put down on whole pixels, so it's kept exactly its size.
+                    if let Some((_, r)) = self.sel.as_mut() {
+                        r.x = r.x.round().min((pw - r.w).max(0.0)).max(0.0);
+                        r.y = r.y.round().min((ph - r.h).max(0.0)).max(0.0);
+                    }
+                    self.phase = Phase::Adjusting;
+                }
+                Phase::Resizing { .. } => self.phase = Phase::Adjusting,
                 Phase::Adjusting => {}
             }
         }
@@ -1310,6 +1432,176 @@ mod tests {
         h.run_steps(2);
         match h.state().outcome() {
             Outcome::Chosen { area, .. } => assert_eq!((area.w, area.h), (200, 100), "{area:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn cursor_at(h: &mut egui_kittest::Harness<'_, Overlay>, x: f32, y: f32) -> CursorIcon {
+        h.hover_at(egui::pos2(x, y));
+        h.run_steps(1);
+        h.output().platform_output.cursor_icon
+    }
+
+    /// Presses the grip of the frame at `from` and drags it to `to`, a few steps at a time; the
+    /// pointer shows arrows four ways all the while.
+    fn drag_grip(h: &mut egui_kittest::Harness<'_, Overlay>, from: egui::Pos2, to: egui::Pos2) {
+        assert_eq!(cursor_at(h, from.x, from.y), CursorIcon::Move, "over the grip");
+        h.drag_at(from);
+        h.run_steps(1);
+        for i in 1..=5 {
+            h.hover_at(from + (to - from) * (i as f32 / 5.0));
+            h.run_steps(1);
+            assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::Move, "while it's moved by the grip");
+        }
+        h.drop_at(to);
+        h.run_steps(2);
+    }
+
+    #[test]
+    fn a_recordings_frame_is_moved_by_the_grip_in_its_middle_and_stays_on_its_monitor() {
+        use egui_kittest::kittest::Queryable as _;
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Video);
+        o.preselect(0, IRect::new(100, 100, 300, 200));
+        let mut h = harness(o);
+        h.run_steps(2);
+        // The grip in the middle moves it; the rest is as it was.
+        assert_eq!(cursor_at(&mut h, 250.0, 200.0), CursorIcon::Move, "the grip");
+        assert_eq!(cursor_at(&mut h, 150.0, 150.0), CursorIcon::Grab, "inside, off the grip: it moves too");
+        assert_eq!(cursor_at(&mut h, 400.0, 300.0), CursorIcon::ResizeNwSe, "the bottom right corner");
+        assert_eq!(cursor_at(&mut h, 700.0, 500.0), CursorIcon::Crosshair, "outside");
+        h.hover_at(egui::pos2(250.0, 200.0));
+        h.run_steps(1);
+        shot(&mut h, "overlay-move-grip");
+        // Dragged by the grip: the whole frame goes, the same size, and is shown there.
+        drag_grip(&mut h, egui::pos2(250.0, 200.0), egui::pos2(430.0, 290.0));
+        assert_eq!(h.state().sel, Some((0, Rect::new(280.0, 190.0, 300.0, 200.0))));
+        assert_eq!(h.state().grip(0, (800.0, 600.0), 1.0), Some((430.0, 290.0)), "the grip goes with it");
+        h.hover_at(egui::pos2(100.0, 500.0));
+        h.run_steps(2);
+        shot(&mut h, "overlay-moved-frame");
+        // Dragged off the screen: it stops at the monitor's edge, still the same size.
+        drag_grip(&mut h, egui::pos2(430.0, 290.0), egui::pos2(799.0, 599.0));
+        assert_eq!(h.state().sel, Some((0, Rect::new(500.0, 400.0, 300.0, 200.0))));
+        drag_grip(&mut h, egui::pos2(650.0, 500.0), egui::pos2(0.0, 0.0));
+        assert_eq!(h.state().sel, Some((0, Rect::new(0.0, 0.0, 300.0, 200.0))));
+        // Moved to the middle and started: recorded where it was moved to.
+        drag_grip(&mut h, egui::pos2(150.0, 100.0), egui::pos2(370.0, 260.0));
+        h.get_by_label("Start recording").click();
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, desktop, action, .. } => {
+                assert_eq!((*area, *desktop, *action), (IRect::new(220, 160, 300, 200), IRect::new(220, 160, 300, 200), Action::Start));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_frame_moved_part_way_across_a_pixel_is_put_down_on_whole_pixels() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Gif);
+        o.preselect(0, IRect::new(100, 100, 300, 200));
+        let mut h = harness(o);
+        h.run_steps(2);
+        drag_grip(&mut h, egui::pos2(250.0, 200.0), egui::pos2(310.6, 240.3));
+        assert_eq!(h.state().sel, Some((0, Rect::new(161.0, 140.0, 300.0, 200.0))));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, .. } => assert_eq!(*area, IRect::new(161, 140, 300, 200)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_keys_nudge_a_frame_and_keep_it_on_its_monitor() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Video);
+        o.preselect(0, IRect::new(100, 100, 300, 200));
+        let mut h = harness(o);
+        h.run_steps(2);
+        let press = |h: &mut egui_kittest::Harness<'_, Overlay>, mods: egui::Modifiers, key: egui::Key| {
+            h.key_press_modifiers(mods, key);
+            h.run_steps(1);
+            h.state().sel.map(|(_, r)| (r.x, r.y, r.w, r.h))
+        };
+        assert_eq!(press(&mut h, egui::Modifiers::NONE, egui::Key::ArrowRight), Some((101.0, 100.0, 300.0, 200.0)), "a pixel");
+        assert_eq!(press(&mut h, egui::Modifiers::NONE, egui::Key::ArrowUp), Some((101.0, 99.0, 300.0, 200.0)));
+        assert_eq!(press(&mut h, egui::Modifiers::COMMAND, egui::Key::ArrowDown), Some((101.0, 109.0, 300.0, 200.0)), "ten with Ctrl");
+        assert_eq!(press(&mut h, egui::Modifiers::COMMAND, egui::Key::ArrowLeft), Some((91.0, 109.0, 300.0, 200.0)));
+        assert_eq!(press(&mut h, egui::Modifiers::SHIFT, egui::Key::ArrowRight), Some((91.0, 109.0, 301.0, 200.0)), "larger with Shift");
+        // Not past the monitor's edge, either way.
+        for _ in 0..12 {
+            press(&mut h, egui::Modifiers::COMMAND, egui::Key::ArrowLeft);
+        }
+        assert_eq!(h.state().sel.map(|(_, r)| r.x), Some(0.0));
+        for _ in 0..60 {
+            press(&mut h, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::ArrowRight);
+        }
+        assert_eq!(h.state().sel.map(|(_, r)| (r.x, r.w)), Some((0.0, 800.0)), "as wide as the monitor, no wider");
+        // A fixed size is only moved.
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoFixed(200, 100));
+        o.preselect(0, IRect::new(100, 100, 200, 100));
+        let mut h = harness(o);
+        h.run_steps(2);
+        assert_eq!(press(&mut h, egui::Modifiers::SHIFT | egui::Modifiers::COMMAND, egui::Key::ArrowRight), Some((110.0, 100.0, 200.0, 100.0)));
+    }
+
+    #[test]
+    fn a_fixed_frame_has_the_grip_and_a_window_or_a_small_or_whole_frame_has_none() {
+        // A frame of a set size is moved by its grip too.
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoFixed(300, 200));
+        o.preselect(0, IRect::new(100, 100, 300, 200));
+        let mut h = harness(o);
+        h.run_steps(2);
+        drag_grip(&mut h, egui::pos2(250.0, 200.0), egui::pos2(350.0, 250.0));
+        assert_eq!(h.state().sel.map(|(_, r)| (r.w, r.h)), Some((300.0, 200.0)));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, .. } => assert_eq!(*area, IRect::new(200, 150, 300, 200)),
+            other => panic!("{other:?}"),
+        }
+        // A window clicked to record is that window: nothing to move it by.
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::VideoWindow);
+        o.preselect(0, IRect::new(100, 100, 300, 200));
+        assert_eq!(o.grip(0, (800.0, 600.0), 1.0), None);
+        // Too small for the grip beside its handles, it's moved from inside it; the whole screen
+        // can't be moved at all.
+        assert_eq!(grip_at(Rect::new(10.0, 10.0, 60.0, 300.0), (800.0, 600.0), 1.0), None);
+        assert_eq!(grip_at(Rect::new(10.0, 10.0, 80.0, 80.0), (800.0, 600.0), 1.0), Some((50.0, 50.0)));
+        assert_eq!(grip_at(Rect::new(10.0, 10.0, 80.0, 80.0), (800.0, 600.0), 0.5), None, "shown at half size, it's small");
+        assert_eq!(grip_at(Rect::new(0.0, 0.0, 800.0, 600.0), (800.0, 600.0), 1.0), None);
+        assert_eq!(grip_at(Rect::new(0.0, 0.0, 800.0, 590.0), (800.0, 600.0), 1.0), Some((400.0, 295.0)));
+        for scale in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            let _ = grip_at(Rect::new(0.0, 0.0, 100.0, 100.0), (800.0, 600.0), scale);
+        }
+    }
+
+    #[test]
+    fn a_pictures_area_has_no_grip_and_is_chosen_as_before() {
+        let mut o = Overlay::new(vec![screen_800()], Vec::new(), Purpose::Picture);
+        o.preview = true;
+        let mut h = harness(o);
+        h.run_steps(2);
+        drag_with(&mut h, egui::pos2(100.0, 100.0), egui::pos2(400.0, 300.0), egui::Modifiers::NONE);
+        assert_eq!(h.state().sel, Some((0, Rect::new(100.0, 100.0, 300.0, 200.0))));
+        assert_eq!(h.state().grip(0, (800.0, 600.0), 1.0), None, "no grip");
+        // Its middle is a hand, as before: dragged from there it moves.
+        assert_eq!(cursor_at(&mut h, 250.0, 200.0), CursorIcon::Grab);
+        h.drag_at(egui::pos2(250.0, 200.0));
+        h.run_steps(1);
+        h.hover_at(egui::pos2(280.0, 220.0));
+        h.run_steps(1);
+        assert_eq!(h.output().platform_output.cursor_icon, CursorIcon::Grabbing);
+        h.hover_at(egui::pos2(300.0, 230.0));
+        h.run_steps(1);
+        h.drop_at(egui::pos2(300.0, 230.0));
+        h.run_steps(2);
+        assert_eq!(h.state().sel, Some((0, Rect::new(150.0, 130.0, 300.0, 200.0))));
+        shot(&mut h, "overlay-picture-no-grip");
+        h.key_press(egui::Key::Enter);
+        h.run_steps(2);
+        match h.state().outcome() {
+            Outcome::Chosen { area, action, .. } => assert_eq!((*area, *action), (IRect::new(150, 130, 300, 200), Action::Default)),
             other => panic!("{other:?}"),
         }
     }

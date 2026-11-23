@@ -56,7 +56,10 @@ every capture, a delayed capture (3, 5 or 10 s), the editor and the captures fol
 an area the screen is frozen as it was when the key was pressed (open menus and tooltips included),
 with a magnifier that shows the pixels, coordinates and colour under the pointer, crosshairs, the
 windows under the pointer to click (on Windows an open menu, drop-down or tooltip too, to keep just it),
-and the area's size. Arrows nudge the area; Shift+arrows resize it.
+and the area's size. Arrows nudge the area (Ctrl+arrows, Cmd on a Mac, ten pixels at a time);
+Shift+arrows resize it. A recording's frame (a GIF, a scrolling capture or a video) has a round
+grip with arrows four ways in its middle: drag it to move the whole frame, its size kept, anywhere
+on its monitor before the recording starts.
 Hold Shift while dragging for a square, Ctrl (Cmd on a Mac) for 16:9, both for 4:3. Hold Alt
 (Option on a Mac) as you let go to keep that area and drag out another: the last one without Alt
 (or Enter) keeps them all in one picture, laid out as they were on the screen with the rest
