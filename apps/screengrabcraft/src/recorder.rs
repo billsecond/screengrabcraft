@@ -310,8 +310,8 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     let mut builder = ViewportBuilder::default()
         .with_title("ScreenGrabCraft Recorder")
         .with_app_id(APP_ID)
-        .with_inner_size(recorder::SIZE)
-        .with_min_inner_size(recorder::SIZE)
+        .with_inner_size(recorder::size(p))
+        .with_min_inner_size(recorder::size(p))
         .with_resizable(false);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(ICON) {
         builder = builder.with_icon(icon);

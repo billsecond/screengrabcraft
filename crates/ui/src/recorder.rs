@@ -219,11 +219,38 @@ fn toggle(ui: &mut Ui, on: &mut bool, label: &str, enabled: bool) -> egui::Respo
     resp.on_hover_text(if shown { format!("Turn the {} off", label.to_lowercase()) } else { format!("Record the {}", label.to_lowercase()) })
 }
 
-/// One of the Recorder's cards: its picture, its name and its switch along the top, then what's
-/// in it (greyed while it's off). True when the switch was turned.
-fn card(ui: &mut Ui, icon: Icon, title: &str, on: &mut bool, enabled: bool, add: impl FnOnce(&mut Ui, bool)) -> bool {
+/// The room each further microphone or camera takes in its card, and in the window.
+pub const ROW: f32 = 32.0;
+
+/// How many further microphones and cameras the Recorder lists (beside the first of each), the
+/// most of the two: its cards grow a row for each.
+fn more_rows(sources: &VideoOptions) -> usize {
+    use screengrabcraft_model::settings::{MOST_CAMERAS, MOST_MICROPHONES};
+    sources.more_microphones.len().min(MOST_MICROPHONES - 1).max(sources.more_cameras.len().min(MOST_CAMERAS - 1))
+}
+
+/// The window's size for these choices: [`SIZE`], a row taller for each further microphone or
+/// camera listed.
+pub fn size(sources: &VideoOptions) -> Vec2 {
+    SIZE + vec2(0.0, ROW * more_rows(sources) as f32)
+}
+
+/// One of the Recorder's cards, `height` tall: its picture, its name and its switch along the
+/// top (and, with `more`, a + beside the switch saying so, to add another), then what's in it
+/// (greyed while it's off). Whether the switch was turned, and whether the + was pressed.
+#[allow(clippy::too_many_arguments)]
+fn card(
+    ui: &mut Ui,
+    icon: Icon,
+    title: &str,
+    on: &mut bool,
+    enabled: bool,
+    height: f32,
+    more: Option<(&str, bool)>,
+    add: impl FnOnce(&mut Ui, bool),
+) -> (bool, bool) {
     let t = Tokens::get(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(CARD, Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(CARD.x, height), Sense::hover());
     let lit = *on && enabled;
     let (fill, edge) = if lit { (t.window, Stroke::new(1.5, t.accent)) } else { (t.panel, Stroke::new(1.0, t.border)) };
     ui.painter().rect(rect, 12.0, fill, edge, StrokeKind::Inside);
@@ -244,10 +271,83 @@ fn card(ui: &mut Ui, icon: Icon, title: &str, on: &mut bool, enabled: bool, add:
     );
     let at = Rect::from_min_max(pos2(top.max.x - 44.0, top.min.y), top.max);
     let changed = toggle(&mut ui.new_child(egui::UiBuilder::new().max_rect(at)), on, title, enabled).changed();
+    // Another one: a + beside the switch, while it's on.
+    let mut added = false;
+    if let Some((tip, can)) = more {
+        let plus = Rect::from_min_size(pos2(at.min.x - 30.0, top.center().y - 12.0), vec2(24.0, 24.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(plus));
+        added = icons::button_sized(&mut child, Icon::Plus, tip, false, lit && can, 24.0).clicked();
+    }
     ui.add_space(12.0);
     let lit = *on && enabled;
     ui.add_enabled_ui(lit, |ui| add(ui, lit));
-    changed
+    (changed, added)
+}
+
+/// A further device's row in its card: which one (from `listed`), and a button to stop recording
+/// it. True when that was pressed.
+fn more_row(ui: &mut Ui, id: (&str, usize), shown: String, remove: &str, choose: impl FnOnce(&mut Ui)) -> bool {
+    let mut gone = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let w = (ui.available_width() - 30.0).max(40.0);
+        egui::ComboBox::from_id_salt(id).width(w).truncate().selected_text(shown).show_ui(ui, choose);
+        gone = icons::button_sized(ui, Icon::Close, remove, false, true, 24.0).clicked();
+    });
+    ui.add_space(4.0);
+    gone
+}
+
+/// The microphone to add next: the first listed that isn't recorded already (`first`: the one
+/// the first microphone is).
+fn next_microphone(devices: &RecorderDevices, first: Option<&str>, more: &[String]) -> Option<String> {
+    devices.microphones.iter().find(|m| Some(m.as_str()) != first && !more.contains(m)).cloned()
+}
+
+/// The camera to add next: the first listed that isn't recorded already.
+fn next_camera(devices: &RecorderDevices, first: Option<u32>, more: &[u32]) -> Option<u32> {
+    devices.cameras.as_deref().unwrap_or_default().iter().map(|c| c.0).find(|i| Some(*i) != first && !more.contains(i))
+}
+
+/// The further microphones' rows: each one's choice, and its button to stop recording it.
+fn more_microphones(ui: &mut Ui, sources: &mut VideoOptions, devices: &RecorderDevices) {
+    use screengrabcraft_model::settings::MOST_MICROPHONES;
+    let mut gone = None;
+    for (k, name) in sources.more_microphones.iter_mut().enumerate().take(MOST_MICROPHONES - 1) {
+        let shown = name.clone();
+        let remove = format!("Don't record {shown}");
+        if more_row(ui, ("recorder-mic-more", k), shown, &remove, |ui| {
+            for m in &devices.microphones {
+                ui.selectable_value(name, m.clone(), m);
+            }
+        }) {
+            gone = Some(k);
+        }
+    }
+    if let Some(k) = gone {
+        sources.more_microphones.remove(k);
+    }
+}
+
+/// The further cameras' rows: each one's choice, and its button to stop recording it.
+fn more_cameras(ui: &mut Ui, sources: &mut VideoOptions, devices: &RecorderDevices) {
+    use screengrabcraft_model::settings::MOST_CAMERAS;
+    let list = devices.cameras.as_deref().unwrap_or_default();
+    let mut gone = None;
+    for (k, index) in sources.more_cameras.iter_mut().enumerate().take(MOST_CAMERAS - 1) {
+        let shown = list.iter().find(|c| c.0 == *index).map_or_else(|| format!("Camera {}", *index + 1), |c| c.1.clone());
+        let remove = format!("Don't record {shown}");
+        if more_row(ui, ("recorder-camera-more", k), shown, &remove, |ui| {
+            for (i, name) in list {
+                ui.selectable_value(index, *i, name);
+            }
+        }) {
+            gone = Some(k);
+        }
+    }
+    if let Some(k) = gone {
+        sources.more_cameras.remove(k);
+    }
 }
 
 /// A choice of area: a small square with its picture, outlined in the accent colour when chosen.
@@ -647,20 +747,37 @@ pub fn recorder_ui(
             });
         });
         ui.add_space(14.0);
+        // Every card as tall as the one with the most further devices listed.
+        let height = CARD.y + ROW * more_rows(sources) as f32;
+        let first_camera = sources.camera_index.or_else(|| devices.cameras.as_deref().and_then(|l| l.first()).map(|c| c.0));
+        let first_mic = sources.microphone_name.clone().or_else(|| devices.default_microphone.clone());
+        let another_camera = next_camera(devices, first_camera, &sources.more_cameras)
+            .filter(|_| sources.more_cameras.len() + 1 < screengrabcraft_model::settings::MOST_CAMERAS);
+        let another_mic = next_microphone(devices, first_mic.as_deref(), &sources.more_microphones)
+            .filter(|_| sources.more_microphones.len() + 1 < screengrabcraft_model::settings::MOST_MICROPHONES);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
             let mut screen = rec.screen;
-            if card(ui, Icon::Screen, "Screen", &mut screen, true, |ui, _| screen_card(ui, view, rec, devices)) {
+            if card(ui, Icon::Screen, "Screen", &mut screen, true, height, None, |ui, _| screen_card(ui, view, rec, devices)).0 {
                 rec.screen = screen;
             }
             let mut camera_on = sources.camera && devices.camera_supported;
             let shown = camera_on;
-            if card(ui, Icon::Camera, "Camera", &mut camera_on, devices.camera_supported, |ui, _| camera_card(ui, shown, sources, devices, camera)) {
+            let more = Some(("Record another camera too, on a track of its own", another_camera.is_some()));
+            let (turned, add) = card(ui, Icon::Camera, "Camera", &mut camera_on, devices.camera_supported, height, more, |ui, _| {
+                camera_card(ui, shown, sources, devices, camera);
+                more_cameras(ui, sources, devices);
+            });
+            if turned {
                 sources.camera = camera_on;
+            }
+            if add && let Some(c) = another_camera {
+                sources.more_cameras.push(c);
             }
             let mut mic_on = sources.microphone;
             let mic_shown = mic_on;
-            if card(ui, Icon::Microphone, "Microphone", &mut mic_on, true, |ui, _| {
+            let more = Some(("Record another microphone too, on a track of its own", another_mic.is_some()));
+            let (turned, add) = card(ui, Icon::Microphone, "Microphone", &mut mic_on, true, height, more, |ui, _| {
                 sound_card(
                     ui,
                     "recorder-mic",
@@ -671,6 +788,7 @@ pub fn recorder_ui(
                     "Microphone level",
                     mic_shown,
                 );
+                more_microphones(ui, sources, devices);
                 // The camera's own microphone, with the camera on: some cameras send no video
                 // while theirs records (the recording then lets the camera go).
                 let camera_name = sources
@@ -690,12 +808,16 @@ pub fn recorder_ui(
                 if matches!(mic, MicLevel::Silent) {
                     warning(ui, SILENT_MICROPHONE);
                 }
-            }) {
+            });
+            if turned {
                 sources.microphone = mic_on;
+            }
+            if add && let Some(m) = another_mic {
+                sources.more_microphones.push(m);
             }
             let mut sound_on = sources.system_sound && devices.system_sound;
             let sound_shown = sound_on;
-            if card(ui, Icon::Speaker, "Computer sound", &mut sound_on, devices.system_sound, |ui, _| {
+            if card(ui, Icon::Speaker, "Computer sound", &mut sound_on, devices.system_sound, height, None, |ui, _| {
                 if !devices.system_sound_platform {
                     note(ui, "Only on Windows: this system has no way to record what it plays.");
                 } else if !devices.system_sound {
@@ -713,7 +835,9 @@ pub fn recorder_ui(
                     );
                     note(ui, "What plays through these speakers, like the others in a call.");
                 }
-            }) {
+            })
+            .0
+            {
                 sources.system_sound = sound_on;
             }
         });
@@ -908,6 +1032,70 @@ mod tests {
         let mut h = harness(s, d);
         h.run_steps(2);
         assert!(h.query_by_label_contains("That's the camera's own microphone.").is_none());
+    }
+
+    const ANOTHER_MIC: &str = "Record another microphone too, on a track of its own";
+    const ANOTHER_CAMERA: &str = "Record another camera too, on a track of its own";
+
+    #[test]
+    fn more_microphones_and_cameras_are_added_each_on_a_row_and_taken_away() {
+        let production = VideoOptions { microphone: true, camera: true, microphone_name: None, camera_index: None, ..VideoOptions::production() };
+        let s = Settings { production, ..Settings::default() };
+        let d = RecorderDevices { cameras: Some(vec![(0, "Webcam".into()), (1, "Desk camera".into())]), ..devices() };
+        let mut h = harness(s.clone(), d.clone());
+        h.run_steps(2);
+        assert_eq!(size(&h.state().settings.production), SIZE, "one of each: the window as it was");
+        // The system's default (the headset) is recorded already: the one added is the other.
+        press(&mut h, ANOTHER_MIC);
+        assert_eq!(h.state().settings.production.more_microphones, vec!["Webcam microphone".to_string()]);
+        assert!(disabled(&h, ANOTHER_MIC), "no other microphone to add");
+        press(&mut h, ANOTHER_CAMERA);
+        assert_eq!(h.state().settings.production.more_cameras, vec![1]);
+        assert!(disabled(&h, ANOTHER_CAMERA), "no other camera to add");
+        h.get_by_value("Desk camera");
+        h.get_by_value("Webcam microphone");
+        assert_eq!(size(&h.state().settings.production), SIZE + vec2(0.0, ROW), "a row taller for them");
+        // As the owner sees it, the window grown to fit.
+        if let Ok(dir) = std::env::var("SGC_SHOTS") {
+            let grown = h.state().settings.clone();
+            let mut shot = Harness::builder().with_size(size(&grown.production)).build_ui_state(
+                |ui, st: &mut State| {
+                    crate::theme::apply(ui.ctx(), Theme::Light);
+                    let _ = recorder_ui(
+                        ui,
+                        &mut st.view,
+                        &mut st.settings.recorder,
+                        &mut st.settings.production,
+                        &st.devices,
+                        &st.mic,
+                        &MicLevel::Off,
+                        &st.camera,
+                    );
+                },
+                State {
+                    settings: grown,
+                    view: RecorderView::default(),
+                    devices: d.clone(),
+                    mic: MicLevel::Level(0.3),
+                    camera: CameraPreview::Off,
+                    pressed: None,
+                },
+            );
+            shot.run_steps(3);
+            if let Ok(img) = shot.render() {
+                let _ = img.save(format!("{dir}/recorder-several.png"));
+            }
+        }
+        // Each taken away again with its own button.
+        press(&mut h, "Don't record Webcam microphone");
+        assert!(h.state().settings.production.more_microphones.is_empty());
+        press(&mut h, "Don't record Desk camera");
+        assert!(h.state().settings.production.more_cameras.is_empty());
+        assert!(!disabled(&h, ANOTHER_MIC) && !disabled(&h, ANOTHER_CAMERA));
+        // With the microphone off, no other is added.
+        press(&mut h, "Microphone");
+        assert!(disabled(&h, ANOTHER_MIC));
+        assert!(h.state().pressed.is_none(), "choosing records nothing");
     }
 
     #[test]

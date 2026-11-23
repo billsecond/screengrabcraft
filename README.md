@@ -127,7 +127,10 @@ in one video (made no larger than 3840 × 2160), or a **fixed size** placed with
 monitor and video sizes, landscape, portrait and square, as many as fit on your monitors, or your
 own. Turn each input on or off: the screen,
 the camera, the microphone (with a level meter once you turn it on or press Test) and the
-computer's sound. With the screen off the camera's picture is the video. Under the camera's picture,
+computer's sound. The **+** beside the Microphone's and the Camera's switch records another one at
+the same time (up to four of each), each on a track of its own: in the video editor each is muted,
+moved, trimmed and played alone on its own, the sounds are mixed and each camera has its own corner
+of the video. With the screen off the camera's picture is the video. Under the camera's picture,
 **Mirror** flips it left to right and **Border** puts a line of your colour round it (the video
 editor can change both after). While it records, the camera button on the controls (or F7, or the tray)
 puts the camera full screen with the screen in its corner, and back. Press the red **Record**;

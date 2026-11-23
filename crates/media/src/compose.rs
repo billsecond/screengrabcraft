@@ -39,10 +39,9 @@ pub struct Composer {
     /// playing goes on forward), and the pictures of the last few such moments.
     screen_held: Option<ScreenDecoder>,
     held: Vec<(u64, Raster)>,
-    camera: Option<(usize, u8)>,
-    /// The last camera picture decoded, and which it was (and the other clip's, in a transition).
-    camera_frame: Option<(usize, Raster)>,
-    camera_other: Option<(usize, Raster)>,
+    /// Each camera's last picture decoded, and which it was (and the other clip's, in a
+    /// transition), by its stream.
+    camera_frames: std::collections::BTreeMap<(u8, bool), (usize, Raster)>,
     /// Captions drawn on the picture (in timeline time), if any.
     captions: Option<Arc<Vec<Cue>>>,
     /// The media bin's pictures, for the layers' items.
@@ -67,7 +66,6 @@ impl Composer {
     /// `width × height` is the video's size (the screen's, or smaller).
     pub fn new(rec: Arc<Recording>, timeline: &Timeline, width: u32, height: u32) -> Composer {
         let screen = timeline.find(StreamKind::Screen).and_then(|i| timeline.tracks.get(i).map(|t| (i, ScreenDecoder::new(t.stream))));
-        let camera = timeline.find(StreamKind::Camera).and_then(|i| timeline.tracks.get(i).map(|t| (i, t.stream)));
         let screen_other = screen.as_ref().map(|(_, d)| ScreenDecoder::new(d.stream()));
         let screen_held = screen.as_ref().map(|(_, d)| ScreenDecoder::new(d.stream()));
         Composer {
@@ -76,9 +74,7 @@ impl Composer {
             screen_held,
             held: Vec::new(),
             screen_other,
-            camera,
-            camera_frame: None,
-            camera_other: None,
+            camera_frames: Default::default(),
             captions: None,
             media: Arc::new(crate::layer_draw::NoMedia),
             arrow: crate::pointer::arrow(),
@@ -186,32 +182,29 @@ impl Composer {
         if screen_shown && self.zoom && !timeline.frame.is_plain() {
             out = crate::frame::frame_screen(out, &timeline.frame);
         }
-        if let Some((i, stream)) = self.camera
-            && shown(i)
-            && let Some(src) = timeline.source_time(i, t)
-            && let Some(cam) = self.camera_at(stream, src, false)
-        {
-            // A transition between two of its clips: the other one's picture blended in.
-            let cam = match timeline.blend_at(i, t) {
-                Some(b) => {
-                    let coming_plays = t >= b.cut;
-                    match self.camera_at(stream, if coming_plays { b.going } else { b.coming }, true) {
-                        Some(o) if coming_plays => blend_pictures(&o, &cam, b.kind, b.p),
-                        Some(o) => blend_pictures(&cam, &o, b.kind, b.p),
-                        None => cam,
-                    }
+        // The cameras over it, the first one first. Without the screen the first camera shown
+        // fills the picture, the others over it in their places.
+        let main = timeline.main_camera();
+        let mut filled = screen_shown;
+        for i in timeline.camera_tracks() {
+            let Some(stream) = timeline.tracks.get(i).filter(|_| shown(i)).map(|tr| tr.stream) else { continue };
+            let Some(src) = timeline.source_time(i, t) else { continue };
+            let Some(cam) = self.camera_at(stream, src, false) else { continue };
+            let cam = self.camera_blended(timeline, i, t, stream, cam);
+            let cam = with_look(cam, look_of(i));
+            if main != Some(i) {
+                // Another camera: in its own place, as it is (mirrored if it's to be).
+                let layout = timeline.camera_layout(i).unwrap_or_default();
+                let cam = if layout.mirror { screengrabcraft_render::effects::flip(&cam, true).unwrap_or(cam) } else { cam };
+                if filled {
+                    overlay_picture(&mut out, &cam, &layout);
+                } else {
+                    fill_camera(&mut out, &cam);
                 }
-                None => cam,
-            };
-            // Its clip's crop and colours.
-            let cam_look = look_of(i);
-            let cam = if cam_look.is_plain() {
-                cam
-            } else {
-                let mut c = if cam_look.crop == [0; 4] { cam } else { zoomed(&cam, cam_look.view(), cam.width(), cam.height()).unwrap_or(cam) };
-                adjust_colours(&mut c, cam_look);
-                c
-            };
+                filled = true;
+                continue;
+            }
+            filled = true;
             // Mirrored: flipped left to right, as the owner sees themself (the background learnt
             // flipped with it, so it still lines up).
             let mirror = timeline.camera.mirror;
@@ -310,7 +303,19 @@ impl Composer {
         out
     }
 
-    /// The camera's picture at `src`: the last one up to then, unless the camera had stopped
+    /// Camera track `i`'s picture `cam` at `t`, in a transition between two of its clips the other
+    /// one's picture blended in.
+    fn camera_blended(&mut self, timeline: &Timeline, i: usize, t: u64, stream: u8, cam: Raster) -> Raster {
+        let Some(b) = timeline.blend_at(i, t) else { return cam };
+        let coming_plays = t >= b.cut;
+        match self.camera_at(stream, if coming_plays { b.going } else { b.coming }, true) {
+            Some(o) if coming_plays => blend_pictures(&o, &cam, b.kind, b.p),
+            Some(o) => blend_pictures(&cam, &o, b.kind, b.p),
+            None => cam,
+        }
+    }
+
+    /// A camera's picture at `src`: the last one up to then, unless the camera had stopped
     /// sending (none for over two seconds), when there's none.
     fn camera_at(&mut self, stream: u8, src: u64, other: bool) -> Option<Raster> {
         let frames: &[FrameEntry] = self.rec.frames(stream);
@@ -318,18 +323,26 @@ impl Composer {
         if frames.get(i).is_some_and(|f| src.saturating_sub(f.pts) > CAMERA_STALE_US) {
             return None;
         }
-        let slot = if other { &mut self.camera_other } else { &mut self.camera_frame };
-        if let Some((at, pic)) = slot
+        if let Some((at, pic)) = self.camera_frames.get(&(stream, other))
             && *at == i
         {
             return Some(pic.clone());
         }
         let jpeg = self.rec.jpeg(frames.get(i)?).ok()?;
         let pic = screengrabcraft_render::decode(&jpeg).ok()?;
-        let slot = if other { &mut self.camera_other } else { &mut self.camera_frame };
-        *slot = Some((i, pic.clone()));
+        self.camera_frames.insert((stream, other), (i, pic.clone()));
         Some(pic)
     }
+}
+
+/// A camera's picture with its clip's crop and colours.
+fn with_look(cam: Raster, look: crate::timeline::ClipLook) -> Raster {
+    if look.is_plain() {
+        return cam;
+    }
+    let mut c = if look.crop == [0; 4] { cam } else { zoomed(&cam, look.view(), cam.width(), cam.height()).unwrap_or(cam) };
+    adjust_colours(&mut c, look);
+    c
 }
 
 /// The screen's picture with each frozen region's part (see [`Composer::frozen`]) laid where it
@@ -986,7 +999,7 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
     let mut out = vec![0f32; count * 2];
     // The voice (when the rest is lowered under it) apart from the rest: the layers' media, the
     // computer's sound.
-    let voice = voice_track(timeline);
+    let voice = voice_tracks(timeline);
     let mut rest = vec![0f32; count * 2];
     // (A track played alone: the layers' sound isn't heard.)
     if !timeline.tracks.iter().any(|t| t.solo && !t.kind.is_video()) {
@@ -997,7 +1010,7 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         if !timeline.heard(ti) || t.kind.is_video() || t.volume <= 0.0 {
             continue;
         }
-        let into = if voice.is_none_or(|v| v == ti) { &mut out } else { &mut rest };
+        let into = if voice.is_empty() || voice.contains(&ti) { &mut out } else { &mut rest };
         let shaped = !t.points.is_empty();
         let stereo = rec.stream(t.stream).is_some_and(|s| s.channels >= 2);
         // `n` stereo samples of the track as recorded from sample `from` (-1 to 1); mixed to mono,
@@ -1091,7 +1104,7 @@ pub fn mix_with(rec: &Recording, timeline: &Timeline, media: &dyn crate::layer_d
         }
     }
     // The rest lowered while the voice is heard.
-    let duck = voice.map(|v| duck_levels(rec, timeline, v, first, count));
+    let duck = (!voice.is_empty()).then(|| duck_levels(rec, timeline, &voice, first, count));
     for (k, pair) in rest.as_chunks::<2>().0.iter().enumerate() {
         let g = duck.as_ref().and_then(|d| d.get(k)).copied().unwrap_or(1.0);
         if let Some(o) = out.get_mut(k * 2..k * 2 + 2) {
@@ -1197,13 +1210,15 @@ pub fn heard_alone(
     out
 }
 
-/// The track whose voice lowers the rest, when the rest is lowered under the voice: the
-/// microphone, if it's heard.
-pub fn voice_track(timeline: &Timeline) -> Option<usize> {
+/// The tracks whose voices lower the rest, when the rest is lowered under the voice: every
+/// microphone that's heard (none when the rest isn't lowered).
+pub fn voice_tracks(timeline: &Timeline) -> Vec<usize> {
     if !timeline.ducking.on {
-        return None;
+        return Vec::new();
     }
-    timeline.find(StreamKind::Microphone).filter(|&i| timeline.tracks.get(i).is_some_and(|t| !t.muted && t.volume > 0.0))
+    (0..timeline.tracks.len())
+        .filter(|&i| timeline.tracks.get(i).is_some_and(|t| t.kind == StreamKind::Microphone && !t.muted && t.volume > 0.0))
+        .collect()
 }
 
 /// The steps the voice is listened for in (samples: 10 ms), how long the rest stays down after
@@ -1217,19 +1232,24 @@ const DUCK_ATTACK: u64 = 10;
 const VOICE_LOUD: f32 = 0.02;
 
 /// How loud the rest is at each of `count` samples from timeline sample `first` (1 as it is, down
-/// to the ducking's level while track `voice` is heard). The same whatever stretch is asked for:
-/// it's worked out on steps fixed on the timeline.
-fn duck_levels(rec: &Recording, timeline: &Timeline, voice: usize, first: u64, count: usize) -> Vec<f32> {
+/// to the ducking's level while any of the tracks `voices` is heard). The same whatever stretch is
+/// asked for: it's worked out on steps fixed on the timeline.
+fn duck_levels(rec: &Recording, timeline: &Timeline, voices: &[usize], first: u64, count: usize) -> Vec<f32> {
     let level = timeline.ducking.level.clamp(0.0, 1.0);
-    let Some(stream) = timeline.tracks.get(voice).map(|t| t.stream) else { return vec![1.0; count] };
+    let voices: Vec<(usize, u8)> = voices.iter().filter_map(|&v| timeline.tracks.get(v).map(|t| (v, t.stream))).collect();
+    if voices.is_empty() {
+        return vec![1.0; count];
+    }
     let g0 = (first / DUCK_STEP).saturating_sub(DUCK_HOLD + DUCK_RELEASE);
     let g1 = first.saturating_add(count as u64) / DUCK_STEP + DUCK_ATTACK + 2;
     let heard: Vec<bool> = (g0..=g1)
         .map(|g| {
-            let Some(src) = timeline.source_time(voice, to_us(g * DUCK_STEP)) else { return false };
-            let pcm = rec.sound(stream, to_samples(src).saturating_sub(DUCK_STEP / 2), DUCK_STEP as usize);
-            let ms = pcm.iter().map(|v| (f32::from(*v) / 32768.0).powi(2)).sum::<f32>() / pcm.len().max(1) as f32;
-            ms.sqrt() > VOICE_LOUD
+            voices.iter().any(|&(voice, stream)| {
+                let Some(src) = timeline.source_time(voice, to_us(g * DUCK_STEP)) else { return false };
+                let pcm = rec.sound(stream, to_samples(src).saturating_sub(DUCK_STEP / 2), DUCK_STEP as usize);
+                let ms = pcm.iter().map(|v| (f32::from(*v) / 32768.0).powi(2)).sum::<f32>() / pcm.len().max(1) as f32;
+                ms.sqrt() > VOICE_LOUD
+            })
         })
         .collect();
     // How far down the rest is at each step, 0 to 1: all the way while the voice is heard and a
@@ -2359,5 +2379,76 @@ mod tests {
         tl.camera.mirror = true;
         let f = c.frame(&tl, 100_000);
         assert!(f.pixel(8, 24).unwrap().r < 50 && f.pixel(56, 24).unwrap().r > 200);
+    }
+
+    /// Two cameras and no screen: a red one (the first) and a blue one; and two microphones, the
+    /// first speaking in the second half, the computer's sound throughout.
+    fn two_cameras_two_voices() -> Arc<Recording> {
+        let streams = vec![
+            StreamInfo { id: 1, kind: StreamKind::SystemSound, name: String::new(), width: 0, height: 0, channels: 1 },
+            StreamInfo { id: 2, kind: StreamKind::Microphone, name: "Headset".into(), width: 0, height: 0, channels: 1 },
+            StreamInfo { id: 4, kind: StreamKind::Microphone, name: "Desk mic".into(), width: 0, height: 0, channels: 1 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Red".into(), width: 64, height: 48, channels: 0 },
+            StreamInfo { id: 7, kind: StreamKind::Camera, name: "Blue".into(), width: 64, height: 48, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let jpeg =
+            |c: Color| screengrabcraft_render::encode(&Raster::filled(64, 48, c).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 95).unwrap();
+        for t in 0..20u64 {
+            w.jpeg_frame(3, t * 100_000, &jpeg(Color::rgb(220, 20, 20))).unwrap();
+            w.jpeg_frame(7, t * 100_000, &jpeg(Color::rgb(20, 20, 220))).unwrap();
+            w.audio(1, t * 4800, &[3000i16; 4800]).unwrap();
+            w.audio(2, t * 4800, &[0i16; 4800]).unwrap();
+            // The desk microphone heard from 1 s on.
+            w.audio(4, t * 4800, &[if t >= 10 { 8000i16 } else { 0 }; 4800]).unwrap();
+        }
+        Arc::new(Recording::open(Box::new(w.finish(2_000_000).unwrap())).unwrap())
+    }
+
+    #[test]
+    fn without_the_screen_the_first_camera_shown_fills_the_picture_and_the_others_go_over_it() {
+        let r = two_cameras_two_voices();
+        let mut tl = Timeline::new(&r);
+        let mut c = Composer::new(r.clone(), &tl, 160, 120);
+        let blueish = |p: Color| p.b > 150 && p.r < 100;
+        let reddish = |p: Color| p.r > 150 && p.b < 100;
+        // The first fills it, the second in its corner (bottom left) over it.
+        let f = c.frame(&tl, 500_000);
+        assert!(reddish(f.pixel(120, 30).unwrap()), "{:?}", f.pixel(120, 30));
+        assert!(blueish(f.pixel(20, 103).unwrap()), "{:?}", f.pixel(20, 103));
+        // The first hidden: the second fills the picture.
+        let first = tl.main_camera().unwrap();
+        tl.set_muted(first, true).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert!(blueish(f.pixel(120, 30).unwrap()) && blueish(f.pixel(20, 103).unwrap()));
+        // The second moved to the top right and hidden too: nothing but black.
+        let second = tl.camera_tracks()[1];
+        tl.camera_layout_mut(Some(second)).unwrap().corner = Corner::TopRight;
+        tl.set_muted(first, false).unwrap();
+        let f = c.frame(&tl, 500_000);
+        assert!(blueish(f.pixel(140, 15).unwrap()) && reddish(f.pixel(20, 103).unwrap()));
+        tl.set_muted(first, true).unwrap();
+        tl.set_muted(second, true).unwrap();
+        assert_eq!(c.frame(&tl, 500_000).pixel(80, 60).unwrap(), Color::BLACK);
+    }
+
+    #[test]
+    fn the_rest_goes_down_under_any_of_the_microphones() {
+        let r = two_cameras_two_voices();
+        let mut tl = Timeline::new(&r);
+        tl.ducking = crate::timeline::Ducking { on: true, level: 0.25 };
+        assert_eq!(voice_tracks(&tl).len(), 2, "both microphones are voices");
+        // Before the desk microphone speaks the computer's sound is as it was; while it does, a
+        // quarter as loud, under the voice.
+        let quiet = mix(&r, &tl, to_samples(300_000), 1);
+        assert!((quiet[0] - 3000.0 / 32768.0).abs() < 1e-3, "{quiet:?}");
+        let under = mix(&r, &tl, to_samples(1_600_000), 1);
+        assert!((under[0] - (8000.0 + 3000.0 * 0.25) / 32768.0).abs() < 2e-3, "{under:?}");
+        // The desk microphone muted: only the silent headset is a voice, and nothing goes down.
+        let desk = tl.tracks.iter().position(|t| t.stream == 4).unwrap();
+        tl.set_muted(desk, true).unwrap();
+        assert_eq!(voice_tracks(&tl).len(), 1);
+        let back = mix(&r, &tl, to_samples(1_600_000), 1);
+        assert!((back[0] - 3000.0 / 32768.0).abs() < 1e-3, "{back:?}");
     }
 }

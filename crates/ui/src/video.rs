@@ -257,6 +257,8 @@ pub struct VideoView {
     pub item: Option<(u32, u32)>,
     /// The camera chosen on the picture (to move and resize it there).
     pub camera_chosen: bool,
+    /// Which camera that is (its track; none: the first), in a recording of several.
+    pub camera_track: Option<usize>,
     /// The library panel at the left: shown, and which tab.
     pub library_open: bool,
     pub lib_tab: LibTab,
@@ -597,6 +599,7 @@ impl VideoView {
             rereading: Vec::new(),
             item: None,
             camera_chosen: false,
+            camera_track: None,
             library_open: true,
             lib_tab: LibTab::default(),
             thumbs: Default::default(),
@@ -1927,7 +1930,12 @@ impl VideoView {
     /// (when the recording has them), and how the timeline is worked. Always there, so the picture
     /// doesn't jump about as things are chosen.
     fn camera_panel(&mut self, ed: &mut Editor, ui: &mut Ui) {
-        let camera = self.session.timeline.find(StreamKind::Camera);
+        let cameras: Vec<(usize, String)> = {
+            let tl = &self.session.timeline;
+            let all = tl.camera_tracks();
+            let several = all.len() > 1;
+            all.into_iter().map(|i| (i, if several { tl.track_label(i, &self.rec) } else { "Camera".to_string() })).collect()
+        };
         let pointer = !self.rec.pointer.is_empty();
         let t = Tokens::get(ui.ctx());
         // The clip chosen on a track: what it is, where it starts and ends.
@@ -1935,7 +1943,7 @@ impl VideoView {
         let clip = self.selected.filter(|_| held.is_none()).and_then(|(ti, ci)| {
             let track = self.session.timeline.tracks.get(ti)?;
             let c = track.clips.get(ci)?;
-            let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+            let name = self.session.timeline.track_label(ti, &self.rec);
             Some((name, c.at, c.len, c.end(), c.speed, !track.kind.is_video(), c.reverse))
         });
         let stretch = self.range;
@@ -2092,9 +2100,9 @@ impl VideoView {
                     }
                     section(ui, "Markers", &mut first);
                     self.markers_section(ed, ui);
-                    if let Some(track) = camera {
-                        section(ui, "Camera", &mut first);
-                        self.camera_section(ed, ui, track);
+                    for (track, name) in &cameras {
+                        section(ui, name, &mut first);
+                        ui.push_id(("camera", *track), |ui| self.camera_section(ed, ui, *track));
                     }
                     if pointer {
                         section(ui, "Pointer", &mut first);
@@ -2454,15 +2462,24 @@ impl VideoView {
         });
     }
 
-    /// The camera's place in the picture: its corner, its shape, its size.
+    /// A camera's place in the picture (camera track `track`): its corner, its shape, its size; the
+    /// first camera's background and full screen too.
     fn camera_section(&mut self, ed: &mut Editor, ui: &mut Ui, track: usize) {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
-        let cam = self.session.timeline.camera;
+        let cam = self.session.timeline.camera_layout(track).unwrap_or_default();
+        let main = self.session.timeline.main_camera() == Some(track);
+        // Each change is to this camera.
+        let to = move |mut p: serde_json::Value| {
+            if let Some(o) = p.as_object_mut() {
+                o.insert("track".into(), json!(track));
+            }
+            p
+        };
         let small = |s: &str| RichText::new(s).size(12.0).color(t.muted);
         ui.label(small("Corner"));
         let half = ((ui.available_width() - 6.0) / 2.0).floor();
-        egui::Grid::new("camera_corners").spacing([6.0, 6.0]).show(ui, |ui| {
+        egui::Grid::new(("camera_corners", track)).spacing([6.0, 6.0]).show(ui, |ui| {
             for (i, (corner, label)) in [
                 (Corner::TopLeft, "Top left"),
                 (Corner::TopRight, "Top right"),
@@ -2473,7 +2490,7 @@ impl VideoView {
             .enumerate()
             {
                 if ui.add(egui::Button::new(label).selected(cam.corner == corner).min_size(vec2(half, 28.0))).clicked() {
-                    self.run(ed, &ctx, "video.camera", json!({"corner": corner}));
+                    self.run(ed, &ctx, "video.camera", to(json!({"corner": corner})));
                 }
                 if i % 2 == 1 {
                     ui.end_row();
@@ -2487,7 +2504,7 @@ impl VideoView {
             ui.spacing_mut().item_spacing.x = 6.0;
             for (shape, label) in [(CameraShape::Rectangle, "Square"), (CameraShape::Rounded, "Rounded"), (CameraShape::Circle, "Circle")] {
                 if ui.add(egui::Button::new(label).selected(cam.shape == shape).min_size(vec2(third, 28.0))).clicked() {
-                    self.run(ed, &ctx, "video.camera", json!({"shape": shape}));
+                    self.run(ed, &ctx, "video.camera", to(json!({"shape": shape})));
                 }
             }
         });
@@ -2498,7 +2515,7 @@ impl VideoView {
             self.session.begin("Camera");
         }
         if r.changed() {
-            let p = json!({"size": size / 100.0});
+            let p = to(json!({"size": size / 100.0}));
             if r.dragged() {
                 let _ = self.session.drag("video.camera", &p);
             } else {
@@ -2517,7 +2534,7 @@ impl VideoView {
             self.session.begin("Camera");
         }
         if r.changed() {
-            let p = json!({"border": border / 100.0});
+            let p = to(json!({"border": border / 100.0}));
             if r.dragged() {
                 let _ = self.session.drag("video.camera", &p);
             } else {
@@ -2534,7 +2551,7 @@ impl VideoView {
             let r = egui::color_picker::color_edit_button_srgba(ui, &mut c32, egui::color_picker::Alpha::Opaque);
             r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::ColorButton, true, "The border's colour"));
             if r.on_hover_text("The colour of the line round the camera").changed() {
-                let mut p = json!({"borderColor": format!("#{:02X}{:02X}{:02X}", c32.r(), c32.g(), c32.b())});
+                let mut p = to(json!({"borderColor": format!("#{:02X}{:02X}{:02X}", c32.r(), c32.g(), c32.b())}));
                 // A colour chosen with no border yet shows one.
                 if cam.border <= 0.0 {
                     p["border"] = json!(0.03);
@@ -2545,10 +2562,16 @@ impl VideoView {
         ui.add_space(6.0);
         let mut mirror = cam.mirror;
         if ui.checkbox(&mut mirror, "Mirror").on_hover_text("The camera flipped left to right, as you see yourself in a mirror").changed() {
-            self.run(ed, &ctx, "video.camera", json!({"mirror": mirror}));
+            self.run(ed, &ctx, "video.camera", to(json!({"mirror": mirror})));
         }
         ui.add_space(4.0);
         ui.label(small("Or drag the camera on the picture to put it anywhere."));
+        if !main {
+            // Taking its background away and filling the picture are the first camera's.
+            ui.add_space(4.0);
+            ui.label(small("Its background and the camera full screen are the first camera's."));
+            return;
+        }
         ui.add_space(8.0);
         self.camera_background(ed, ui);
         // The camera full screen for stretches, the screen in its place.
@@ -2849,7 +2872,7 @@ impl VideoView {
         let t = Tokens::get(ui.ctx());
         let ctx = ui.ctx().clone();
         let kind_name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
-        let name = track.name.clone().unwrap_or_else(|| kind_name.to_string());
+        let name = self.session.timeline.track_label(i, &self.rec);
         ui.painter().rect_filled(Rect::from_min_size(row.min, vec2(4.0, row.height())), 0.0, kind_colour(track.kind));
         let painter = ui.painter_at(row);
         // What it is, drawn and said: faint while it's hidden or muted.
@@ -3175,7 +3198,7 @@ impl VideoView {
                     ui.close();
                     return;
                 };
-                let name = self.rec.stream(track.stream).map(|s| s.kind.label()).unwrap_or("Track");
+                let name = self.session.timeline.track_label(i, &self.rec);
                 heading(ui, format!("{name} at {}", clock(at)));
                 if ui
                     .add_enabled(self.splittable(at, Some(i)), egui::Button::new("Split This Track Here"))
@@ -3328,7 +3351,7 @@ impl VideoView {
                     }
                 }
                 if ui.button("Rename…").on_hover_text("Its name here, and in the transcript for what's heard on it").clicked() {
-                    self.start_rename(Rename::Track(i), track.name.as_deref().unwrap_or(name), false);
+                    self.start_rename(Rename::Track(i), track.name.as_deref().unwrap_or(&name), false);
                     ui.close();
                 }
                 let n = self.session.timeline.tracks.len();
@@ -3551,6 +3574,8 @@ impl VideoView {
         let ctx = ui.ctx().clone();
         let now = ctx.input(|i| i.time);
         let tracks = self.session.timeline.tracks.clone();
+        // What each track is called, for its clips (its device, with several of a kind).
+        let track_names: Vec<String> = (0..tracks.len()).map(|i| self.session.timeline.track_label(i, &self.rec)).collect();
         // Where each track's volume points are heard on the timeline.
         let vpoints: Vec<Vec<(usize, u64)>> = (0..tracks.len()).map(|i| self.session.timeline.volume_points_on_timeline(i)).collect();
         let points_of = |i: usize| -> &[(usize, u64)] { vpoints.get(i).map(Vec::as_slice).unwrap_or_default() };
@@ -3723,7 +3748,7 @@ impl VideoView {
                             painter.text(
                                 r.min + vec2(8.0, 6.0),
                                 egui::Align2::LEFT_TOP,
-                                track.kind.label(),
+                                track_names.get(i).map_or(track.kind.label(), String::as_str),
                                 egui::FontId::proportional(12.0),
                                 t.text,
                             );

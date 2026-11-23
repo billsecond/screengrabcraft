@@ -255,6 +255,7 @@ mod tests {
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
             camera_full: Vec::new(),
+            cameras: Vec::new(),
         }
     }
 

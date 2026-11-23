@@ -799,6 +799,56 @@ pub struct Timeline {
     /// to in the camera track's recording (µs), in order and apart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub camera_full: Vec<[u64; 2]>,
+    /// A recording of several cameras: where each camera but the first goes on the picture (the
+    /// first's is `camera`), one for each, by its track's stream.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cameras: Vec<OtherCamera>,
+}
+
+/// A camera other than the first (of a recording of several), and its place on the picture: its
+/// corner or where it was dragged, its shape, size, border, mirroring. Nothing is taken away from
+/// its picture, and it doesn't fill the picture: those are the first camera's.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OtherCamera {
+    pub stream: u8,
+    #[serde(default)]
+    pub layout: CameraLayout,
+}
+
+/// The corners the other cameras start in, in turn: away from the first camera's.
+const OTHER_CORNERS: [Corner; 4] = [Corner::BottomLeft, Corner::TopRight, Corner::TopLeft, Corner::BottomRight];
+
+/// Where the `rank`th camera after the first starts: in a corner of its own.
+pub fn other_camera_layout(rank: usize) -> CameraLayout {
+    CameraLayout { corner: OTHER_CORNERS.get(rank % OTHER_CORNERS.len()).copied().unwrap_or_default(), ..CameraLayout::default() }
+}
+
+impl CameraLayout {
+    /// As it's kept: its size, border and place in range, its colour key's tolerance a number.
+    pub fn checked(self) -> CameraLayout {
+        CameraLayout {
+            size: if self.size.is_finite() { self.size.clamp(0.1, 0.5) } else { camera_size() },
+            border: if self.border.is_finite() { self.border.clamp(0.0, MAX_CAMERA_BORDER) } else { 0.0 },
+            at: self.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]),
+            key_tolerance: if self.key_tolerance.is_finite() { self.key_tolerance.clamp(0.0, 1.0) } else { key_tolerance() },
+            ..self
+        }
+    }
+
+    /// An other camera's, as it's kept: nothing taken away from its picture.
+    fn checked_other(self) -> CameraLayout {
+        CameraLayout { remove: crate::keyer::Remove::Nothing, behind: Behind::Screen, ..self.checked() }
+    }
+}
+
+/// The camera streams of `tracks` but the first (the lowest), in order: each one's place among
+/// the other cameras.
+fn other_camera_streams(tracks: &[Track]) -> Vec<u8> {
+    let mut s: Vec<u8> = tracks.iter().filter(|t| t.kind == StreamKind::Camera).map(|t| t.stream).collect();
+    s.sort_unstable();
+    s.dedup();
+    s.into_iter().skip(1).collect()
 }
 
 /// A moment marked on the timeline, with a name: a chapter of the video made.
@@ -866,6 +916,11 @@ impl Timeline {
                     mono: false,
                 }
             })
+            .collect::<Vec<Track>>();
+        let cameras = other_camera_streams(&tracks)
+            .into_iter()
+            .enumerate()
+            .map(|(rank, stream)| OtherCamera { stream, layout: other_camera_layout(rank) })
             .collect();
         Timeline {
             tracks,
@@ -884,6 +939,7 @@ impl Timeline {
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
             camera_full: Vec::new(),
+            cameras,
         }
     }
 
@@ -973,12 +1029,18 @@ impl Timeline {
             t.clips = kept;
             tracks.push(t);
         }
-        self.camera.size = if self.camera.size.is_finite() { self.camera.size.clamp(0.1, 0.5) } else { camera_size() };
-        self.camera.border = if self.camera.border.is_finite() { self.camera.border.clamp(0.0, MAX_CAMERA_BORDER) } else { 0.0 };
-        self.camera.at = self.camera.at.filter(|[x, y]| x.is_finite() && y.is_finite()).map(|[x, y]| [x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
-        self.camera.key_tolerance = if self.camera.key_tolerance.is_finite() { self.camera.key_tolerance.clamp(0.0, 1.0) } else { key_tolerance() };
-        // The camera full screen only where there's a camera, inside what it recorded.
-        let camera_len = tracks.iter().find(|t| t.kind == StreamKind::Camera).map(|t| rec.stream_duration(t.stream));
+        self.camera = self.camera.checked();
+        // Each other camera's place: as saved, else in a corner of its own.
+        let cameras = other_camera_streams(&tracks)
+            .into_iter()
+            .enumerate()
+            .map(|(rank, stream)| {
+                let saved = self.cameras.iter().take(64).find(|c| c.stream == stream).map(|c| c.layout.checked_other());
+                OtherCamera { stream, layout: saved.unwrap_or_else(|| other_camera_layout(rank)) }
+            })
+            .collect();
+        // The camera full screen only where there's a camera (the first), inside what it recorded.
+        let camera_len = tracks.iter().filter(|t| t.kind == StreamKind::Camera).min_by_key(|t| t.stream).map(|t| rec.stream_duration(t.stream));
         let camera_full = match camera_len {
             Some(len) => tidy(self.camera_full.into_iter().take(MAX_CAMERA_FULL * 4).collect(), len),
             None => Vec::new(),
@@ -1000,6 +1062,7 @@ impl Timeline {
             pointer_hidden: merged(self.pointer_hidden),
             pointer_paths: crate::pointer::checked_paths(self.pointer_paths),
             camera_full,
+            cameras,
         };
         checked.check_layers();
         // The markers: named, in order, one to a moment, not too many.
@@ -1028,6 +1091,73 @@ impl Timeline {
     /// The first track of a kind.
     pub fn find(&self, kind: StreamKind) -> Option<usize> {
         self.tracks.iter().position(|t| t.kind == kind)
+    }
+
+    /// What track `i` is called: the name the owner gave it, else what it is (Microphone), or,
+    /// with several of its kind, its device's name (else Microphone 2).
+    pub fn track_label(&self, i: usize, rec: &Recording) -> String {
+        let Some(t) = self.tracks.get(i) else { return "Track".to_string() };
+        if let Some(n) = &t.name {
+            return n.clone();
+        }
+        let kind = t.kind.label();
+        let mut same: Vec<u8> = self.tracks.iter().filter(|o| o.kind == t.kind).map(|o| o.stream).collect();
+        if same.len() <= 1 {
+            return kind.to_string();
+        }
+        same.sort_unstable();
+        let device = rec.stream(t.stream).and_then(|s| clean_name(&s.name));
+        let named_once = device
+            .as_ref()
+            .is_some_and(|d| self.tracks.iter().filter(|o| rec.stream(o.stream).and_then(|s| clean_name(&s.name)).as_ref() == Some(d)).count() == 1);
+        match device {
+            Some(d) if named_once => d,
+            _ => format!("{kind} {}", same.iter().position(|s| *s == t.stream).unwrap_or(0) + 1),
+        }
+    }
+
+    /// The first camera's track: the camera recorded first (the lowest stream), whatever order
+    /// the tracks are in. Its place, its background and the camera full screen are `camera`'s.
+    pub fn main_camera(&self) -> Option<usize> {
+        self.tracks.iter().enumerate().filter(|(_, t)| t.kind == StreamKind::Camera).min_by_key(|(_, t)| t.stream).map(|(i, _)| i)
+    }
+
+    /// The camera tracks in the order they're drawn: the first camera's, then the others as they
+    /// were recorded (the later on top).
+    pub fn camera_tracks(&self) -> Vec<usize> {
+        let mut v: Vec<(u8, usize)> =
+            self.tracks.iter().enumerate().filter(|(_, t)| t.kind == StreamKind::Camera).map(|(i, t)| (t.stream, i)).collect();
+        v.sort_unstable();
+        v.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// Where camera track `i` goes on the picture: the first camera's `camera`, another one's its
+    /// own place. None if it isn't a camera track.
+    pub fn camera_layout(&self, i: usize) -> Option<CameraLayout> {
+        let stream = self.tracks.get(i).filter(|t| t.kind == StreamKind::Camera)?.stream;
+        if self.main_camera() == Some(i) {
+            return Some(self.camera);
+        }
+        let rank = other_camera_streams(&self.tracks).iter().position(|s| *s == stream).unwrap_or(0);
+        Some(self.cameras.iter().find(|c| c.stream == stream).map_or_else(|| other_camera_layout(rank), |c| c.layout))
+    }
+
+    /// The place of camera track `track` to change (none: the first camera's).
+    pub fn camera_layout_mut(&mut self, track: Option<usize>) -> Result<&mut CameraLayout, EditError> {
+        let Some(i) = track else { return Ok(&mut self.camera) };
+        let t = self.track(i)?;
+        if t.kind != StreamKind::Camera {
+            return Err(EditError::Invalid(format!("track {i} isn't a camera")));
+        }
+        let stream = t.stream;
+        if self.main_camera() == Some(i) {
+            return Ok(&mut self.camera);
+        }
+        if !self.cameras.iter().any(|c| c.stream == stream) {
+            let layout = self.camera_layout(i).unwrap_or_default();
+            self.cameras.push(OtherCamera { stream, layout });
+        }
+        self.cameras.iter_mut().find(|c| c.stream == stream).map(|c| &mut c.layout).ok_or(EditError::NoTrack(i))
     }
 
     /// Where in its recording track `i` is at timeline time `t`, if a clip is playing then.
@@ -2055,7 +2185,7 @@ impl Timeline {
         if to <= from {
             return Err(EditError::Invalid("the stretch is empty".to_string()));
         }
-        let i = self.find(StreamKind::Camera).ok_or_else(|| EditError::Invalid("the recording has no camera".to_string()))?;
+        let i = self.main_camera().ok_or_else(|| EditError::Invalid("the recording has no camera".to_string()))?;
         let spans: Vec<[u64; 2]> = self
             .track(i)?
             .clips
@@ -2095,7 +2225,7 @@ impl Timeline {
     /// shown to its last; none if it's all cut out.
     pub fn camera_full_shown(&self, k: usize) -> Option<(u64, u64)> {
         let [a, b] = *self.camera_full.get(k)?;
-        let track = self.tracks.get(self.find(StreamKind::Camera)?)?;
+        let track = self.tracks.get(self.main_camera()?)?;
         track
             .clips
             .iter()
@@ -2142,6 +2272,7 @@ mod tests {
             pointer_hidden: Vec::new(),
             pointer_paths: Vec::new(),
             camera_full: Vec::new(),
+            cameras: Vec::new(),
         }
     }
 
@@ -2722,5 +2853,99 @@ mod tests {
         t.camera.shape = CameraShape::Circle;
         let json = serde_json::to_string(&t).unwrap();
         assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), t);
+    }
+
+    /// A made-up recording of the screen, two microphones and three cameras (the streams as the
+    /// recorder numbers them), every track three seconds long.
+    fn several() -> Recording {
+        use crate::recording::{Header, RecordingWriter, StreamInfo};
+        let s = |id, kind, name: &str, channels| StreamInfo { id, kind, name: name.into(), width: 32, height: 24, channels };
+        let streams = vec![
+            s(0, StreamKind::Screen, "", 0),
+            s(2, StreamKind::Microphone, "Headset", 1),
+            s(4, StreamKind::Microphone, "Desk mic", 1),
+            s(3, StreamKind::Camera, "Webcam", 0),
+            s(7, StreamKind::Camera, "Desk camera", 0),
+            s(8, StreamKind::Camera, "Desk camera", 0),
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        for t in 0..30u64 {
+            w.video_frame(0, t * 100_000, &screengrabcraft_model::Raster::filled(32, 24, screengrabcraft_model::Color::WHITE).unwrap()).unwrap();
+            for cam in [3, 7, 8] {
+                w.jpeg_frame(cam, t * 100_000, b"not a picture").unwrap();
+            }
+            for mic in [2, 4] {
+                w.audio(mic, t * 4800, &[100i16; 4800]).unwrap();
+            }
+        }
+        Recording::open(Box::new(w.finish(3_000_000).unwrap())).unwrap()
+    }
+
+    #[test]
+    fn several_cameras_each_have_a_corner_of_their_own_and_the_first_is_the_first_recorded() {
+        let rec = several();
+        let mut t = Timeline::new(&rec);
+        assert_eq!(t.tracks.len(), 6, "a track each");
+        let at = |t: &Timeline, stream: u8| t.tracks.iter().position(|x| x.stream == stream).unwrap();
+        assert_eq!(t.main_camera(), Some(at(&t, 3)));
+        assert_eq!(t.camera_tracks(), vec![at(&t, 3), at(&t, 7), at(&t, 8)]);
+        assert_eq!(t.cameras.iter().map(|c| (c.stream, c.layout.corner)).collect::<Vec<_>>(), vec![(7, Corner::BottomLeft), (8, Corner::TopRight)]);
+        assert_eq!(t.camera_layout(at(&t, 3)).unwrap().corner, Corner::BottomRight);
+        assert!(t.camera_layout(at(&t, 0)).is_none(), "the screen isn't a camera");
+        // The tracks moved about: the first camera is still the one recorded first.
+        let last = t.tracks.len() - 1;
+        t.move_track(at(&t, 3), last).unwrap();
+        assert_eq!(t.main_camera(), Some(at(&t, 3)));
+        // Each one's place changed on its own: the first's is `camera`, the others' their own.
+        t.camera_layout_mut(Some(at(&t, 8))).unwrap().size = 0.4;
+        t.camera_layout_mut(Some(at(&t, 3))).unwrap().size = 0.3;
+        t.camera_layout_mut(None).unwrap().mirror = true;
+        assert_eq!(t.camera.size, 0.3);
+        assert!(t.camera.mirror);
+        assert_eq!(t.camera_layout(at(&t, 8)).unwrap().size, 0.4);
+        assert_eq!(t.camera_layout(at(&t, 7)).unwrap().size, 0.22);
+        assert!(t.camera_layout_mut(Some(at(&t, 0))).is_err() && t.camera_layout_mut(Some(99)).is_err());
+        // Names: by device where it's the only one so named, else numbered.
+        let names: Vec<String> = (0..t.tracks.len()).map(|i| t.track_label(i, &rec)).collect();
+        assert!(names.contains(&"Screen".to_string()) && names.contains(&"Headset".to_string()) && names.contains(&"Desk mic".to_string()));
+        assert!(
+            names.contains(&"Webcam".to_string()) && names.contains(&"Camera 2".to_string()) && names.contains(&"Camera 3".to_string()),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn the_other_cameras_places_are_kept_through_a_file_and_made_safe() {
+        let rec = several();
+        let mut t = Timeline::new(&rec);
+        let i = t.tracks.iter().position(|x| x.stream == 7).unwrap();
+        {
+            let c = t.camera_layout_mut(Some(i)).unwrap();
+            c.at = Some([0.25, 0.25]);
+            c.mirror = true;
+        }
+        let back = serde_json::from_str::<Timeline>(&serde_json::to_string(&t).unwrap()).unwrap().checked(&rec);
+        assert_eq!(back.camera_layout(i), t.camera_layout(i));
+        // Junk: an other camera can't take its background away, sizes and places in range, ones for
+        // cameras the recording doesn't have dropped, a missing one in its own corner again.
+        let bad =
+            CameraLayout { size: f32::NAN, at: Some([9.0, f32::INFINITY]), remove: crate::keyer::Remove::Background, ..CameraLayout::default() };
+        let mut junk = t.clone();
+        junk.cameras = vec![OtherCamera { stream: 7, layout: bad }, OtherCamera { stream: 42, layout: bad }];
+        let fixed = junk.checked(&rec);
+        let seven = fixed.camera_layout(i).unwrap();
+        assert_eq!((seven.size, seven.at, seven.remove), (0.22, None, crate::keyer::Remove::Nothing));
+        assert_eq!(fixed.cameras.iter().map(|c| c.stream).collect::<Vec<_>>(), vec![7, 8]);
+        assert_eq!(fixed.cameras.iter().find(|c| c.stream == 8).map(|c| c.layout.corner), Some(Corner::TopRight));
+        // Edits saved before there were several cameras open as they were.
+        let old: Timeline = serde_json::from_str(r#"{"tracks": [], "camera": {"corner": "topLeft"}}"#).unwrap();
+        let old = old.checked(&rec);
+        assert_eq!(old.camera.corner, Corner::TopLeft);
+        assert_eq!(old.cameras.len(), 2);
+        // Only the first camera fills the picture.
+        assert_eq!(old.camera_full, Vec::<[u64; 2]>::new());
+        let mut full = old.clone();
+        full.set_camera_full(500_000, 1_000_000, true).unwrap();
+        assert_eq!(full.camera_full, vec![[500_000, 1_000_000]]);
     }
 }
