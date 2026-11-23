@@ -1,3 +1,15 @@
+## What's new in 0.1.58
+
+### Recording
+
+- **Move a recording's frame:** once a region or a set size is chosen for a recording (a video, a GIF, a scrolling capture or Video Production), drag the round grip in its middle to move the whole frame anywhere on its monitor; the recording and its countdown use the new place. Ctrl+arrows (Cmd on a Mac) nudge it ten pixels, plain arrows one, and Shift+arrows resize it up to the monitor's edge.
+- **Several microphones and cameras at once:** the **+** on the Recorder's Microphone and Camera cards adds another device, up to four of each. Each is kept on a track of its own and shows as its own track in the Video Editor, to mute, move, trim or play alone. The first camera stays where it was; the others go in corners of their own, each placed and sized on its own. Every microphone is mixed into the MP4.
+
+### Still to come
+
+- With several microphones or cameras: captions are made from the first microphone, background removal and the camera full screen are the first camera's, and the Recorder's level meter and camera preview show the first device.
+- Several screens or regions in one recording.
+
 ## What's new in 0.1.57
 
 New since 0.1.56: 100 more features from the feature list (`docs/parity.md`), and 9 more started. Six of them are on that list twice, once for recording or capturing and once for the editor, so here they share a line.
