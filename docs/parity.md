@@ -22,7 +22,8 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Repeat the last area | Has | |
 | Delay before the capture | Has | 3, 5 or 10 seconds from the tray |
 | Frozen screen while choosing, with a magnifier, crosshairs and the pixel's colour | Has | |
-| Arrow keys nudge the area, Shift+arrows resize it | Has | |
+| Arrow keys nudge the area, Shift+arrows resize it | Has | Ctrl (Cmd on a Mac) with them: ten pixels at a time |
+| A recording's frame moved before it starts | Has | a round grip with arrows four ways in the frame's middle (the move pointer over it) drags the whole frame, its size kept, on its monitor; GIF, scrolling, video and fixed-size frames |
 | Windows snap under the pointer | Has | |
 | Open menus and tooltips caught as they were | Has | the screen is frozen when the key is pressed, so open menus are in it; on Windows an open menu, drop-down (the system's, or the program in front's own) or tooltip is snapped to like a window, a click keeping just it; elsewhere it's dragged round |
 | Parts of a window (a button, a pane) snapped to | Missing | |
