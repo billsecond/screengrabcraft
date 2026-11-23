@@ -10,7 +10,6 @@ use std::sync::mpsc::{Receiver, channel};
 
 use egui::{RichText, Ui};
 use screengrabcraft_media::keyer::{Plate, Remove};
-use screengrabcraft_media::recording::StreamKind;
 use serde_json::json;
 
 use super::{VideoView, named_slider};
@@ -38,7 +37,7 @@ impl VideoView {
         if self.learning.is_some() {
             return;
         }
-        let Some(stream) = self.session.timeline.find(StreamKind::Camera).and_then(|i| self.session.timeline.tracks.get(i)).map(|t| t.stream) else {
+        let Some(stream) = self.session.timeline.main_camera().and_then(|i| self.session.timeline.tracks.get(i)).map(|t| t.stream) else {
             return;
         };
         let model = match ed.services.background_model() {

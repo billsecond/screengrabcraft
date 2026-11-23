@@ -1,6 +1,6 @@
 //! The recording file (`.sgvideo`): everything a video recording captured, each source on a
-//! track of its own (the screen, the camera, the computer's sound, the microphone), and the
-//! edits made since.
+//! track of its own (the screen, the computer's sound, each microphone and each camera), and
+//! the edits made since.
 //!
 //! The file is only ever added to, chunk by chunk, so a recording that stopped halfway (the
 //! program or the computer went down) still opens with everything written up to then. Edits
@@ -43,7 +43,8 @@ pub const KEY_EVERY_US: u64 = 2_000_000;
 const MAX_CHUNK: u32 = 256 * 1024 * 1024;
 /// The largest picture on a track.
 const MAX_SIDE: u32 = 16_384;
-const MAX_TRACKS: usize = 8;
+/// The most tracks a recording has (the screen, the computer's sound, a few microphones and cameras).
+const MAX_TRACKS: usize = 16;
 /// The longest recording read (a damaged file can claim anything).
 const MAX_DURATION_US: u64 = 24 * 3600 * 1_000_000;
 

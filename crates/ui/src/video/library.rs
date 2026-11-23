@@ -65,6 +65,8 @@ pub enum CanvasDrag {
         resize: Option<(f32, f32)>,
     },
     Camera {
+        /// Its track.
+        track: usize,
         grab: Vec2,
         resize: Option<(f32, f32)>,
     },
@@ -193,6 +195,7 @@ fn template_frame(t: &layers::Template, w: u32, h: u32, at: u64, texts: &mut lay
         pointer_hidden: Vec::new(),
         pointer_paths: Vec::new(),
         camera_full: Vec::new(),
+        cameras: Vec::new(),
     };
     tl.place(t.item.clone(), None, 0).ok()?;
     layer_draw::draw_layers(&mut pic, &tl, &layer_draw::NoMedia, at.min(t.item.len.saturating_sub(1)), texts, &mut Default::default());
@@ -1418,17 +1421,30 @@ impl VideoView {
         None
     }
 
-    /// The camera's place on the video (pixels), if it's on the picture.
-    fn camera_place(&self) -> Option<(f32, f32, f32, f32)> {
+    /// The chosen camera's track (the first, unless another was chosen).
+    pub(super) fn chosen_camera(&self) -> Option<usize> {
         let tl = &self.session.timeline;
-        let i = tl.find(StreamKind::Camera)?;
+        self.camera_track.filter(|&i| tl.tracks.get(i).is_some_and(|t| t.kind == StreamKind::Camera)).or_else(|| tl.main_camera())
+    }
+
+    /// The chosen camera's place on the video (pixels), if it's on the picture.
+    fn camera_place(&self) -> Option<(f32, f32, f32, f32)> {
+        self.camera_place_of(self.chosen_camera()?)
+    }
+
+    /// Camera track `i`'s place on the video (pixels), if it's on the picture: shown, and over
+    /// something (without the screen the first camera fills the picture).
+    fn camera_place_of(&self, i: usize) -> Option<(f32, f32, f32, f32)> {
+        let tl = &self.session.timeline;
         let track = tl.tracks.get(i)?;
-        if track.muted || tl.find(StreamKind::Screen).is_none() {
+        let on_something = tl.find(StreamKind::Screen).is_some() || tl.main_camera() != Some(i);
+        if track.muted || !on_something {
             return None;
         }
         let s = self.rec.stream(track.stream)?;
         let aspect = s.width as f32 / s.height.max(1) as f32;
-        Some(screengrabcraft_media::compose::camera_rect(&tl.camera, aspect, self.composer.width as f32, self.composer.height as f32))
+        let layout = tl.camera_layout(i)?;
+        Some(screengrabcraft_media::compose::camera_rect(&layout, aspect, self.composer.width as f32, self.composer.height as f32))
     }
 
     /// The items on the picture at the playhead, top first, with where they are (video pixels).
@@ -1499,28 +1515,31 @@ impl VideoView {
                 ctx.set_cursor_icon(egui::CursorIcon::Grab);
             }
         }
-        // What's under the pointer: the topmost item, else the camera.
-        let pick = |s: &VideoView, p: Pos2| -> Option<Option<(u32, u32)>> {
+        // What's under the pointer: the topmost item (Ok), else the topmost camera (Err, its track).
+        let pick = |s: &VideoView, p: Pos2| -> Option<Result<(u32, u32), usize>> {
             let v = video_at(p);
             if let Some((l, i, _)) =
                 s.items_on_picture().into_iter().find(|(_, _, r)| r.x <= v.x && v.x <= r.x + r.w && r.y <= v.y && v.y <= r.y + r.h)
             {
-                return Some(Some((l, i)));
+                return Some(Ok((l, i)));
             }
-            let (x, y, w, h) = s.camera_place()?;
-            (x <= v.x && v.x <= x + w && y <= v.y && v.y <= y + h).then_some(None)
+            s.session.timeline.camera_tracks().into_iter().rev().find_map(|k| {
+                let (x, y, w, h) = s.camera_place_of(k)?;
+                (x <= v.x && v.x <= x + w && y <= v.y && v.y <= y + h).then_some(Err(k))
+            })
         };
         if resp.clicked()
             && let Some(p) = resp.interact_pointer_pos()
         {
             match pick(self, p) {
-                Some(Some(sel)) => {
+                Some(Ok(sel)) => {
                     self.item = Some(sel);
                     self.camera_chosen = false;
                 }
-                Some(None) => {
+                Some(Err(k)) => {
                     self.item = None;
                     self.camera_chosen = true;
+                    self.camera_track = Some(k);
                 }
                 None => {
                     self.item = None;
@@ -1555,8 +1574,9 @@ impl VideoView {
                 && way_point.is_none()
                 && let Some(sel) = pick(self, p)
             {
-                self.item = sel;
-                self.camera_chosen = sel.is_none();
+                self.item = sel.ok();
+                self.camera_chosen = sel.is_err();
+                self.camera_track = sel.err().or(self.camera_track);
                 target = self.chosen_rect(pic).map(|r| (false, r));
             }
             if let Some((resize, r)) = target {
@@ -1572,10 +1592,12 @@ impl VideoView {
                     let grab = video_at(p) - pos2(place.x * vw, place.y * vh);
                     self.session.begin(if resize { "Resize" } else { "Move" });
                     self.canvas_drag = Some(CanvasDrag::Item { layer, item, grab, resize: resize.then_some((w, dist)) });
-                } else if self.camera_chosen {
+                } else if self.camera_chosen
+                    && let Some(track) = self.chosen_camera()
+                {
                     self.session.begin(if resize { "Resize Camera" } else { "Move Camera" });
-                    let size = self.session.timeline.camera.size;
-                    self.canvas_drag = Some(CanvasDrag::Camera { grab, resize: resize.then_some((size, dist)) });
+                    let size = self.session.timeline.camera_layout(track).map_or(0.22, |c| c.size);
+                    self.canvas_drag = Some(CanvasDrag::Camera { track, grab, resize: resize.then_some((size, dist)) });
                 }
             }
         }
@@ -1658,18 +1680,18 @@ impl VideoView {
                         }
                     }
                 }
-                CanvasDrag::Camera { grab, resize } => {
-                    let centre = self.camera_place().map(|(x, y, w, h)| pos2(x + w / 2.0, y + h / 2.0)).unwrap_or(v);
+                CanvasDrag::Camera { track, grab, resize } => {
+                    let centre = self.camera_place_of(track).map(|(x, y, w, h)| pos2(x + w / 2.0, y + h / 2.0)).unwrap_or(v);
                     let params = match resize {
-                        Some((s0, d0)) => json!({"x": centre.x / vw, "y": centre.y / vh, "size": s0 * ((v - centre).length() / d0)}),
-                        None => json!({"x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh}),
+                        Some((s0, d0)) => json!({"x": centre.x / vw, "y": centre.y / vh, "size": s0 * ((v - centre).length() / d0), "track": track}),
+                        None => json!({"x": (v.x - grab.x) / vw, "y": (v.y - grab.y) / vh, "track": track}),
                     };
                     let _ = self.session.drag("video.cameraAt", &params);
                     if resize.is_none() {
                         let (x, y) = catch(self);
                         if x.is_some() || y.is_some() {
                             let (dx, dy) = (x.map_or(0.0, |c| c.0) / f, y.map_or(0.0, |c| c.0) / f);
-                            let params = json!({"x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh});
+                            let params = json!({"x": (v.x - grab.x + dx) / vw, "y": (v.y - grab.y + dy) / vh, "track": track});
                             let _ = self.session.drag("video.cameraAt", &params);
                             lines = (x.map(|c| c.1), y.map(|c| c.1));
                         }

@@ -117,6 +117,88 @@ fn space_plays_and_the_playhead_moves() {
     assert!(!h.state().video.as_ref().unwrap().is_playing());
 }
 
+/// A made-up recording of the screen, two microphones and two cameras (a green webcam and an
+/// orange desk camera), 4 s long, numbered as the recorder numbers them.
+fn several_sources() -> Vec<u8> {
+    let streams = vec![
+        StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 320, height: 180, channels: 0 },
+        StreamInfo { id: 2, kind: StreamKind::Microphone, name: "Headset".into(), width: 0, height: 0, channels: 1 },
+        StreamInfo { id: 4, kind: StreamKind::Microphone, name: "Desk microphone".into(), width: 0, height: 0, channels: 1 },
+        StreamInfo { id: 3, kind: StreamKind::Camera, name: "Webcam".into(), width: 64, height: 48, channels: 0 },
+        StreamInfo { id: 7, kind: StreamKind::Camera, name: "Desk camera".into(), width: 64, height: 48, channels: 0 },
+    ];
+    let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+    let jpeg = |rgb: [u8; 3]| {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).encode_image(&image::RgbImage::from_pixel(64, 48, image::Rgb(rgb))).unwrap();
+        out
+    };
+    let (green, orange) = (jpeg([30, 160, 140]), jpeg([240, 140, 20]));
+    for t in 0..40u64 {
+        w.video_frame(0, t * 100_000, &Raster::filled(320, 180, Color::WHITE).unwrap()).unwrap();
+        let hum = |k: f32| -> Vec<i16> { (0..4800).map(|i| (((t * 4800 + i) as f32 * k).sin() * 9000.0) as i16).collect() };
+        w.audio(2, t * 4800, &hum(0.06)).unwrap();
+        w.audio(4, t * 4800, &hum(0.02)).unwrap();
+        w.jpeg_frame(3, t * 100_000, &green).unwrap();
+        w.jpeg_frame(7, t * 100_000, &orange).unwrap();
+    }
+    w.finish(4_000_000).unwrap()
+}
+
+#[test]
+fn several_microphones_and_cameras_each_have_a_track_and_each_camera_is_placed_on_its_own() {
+    let mut ed = Editor::new(Box::new(NoServices), EditorSettings::default());
+    ed.open_file(&egui::Context::default(), OpenedFile { name: "Several.sgvideo".into(), path: None, bytes: several_sources() });
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 900.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    h.run_steps(3);
+    let tl = |h: &Harness<'_, Editor>| h.state().video.as_ref().unwrap().session.timeline.clone();
+    assert_eq!(tl(&h).tracks.len(), 5, "a track each");
+    // Each named by its device: the headers, and a camera section for each in the panel.
+    for name in ["Headset", "Desk microphone", "Webcam", "Desk camera"] {
+        assert!(h.query_all_by_label(name).next().is_some(), "{name}");
+    }
+    assert_eq!(h.query_all_by_label("Top left").count(), 2, "corners for each camera");
+    let second = tl(&h).tracks.iter().position(|t| t.stream == 7).unwrap();
+    assert_eq!(tl(&h).camera_layout(second).unwrap().corner, Corner::BottomLeft, "in a corner of its own");
+    // The second camera's Top left (the lower of the two in the panel): only it moves.
+    h.get_all_by_label("Top left").max_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y)).unwrap().scroll_to_me();
+    // (The panel scrolls there over a few frames.)
+    h.run_steps(6);
+    h.get_all_by_label("Top left").max_by(|a, b| a.rect().min.y.total_cmp(&b.rect().min.y)).unwrap().click();
+    h.run_steps(2);
+    assert_eq!(tl(&h).camera_layout(second).unwrap().corner, Corner::TopLeft);
+    assert_eq!(tl(&h).camera.corner, Corner::BottomRight, "the first camera where it was");
+    // On the picture: clicked, the second camera is the one chosen; dragged, it moves.
+    let rect = {
+        let v = h.state_mut().video.as_mut().unwrap();
+        v.camera_track = Some(second);
+        let r = v.camera_on_screen().expect("the second camera is on the picture");
+        v.camera_track = None;
+        r
+    };
+    crate::tests::click_at(&mut h, rect.center());
+    {
+        let v = h.state().video.as_ref().unwrap();
+        assert!(v.camera_chosen && v.camera_track == Some(second), "the one clicked is chosen");
+    }
+    crate::tests::drag(&mut h, rect.center(), rect.center() + egui::vec2(120.0, 60.0));
+    let moved = tl(&h).camera_layout(second).unwrap();
+    assert!(moved.at.is_some(), "dragged somewhere: {moved:?}");
+    assert_eq!(tl(&h).camera.at, None, "the first camera not moved");
+    // Both microphones are heard, and each can be hidden on its own.
+    let headset = tl(&h).tracks.iter().position(|t| t.stream == 2).unwrap();
+    h.state_mut().video.as_mut().unwrap().session.execute("video.mute", &serde_json::json!({"track": headset, "muted": true})).unwrap();
+    assert!(tl(&h).tracks.iter().any(|t| t.stream == 4 && !t.muted), "the desk microphone still heard");
+    shot(&mut h, "video-several-sources");
+}
+
 #[test]
 fn the_camera_moves_to_another_corner_and_becomes_a_circle() {
     let mut h = harness();

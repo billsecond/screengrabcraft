@@ -865,7 +865,8 @@ impl Pauses {
 /// What the writer thread is handed.
 enum Item {
     Screen(u64, Raster),
-    Camera(u64, Vec<u8>),
+    /// A camera's picture: its track, when, the JPEG.
+    Camera(u8, u64, Vec<u8>),
     Sound(u8, SoundBlock),
     Pointer(pointer::Sample),
     PointerShape(Box<pointer::Shape>),
@@ -1118,15 +1119,43 @@ const BLOCKED_BY_ITS_MIC: &str = "sends no video while its own microphone record
 const MIC_SILENT: &str =
     "recorded only silence. In Windows Settings, Privacy & security, Microphone, let desktop apps use the microphone, and check it isn't muted";
 
-/// The sound devices and the camera a recording asked for, those that started.
+/// The sound devices and the cameras a recording asked for, those that started.
 struct Devices {
     system: Option<AudioCapture>,
-    mic: Option<AudioCapture>,
-    camera: Option<CameraCapture>,
-    /// How long before the recording began the camera was started (its pictures' times count
+    /// Each microphone and its track, the first one first.
+    mics: Vec<Mic>,
+    /// Each camera and its track, the first one first.
+    cameras: Vec<Cam>,
+    /// How long before the recording began the cameras were started (their pictures' times count
     /// from then).
     camera_lead: Duration,
 }
+
+/// A microphone being recorded: its track, and how much it has heard.
+struct Mic {
+    id: u8,
+    capture: AudioCapture,
+    heard: Heard,
+}
+
+/// A camera being recorded: its track, and when its last picture came.
+struct Cam {
+    id: u8,
+    capture: CameraCapture,
+    /// Pictures since the recording began.
+    pictures: u32,
+    /// When its last picture came (it started before the recording did).
+    last_picture: Duration,
+    /// Whether the owner was told it sends nothing.
+    told: bool,
+}
+
+/// The tracks of a recording: the screen, the computer's sound, the first microphone and the first
+/// camera as they always were, then each further microphone and camera.
+const SCREEN_TRACK: u8 = 0;
+const SYSTEM_TRACK: u8 = 1;
+const MIC_TRACKS: [u8; screengrabcraft_model::settings::MOST_MICROPHONES] = [2, 4, 5, 6];
+const CAMERA_TRACKS: [u8; screengrabcraft_model::settings::MOST_CAMERAS] = [3, 7, 8, 9];
 
 /// How long the camera's first picture is waited for before a recording begins: a camera takes
 /// a second or two to start sending, and a recording begun meanwhile has none at its start.
@@ -1159,29 +1188,51 @@ fn missing_from(notes: &[String]) -> Option<(String, String)> {
     }
 }
 
-/// The recording's camera, if it asked for one, started (its pictures timed from `from`).
-fn open_camera(o: &VideoOptions, from: Instant, s: &Shared) -> Option<CameraCapture> {
-    if !o.camera {
-        return None;
-    }
-    match o.camera_index.or_else(|| camera::cameras().first().map(|c| c.0)) {
-        Some(i) => CameraCapture::start(i, from)
-            .inspect(|c| log::info!("recording the camera {}", c.name))
-            .map_err(|e| {
-                log::warn!("no camera: {e}");
-                s.note(format!("No camera: {e}"));
-            })
-            .ok(),
-        None => {
-            s.note("No camera was found".to_string());
-            None
+/// The cameras the recording asked for, by number (none: the first camera found), each once:
+/// those found, in order.
+fn camera_numbers(asked: &[Option<u32>], found: &[(u32, String)]) -> Vec<u32> {
+    let mut out: Vec<u32> = Vec::new();
+    for a in asked {
+        if let Some(i) = a.or_else(|| found.first().map(|c| c.0))
+            && !out.contains(&i)
+        {
+            out.push(i);
         }
     }
+    out
 }
 
-/// The sound devices a recording asked for, started (their sound numbered from `started`), and
-/// its camera, started already.
-fn open_devices(o: &VideoOptions, started: Instant, s: &Shared, camera: Option<CameraCapture>, camera_lead: Duration) -> Devices {
+/// The recording's cameras, those it asked for, started (their pictures timed from `from`), each
+/// in a helper program of its own (so ending it lets that camera go), with its track.
+fn open_cameras(o: &VideoOptions, from: Instant, s: &Shared) -> Vec<Cam> {
+    let asked = o.cameras();
+    if asked.is_empty() {
+        return Vec::new();
+    }
+    let numbers = camera_numbers(&asked, &camera::cameras());
+    if numbers.is_empty() {
+        s.note("No camera was found".to_string());
+    }
+    let mut out = Vec::new();
+    for (i, id) in numbers.into_iter().zip(CAMERA_TRACKS) {
+        match CameraCapture::start(i, from) {
+            Ok(c) => {
+                log::info!("recording the camera {}", c.name);
+                out.push(Cam { id, capture: c, pictures: 0, last_picture: Duration::ZERO, told: false });
+            }
+            Err(e) => {
+                log::warn!("no camera: {e}");
+                s.note(format!("No camera: {e}"));
+            }
+        }
+    }
+    out
+}
+
+/// The sound devices a recording asked for, started (their sound numbered from `started`), with
+/// its cameras, started already. A microphone that turns out to be one already started (the
+/// system's default, chosen again by name) is recorded once.
+fn open_devices(o: &VideoOptions, started: Instant, s: &Shared, cameras: Vec<Cam>, camera_lead: Duration) -> Devices {
     let system = if o.system_sound && audio::system_sound_supported() {
         AudioCapture::start(AudioSource::SystemSound(o.system_sound_name.clone()), started)
             .inspect(|c| log::info!("recording the computer's sound from {}", c.name))
@@ -1190,15 +1241,26 @@ fn open_devices(o: &VideoOptions, started: Instant, s: &Shared, camera: Option<C
     } else {
         None
     };
-    let mic = if o.microphone {
-        AudioCapture::start(AudioSource::Microphone(o.microphone_name.clone()), started)
-            .inspect(|c| log::info!("recording the microphone {}", c.name))
-            .map_err(|e| s.note(format!("No microphone: {e}")))
-            .ok()
-    } else {
-        None
-    };
-    Devices { system, mic, camera, camera_lead }
+    let mut mics: Vec<Mic> = Vec::new();
+    let mut ids = MIC_TRACKS.into_iter();
+    for name in o.microphones() {
+        match AudioCapture::start(AudioSource::Microphone(name), started) {
+            Ok(c) if mics.iter().any(|m| m.capture.name == c.name) => {
+                log::info!("the microphone {} was chosen twice: it's recorded once", c.name);
+                let _ = c.stop();
+            }
+            Ok(c) => {
+                let Some(id) = ids.next() else {
+                    let _ = c.stop();
+                    break;
+                };
+                log::info!("recording the microphone {}", c.name);
+                mics.push(Mic { id, capture: c, heard: Heard::default() });
+            }
+            Err(e) => s.note(format!("No microphone: {e}")),
+        }
+    }
+    Devices { system, mics, cameras, camera_lead }
 }
 
 /// When in the recording a camera picture belongs (its time counts from before the recording
@@ -1216,62 +1278,56 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
             dir.join(format!("recording-{}.{}", std::process::id(), recording::EXT))
         }
     };
-    // The camera first, and its first picture waited for: a camera takes a second or two to
+    // The cameras first, and their first pictures waited for: a camera takes a second or two to
     // start sending, and a recording begun meanwhile has no camera at its start.
     let warming = Instant::now();
-    let camera = open_camera(&plan.options, warming, s);
-    let warm = camera.as_ref().map(|c| first_frames(c, s.stop, CAMERA_WARM_UP)).unwrap_or_default();
-    if let Some(c) = &camera {
-        match warm.last() {
-            Some(_) => log::info!("the camera {} sent its first picture after {} ms", c.name, warming.elapsed().as_millis()),
-            None => log::warn!("the camera {} sent no picture in {} s; recording without waiting longer", c.name, CAMERA_WARM_UP.as_secs()),
+    let cameras = open_cameras(&plan.options, warming, s);
+    let warm = first_frames(&cameras, s.stop, CAMERA_WARM_UP);
+    for (c, w) in cameras.iter().zip(&warm) {
+        match w {
+            Some(_) => log::info!("the camera {} sent its first picture after {} ms", c.capture.name, warming.elapsed().as_millis()),
+            None => log::warn!("the camera {} sent no picture in {} s; recording without waiting longer", c.capture.name, CAMERA_WARM_UP.as_secs()),
         }
     }
     // The recording begins now: its clock, the sound (placed by the clock), the screen.
     let started = Instant::now();
     s.begin(started);
-    let mut d = open_devices(&plan.options, started, s, camera, started.saturating_duration_since(warming));
+    let mut d = open_devices(&plan.options, started, s, cameras, started.saturating_duration_since(warming));
     let mut screen = ScreenSource::open(&plan.screen)?;
-    if screen.is_none() && d.system.is_none() && d.mic.is_none() && d.camera.is_none() {
+    if screen.is_none() && d.system.is_none() && d.mics.is_empty() && d.cameras.is_empty() {
         let why = s.sources.lock().map(|v| v.join("; ")).unwrap_or_default();
         return Err(if why.is_empty() { "nothing was chosen to record".to_string() } else { format!("nothing could be recorded: {why}") });
     }
-    let mut streams = Vec::with_capacity(4);
+    let mut streams = Vec::with_capacity(2 + d.mics.len() + d.cameras.len());
     if let Some(src) = &screen {
         let (width, height) = src.size;
-        streams.push(StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width, height, channels: 0 });
+        streams.push(StreamInfo { id: SCREEN_TRACK, kind: StreamKind::Screen, name: String::new(), width, height, channels: 0 });
     }
     if let Some(a) = &d.system {
-        streams.push(StreamInfo { id: 1, kind: StreamKind::SystemSound, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
+        streams.push(StreamInfo { id: SYSTEM_TRACK, kind: StreamKind::SystemSound, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
         s.note("Computer sound".to_string());
     }
-    if let Some(a) = &d.mic {
-        streams.push(StreamInfo { id: 2, kind: StreamKind::Microphone, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
+    for m in &d.mics {
+        let a = &m.capture;
+        streams.push(StreamInfo { id: m.id, kind: StreamKind::Microphone, name: a.name.clone(), width: 0, height: 0, channels: a.channels });
         s.note(format!("Microphone: {}", a.name));
     }
-    // The camera's latest picture from before the recording began opens it.
-    let first_camera = warm.into_iter().last();
-    if let Some(c) = &d.camera {
-        let (mut width, mut height) = (640, 480);
-        if screen.is_none()
-            && let Some(f) = &first_camera
-        {
-            // The camera is the picture: the video is the size of the camera's pictures.
-            (width, height) = (f.width.max(2), f.height.max(2));
-        }
-        streams.push(StreamInfo { id: 3, kind: StreamKind::Camera, name: c.name.clone(), width, height, channels: 0 });
-        s.note(format!("Camera: {}", c.name));
+    // Each camera's latest picture from before the recording began opens its track; its size is
+    // its pictures' (without the screen, the first camera's is the video's).
+    for (c, first) in d.cameras.iter().zip(&warm) {
+        let (width, height) = first.as_ref().map_or((640, 480), |f| (f.width.max(2), f.height.max(2)));
+        streams.push(StreamInfo { id: c.id, kind: StreamKind::Camera, name: c.capture.name.clone(), width, height, channels: 0 });
+        s.note(format!("Camera: {}", c.capture.name));
     }
     let header = Header { version: 1, created: plan.created.clone(), fps: plan.fps, streams };
     let file = std::fs::File::create(&file_path).map_err(|e| format!("{}: {e}", file_path.display()))?;
     // Noted until it ends here, so a crash doesn't lose it (see `cut_short`).
     let _under_way = UnderWay::note(&file_path, &plan.created);
     let mut writer = RecordingWriter::new(BufWriter::new(file), &header).map_err(|e| e.to_string())?;
-    // The camera's look chosen in the Recorder (mirrored, a border): the recording starts with it
+    // The cameras' look chosen in the Recorder (mirrored, a border): the recording starts with it
     // as its edits, which the video editor can change.
-    if d.camera.is_some()
-        && let Some(look) = camera_look(&plan.options)
-    {
+    let camera_ids: Vec<u8> = d.cameras.iter().map(|c| c.id).collect();
+    if let Some(look) = camera_look(&plan.options, &camera_ids) {
         writer.edit(&look).map_err(|e| e.to_string())?;
     }
     let (tx, rx) = std::sync::mpsc::channel::<Item>();
@@ -1287,7 +1343,7 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
                         w.fetch_sub(1, Ordering::SeqCst);
                         writer.video_frame(0, pts, &pic)
                     }
-                    Item::Camera(pts, jpeg) => writer.jpeg_frame(3, pts, &jpeg),
+                    Item::Camera(id, pts, jpeg) => writer.jpeg_frame(id, pts, &jpeg),
                     Item::Sound(stream, b) => writer.audio(stream, b.first, &b.samples),
                     Item::Pointer(s) => writer.pointer(&s),
                     Item::PointerShape(s) => writer.pointer_shape(&s),
@@ -1298,10 +1354,10 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
             Ok(writer)
         })
         .map_err(|e| e.to_string())?;
-    if d.camera.is_some()
-        && let Some(f) = first_camera
-    {
-        let _ = tx.send(Item::Camera(0, f.jpeg));
+    for (c, first) in d.cameras.iter().zip(warm) {
+        if let Some(f) = first {
+            let _ = tx.send(Item::Camera(c.id, 0, f.jpeg));
+        }
     }
     // Record Video: the MP4 is made as the recording goes, two seconds at a time.
     let live = match (&screen, plan.kind) {
@@ -1314,7 +1370,7 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     let mut pointer_feed = screen.as_ref().and_then(|src| PointerFeed::start(&plan.screen, src.size, started));
     // The shortcuts pressed, to show on the video (Video Production, when asked for).
     let mut keys_feed = (plan.kind == Kind::Production && plan.options.keys && screen.is_some()).then(|| KeysFeed::start(started)).flatten();
-    let camera_recorded = d.camera.is_some();
+    let camera_recorded = !d.cameras.is_empty();
     let (frames, live) = std::thread::scope(|scope| {
         let feeder = live.map(|(ex, cancel)| scope.spawn(|| feed_live(ex, cancel, &file_path, &feeding, s.swaps)));
         let feeds = Feeds { pointer: pointer_feed.as_mut(), keys: keys_feed.as_mut() };
@@ -1337,27 +1393,27 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
         k.end();
         k.pass_on(&tx, &pauses);
     }
-    // What the devices still hold, then they're let go (the camera's light goes off).
+    // What the devices still hold, then they're let go (each camera's light goes off).
     if let Some(a) = d.system {
         let ch = a.channels;
-        send_sound(&tx, 1, a.stop(), &pauses, ch);
+        send_sound(&tx, SYSTEM_TRACK, a.stop(), &pauses, ch);
     }
-    if let Some(a) = d.mic {
-        let ch = a.channels;
-        send_sound(&tx, 2, a.stop(), &pauses, ch);
+    for m in d.mics {
+        let ch = m.capture.channels;
+        send_sound(&tx, m.id, m.capture.stop(), &pauses, ch);
     }
-    if let Some(c) = d.camera {
-        for f in c.stop() {
+    for c in d.cameras {
+        for f in c.capture.stop() {
             if let Some(pts) = camera_pts(&f, d.camera_lead, &pauses) {
-                let _ = tx.send(Item::Camera(pts, f.jpeg));
+                let _ = tx.send(Item::Camera(c.id, pts, f.jpeg));
             }
         }
     }
     drop(tx);
     let mut writer = write_thread.join().map_err(|_| "the recording stopped unexpectedly".to_string())??;
-    // The stretches the camera filled the picture become its edits, with the camera's look.
+    // The stretches the camera filled the picture become its edits, with the cameras' look.
     if !full.is_empty() {
-        let mut edits = camera_look(&plan.options).unwrap_or_default();
+        let mut edits = camera_look(&plan.options, &camera_ids).unwrap_or_default();
         edits.camera_full = full.clone();
         writer.edit(&edits).map_err(|e| e.to_string())?;
         log::info!("the camera filled the picture {} time(s)", full.len());
@@ -1384,18 +1440,32 @@ fn video(plan: &VideoPlan, s: &Shared) -> Result<Output, String> {
     made.map(|d| Output::Video(plan.out.clone(), d))
 }
 
-/// The edits a recording starts with for the camera's look the owner chose (mirrored, a border),
-/// or none when it's as the camera sends it. Only the camera's place is in them: the tracks are
-/// filled in whole when the recording is opened.
-fn camera_look(o: &VideoOptions) -> Option<Timeline> {
+/// The edits a recording of the cameras `cameras` (their tracks, the first one first) starts with
+/// for the look the owner chose (mirrored, a border), every camera alike, each other one in a
+/// corner of its own; none when they're as the cameras send them. Only the cameras' places are in
+/// them: the tracks are filled in whole when the recording is opened.
+fn camera_look(o: &VideoOptions, cameras: &[u8]) -> Option<Timeline> {
     let border = o.camera_border.min(screengrabcraft_model::settings::CAMERA_BORDER_MAX);
-    if !o.camera_mirror && border == 0 {
+    if cameras.is_empty() || (!o.camera_mirror && border == 0) {
         return None;
     }
+    let look = |mut c: screengrabcraft_media::timeline::CameraLayout| {
+        c.mirror = o.camera_mirror;
+        c.border = f32::from(border) / 100.0;
+        c.border_color = o.camera_border_color;
+        c
+    };
     let mut tl = Timeline::default();
-    tl.camera.mirror = o.camera_mirror;
-    tl.camera.border = f32::from(border) / 100.0;
-    tl.camera.border_color = o.camera_border_color;
+    tl.camera = look(tl.camera);
+    tl.cameras = cameras
+        .iter()
+        .skip(1)
+        .enumerate()
+        .map(|(rank, &stream)| screengrabcraft_media::timeline::OtherCamera {
+            stream,
+            layout: look(screengrabcraft_media::timeline::other_camera_layout(rank)),
+        })
+        .collect();
     Some(tl)
 }
 
@@ -1439,13 +1509,18 @@ fn send_sound(tx: &std::sync::mpsc::Sender<Item>, id: u8, blocks: Vec<SoundBlock
     h
 }
 
-/// The camera's first pictures, waited for up to `wait` (so its size is known before the
-/// recording file is begun).
-fn first_frames(c: &CameraCapture, stop: &AtomicBool, wait: Duration) -> Vec<camera::CameraFrame> {
+/// Each camera's latest picture once every one has sent one, waited for up to `wait` (so their
+/// sizes are known before the recording file is begun); none for a camera that sent none by then.
+fn first_frames(cameras: &[Cam], stop: &AtomicBool, wait: Duration) -> Vec<Option<camera::CameraFrame>> {
     let until = Instant::now() + wait;
+    let mut got: Vec<Option<camera::CameraFrame>> = vec![None; cameras.len()];
     loop {
-        let got = c.take();
-        if !got.is_empty() || Instant::now() >= until || stop.load(Ordering::SeqCst) {
+        for (c, g) in cameras.iter().zip(got.iter_mut()) {
+            if let Some(f) = c.capture.take().pop() {
+                *g = Some(f);
+            }
+        }
+        if got.iter().all(Option::is_some) || Instant::now() >= until || stop.load(Ordering::SeqCst) {
             return got;
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1565,16 +1640,9 @@ fn record_screen(
     let limit = Duration::from_secs(u64::from(plan.max_secs.max(1)));
     let mut due = Instant::now();
     let mut frames = 0u32;
-    // A camera that started but sends nothing is said so, once; one held up by its own
-    // microphone is let go of (the voice matters more), and said so.
-    let mut camera_pictures = 0u32;
-    let mut camera_told = false;
-    // When the camera's last picture came (it started before the recording did).
-    let mut last_picture = Duration::ZERO;
     // How much sound came, and how loud, for the log and to tell a microphone that heard nothing.
-    let (mut mic, mut system) = (Heard::default(), Heard::default());
-    let channels = |a: &Option<AudioCapture>| a.as_ref().map_or(1, |a| a.channels);
-    let (mic_ch, system_ch) = (channels(&d.mic), channels(&d.system));
+    let mut system = Heard::default();
+    let system_ch = d.system.as_ref().map_or(1, |a| a.channels);
     // The time recorded (pauses don't count) is what the limit is on.
     while !s.stop.load(Ordering::SeqCst) && started.elapsed().saturating_sub(pauses.total(started.elapsed())) < limit {
         let at = started.elapsed();
@@ -1607,44 +1675,58 @@ fn record_screen(
             }
         }
         if let Some(a) = &d.system {
-            system.add(send_sound(tx, 1, a.take(), pauses, system_ch));
+            system.add(send_sound(tx, SYSTEM_TRACK, a.take(), pauses, system_ch));
             s.levels[0].store(a.level().to_bits(), Ordering::Relaxed);
         }
-        if let Some(a) = &d.mic {
-            mic.add(send_sound(tx, 2, a.take(), pauses, mic_ch));
-            s.levels[1].store(a.level().to_bits(), Ordering::Relaxed);
+        // The controls show the loudest microphone.
+        let mut loudest = 0f32;
+        for m in &mut d.mics {
+            let ch = m.capture.channels;
+            m.heard.add(send_sound(tx, m.id, m.capture.take(), pauses, ch));
+            loudest = loudest.max(m.capture.level());
         }
-        if let Some(c) = &d.camera {
-            for f in c.take() {
+        if !d.mics.is_empty() {
+            s.levels[1].store(loudest.to_bits(), Ordering::Relaxed);
+        }
+        // Each camera's pictures; one that started but sends nothing is said so, once; one held
+        // up by its own microphone is let go of (the voice matters more), and said so.
+        let mut let_go = Vec::new();
+        for (k, c) in d.cameras.iter_mut().enumerate() {
+            for f in c.capture.take() {
                 // Any still on their way from before the recording began are left out, and any
                 // from while it's paused.
                 if f.at >= d.camera_lead {
-                    camera_pictures = camera_pictures.saturating_add(1);
-                    last_picture = at;
+                    c.pictures = c.pictures.saturating_add(1);
+                    c.last_picture = at;
                 }
                 if let Some(pts) = camera_pts(&f, d.camera_lead, pauses) {
-                    let _ = tx.send(Item::Camera(pts, f.jpeg));
+                    let _ = tx.send(Item::Camera(c.id, pts, f.jpeg));
                 }
             }
-            let silent = at.saturating_sub(last_picture);
-            let own_mic = d.mic.as_ref().is_some_and(|m| camera::is_own_microphone(&m.name, &c.name));
+            let silent = at.saturating_sub(c.last_picture);
+            let name = &c.capture.name;
+            let own_mic = d.mics.iter().any(|m| camera::is_own_microphone(&m.capture.name, name));
             if own_mic && silent >= OWN_MIC_SILENT {
                 // Some cameras stop sending video once their own microphone records (Windows' own
                 // camera reader gets none either). The voice is kept: the camera is let go of
                 // (its own program ended, so it isn't held), and the owner is told.
-                log::warn!("the camera {} sends no pictures while its own microphone records: the voice is kept and the camera let go of", c.name);
-                s.note(format!("No camera: {} {BLOCKED_BY_ITS_MIC}. Choose another microphone to record both", c.name));
-                if let Some(old) = d.camera.take() {
-                    let _ = std::thread::Builder::new().name("camera let go".into()).spawn(move || old.abandon());
+                log::warn!("the camera {name} sends no pictures while its own microphone records: the voice is kept and the camera let go of");
+                s.note(format!("No camera: {name} {BLOCKED_BY_ITS_MIC}. Choose another microphone to record both"));
+                let_go.push(k);
+            } else if !c.told && silent >= CAMERA_SILENT {
+                c.told = true;
+                log::warn!("the camera {name} has sent no pictures for {} s ({} before)", silent.as_secs(), c.pictures);
+                match c.capture.trouble() {
+                    Some(why) => s.note(format!("No camera pictures from {name}: {why}")),
+                    None if c.pictures > 0 => s.note(format!("No camera pictures: {name} stopped sending them")),
+                    None => s.note(format!("No camera pictures: {name} has sent none (is another program using it?)")),
                 }
-            } else if !camera_told && silent >= CAMERA_SILENT {
-                camera_told = true;
-                log::warn!("the camera has sent no pictures for {} s ({camera_pictures} before)", silent.as_secs());
-                match c.trouble() {
-                    Some(why) => s.note(format!("No camera pictures from {}: {why}", c.name)),
-                    None if camera_pictures > 0 => s.note(format!("No camera pictures: {} stopped sending them", c.name)),
-                    None => s.note(format!("No camera pictures: {} has sent none (is another program using it?)", c.name)),
-                }
+            }
+        }
+        for k in let_go.into_iter().rev() {
+            if k < d.cameras.len() {
+                let old = d.cameras.remove(k);
+                let _ = std::thread::Builder::new().name("camera let go".into()).spawn(move || old.capture.abandon());
             }
         }
         s.wake.request_repaint_after(Duration::from_millis(250));
@@ -1653,22 +1735,23 @@ fn record_screen(
     }
     // What came, so a recording missing its camera or its sound can be told from the log.
     let loud = |h: &Heard| f64::from(h.peak) / 32767.0;
+    let cameras: Vec<String> = d.cameras.iter().map(|c| c.pictures.to_string()).collect();
+    let mics: Vec<String> = d.mics.iter().map(|m| format!("{:.1} s (loudest {:.3})", m.heard.secs(m.capture.channels), loud(&m.heard))).collect();
     log::info!(
-        "recorded {:.1} s: {frames} screen pictures, {camera_pictures} camera pictures, {:.1} s of microphone (loudest {:.3}), {:.1} s of computer sound (loudest {:.3})",
+        "recorded {:.1} s: {frames} screen pictures, camera pictures [{}], microphones [{}], {:.1} s of computer sound (loudest {:.3})",
         started.elapsed().as_secs_f64(),
-        mic.secs(mic_ch),
-        loud(&mic),
+        cameras.join(", "),
+        mics.join(", "),
         system.secs(system_ch),
         loud(&system)
     );
     // A microphone that heard nothing at all: Windows hands programs silence when it doesn't let
     // them use the microphone.
-    if let Some(m) = &d.mic
-        && mic.silent()
-        && mic.secs(mic_ch) >= 2.0
-    {
-        log::warn!("the microphone {} recorded only silence", m.name);
-        s.note(format!("No microphone sound: {} {MIC_SILENT}", m.name));
+    for m in &d.mics {
+        if m.heard.silent() && m.heard.secs(m.capture.channels) >= 2.0 {
+            log::warn!("the microphone {} recorded only silence", m.capture.name);
+            s.note(format!("No microphone sound: {} {MIC_SILENT}", m.capture.name));
+        }
     }
     if screen.is_some() && frames == 0 {
         return Err("nothing could be recorded".to_string());
@@ -1685,7 +1768,7 @@ fn start_live(plan: &VideoPlan, size: (u32, u32), d: &Devices) -> Option<(Export
         return None;
     }
     let (w, h) = compose::fit(size.0, size.1, settings.max_width, settings.max_height);
-    let with_sound = d.system.is_some() || d.mic.is_some();
+    let with_sound = d.system.is_some() || !d.mics.is_empty();
     let cancel = Arc::new(AtomicBool::new(false));
     match Exporter::new(&plan.out, w, h, with_sound, settings, cancel.clone()) {
         Ok(ex) => Some((ex, cancel)),
@@ -2206,9 +2289,9 @@ mod tests {
         ];
         let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
         let o = VideoOptions { camera_mirror: true, ..VideoOptions::production() };
-        w.edit(&camera_look(&o).unwrap()).unwrap();
+        w.edit(&camera_look(&o, &[3]).unwrap()).unwrap();
         w.video_frame(0, 0, &Raster::filled(64, 48, Color::BLACK).unwrap()).unwrap();
-        let mut edits = camera_look(&o).unwrap();
+        let mut edits = camera_look(&o, &[3]).unwrap();
         edits.camera_full = vec![[200_000, 600_000]];
         w.edit(&edits).unwrap();
         let rec = recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap();
@@ -2220,9 +2303,9 @@ mod tests {
 
     #[test]
     fn a_recording_starts_with_the_cameras_chosen_look() {
-        assert!(camera_look(&VideoOptions::production()).is_none(), "as the camera sends it: no edits");
+        assert!(camera_look(&VideoOptions::production(), &[3]).is_none(), "as the camera sends it: no edits");
         let o = VideoOptions { camera_mirror: true, camera_border: 50, camera_border_color: Color::rgb(0, 120, 255), ..VideoOptions::production() };
-        let look = camera_look(&o).unwrap();
+        let look = camera_look(&o, &[3]).unwrap();
         // Written first, as the recorder does, then the pictures: opened, every track is whole.
         let streams = vec![
             StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 64, height: 48, channels: 0 },
@@ -2242,6 +2325,82 @@ mod tests {
         assert_eq!(tl.camera.border, 0.1, "at most the widest");
         assert_eq!(tl.camera.border_color, Color::rgb(0, 120, 255));
         assert_eq!(tl.tracks, Timeline::new(&rec).tracks);
+    }
+
+    #[test]
+    fn several_cameras_each_get_the_chosen_look_in_a_corner_of_their_own() {
+        use screengrabcraft_media::timeline::Corner;
+        assert!(camera_look(&VideoOptions { camera_mirror: true, ..VideoOptions::production() }, &[]).is_none(), "no camera: no look");
+        let o = VideoOptions { camera_mirror: true, camera_border: 4, ..VideoOptions::production() };
+        let look = camera_look(&o, &[CAMERA_TRACKS[0], CAMERA_TRACKS[1], CAMERA_TRACKS[2]]).unwrap();
+        assert_eq!(look.cameras.iter().map(|c| c.stream).collect::<Vec<_>>(), vec![CAMERA_TRACKS[1], CAMERA_TRACKS[2]]);
+        assert!(look.cameras.iter().all(|c| c.layout.mirror && c.layout.border == 0.04));
+        assert_eq!(look.cameras.iter().map(|c| c.layout.corner).collect::<Vec<_>>(), vec![Corner::BottomLeft, Corner::TopRight]);
+        assert_eq!(look.camera.corner, Corner::BottomRight, "the first in its own corner");
+    }
+
+    #[test]
+    fn the_cameras_asked_for_are_found_each_once() {
+        let found = vec![(0, "Webcam".to_string()), (1, "Desk camera".to_string())];
+        assert_eq!(camera_numbers(&[None, Some(1)], &found), vec![0, 1]);
+        assert_eq!(camera_numbers(&[None, Some(0)], &found), vec![0], "the first found, chosen again by number: once");
+        assert_eq!(camera_numbers(&[Some(1), Some(1), Some(5)], &found), vec![1, 5], "a number not found now is still tried");
+        assert!(camera_numbers(&[None], &[]).is_empty(), "no camera at all");
+        // Every camera and microphone has a track of its own, apart from the others'.
+        let mut all: Vec<u8> = [SCREEN_TRACK, SYSTEM_TRACK].into_iter().chain(MIC_TRACKS).chain(CAMERA_TRACKS).collect();
+        all.sort_unstable();
+        all.dedup();
+        assert_eq!(all.len(), 2 + MIC_TRACKS.len() + CAMERA_TRACKS.len());
+        assert_eq!((MIC_TRACKS[0], CAMERA_TRACKS[0]), (2, 3), "the first microphone and camera where they always were");
+    }
+
+    /// A recording as the recorder writes one of the screen, two microphones and two cameras: each
+    /// on a track of its own, the second camera in a corner of its own, both voices in the sound.
+    #[test]
+    fn a_recording_of_two_microphones_and_two_cameras_keeps_each_apart() {
+        use screengrabcraft_media::timeline::Corner;
+        let (mic2, cam2) = (MIC_TRACKS[1], CAMERA_TRACKS[1]);
+        let streams = vec![
+            StreamInfo { id: SCREEN_TRACK, kind: StreamKind::Screen, name: String::new(), width: 160, height: 120, channels: 0 },
+            StreamInfo { id: MIC_TRACKS[0], kind: StreamKind::Microphone, name: "Headset".into(), width: 0, height: 0, channels: 1 },
+            StreamInfo { id: mic2, kind: StreamKind::Microphone, name: "Desk mic".into(), width: 0, height: 0, channels: 2 },
+            StreamInfo { id: CAMERA_TRACKS[0], kind: StreamKind::Camera, name: "Webcam".into(), width: 32, height: 24, channels: 0 },
+            StreamInfo { id: cam2, kind: StreamKind::Camera, name: "Desk camera".into(), width: 32, height: 24, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        let jpeg =
+            |c: Color| screengrabcraft_render::encode(&Raster::filled(32, 24, c).unwrap(), screengrabcraft_model::ImageFormat::Jpeg, 95).unwrap();
+        let (red, blue) = (jpeg(Color::rgb(230, 20, 20)), jpeg(Color::rgb(20, 20, 230)));
+        for t in 0..10u64 {
+            w.video_frame(SCREEN_TRACK, t * 100_000, &Raster::filled(160, 120, Color::WHITE).unwrap()).unwrap();
+            w.jpeg_frame(CAMERA_TRACKS[0], t * 100_000, &red).unwrap();
+            w.jpeg_frame(cam2, t * 100_000, &blue).unwrap();
+            // The headset says 1000, the desk microphone 2000 (both sides).
+            w.audio(MIC_TRACKS[0], t * 4800, &[1000i16; 4800]).unwrap();
+            w.audio(mic2, t * 4800, &[2000i16; 9600]).unwrap();
+        }
+        let rec = Arc::new(recording::Recording::open(Box::new(w.finish(1_000_000).unwrap())).unwrap());
+        let tl = Timeline::new(&rec);
+        let kinds: Vec<(u8, StreamKind)> = tl.tracks.iter().map(|t| (t.stream, t.kind)).collect();
+        assert_eq!(kinds.len(), 5, "a track each: {kinds:?}");
+        assert_eq!(tl.main_camera().map(|i| tl.tracks[i].stream), Some(CAMERA_TRACKS[0]));
+        let second = tl.tracks.iter().position(|t| t.stream == cam2).unwrap();
+        assert_eq!(tl.camera_layout(second).unwrap().corner, Corner::BottomLeft);
+        // The picture: the screen, the first camera bottom right, the second bottom left.
+        let mut c = compose::Composer::new(rec.clone(), &tl, 160, 120);
+        let pic = c.frame(&tl, 500_000);
+        let px = |x, y| pic.pixel(x, y).unwrap();
+        assert!(px(138, 103).r > 150 && px(138, 103).b < 100, "the first camera: {:?}", px(138, 103));
+        assert!(px(21, 103).b > 150 && px(21, 103).r < 100, "the second camera: {:?}", px(21, 103));
+        assert_eq!(px(80, 20), Color::WHITE, "the screen between them");
+        // The sound: both voices, each muted on its own.
+        let both = compose::mix(&rec, &tl, 24_000, 4);
+        assert!((both[0] - 3000.0 / 32768.0).abs() < 1e-3, "{both:?}");
+        let mut one = tl.clone();
+        let headset = one.tracks.iter().position(|t| t.stream == MIC_TRACKS[0]).unwrap();
+        one.set_muted(headset, true).unwrap();
+        let desk = compose::mix(&rec, &one, 24_000, 4);
+        assert!((desk[0] - 2000.0 / 32768.0).abs() < 1e-3, "{desk:?}");
     }
 
     #[test]

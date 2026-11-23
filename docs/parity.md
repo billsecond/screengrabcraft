@@ -58,6 +58,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Frame rate, quality, scaled to 1080p | Has | |
 | A smaller file format | Has | AV1 and Opus, beside H.264 and AAC on Windows |
 | Microphone and the computer's sound | Has | the computer's sound on Windows only |
+| **Several microphones and cameras at once** | Has | the + beside the Recorder's Microphone and Camera switches: up to four of each, each on a track of its own (each camera in a helper program of its own), named by its device in the video editor; each muted, moved, trimmed and soloed on its own, the sounds mixed (the rest lowered under any of the voices), each camera in a corner of its own, dragged anywhere on the picture. The first camera's background and full screen only; captions of the first microphone only |
 | Camera in a corner: square, rounded, circle | Has | |
 | Camera full screen, swapped with the screen while recording | Has | the camera button on the recording's controls, F7 or the tray: the camera fills the picture, the screen in its corner, and back; kept as stretches the video editor's camera panel lists, adds to and removes (`video.cameraFull`). With the screen off the camera is the video |
 | Camera border, mirrored camera | Has | Mirror and Border (with its colour) under the Recorder's camera picture, shown there as they will be; the video editor's camera panel changes both, and how wide the border is |
@@ -351,6 +352,7 @@ By how much someone using it every day would miss each one. Built ones move to a
 71. A tool bar of your choosing; the captured pointer as an annotation to move or delete (#110).
 72. TIFF opened and saved; a colour replaced by another (#114).
 73. Spell check while text and callouts are typed, with an MIT checker and word list.
+74. Several microphones and cameras recorded at once, each on a track of its own.
 
 **Still to build**
 

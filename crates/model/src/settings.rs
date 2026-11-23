@@ -558,7 +558,17 @@ pub struct VideoOptions {
     /// Video Production: the shortcuts pressed while recording kept, to show them on the video
     /// (never what's typed; Windows only for now).
     pub keys: bool,
+    /// Video Production: more microphones (or other sound inputs) recorded with the first, each
+    /// on a track of its own, by name. Only while the microphone is.
+    pub more_microphones: Vec<String>,
+    /// Video Production: more cameras recorded with the first, each on a track of its own, by
+    /// number. Only while the camera is.
+    pub more_cameras: Vec<u32>,
 }
+
+/// The most microphones, and the most cameras, a recording takes in at once.
+pub const MOST_MICROPHONES: usize = 4;
+pub const MOST_CAMERAS: usize = 4;
 
 /// The widest border round the camera, in hundredths of its picture's shorter side.
 pub const CAMERA_BORDER_MAX: u8 = 10;
@@ -578,11 +588,44 @@ impl Default for VideoOptions {
             camera_border_color: crate::Color::WHITE,
             captions: true,
             keys: true,
+            more_microphones: Vec::new(),
+            more_cameras: Vec::new(),
         }
     }
 }
 
 impl VideoOptions {
+    /// The microphones to record, the first one first (none: the system's default), each once and
+    /// no more than [`MOST_MICROPHONES`]; none while the microphone is off.
+    pub fn microphones(&self) -> Vec<Option<String>> {
+        if !self.microphone {
+            return Vec::new();
+        }
+        let mut out = vec![self.microphone_name.clone()];
+        for m in &self.more_microphones {
+            let m = Some(m.clone());
+            if out.len() < MOST_MICROPHONES && !out.contains(&m) {
+                out.push(m);
+            }
+        }
+        out
+    }
+
+    /// The cameras to record by number, the first one first (none: the first camera found), each
+    /// once and no more than [`MOST_CAMERAS`]; none while the camera is off.
+    pub fn cameras(&self) -> Vec<Option<u32>> {
+        if !self.camera {
+            return Vec::new();
+        }
+        let mut out = vec![self.camera_index];
+        for c in &self.more_cameras {
+            if out.len() < MOST_CAMERAS && !out.contains(&Some(*c)) {
+                out.push(Some(*c));
+            }
+        }
+        out
+    }
+
     /// Video Production: everything, each on its own track.
     pub fn production() -> VideoOptions {
         VideoOptions {
@@ -597,6 +640,8 @@ impl VideoOptions {
             camera_border_color: crate::Color::WHITE,
             captions: true,
             keys: true,
+            more_microphones: Vec::new(),
+            more_cameras: Vec::new(),
         }
     }
 }
@@ -2056,6 +2101,29 @@ mod tests {
         assert_eq!(c.pick(&[("LG", 0, 0), ("Generic", 1920, 0)]), Some(1), "renamed");
         assert_eq!(c.pick(&[("LG", 0, 0)]), None);
         assert_eq!(c.pick(&[]), None);
+    }
+
+    #[test]
+    fn several_microphones_and_cameras_are_each_recorded_once_and_not_too_many() {
+        let o = VideoOptions {
+            microphone_name: Some("Headset".into()),
+            more_microphones: vec!["Desk mic".into(), "Headset".into(), "Desk mic".into(), "Line in".into(), "Fourth".into(), "Fifth".into()],
+            camera_index: None,
+            more_cameras: vec![2, 2, 5, 6, 7, 8],
+            ..VideoOptions::production()
+        };
+        let mics = o.microphones();
+        assert_eq!(mics, vec![Some("Headset".into()), Some("Desk mic".into()), Some("Line in".into()), Some("Fourth".into())]);
+        assert_eq!(o.cameras(), vec![None, Some(2), Some(5), Some(6)]);
+        assert_eq!((mics.len(), o.cameras().len()), (MOST_MICROPHONES, MOST_CAMERAS));
+        // Only while each is on.
+        assert!(VideoOptions { microphone: false, ..o.clone() }.microphones().is_empty());
+        assert!(VideoOptions { camera: false, ..o.clone() }.cameras().is_empty());
+        // Settings from before there were several read as one of each, and come back the same.
+        let old: VideoOptions = serde_json::from_str(r#"{"microphone": true, "microphoneName": "Headset", "camera": true}"#).unwrap();
+        assert_eq!((old.microphones(), old.cameras()), (vec![Some("Headset".to_string())], vec![None]));
+        let back: VideoOptions = serde_json::from_str(&serde_json::to_string(&o).unwrap()).unwrap();
+        assert_eq!(back, o);
     }
 
     #[test]

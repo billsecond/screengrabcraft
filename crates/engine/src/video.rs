@@ -393,8 +393,14 @@ fn volume(s: &mut VideoSession, p: &Value) -> Result<Value> {
     Ok(json!({}))
 }
 
+/// The camera track asked for (`track`), if one is: none is the first camera.
+fn camera_track(p: &Value) -> Result<Option<usize>> {
+    if p.get("track").is_some_and(|t| !t.is_null()) { Ok(Some(index(p, "track")?)) } else { Ok(None) }
+}
+
 fn camera(s: &mut VideoSession, p: &Value) -> Result<Value> {
-    let c = &mut s.timeline.camera;
+    let track = camera_track(p)?;
+    let c = s.timeline.camera_layout_mut(track).map_err(edit_err)?;
     if let Some(v) = p.get("corner") {
         c.corner = serde_json::from_value::<Corner>(v.clone())
             .map_err(|_| EngineError::Params("`corner` is topLeft, topRight, bottomLeft or bottomRight".to_string()))?;
@@ -1752,13 +1758,15 @@ fn camera_key(s: &mut VideoSession, p: &Value) -> Result<Value> {
 fn camera_at(s: &mut VideoSession, p: &Value) -> Result<Value> {
     if p.get("corner").is_some_and(|v| !v.is_null()) || p.get("x").is_none() {
         // Back in its corner.
-        s.timeline.camera.at = None;
+        s.timeline.camera_layout_mut(camera_track(p)?).map_err(edit_err)?.at = None;
         return camera(s, p);
     }
     let (x, y) = (number(p, "x")?.unwrap_or(0.5), number(p, "y")?.unwrap_or(0.5));
-    s.timeline.camera.at = Some([x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
-    if let Some(size) = number(p, "size")? {
-        s.timeline.camera.size = size.clamp(0.1, 0.5);
+    let size = number(p, "size")?;
+    let c = s.timeline.camera_layout_mut(camera_track(p)?).map_err(edit_err)?;
+    c.at = Some([x.clamp(-0.5, 1.5), y.clamp(-0.5, 1.5)]);
+    if let Some(size) = size {
+        c.size = size.clamp(0.1, 0.5);
     }
     Ok(json!({}))
 }
@@ -1967,7 +1975,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.camera",
         label: "Camera",
-        params: r##"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5, "border"?: 0..0.1 (a share of the picture's shorter side, 0 is none), "borderColor"?: "#RRGGBB", "mirror"?: bool}"##,
+        params: r##"{"corner"?: "topLeft"|"topRight"|"bottomLeft"|"bottomRight", "shape"?: "rectangle"|"rounded"|"circle", "size"?: 0.1..0.5, "border"?: 0..0.1 (a share of the picture's shorter side, 0 is none), "borderColor"?: "#RRGGBB", "mirror"?: bool, "track"?: n (a camera track: in a recording of several cameras, which one; none is the first)}"##,
         run: camera,
     },
     VideoCommand {
@@ -2190,7 +2198,7 @@ pub const VIDEO_COMMANDS: &[VideoCommand] = &[
     VideoCommand {
         id: "video.cameraAt",
         label: "Move Camera",
-        params: r#"{"x": -0.5..1.5, "y": -0.5..1.5, "size"?: 0.1..0.5}: its middle, as a share of the picture (past 0 or 1 it is off it); {"corner": …} puts it back in a corner"#,
+        params: r#"{"x": -0.5..1.5, "y": -0.5..1.5, "size"?: 0.1..0.5}: its middle, as a share of the picture (past 0 or 1 it is off it); {"corner": …} puts it back in a corner; "track"?: n, which camera (none is the first)"#,
         run: camera_at,
     },
 ];
@@ -2901,6 +2909,41 @@ mod tests {
         s.execute("edit.undo", &json!({})).unwrap();
         s.execute("edit.undo", &json!({})).unwrap();
         assert_eq!(s.timeline.camera, screengrabcraft_media::timeline::CameraLayout::default());
+    }
+
+    #[test]
+    fn each_camera_of_several_is_placed_on_its_own() {
+        let streams = vec![
+            StreamInfo { id: 0, kind: StreamKind::Screen, name: String::new(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 3, kind: StreamKind::Camera, name: "Webcam".into(), width: 16, height: 16, channels: 0 },
+            StreamInfo { id: 7, kind: StreamKind::Camera, name: "Desk".into(), width: 16, height: 16, channels: 0 },
+        ];
+        let mut w = RecordingWriter::new(Vec::new(), &Header { version: 1, created: String::new(), fps: 10, streams }).unwrap();
+        w.video_frame(0, 0, &Raster::filled(16, 16, Color::WHITE).unwrap()).unwrap();
+        let mut s = VideoSession::new(&Recording::open(Box::new(w.finish(5_000_000).unwrap())).unwrap());
+        let second = s.timeline.tracks.iter().position(|t| t.stream == 7).unwrap();
+        s.execute("video.camera", &json!({"track": second, "corner": "topLeft", "mirror": true})).unwrap();
+        s.execute("video.cameraAt", &json!({"track": second, "x": 0.5, "y": 0.5, "size": 0.3})).unwrap();
+        let other = s.timeline.camera_layout(second).unwrap();
+        assert_eq!((other.corner, other.mirror, other.at, other.size), (Corner::TopLeft, true, Some([0.5, 0.5]), 0.3));
+        assert_eq!(s.timeline.camera, screengrabcraft_media::timeline::CameraLayout::default(), "the first camera as it was");
+        // Without a track (or with the first's), the first camera.
+        let first = s.timeline.main_camera().unwrap();
+        s.execute("video.camera", &json!({"corner": "topRight"})).unwrap();
+        s.execute("video.camera", &json!({"track": first, "size": 0.4})).unwrap();
+        assert_eq!((s.timeline.camera.corner, s.timeline.camera.size), (Corner::TopRight, 0.4));
+        // Back in its corner; undone, back where it was dragged.
+        s.execute("video.cameraAt", &json!({"track": second, "corner": "bottomLeft"})).unwrap();
+        assert_eq!(s.timeline.camera_layout(second).unwrap().at, None);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert_eq!(s.timeline.camera_layout(second).unwrap().at, Some([0.5, 0.5]));
+        // A track that isn't a camera, or isn't there, is refused and changes nothing.
+        let before = s.timeline.clone();
+        for junk in [json!({"track": 0, "size": 0.3}), json!({"track": 9, "size": 0.3}), json!({"track": -1, "size": 0.3}), json!({"track": "two"})] {
+            assert!(s.execute("video.camera", &junk).is_err(), "{junk}");
+            assert!(s.execute("video.cameraAt", &junk).is_err(), "{junk}");
+            assert_eq!(s.timeline, before);
+        }
     }
 
     #[test]
