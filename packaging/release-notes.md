@@ -1,3 +1,9 @@
+## What's new in 0.1.59
+
+### Fixed
+
+- **A minimized editor stays minimized:** if you minimized the Image Editor or the Video Editor, a capture or a recording now opens in it and leaves it minimized, ready when you bring it back. What you open yourself (a picture from the file manager, a notice's Open, the tray's Open Editor) still brings it back, and an editor on the screen comes forward with the capture as before.
+
 ## What's new in 0.1.58
 
 ### Recording
