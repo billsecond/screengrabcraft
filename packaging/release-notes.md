@@ -1,3 +1,9 @@
+## What's new in 0.1.62
+
+### Recording
+
+- **A film-style countdown:** the countdown before a recording (a GIF, a video, Video Production) now looks like the start of an old film: a big number in a circle, a hand that sweeps round once each second, and a grainy sepia picture that flickers, with a few scratches. It still counts the seconds and Cancel still stops the recording before it starts. The countdown before a delayed still capture is unchanged.
+
 ## What's new in 0.1.61
 
 ### Fixed
