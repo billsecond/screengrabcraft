@@ -4579,3 +4579,157 @@ fn without_paths_there_is_no_video_of_pictures() {
     assert!(h2.query_by_label("New Video from Pictures…").is_none(), "nowhere to keep it");
     h.run_steps(1);
 }
+
+// ---- the last recording opened again ----
+
+/// A host with recordings on its disk (in memory), read on a thread as the desktop's are; what
+/// isn't there can't be opened.
+#[derive(Clone, Default)]
+struct Recordings(std::sync::Arc<std::collections::BTreeMap<String, Vec<u8>>>);
+
+impl Recordings {
+    fn with(files: &[(&str, Vec<u8>)]) -> Recordings {
+        Recordings(std::sync::Arc::new(files.iter().map(|(p, b)| (p.to_string(), b.clone())).collect()))
+    }
+}
+
+impl crate::services::Services for Recordings {
+    fn file_exists(&self, path: &str) -> bool {
+        self.0.contains_key(path)
+    }
+    fn read_file(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.0.get(path).cloned().ok_or_else(|| "no such file".to_string())
+    }
+    fn open_recording(&self, path: &str) -> Result<Box<dyn screengrabcraft_media::recording::Source>, String> {
+        match self.0.get(path) {
+            Some(b) => Ok(Box::new(b.clone())),
+            None => Err("no such file".to_string()),
+        }
+    }
+    fn append_file(&self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The Video Editor as the program starts it with nothing to open (`given`: a recording on the
+/// command line).
+fn video_started_with_nothing(host: Recordings, settings: EditorSettings, given: Option<&str>) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(host), settings);
+    ed.kind = crate::EditorKind::Video;
+    if let Some(p) = given {
+        ed.open_path(&egui::Context::default(), p);
+    }
+    ed.offer_welcome();
+    let mut h = Harness::builder().with_size(egui::vec2(1280.0, 800.0)).with_step_dt(0.25).build_ui_state(
+        |ui, ed: &mut Editor| {
+            let ctx = ui.ctx().clone();
+            ed.logic(&ctx);
+            ed.ui(ui);
+        },
+        ed,
+    );
+    // Asked for as the window opens (the harness has drawn its first frames meanwhile).
+    h.state_mut().reopen_last();
+    h
+}
+
+/// Frames until a recording is open (they're read on a thread), or a while has gone by.
+fn until_a_recording_opens(h: &mut Harness<'_, Editor>) {
+    for _ in 0..400 {
+        if h.state().video.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+fn damaged() -> Vec<u8> {
+    let mut b = screengrabcraft_media::recording::MAGIC.to_vec();
+    b.extend(b"HEAD and then nothing that can be read");
+    b
+}
+
+#[test]
+fn the_video_editor_opens_with_the_last_recording_it_had_open() {
+    let host = Recordings::with(&[("C:/Captures/Week.sgvideo", recording()), ("C:/Captures/Newer.sgvideo", recording())]);
+    let settings = EditorSettings {
+        last_video: Some("C:/Captures/Week.sgvideo".into()),
+        last_picture: Some("C:/Captures/Shot.png".into()),
+        ..EditorSettings::default()
+    };
+    let mut h = video_started_with_nothing(host, settings, None);
+    // Its first frame is drawn without it (however many passes egui draws it in).
+    h.step();
+    assert!(h.state().video.is_none() && h.state().opening_video.is_none());
+    until_a_recording_opens(&mut h);
+    let ed = h.state();
+    assert_eq!(ed.video_path.as_deref(), Some("C:/Captures/Week.sgvideo"));
+    assert_eq!(ed.video.as_ref().map(|v| v.session.timeline.length()), Some(4_000_000));
+    assert_eq!(ed.toast_text(), None);
+    // Each editor's own: the Image Editor's last picture is let be.
+    assert_eq!(ed.settings.last_video.as_deref(), Some("C:/Captures/Week.sgvideo"));
+    assert_eq!(ed.settings.last_picture.as_deref(), Some("C:/Captures/Shot.png"));
+    assert!(h.query_by_label("Opening the Recording").is_none());
+    shot(&mut h, "video-editor-opened-with-the-last-recording");
+}
+
+#[test]
+fn a_last_recording_gone_or_damaged_gives_way_to_the_one_before_without_a_word() {
+    let host = Recordings::with(&[
+        ("C:/Captures/Damaged.sgvideo", damaged()),
+        ("C:/Captures/Shot.png", b"a picture, not the Video Editor's".to_vec()),
+        ("C:/Captures/Week.mp4", b"a made video, played in the system's player".to_vec()),
+        ("C:/Captures/Good.sgvideo", recording()),
+    ]);
+    let settings = EditorSettings {
+        last_video: Some("C:/Captures/Gone.sgvideo".into()),
+        recent: [
+            "C:/Captures/Gone.sgvideo",
+            "C:/Captures/Damaged.sgvideo",
+            "C:/Captures/Shot.png",
+            "C:/Captures/Week.mp4",
+            "C:/Captures/Good.sgvideo",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        ..EditorSettings::default()
+    };
+    let mut h = video_started_with_nothing(host, settings, None);
+    until_a_recording_opens(&mut h);
+    let ed = h.state();
+    assert_eq!(ed.video_path.as_deref(), Some("C:/Captures/Good.sgvideo"));
+    assert_eq!(ed.toast_text(), None, "the damaged one isn't spoken of");
+    assert_eq!(ed.settings.last_video.as_deref(), Some("C:/Captures/Good.sgvideo"));
+
+    // None that can be opened: its own start page, and no notice.
+    let host = Recordings::with(&[("C:/Captures/Damaged.sgvideo", damaged())]);
+    let mut h = video_started_with_nothing(
+        host,
+        EditorSettings { last_video: Some("C:/Captures/Damaged.sgvideo".into()), ..EditorSettings::default() },
+        None,
+    );
+    for _ in 0..100 {
+        if h.state().opening_video.is_none() && h.state().reopen == crate::reopen::Reopen::Off {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+    assert!(h.state().video.is_none());
+    assert_eq!(h.state().toast_text(), None);
+    assert!(h.query_all_by_label("No recording open").next().is_some());
+}
+
+#[test]
+fn a_recording_given_at_the_start_wins_over_the_last_one() {
+    let host = Recordings::with(&[("C:/Captures/Week.sgvideo", recording()), ("C:/Captures/Given.sgvideo", recording())]);
+    let settings = EditorSettings { last_video: Some("C:/Captures/Week.sgvideo".into()), ..EditorSettings::default() };
+    let mut h = video_started_with_nothing(host, settings, Some("C:/Captures/Given.sgvideo"));
+    until_a_recording_opens(&mut h);
+    h.run_steps(4);
+    assert_eq!(h.state().video_path.as_deref(), Some("C:/Captures/Given.sgvideo"));
+    assert_eq!(h.state().settings.last_video.as_deref(), Some("C:/Captures/Given.sgvideo"), "the one to open next time");
+}

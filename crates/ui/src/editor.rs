@@ -363,7 +363,9 @@ pub struct Editor {
     pub transcripts: crate::transcribe::Transcripts,
     /// A recording being read on a thread of its own.
     pub(crate) opening_video: Option<OpeningVideo>,
-    toast: Option<(String, f64, bool)>,
+    pub(crate) toast: Option<(String, f64, bool)>,
+    /// The last file of the editor's kind, to be opened again once the window is up.
+    pub(crate) reopen: crate::reopen::Reopen,
     /// The strip's thumbnails, with the time of the picture each was made from.
     pub(crate) thumbs: std::collections::HashMap<String, (u64, egui::TextureHandle)>,
     pub(crate) recent: Vec<crate::services::RecentItem>,
@@ -418,6 +420,9 @@ pub(crate) struct OpeningVideo {
     pub done: std::sync::Arc<std::sync::Mutex<Option<Result<(screengrabcraft_media::recording::Recording, crate::video::Waves), String>>>>,
     /// The service said captions are being made for it.
     pub captions_coming: bool,
+    /// Opened again as the editor started: if it can't be read, nothing is said and the next of
+    /// these is tried (see `reopen.rs`).
+    pub next: Option<Vec<String>>,
 }
 
 impl Editor {
@@ -500,6 +505,7 @@ impl Editor {
             egui_fonts: std::collections::HashSet::new(),
             opening_video: None,
             toast: None,
+            reopen: Default::default(),
             thumbs: std::collections::HashMap::new(),
             recent: Vec::new(),
             recent_at: f64::NEG_INFINITY,
@@ -586,6 +592,8 @@ impl Editor {
         self.video_path = None;
         self.video_epoch += 1;
         self.welcome = false;
+        // Something else is open now (a capture, a paste, a new picture): not the last file.
+        self.reopen = crate::reopen::Reopen::Off;
         self.session.replace(doc);
         self.name = name;
         self.guides.clear();
@@ -644,7 +652,8 @@ impl Editor {
             self.welcome = false;
             return;
         }
-        if self.dialog.is_some() || self.opening_video.is_some() {
+        // Nor while the last picture is about to be opened again (a frame or two).
+        if self.dialog.is_some() || self.opening_video.is_some() || self.reopen != crate::reopen::Reopen::Off {
             return;
         }
         let t = Tokens::get(ctx);
@@ -815,8 +824,11 @@ impl Editor {
                 Err(e) => self.error(ctx, format!("{}: {e}", file.name)),
             }
         }
-        if let Some(p) = &file.path {
-            self.settings.remember(p);
+        // Only a file that opened is one to open again.
+        if let Some(p) = &file.path
+            && (self.picture_path.as_deref() == Some(p.as_str()) || self.project_path.as_deref() == Some(p.as_str()))
+        {
+            self.remember_file(p);
             self.services.save_settings(&self.settings);
         }
     }
@@ -853,8 +865,9 @@ impl Editor {
         self.video = Some(view);
         self.video_path = path.clone();
         self.video_epoch += 1;
+        self.reopen = crate::reopen::Reopen::Off;
         if let Some(p) = &path {
-            self.settings.remember(p);
+            self.remember_file(p);
             self.services.save_settings(&self.settings);
         }
     }
@@ -882,7 +895,7 @@ impl Editor {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn open_video_in_background(&mut self, ctx: &egui::Context, source: Box<dyn screengrabcraft_media::recording::Source>, path: &str) {
+    pub(crate) fn open_video_in_background(&mut self, ctx: &egui::Context, source: Box<dyn screengrabcraft_media::recording::Source>, path: &str) {
         use std::sync::atomic::Ordering;
         let opening = OpeningVideo {
             name: file_name(path),
@@ -890,6 +903,7 @@ impl Editor {
             progress: Default::default(),
             done: Default::default(),
             captions_coming: false,
+            next: None,
         };
         let (progress, done, wake) = (opening.progress.clone(), opening.done.clone(), ctx.clone());
         let spawned = std::thread::Builder::new().name("open-recording".into()).spawn(move || {
@@ -926,9 +940,14 @@ impl Editor {
             return;
         };
         let Some(o) = self.opening_video.take() else { return };
-        match read {
-            Ok((rec, waves)) => self.show_video(ctx, rec, waves, Some(o.path), &o.name, o.captions_coming),
-            Err(e) => self.error(ctx, format!("{}: {e}", o.name)),
+        match (read, o.next) {
+            (Ok((rec, waves)), _) => self.show_video(ctx, rec, waves, Some(o.path), &o.name, o.captions_coming),
+            // The last recording, opened again at the start: the one before it is tried instead.
+            (Err(e), Some(next)) => {
+                log::info!("start: the last recording ({}) couldn't be read: {e}", o.name);
+                self.reopen_first(ctx, next);
+            }
+            (Err(e), None) => self.error(ctx, format!("{}: {e}", o.name)),
         }
     }
 
@@ -1307,7 +1326,7 @@ impl Editor {
                     self.project_path = Some(path.to_string());
                     self.session.dirty = false;
                     self.saver.saved_elsewhere();
-                    self.settings.remember(path);
+                    self.remember_file(path);
                     self.services.save_settings(&self.settings);
                     self.toast(ctx, format!("Saved {}", file_name(path)));
                 }
@@ -1467,6 +1486,7 @@ impl Editor {
         }
         self.poll_dialogs(ctx);
         self.poll_opening(ctx);
+        self.reopen_step(ctx);
         self.poll_transcripts(ctx);
         let mut dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
         // Onto the video editor: into its media bin, every one of them.
@@ -1518,6 +1538,7 @@ impl Editor {
     /// The window's contents.
     pub fn ui(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        self.reopen_drawn(&ctx);
         // The window is over the whole screen while a video's preview is, and no longer: whatever
         // ends the preview (Esc, the video closed, another capture opened) gives the window back.
         let full = self.video.as_ref().is_some_and(|v| v.full_screen);

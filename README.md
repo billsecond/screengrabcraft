@@ -14,7 +14,9 @@ it. It is two programs:
 - **ScreenGrabCraft Image Editor**, where screenshots and pictures are marked up (it also runs in
   a browser), and the **Video Editor**, the same program in a window of its own, where recordings
   are cut and edited. Each one's Recent strip lists its own: pictures in one, recordings in the
-  other.
+  other. Opened with nothing to open (the Start menu, the tray, a desktop icon), each
+  shows what it last had open: the Image Editor its last picture, the Video Editor its last
+  recording.
 
 Both are native, GPU-drawn programs (no Electron, no web view), with a command-line program
 beside them for scripts and agents.

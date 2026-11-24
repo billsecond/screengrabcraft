@@ -97,6 +97,16 @@ fn brought_back(args: &[String], minimized: bool, standby: bool) -> bool {
     standby || !minimized || !args.iter().any(|a| a == launch::FROM_CAPTURE)
 }
 
+/// Whether the window opens again what it last had open as it comes to the owner with `args`:
+/// when it's given nothing to open (the Start menu, the tray's Open Editor, a desktop icon) and
+/// nothing is open in it (`fresh`: it has just started, or was kept ready out of sight). A
+/// window already on the screen just comes forward; a capture or a recording from the service
+/// is what opens instead; and an editor started out of sight to be kept ready opens nothing
+/// until it's brought to the owner, so that it never shows an old file as a capture comes.
+fn opens_the_last_file(args: &[String], fresh: bool) -> bool {
+    fresh && !args.iter().any(|a| !a.starts_with("--") || a == launch::FROM_CAPTURE || a == launch::EDITOR_STANDBY)
+}
+
 /// The window's taskbar button, there or not (Windows; elsewhere the taskbar has its own ways).
 #[cfg(target_os = "windows")]
 fn taskbar_button(frame: &eframe::Frame, shown: bool) {
@@ -319,7 +329,7 @@ impl eframe::App for App {
             if std::mem::take(&mut self.off_taskbar) {
                 taskbar_button(frame, true);
             }
-            self.standby = false;
+            let was_ready = std::mem::take(&mut self.standby);
             self.aside = Aside::default();
             let t = std::time::Instant::now();
             for a in args.iter().filter(|a| !a.starts_with("--")) {
@@ -330,6 +340,11 @@ impl eframe::App for App {
             }
             if args.iter().any(|a| !a.starts_with("--")) {
                 log::info!("opened what was handed over in {} ms", t.elapsed().as_millis());
+            }
+            // Kept ready and now asked for with nothing to open: what it last had open, once the
+            // window is up.
+            if opens_the_last_file(&args, was_ready) {
+                self.editor.reopen_last();
             }
             if back {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
@@ -524,9 +539,13 @@ fn main() -> std::process::ExitCode {
             for f in &files {
                 editor.open_path(&ctx, f);
             }
-            // Started with nothing to open: what there is to start with is offered.
+            // Started with nothing to open: what it last had open, once the window is up (and
+            // what there is to start with offered, if there's none).
             if files.is_empty() {
                 editor.offer_welcome();
+            }
+            if opens_the_last_file(&args, !standby) {
+                editor.reopen_last();
             }
             if coming {
                 editor.expect_captions(0.0);
@@ -754,6 +773,26 @@ mod tests {
         let mut a = Aside::default();
         assert_eq!(a.hear(launch::EDITOR_HIDE, false, true, true), Move::Park);
         assert_eq!(a.back(), Move::Unpark { focus: false });
+    }
+
+    #[test]
+    fn the_last_file_opens_only_when_the_editor_is_opened_with_nothing() {
+        let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        // Started from the Start menu, a desktop icon or the tray's Open Editor, either editor.
+        assert!(opens_the_last_file(&[], true));
+        assert!(opens_the_last_file(&s(&[launch::VIDEO]), true));
+        // A file given on the command line, or handed over, is what opens.
+        assert!(!opens_the_last_file(&s(&["shot.png"]), true));
+        assert!(!opens_the_last_file(&s(&[launch::VIDEO, "C:/Captures/Week.sgvideo"]), true));
+        // A capture or a recording from the service, even one with no file named.
+        assert!(!opens_the_last_file(&launch::capture_args(&s(&["shot.png"])), true));
+        assert!(!opens_the_last_file(&launch::capture_args(&[]), true));
+        assert!(!opens_the_last_file(&launch::capture_args(&s(&[launch::CAPTIONS_COMING, "a.sgvideo"])), true));
+        // Started out of sight to be kept ready: nothing until it's brought to the owner.
+        assert!(!opens_the_last_file(&s(&[launch::EDITOR_STANDBY]), true));
+        assert!(!opens_the_last_file(&s(&[launch::VIDEO, launch::EDITOR_STANDBY]), false));
+        // A window already on the screen just comes forward with what it has.
+        assert!(!opens_the_last_file(&[], false));
     }
 
     #[test]
