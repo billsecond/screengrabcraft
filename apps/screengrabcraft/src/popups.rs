@@ -15,7 +15,7 @@ use screengrabcraft_model::IRect;
 use screengrabcraft_ui::theme::Tokens;
 use screengrabcraft_ui::widgets::{self, FooterButton};
 
-use crate::app::{APP_ID, Service};
+use crate::app::{APP_ID, SMALLEST_WINDOW, Service, fixed_size};
 use crate::record::Kind;
 
 fn popup(title: &str, at: egui::Pos2, size: egui::Vec2, active: bool) -> ViewportBuilder {
@@ -28,7 +28,7 @@ fn popup(title: &str, at: egui::Pos2, size: egui::Vec2, active: bool) -> Viewpor
         .with_window_level(egui::WindowLevel::AlwaysOnTop)
         .with_active(active)
         .with_position(at)
-        .with_inner_size(size)
+        .with_inner_size(fixed_size(size))
 }
 
 /// A desktop point in egui points for a window placed on a monitor of this scale.
@@ -509,6 +509,13 @@ const FRAME_RGB: [u8; 3] = [0xFF, 0x3B, 0x30];
 /// Its windows' title (how they're found to be made plain).
 const FRAME_TITLE: &str = "ScreenGrabCraft recording area";
 
+/// One strip of the outline, `w` by `h` desktop pixels on a monitor of scale `s`, in points: a
+/// 4-pixel strip is under 2 points on a screen scaled over 2, too thin for a window there
+/// ([`SMALLEST_WINDOW`]).
+fn strip_size(w: i32, h: i32, s: f32) -> Vec2 {
+    fixed_size(vec2(w.max(1) as f32 / s.max(0.5), h.max(1) as f32 / s.max(0.5)))
+}
+
 /// The area being recorded outlined for as long as it's recorded: four thin strips just outside
 /// it (so in none of the video), on top of everything, that the pointer goes through. A whole
 /// screen isn't outlined, nor anything once the video is being made. The strips are made hidden
@@ -540,7 +547,7 @@ pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
     let shown = svc.frame_frames > 0;
     let red = egui::Color32::from_rgb(FRAME_RGB[0], FRAME_RGB[1], FRAME_RGB[2]);
     for (i, (x, y, sw, sh)) in strips.into_iter().enumerate() {
-        let size = vec2(sw.max(1) as f32 / s.max(0.5), sh.max(1) as f32 / s.max(0.5));
+        let size = strip_size(sw, sh, s);
         let builder = ViewportBuilder::default()
             .with_title(FRAME_TITLE)
             .with_app_id(APP_ID)
@@ -550,7 +557,7 @@ pub fn recording_frame(svc: &mut Service, ctx: &egui::Context) {
             .with_window_level(egui::WindowLevel::AlwaysOnTop)
             .with_active(false)
             .with_mouse_passthrough(true)
-            .with_min_inner_size([1.0, 1.0])
+            .with_min_inner_size(SMALLEST_WINDOW)
             .with_position(points(x as f32, y as f32, s))
             .with_inner_size(size)
             .with_visible(shown);
@@ -757,6 +764,20 @@ mod tests {
     use screengrabcraft_model::Theme;
 
     use super::*;
+
+    /// The small windows that can't be resized are ones Wayland takes: a notice made tiny, and the
+    /// outline of a recording on a screen scaled by 3 (a 4-pixel strip is 1.3 points).
+    #[test]
+    fn small_windows_are_ones_wayland_takes() {
+        assert!(crate::app::wayland_accepts(&popup("tiny", pos2(0.0, 0.0), vec2(0.0, 0.5), false)));
+        assert!(crate::app::wayland_accepts(&popup("odd", pos2(0.0, 0.0), vec2(f32::NAN, 1.0), false)));
+        for s in [1.0, 1.25, 2.0, 2.5, 3.0, 4.0] {
+            for (w, h) in [(4, 900), (1608, 4), (0, 0), (-5, 3)] {
+                let b = ViewportBuilder::default().with_resizable(false).with_inner_size(strip_size(w, h, s));
+                assert!(crate::app::wayland_accepts(&b), "a {w}x{h} strip at scale {s}");
+            }
+        }
+    }
 
     #[test]
     fn the_recording_control_stays_out_of_the_recording() {

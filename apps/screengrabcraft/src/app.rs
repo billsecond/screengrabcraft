@@ -24,6 +24,31 @@ use crate::record::{self, Recording};
 use crate::tray::{Item, Tray};
 
 pub const APP_ID: &str = "io.github.billsecond.screengrabcraft";
+
+/// The smallest window the service makes, in points. On Wayland winit makes every window at
+/// least 2 points wide and 1 high, and gives one that can't be resized its size as both its
+/// smallest and its largest: any smaller, the smallest would be over the largest, which a desktop
+/// may answer by ending the program ("Invalid min/max size"). The service's hidden 1-point window
+/// did that, so it never started there.
+pub const SMALLEST_WINDOW: egui::Vec2 = vec2(2.0, 2.0);
+
+/// A size for a window that can't be resized: never under [`SMALLEST_WINDOW`] (nor not a number).
+pub fn fixed_size(size: egui::Vec2) -> egui::Vec2 {
+    size.max(SMALLEST_WINDOW)
+}
+
+/// Whether a Wayland desktop takes this window: winit asks for one that can't be resized to be no
+/// smaller than its size and at least 2 by 1 points (rounded), and no larger than its size, and
+/// the smallest mustn't be over the largest.
+#[cfg(test)]
+pub fn wayland_accepts(b: &ViewportBuilder) -> bool {
+    let Some(size) = b.inner_size.filter(|_| b.resizable == Some(false)) else {
+        return true;
+    };
+    let (w, h) = (size.x.round(), size.y.round());
+    // Its smallest (its size, at least 2 by 1) no larger than its largest (its size).
+    w.max(2.0) <= w && h.max(1.0) <= h
+}
 /// Whether the anchor window stays shown once shown (see `logic`).
 const KEEP_ANCHOR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 /// How long the editor is given to step aside before the screen is frozen: a frame to be cloaked
@@ -1615,7 +1640,7 @@ fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], ra
     }
     if cfg!(target_os = "macos") {
         // Desktop units are points there, as egui's are; full screen would slide to a Space.
-        return b.with_position(pos2(m.rect.x as f32, m.rect.y as f32)).with_inner_size(vec2(m.rect.w as f32, m.rect.h as f32));
+        return b.with_position(pos2(m.rect.x as f32, m.rect.y as f32)).with_inner_size(fixed_size(vec2(m.rect.w as f32, m.rect.h as f32)));
     }
     let by_place = screens.iter().position(|((x, y), (w, h), _)| *x == m.rect.x && *y == m.rect.y && *w == m.rect.w && *h == m.rect.h);
     let by_name = screens.iter().position(|(_, _, n)| !n.is_empty() && *n == m.name);
@@ -1623,7 +1648,8 @@ fn overlay_builder(m: &Monitor, screens: &[((i32, i32), (u32, u32), String)], ra
         Some(i) => b.with_monitor(i),
         None => {
             let s = m.scale.max(0.5);
-            b.with_position(pos2(m.rect.x as f32 / s, m.rect.y as f32 / s)).with_inner_size(vec2(m.rect.w as f32 / s, m.rect.h as f32 / s))
+            b.with_position(pos2(m.rect.x as f32 / s, m.rect.y as f32 / s))
+                .with_inner_size(fixed_size(vec2(m.rect.w as f32 / s, m.rect.h as f32 / s)))
         }
     }
 }
@@ -1886,6 +1912,14 @@ pub(crate) fn write_capture(pic: &Raster, source: &str, s: &Settings, save: bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The capture overlay of a monitor that says it has no size is still a window Wayland takes.
+    #[test]
+    fn an_overlay_on_a_monitor_of_no_size_is_one_wayland_takes() {
+        let empty = Monitor { id: 1, name: String::new(), rect: IRect { x: 0, y: 0, w: 0, h: 0 }, scale: 3.0, primary: true };
+        assert!(wayland_accepts(&overlay_builder(&empty, &[], false)));
+        assert!(wayland_accepts(&overlay_builder(&empty, &[], true)));
+    }
 
     /// A capture with the pointer in it gets a side file beside it with the pointer as an
     /// annotation of its own, over the picture without it (a made-up picture, in a folder of the

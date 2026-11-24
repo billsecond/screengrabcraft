@@ -79,6 +79,25 @@ fn development_build() -> bool {
     })
 }
 
+/// The service's root window: an anchor eframe needs and nobody sees. As small as a window can be
+/// ([`app::SMALLEST_WINDOW`]: at 1 point, Wayland desktops ended the service as it started), out of
+/// sight where the system allows it (it may not be see-through), and never in the way.
+fn anchor() -> egui::ViewportBuilder {
+    egui::ViewportBuilder::default()
+        .with_title("ScreenGrabCraft")
+        .with_app_id(app::APP_ID)
+        .with_visible(false)
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_inner_size(app::SMALLEST_WINDOW)
+        .with_min_inner_size(app::SMALLEST_WINDOW)
+        .with_position(if cfg!(target_os = "windows") { [-32000.0, -32000.0] } else { [0.0, 0.0] })
+        .with_taskbar(false)
+        .with_mouse_passthrough(true)
+        .with_resizable(false)
+        .with_active(false)
+}
+
 fn service_command(what: Option<&str>) -> ExitCode {
     let result = match what {
         Some("install") => service::enable(),
@@ -171,20 +190,7 @@ fn main() -> ExitCode {
         store::save_settings(&settings);
     }
 
-    let mut viewport = egui::ViewportBuilder::default()
-        .with_title("ScreenGrabCraft")
-        .with_app_id(app::APP_ID)
-        .with_visible(false)
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_inner_size([1.0, 1.0])
-        .with_min_inner_size([1.0, 1.0])
-        // Out of sight where the system allows it (a 1-pixel window that may not be see-through).
-        .with_position(if cfg!(target_os = "windows") { [-32000.0, -32000.0] } else { [0.0, 0.0] })
-        .with_taskbar(false)
-        .with_mouse_passthrough(true)
-        .with_resizable(false)
-        .with_active(false);
+    let mut viewport = anchor();
     if let Ok(icon) = eframe::icon_data::from_png_bytes(app::ICON) {
         viewport = viewport.with_icon(icon);
     }
@@ -230,5 +236,23 @@ fn main() -> ExitCode {
             log::error!("the capture service could not start: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The hidden root window was 1 point wide and couldn't be resized, so on Wayland winit asked
+    /// for it to be at least 2 wide and at most 1, and the desktop ended the service every time
+    /// it started ("Invalid min/max size"): no tray icon, ever.
+    #[test]
+    fn the_hidden_window_is_one_wayland_takes() {
+        let old = egui::ViewportBuilder::default().with_inner_size([1.0, 1.0]).with_resizable(false);
+        assert!(!app::wayland_accepts(&old), "what 0.1.60 asked for");
+        let b = anchor();
+        assert!(app::wayland_accepts(&b));
+        assert_eq!(b.resizable, Some(false));
+        assert!(b.inner_size.is_some_and(|s| s.x >= 2.0 && s.y >= 1.0));
     }
 }
