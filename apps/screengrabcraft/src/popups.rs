@@ -40,8 +40,8 @@ fn points(x: f32, y: f32, scale: f32) -> egui::Pos2 {
 
 const COUNTDOWN_SIZE: Vec2 = vec2(184.0, 196.0);
 
-/// The countdown's face: the seconds left, what's coming, and Cancel. True when Cancel was
-/// pressed.
+/// The face of the countdown before a delayed still capture: the seconds left, what's coming, and
+/// Cancel. True when Cancel was pressed. (A recording's countdown is an old film's: `film`.)
 fn countdown_ui(ui: &mut Ui, left: u32, coming: &str) -> bool {
     let t = Tokens::get(ui.ctx());
     let mut cancel = false;
@@ -76,26 +76,29 @@ pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
     }
 }
 
-/// The countdown before a recording, in the middle of the area to be recorded. It's gone before
-/// the recording starts, so it isn't in it.
+/// The countdown before a recording (a GIF or a video), in the middle of the area to be recorded,
+/// drawn as an old film's leader (`film`). It's gone before the recording starts, so it isn't
+/// in it.
 pub fn record_countdown(svc: &mut Service, ctx: &egui::Context) {
     let Some(c) = &svc.record_countdown else { return };
     let now = Instant::now();
     if now >= c.until {
         return;
     }
-    let left = c.until.saturating_duration_since(now).as_secs_f32().ceil() as u32;
-    let size = COUNTDOWN_SIZE;
+    let remaining = c.until.saturating_duration_since(now).as_secs_f32();
+    let size = crate::film::SIZE;
     let at = match c.on {
         Some((r, s)) => points(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0, s) - size / 2.0,
         None => pos2(200.0, 200.0),
     };
     let mut cancel = false;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("record-countdown"), popup(COUNTDOWN_TITLE, at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
-            cancel = countdown_ui(ui, left, "Recording starts…");
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(crate::film::BLACK)).show(ui, |ui| {
+            cancel = crate::film::countdown_ui(ui, remaining, "Recording starts…");
         });
     });
+    // The hand sweeps round and the grain moves at film's rate (the service's own timer is slower).
+    ctx.request_repaint_after(crate::film::FRAME_TIME);
     if cancel {
         svc.cancel_record_countdown();
     }
@@ -1157,15 +1160,15 @@ mod tests {
         h.get_by_label("Cancel").click();
         h.run_steps(1);
         assert_eq!(*h.state(), Some(()));
-        // Before a recording, it says so.
-        let mut h = popup_harness(COUNTDOWN_SIZE, Theme::Dark, |ui| countdown_ui(ui, 2, "Recording starts…").then_some(()));
+        // It says the seconds left. (Before a recording, the film's countdown says them: `film`.)
+        let mut h = popup_harness(COUNTDOWN_SIZE, Theme::Dark, |ui| countdown_ui(ui, 2, "Capturing…").then_some(()));
         h.run_steps(2);
-        h.get_by_label("Recording starts…");
+        h.get_by_label("Capturing…");
         h.get_by_label("2");
         if let Ok(dir) = std::env::var("SGC_SHOTS")
             && let Ok(img) = h.render()
         {
-            let _ = img.save(format!("{dir}/record-countdown.png"));
+            let _ = img.save(format!("{dir}/countdown.png"));
         }
     }
 }

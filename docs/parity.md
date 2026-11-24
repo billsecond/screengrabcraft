@@ -66,7 +66,7 @@ The gaps are ranked at the end, by how much someone using it every day would mis
 | Each source on a track of its own, to edit | Has | |
 | Pause, resume, stop by keys (F9, F10); restart; discard | Has | |
 | Recording controls kept out of the video | Has | |
-| Countdown before recording | Has | 3 seconds by default (Settings › Recording: 1 to 10, or off), shown over the area and gone before the recording starts; a GIF, a video, Video Production |
+| Countdown before recording | Has | 3 seconds by default (Settings › Recording: 1 to 10, or off), shown over the area as an old film's leader (a number in a circle, a sweeping hand, grain, flicker), and gone before the recording starts; a GIF, a video, Video Production |
 | Longest recording | Has | Settings |
 | Microphone heard as silent (muted or not allowed) said plainly | Has | after the recording |
 | Background noise taken out | Has | in the video editor, after recording: a track at a time |
