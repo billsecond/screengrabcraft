@@ -1,3 +1,9 @@
+## What's new in 0.1.61
+
+### Fixed
+
+- **The capture service starts on Wayland:** on a Wayland desktop (GNOME among them) the capture service closed as soon as it started, so its tray icon never appeared. It now starts. GNOME shows the tray icon with the AppIndicator extension; without it, ScreenGrabCraft opens its window instead.
+
 ## What's new in 0.1.60
 
 ### Fixed
