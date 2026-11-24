@@ -24,6 +24,7 @@
 
 mod app;
 mod captions;
+mod film;
 mod home;
 mod hotkeys;
 mod ink;

@@ -98,7 +98,8 @@ a step), a web page or Markdown (the last two with the pictures in a folder besi
 itself is a `.sgguide` file in the captures folder (`screengrabcraft --guide <file>`
 opens it again).
 
-A recording (a GIF, a video, Video Production) starts after a **countdown** shown over the area, 3 seconds
+A recording (a GIF, a video, Video Production) starts after a **countdown** shown over the area, drawn as
+an old film's leader (a number in a circle, a hand sweeping round each second, grain and flicker), 3 seconds
 by default; Settings › Recording changes it or turns it off.
 
 **While you record**, you can still take pictures: Capture Region, Window, Full Screen, All Screens
