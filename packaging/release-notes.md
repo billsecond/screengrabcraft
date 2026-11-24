@@ -1,3 +1,9 @@
+## What's new in 0.1.63
+
+### Editing
+
+- **The editors open with your last file:** opened with nothing to open (the Start menu, the tray's Open Editor, a desktop icon), the Image Editor now shows the last picture it had open and the Video Editor the last recording, already loaded, instead of starting empty. A file you open, or a capture or recording from the capture service, still opens instead. If the last file has been moved or can't be read, the one before it opens.
+
 ## What's new in 0.1.62
 
 ### Recording
