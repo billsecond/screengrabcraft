@@ -17,6 +17,7 @@ pub mod edit_text;
 pub mod editor;
 pub mod effects;
 pub mod eyedropper;
+pub mod fit;
 pub mod grab_text;
 pub mod guide;
 pub mod guides;
@@ -80,6 +81,8 @@ pub fn setup(ctx: &egui::Context, theme: screengrabcraft_model::Theme) {
     theme::apply(ctx, theme);
 }
 
+#[cfg(test)]
+mod fit_tests;
 #[cfg(test)]
 mod picture_tests;
 #[cfg(test)]

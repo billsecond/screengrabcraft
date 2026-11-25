@@ -5,6 +5,10 @@
 //! panel colour of the light or dark look, a 1 px border all round, its buttons at the right.
 //! What each shows is drawn by a function of its own (`notice_ui`, …) that only says what was
 //! pressed, so it can be drawn and tested headless.
+//!
+//! Each window grows to what it shows (`screengrabcraft_ui::fit`): a long message wraps and the
+//! notice grows taller, the recording control grows wider rather than its words running under its
+//! buttons. A window just opened is drawn once out of sight, so it appears at its size.
 
 use std::path::Path;
 use std::time::Instant;
@@ -12,6 +16,7 @@ use std::time::Instant;
 use egui::{RichText, Ui, Vec2, ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_desktop::launch;
 use screengrabcraft_model::IRect;
+use screengrabcraft_ui::fit::{self, Fit};
 use screengrabcraft_ui::theme::Tokens;
 use screengrabcraft_ui::widgets::{self, FooterButton};
 
@@ -31,6 +36,9 @@ fn popup(title: &str, at: egui::Pos2, size: egui::Vec2, active: bool) -> Viewpor
         .with_inner_size(fixed_size(size))
 }
 
+/// The most lines of a notice's message: a runaway error never makes it taller than a screen.
+const DETAIL_ROWS: usize = 8;
+
 /// A desktop point in egui points for a window placed on a monitor of this scale.
 fn points(x: f32, y: f32, scale: f32) -> egui::Pos2 {
     if cfg!(target_os = "macos") { pos2(x, y) } else { pos2(x / scale.max(0.5), y / scale.max(0.5)) }
@@ -39,6 +47,11 @@ fn points(x: f32, y: f32, scale: f32) -> egui::Pos2 {
 // ---- the countdown ----
 
 const COUNTDOWN_SIZE: Vec2 = vec2(184.0, 196.0);
+
+/// The countdown's window: [`COUNTDOWN_SIZE`], or bigger if what it shows needs more.
+fn countdown_fit() -> Fit {
+    Fit::new("countdown", COUNTDOWN_SIZE)
+}
 
 /// The face of the countdown before a delayed still capture: the seconds left, what's coming, and
 /// Cancel. True when Cancel was pressed. (A recording's countdown is an old film's: `film`.)
@@ -57,7 +70,8 @@ fn countdown_ui(ui: &mut Ui, left: u32, coming: &str) -> bool {
 pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
     let Some(c) = &svc.countdown else { return };
     let left = c.until.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u32;
-    let size = COUNTDOWN_SIZE;
+    let fit = countdown_fit();
+    let (shown, size) = (fit.shown(ctx), fit.size(ctx));
     let at = match c.on {
         Some((r, s)) => {
             let center = points(r.x as f32 + r.w as f32 / 2.0, r.y as f32 + r.h as f32 / 2.0, s);
@@ -66,10 +80,9 @@ pub fn countdown(svc: &mut Service, ctx: &egui::Context) {
         None => pos2(200.0, 200.0),
     };
     let mut cancel = false;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("countdown"), popup(COUNTDOWN_TITLE, at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
-            cancel = countdown_ui(ui, left, "Capturing…");
-        });
+    let builder = popup(COUNTDOWN_TITLE, at, size, false).with_visible(shown);
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("countdown"), builder, |ui, _| {
+        cancel = fit.face(ui, widgets::popup_frame(ui.ctx()), |ui| countdown_ui(ui, left, "Capturing…"));
     });
     if cancel {
         svc.countdown = None;
@@ -136,6 +149,17 @@ fn recording_size(kind: Kind) -> Vec2 {
         Kind::Gif => 596.0,
     };
     vec2(w, 56.0)
+}
+
+/// The recording control's window: [`recording_size`], or wider if what it shows needs more (a
+/// long shortcut, a long time, another font).
+fn recording_fit(kind: Kind) -> Fit {
+    Fit::new("recording", recording_size(kind))
+}
+
+/// The recording control's frame: a popup's, a little shallower.
+fn control_frame(ctx: &egui::Context) -> egui::Frame {
+    widgets::popup_frame(ctx).inner_margin(egui::Margin::symmetric(12, 8))
 }
 
 /// What the recording control shows.
@@ -222,48 +246,53 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
     if bar.hovered() && !finishing {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
     }
-    ui.horizontal_centered(|ui| {
-        ui.spacing_mut().item_spacing.x = 8.0;
-        grip(ui, t.muted);
-        match kind {
-            _ if v.stopping && !making => {
-                ui.add(egui::Spinner::new().size(16.0).color(t.text));
-                let secs = v.secs;
-                ui.label(RichText::new(format!("Stopping… ({:02}:{:02} recorded)", secs / 60, secs % 60)).color(t.text));
-            }
-            Kind::Gif => {
-                red_light(ui, v.secs, v.paused, t.text);
-                ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
-            }
-            Kind::Scrolling if v.by_itself => {
-                ui.add(egui::Spinner::new().size(14.0).color(t.text));
-                ui.label(RichText::new(format!("Scrolling by itself — {} px", v.progress)).color(t.text))
-                    .on_hover_text("It stops at the end of the page. Done keeps what it has.");
-            }
-            Kind::Scrolling => {
-                let text = if v.lost > 2 { "Scroll more slowly…".to_string() } else { format!("Scroll the area — {} px", v.progress) };
-                ui.label(RichText::new(text).color(if v.lost > 2 { t.danger } else { t.text }));
-            }
-            Kind::Video | Kind::Production if making => {
-                let done = v.saving.saturating_sub(1).min(1000) as f32 / 1000.0;
-                ui.label(RichText::new("Making the video…").color(t.text));
-                ui.add(egui::ProgressBar::new(done).desired_width(150.0).show_percentage());
-            }
-            Kind::Video | Kind::Production => {
-                red_light(ui, v.secs, v.paused, t.text);
-                // A meter for each sound, so the owner sees it's being heard.
-                for (name, level) in [("Sound", v.sound), ("Mic", v.mic)] {
-                    if let Some(l) = level {
-                        ui.label(RichText::new(name).size(12.0).color(t.muted));
-                        ui.add(egui::ProgressBar::new(l.clamp(0.0, 1.0)).desired_width(40.0).desired_height(6.0));
+    ui.spacing_mut().item_spacing.x = 8.0;
+    // The words at the left, the buttons at the right: when they need more than the bar has, the
+    // bar grows rather than the words running under the buttons.
+    fit::ends(
+        ui,
+        |ui| {
+            grip(ui, t.muted);
+            match kind {
+                _ if v.stopping && !making => {
+                    ui.add(egui::Spinner::new().size(16.0).color(t.text));
+                    let secs = v.secs;
+                    ui.label(RichText::new(format!("Stopping… ({:02}:{:02} recorded)", secs / 60, secs % 60)).color(t.text));
+                }
+                Kind::Gif => {
+                    red_light(ui, v.secs, v.paused, t.text);
+                    ui.label(RichText::new(format!("{} frames", v.progress)).color(t.muted));
+                }
+                Kind::Scrolling if v.by_itself => {
+                    ui.add(egui::Spinner::new().size(14.0).color(t.text));
+                    ui.label(RichText::new(format!("Scrolling by itself — {} px", v.progress)).color(t.text))
+                        .on_hover_text("It stops at the end of the page. Done keeps what it has.");
+                }
+                Kind::Scrolling => {
+                    let text = if v.lost > 2 { "Scroll more slowly…".to_string() } else { format!("Scroll the area — {} px", v.progress) };
+                    ui.label(RichText::new(text).color(if v.lost > 2 { t.danger } else { t.text }));
+                }
+                Kind::Video | Kind::Production if making => {
+                    let done = v.saving.saturating_sub(1).min(1000) as f32 / 1000.0;
+                    ui.label(RichText::new("Making the video…").color(t.text));
+                    ui.add(egui::ProgressBar::new(done).desired_width(150.0).show_percentage());
+                }
+                Kind::Video | Kind::Production => {
+                    red_light(ui, v.secs, v.paused, t.text);
+                    // A meter for each sound, so the owner sees it's being heard.
+                    for (name, level) in [("Sound", v.sound), ("Mic", v.mic)] {
+                        if let Some(l) = level {
+                            ui.label(RichText::new(name).size(12.0).color(t.muted));
+                            ui.add(egui::ProgressBar::new(l.clamp(0.0, 1.0)).desired_width(40.0).desired_height(6.0));
+                        }
+                    }
+                    if !v.missing.is_empty() {
+                        ui.label(RichText::new("⚠").color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B))).on_hover_text(v.missing.join("\n"));
                     }
                 }
-                if !v.missing.is_empty() {
-                    ui.label(RichText::new("⚠").color(egui::Color32::from_rgb(0xF5, 0x9E, 0x0B))).on_hover_text(v.missing.join("\n"));
-                }
             }
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        },
+        |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             if finishing {
                 if widgets::button(ui, "Discard").on_hover_text("Stop waiting and throw the recording away").clicked() {
@@ -312,8 +341,8 @@ fn recording_ui(ui: &mut Ui, kind: Kind, v: &RecordingView) -> Option<RecordingC
                     choice = Some(RecordingChoice::Pause);
                 }
             }
-        });
-    });
+        },
+    );
     choice
 }
 
@@ -373,7 +402,8 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
         camera_full: rec.camera_full.load(std::sync::atomic::Ordering::SeqCst),
         camera_full_key: crate::hotkeys::Registered::recording_label(keys, crate::hotkeys::Target::CameraFull),
     };
-    let size = recording_size(kind);
+    let fit = recording_fit(kind);
+    let (shown, size) = (fit.shown(ctx), fit.size(ctx));
     // Where the owner dragged it; else beside the area, else on a screen that isn't recorded,
     // else (asked for from the tray) at the bottom of the area's screen. Windows keeps it out of
     // the recording wherever it is.
@@ -393,10 +423,8 @@ pub fn recording(svc: &mut Service, ctx: &egui::Context) {
     let mut choice = None;
     // Where its window is (points), the points' size in pixels, and whether the button is down.
     let mut seen: Option<(egui::Pos2, f32, bool)> = None;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup(CONTROL_TITLE, at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx()).inner_margin(egui::Margin::symmetric(12, 8))).show(ui, |ui| {
-            choice = recording_ui(ui, kind, &view);
-        });
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("recording"), popup(CONTROL_TITLE, at, size, false).with_visible(shown), |ui, _| {
+        choice = fit.face(ui, control_frame(ui.ctx()), |ui| recording_ui(ui, kind, &view));
         let ppp = ui.ctx().pixels_per_point();
         let (outer, down) = ui.ctx().input(|i| (i.viewport().outer_rect.map(|r| r.min), i.pointer.primary_down()));
         seen = outer.map(|o| (o, ppp, down));
@@ -664,6 +692,18 @@ fn notice_size(n: &NoticeView<'_>) -> Vec2 {
     vec2(400.0, if n.path.is_some() { 134.0 } else { 92.0 })
 }
 
+/// The notice's window: [`notice_size`], taller for a message of more lines.
+fn notice_fit(n: &NoticeView<'_>) -> Fit {
+    Fit::new("notice", notice_size(n))
+}
+
+/// The notice's window as it is now, if one is up (the update's notice goes above it).
+pub fn notice_size_now(svc: &Service, ctx: &egui::Context) -> Option<Vec2> {
+    let n = svc.notice.as_ref()?;
+    let view = NoticeView { text: &n.text, detail: &n.detail, path: n.path.as_deref(), thumb: None, error: n.error };
+    Some(notice_fit(&view).size(ctx))
+}
+
 /// The notice's face: the capture, what became of it, an X at the top right, and its buttons at
 /// the bottom right.
 fn notice_ui(ui: &mut Ui, n: &NoticeView<'_>) -> Option<NoticeChoice> {
@@ -686,21 +726,21 @@ fn notice_ui(ui: &mut Ui, n: &NoticeView<'_>) -> Option<NoticeChoice> {
             ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, "!", widgets::strong_font(ui.ctx(), 17.0), t.panel);
         }
         ui.vertical(|ui| {
-            // Clear of the X.
+            // Clear of the X. The words wrap, all of them (the window grows to them), a long
+            // message up to [`DETAIL_ROWS`] lines.
             ui.set_max_width((ui.available_width() - 30.0).max(40.0));
             let title = RichText::new(n.text).font(widgets::strong_font(ui.ctx(), 14.5)).color(if n.error { t.danger } else { t.text });
-            ui.add(egui::Label::new(title).truncate());
+            ui.add(egui::Label::new(title).wrap());
             if !n.detail.is_empty() {
-                ui.add(egui::Label::new(RichText::new(n.detail).size(12.0).color(t.muted)).truncate());
+                ui.add(widgets::wrapped(n.detail, egui::FontId::proportional(12.0), t.muted, DETAIL_ROWS));
             }
         });
     });
     let buttons = notice_buttons(n.path);
     if !buttons.is_empty() {
+        // At the bottom, and never right under the words (the notice grows instead).
         let room = ui.available_height() - widgets::BUTTON_SIZE.y;
-        if room > 0.0 {
-            ui.add_space(room);
-        }
+        ui.add_space(room.max(6.0));
         let row: Vec<FooterButton<'_>> = buttons.iter().map(|(b, _)| *b).collect();
         if let Some(i) = widgets::footer(ui, &row) {
             choice = buttons.get(i).map(|(_, c)| *c);
@@ -720,7 +760,9 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
     let (text, detail, path, tex, error) =
         (n.text.clone(), n.detail.clone(), n.path.clone(), n.texture.as_ref().map(|t| (t.id(), t.size_vec2())), n.error);
     let view = NoticeView { text: &text, detail: &detail, path: path.as_deref(), thumb: tex, error };
-    let size = notice_size(&view);
+    let fit = notice_fit(&view);
+    // Another notice in its place is measured afresh.
+    let (shown, size) = (fit.shown_with(ctx, (&text, &detail, &path, error)), fit.size(ctx));
     let at = screengrabcraft_capture::monitors()
         .ok()
         .and_then(|ms| ms.into_iter().next())
@@ -728,10 +770,10 @@ pub fn notice(svc: &mut Service, ctx: &egui::Context) {
         .unwrap_or(pos2(40.0, 40.0));
     let mut choice = None;
     let mut hold = false;
-    ctx.show_viewport_immediate(ViewportId::from_hash_of("notice"), popup(NOTICE_TITLE, at, size, false), |ui, _| {
-        egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
+    ctx.show_viewport_immediate(ViewportId::from_hash_of("notice"), popup(NOTICE_TITLE, at, size, false).with_visible(shown), |ui, _| {
+        choice = fit.face(ui, widgets::popup_frame(ui.ctx()), |ui| {
             hold = ui.ui_contains_pointer();
-            choice = notice_ui(ui, &view);
+            notice_ui(ui, &view)
         });
     });
     let close = match (choice, &path) {
@@ -1170,5 +1212,142 @@ mod tests {
         {
             let _ = img.save(format!("{dir}/countdown.png"));
         }
+    }
+
+    /// Draws `face` (as `name`) the way the service draws it, at every display scale, its window
+    /// grown to it, saying what doesn't fit in `wrong`.
+    fn look(wrong: &mut Vec<String>, name: &str, fit: Fit, frame: fn(&egui::Context) -> egui::Frame, face: impl Fn(&mut Ui) + Clone + 'static) {
+        for scale in crate::fit_check::SCALES {
+            let (mut h, _, found) = crate::fit_check::fitted(fit, frame, scale, Theme::Light, face.clone());
+            wrong.extend(found.into_iter().map(|f| format!("{name} @{scale}: {f}")));
+            crate::fit_check::shot(&mut h, name, scale);
+        }
+    }
+
+    const LONG_ERROR: &str =
+        "Windows refused to hand over the screen's picture: the graphics driver stopped answering (0x887A0005). Try again, or restart the computer.";
+
+    /// Long words in every one of the service's popups stay inside them at every display scale:
+    /// a message wraps and the notice grows taller, the recording control grows wider rather than
+    /// its words running under its buttons, and nothing is cut off mid-word.
+    #[test]
+    fn every_popup_keeps_its_words_inside_at_every_scale() {
+        let mut wrong = Vec::new();
+        let notice = |text: &'static str, detail: &'static str, path: Option<&'static str>, error: bool| {
+            let view = move || NoticeView { text, detail, path: path.map(Path::new), thumb: None, error };
+            (notice_fit(&view()), move |ui: &mut Ui| {
+                let _ = notice_ui(ui, &view());
+            })
+        };
+        for (name, (fit, face)) in [
+            ("notice-error", notice("The screen could not be captured", LONG_ERROR, None, true)),
+            (
+                "notice-text",
+                notice(
+                    "Text copied",
+                    "Quarterly report for the north-west region, draft three\nTotals by month and by shop, with the changes since last year\nPrepared for the board meeting on Thursday\nand 12 more lines",
+                    None,
+                    false,
+                ),
+            ),
+            (
+                "notice-saved",
+                notice(
+                    "Saved, but not copied: another program is holding the clipboard",
+                    "Capture 2026-11-25 09.41.07 of the quarterly report window, second monitor.png",
+                    Some("Capture 2026-11-25 09.41.07.png"),
+                    false,
+                ),
+            ),
+            ("notice-short", notice("Saved and copied", "Capture.png", Some("Capture.png"), false)),
+        ] {
+            look(&mut wrong, name, fit, widgets::popup_frame, face);
+        }
+        let full = RecordingView {
+            secs: 3_675,
+            paused: true,
+            border: true,
+            sound: Some(0.5),
+            mic: Some(0.3),
+            missing: vec!["No computer sound".into()],
+            pause_key: Some("Ctrl+Shift+F9".into()),
+            stop_key: Some("Ctrl+Shift+F10".into()),
+            can_draw: true,
+            draw_key: Some("Ctrl+Shift+F8".into()),
+            can_swap: true,
+            camera_full_key: Some("Ctrl+Shift+F7".into()),
+            ..RecordingView::default()
+        };
+        for (name, kind, view) in [
+            ("bar-production", Kind::Production, full.clone()),
+            ("bar-video", Kind::Video, RecordingView { paused: false, ..full.clone() }),
+            ("bar-gif", Kind::Gif, RecordingView { progress: 18_234, ..full.clone() }),
+            ("bar-scrolling", Kind::Scrolling, RecordingView { progress: 184_000, by_itself: true, ..RecordingView::default() }),
+            ("bar-stopping", Kind::Video, RecordingView { secs: 3_725, stopping: true, ..RecordingView::default() }),
+            ("bar-making", Kind::Production, RecordingView { saving: 734, stopping: true, ..RecordingView::default() }),
+        ] {
+            look(&mut wrong, name, recording_fit(kind), control_frame, move |ui: &mut Ui| {
+                let _ = recording_ui(ui, kind, &view);
+            });
+        }
+        look(&mut wrong, "countdown", countdown_fit(), widgets::popup_frame, |ui: &mut Ui| {
+            let _ = countdown_ui(ui, 60, "Capturing…");
+        });
+        // The film's countdown before a recording is drawn to its own size, and keeps to it.
+        look(
+            &mut wrong,
+            "film-countdown",
+            Fit::new("film", crate::film::SIZE),
+            |_| egui::Frame::NONE.fill(crate::film::BLACK),
+            |ui: &mut Ui| {
+                let _ = crate::film::countdown_ui(ui, 9.4, "Recording starts…");
+            },
+        );
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A long message is all there, and the notice is taller for it; a short one keeps the
+    /// notice's own size.
+    #[test]
+    fn a_long_message_makes_the_notice_taller_and_is_all_there() {
+        let view = || NoticeView { text: "The screen could not be captured", detail: LONG_ERROR, path: None, thumb: None, error: true };
+        let (h, size, _) = crate::fit_check::fitted(notice_fit(&view()), widgets::popup_frame, 1.0, Theme::Light, move |ui| {
+            let _ = notice_ui(ui, &view());
+        });
+        assert!(size.y > notice_size(&view()).y && size.x == notice_size(&view()).x, "{size:?}");
+        h.get_by_label(LONG_ERROR);
+        let short =
+            || NoticeView { text: "Saved and copied", detail: "Capture.png", path: Some(Path::new("Capture.png")), thumb: None, error: false };
+        let (_, size, _) = crate::fit_check::fitted(notice_fit(&short()), widgets::popup_frame, 1.0, Theme::Light, move |ui| {
+            let _ = notice_ui(ui, &short());
+        });
+        assert_eq!(size, notice_size(&short()));
+    }
+
+    /// With every button and meter shown and long shortcuts, the recording control is wider than
+    /// it's made, and its words stay left of its buttons.
+    #[test]
+    fn the_recording_control_grows_rather_than_crowd_its_buttons() {
+        let view = RecordingView {
+            secs: 75,
+            paused: true,
+            sound: Some(0.5),
+            mic: Some(0.3),
+            missing: vec!["No computer sound".into()],
+            pause_key: Some("Ctrl+Shift+F9".into()),
+            can_draw: true,
+            draw_key: Some("Ctrl+Shift+F8".into()),
+            can_swap: true,
+            camera_full_key: Some("Ctrl+Shift+F7".into()),
+            ..RecordingView::default()
+        };
+        let (h, size, found) = crate::fit_check::fitted(recording_fit(Kind::Production), control_frame, 1.5, Theme::Dark, move |ui| {
+            let _ = recording_ui(ui, Kind::Production, &view);
+        });
+        assert!(found.is_empty(), "{found:?}");
+        assert!(size.x > recording_size(Kind::Production).x, "{size:?}");
+        let warning = h.get_by_label("⚠").rect();
+        let resume = h.get_by_label("Resume (Ctrl+Shift+F9)").rect();
+        assert!(warning.max.x < resume.min.x, "{warning:?} {resume:?}");
     }
 }
