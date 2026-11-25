@@ -1,3 +1,9 @@
+## What's new in 0.1.65
+
+### Fixed
+
+- **Words stay inside their boxes:** in the New Recording window, a warning about the microphone no longer runs out of the bottom of its card, and with more microphones or cameras listed their × buttons and the notes under them stay inside the card instead of running into the next one; the cards grow to fit what they say. The notice after a capture shows a long message in full, over several lines, instead of cutting it short with "…". The recording controls grow wider rather than the time and sound meters running under the buttons, the bar while recording steps has room for its Stop button, and the update notice grows to its words. A long dialog title wraps clear of its close button, and the hints at the top of the screen while choosing an area wrap on a narrow monitor.
+
 ## What's new in 0.1.64
 
 ### Starting
