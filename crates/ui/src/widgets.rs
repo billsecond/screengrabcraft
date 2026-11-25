@@ -66,14 +66,19 @@ pub fn popup_frame(ctx: &Context) -> Frame {
     Frame::NONE.fill(t.panel).stroke(Stroke::new(1.0, t.border)).inner_margin(Margin::same(12))
 }
 
-/// A window's title at the top left, and its close control at the top right. True when the close
-/// control was pressed.
+/// A window's title at the top left, and its close control at the top right. A title too long for
+/// one line wraps clear of the close control, and the bar grows to it. True when the close control
+/// was pressed.
 pub fn title_bar(ui: &mut Ui, title: &str) -> bool {
     let t = Tokens::get(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), TITLE_HEIGHT), Sense::hover());
-    let font = strong_font(ui.ctx(), 14.0);
-    ui.painter().text(pos2(rect.min.x + f32::from(PADDING), rect.center().y), Align2::LEFT_CENTER, title, font, t.text);
-    let x = Rect::from_center_size(pos2(rect.max.x - 8.0 - 16.0, rect.center().y), vec2(32.0, 28.0));
+    let width = ui.available_width();
+    // From the padding to the close control.
+    let room = (width - f32::from(PADDING) - TITLE_HEIGHT - 4.0).max(40.0);
+    let galley = ui.painter().layout(title.to_string(), strong_font(ui.ctx(), 14.0), t.text, room);
+    let height = TITLE_HEIGHT.max((galley.size().y + 24.0).ceil());
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+    ui.painter().galley(pos2(rect.min.x + f32::from(PADDING), rect.center().y - galley.size().y / 2.0), galley, t.text);
+    let x = Rect::from_center_size(pos2(rect.max.x - 8.0 - 16.0, rect.min.y + TITLE_HEIGHT / 2.0), vec2(32.0, 28.0));
     close_button(ui, x).clicked()
 }
 
@@ -294,27 +299,64 @@ pub fn arrange(buttons: &[FooterButton<'_>], mac: bool) -> (Vec<usize>, Vec<usiz
     (left, right)
 }
 
-/// A row of buttons as wide as `ui`, laid out by [`arrange`] for this platform. Returns the index
-/// (in `buttons`) of the one clicked. Keys are [`dialog_footer`]'s (or [`pressed_key`]'s).
+/// The rows a footer's buttons go in, each its buttons at the left and at the right (indices from
+/// [`arrange`]): one row when they all fit in `room`; else those set apart on a row of their own
+/// and the others in as many rows as they need, none wider than `room` unless a single button is.
+pub fn footer_rows(left: &[usize], right: &[usize], width: impl Fn(usize) -> f32, room: f32) -> Vec<(Vec<usize>, Vec<usize>)> {
+    let span = |ids: &[usize]| ids.iter().map(|&i| width(i) + GAP).sum::<f32>() - GAP;
+    let all: Vec<usize> = left.iter().chain(right).copied().collect();
+    if span(&all) <= room + 0.5 {
+        return vec![(left.to_vec(), right.to_vec())];
+    }
+    let mut rows = Vec::new();
+    if !left.is_empty() {
+        rows.push((left.to_vec(), Vec::new()));
+    }
+    let mut row: Vec<usize> = Vec::new();
+    for &i in right {
+        let mut wider = row.clone();
+        wider.push(i);
+        if !row.is_empty() && span(&wider) > room + 0.5 {
+            rows.push((Vec::new(), std::mem::take(&mut row)));
+        }
+        row.push(i);
+    }
+    if !row.is_empty() {
+        rows.push((Vec::new(), row));
+    }
+    rows
+}
+
+/// A row of buttons as wide as `ui`, laid out by [`arrange`] for this platform; when they don't
+/// fit across it, in more rows ([`footer_rows`]) rather than past its edge. Returns the index (in
+/// `buttons`) of the one clicked. Keys are [`dialog_footer`]'s (or [`pressed_key`]'s).
 pub fn footer(ui: &mut Ui, buttons: &[FooterButton<'_>]) -> Option<usize> {
     let (left, right) = arrange(buttons, cfg!(target_os = "macos"));
     let size = |ui: &Ui, i: usize| buttons.get(i).map_or(BUTTON_SIZE, |b| StandardButton::new(b.label).size(ui));
-    let needed: f32 = buttons.iter().enumerate().map(|(i, _)| size(ui, i).x + GAP).sum::<f32>() - GAP;
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width().max(needed.max(0.0)), BUTTON_SIZE.y), Sense::hover());
-    // Every button's place, worked out first so they are made (and tabbed through) left to right.
+    // With no edge to keep to (a layout that grows), one row.
+    let all: f32 = buttons.iter().enumerate().map(|(i, _)| size(ui, i).x + GAP).sum::<f32>() - GAP;
+    let room = if ui.available_width().is_finite() { ui.available_width() } else { all.max(0.0) };
+    let rows = footer_rows(&left, &right, |i| size(ui, i).x, room);
+    let widest = buttons.iter().enumerate().map(|(i, _)| size(ui, i).x).fold(0.0_f32, f32::max);
+    let n = rows.len().max(1) as f32;
+    let (area, _) = ui.allocate_exact_size(vec2(room.max(widest), BUTTON_SIZE.y * n + GAP * (n - 1.0)), Sense::hover());
+    // Every button's place, worked out first so they are made (and tabbed through) in order.
     let mut places: Vec<(usize, Rect)> = Vec::with_capacity(buttons.len());
-    let mut x = row.min.x;
-    for &i in &left {
-        let s = size(ui, i);
-        places.push((i, Rect::from_min_size(pos2(x, row.min.y), s)));
-        x += s.x + GAP;
-    }
-    let width: f32 = right.iter().map(|&i| size(ui, i).x + GAP).sum::<f32>() - GAP;
-    let mut x = row.max.x - width.max(0.0);
-    for &i in &right {
-        let s = size(ui, i);
-        places.push((i, Rect::from_min_size(pos2(x, row.min.y), s)));
-        x += s.x + GAP;
+    for (k, (left, right)) in rows.iter().enumerate() {
+        let y = area.min.y + k as f32 * (BUTTON_SIZE.y + GAP);
+        let mut x = area.min.x;
+        for &i in left {
+            let s = size(ui, i);
+            places.push((i, Rect::from_min_size(pos2(x, y), s)));
+            x += s.x + GAP;
+        }
+        let width: f32 = right.iter().map(|&i| size(ui, i).x + GAP).sum::<f32>() - GAP;
+        let mut x = area.max.x - width.max(0.0);
+        for &i in right {
+            let s = size(ui, i);
+            places.push((i, Rect::from_min_size(pos2(x, y), s)));
+            x += s.x + GAP;
+        }
     }
     let mut picked = None;
     for (i, rect) in places {
@@ -367,6 +409,15 @@ pub fn dialog_footer(ui: &mut Ui, buttons: &[FooterButton<'_>]) -> Option<usize>
     let top = shown.response.rect;
     ui.painter().hline(top.x_range(), top.top(), Stroke::new(1.0, t.border));
     shown.inner.or_else(|| pressed_key(ui, buttons))
+}
+
+/// Words that wrap to the width they have, at most `rows` lines (a last line that would be more
+/// ends in "…"): a message that never runs past the edge of its window, nor makes it taller than
+/// a screen.
+pub fn wrapped(text: &str, font: FontId, color: Color32, rows: usize) -> egui::Label {
+    let mut job = egui::text::LayoutJob::single_section(text.to_string(), egui::TextFormat::simple(font, color));
+    job.wrap.max_rows = rows.max(1);
+    egui::Label::new(job).wrap()
 }
 
 /// How something is worked, a line each: what's done (bold) and what that does, as small as a

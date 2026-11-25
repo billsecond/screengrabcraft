@@ -15,7 +15,7 @@ use crate::theme::Tokens;
 #[derive(Default)]
 pub struct State {
     found: Option<Found>,
-    making: Option<String>,
+    pub(crate) making: Option<String>,
 }
 
 /// The codes read: what each says and whether it's a web address.

@@ -235,9 +235,34 @@ pub fn size(sources: &VideoOptions) -> Vec2 {
     SIZE + vec2(0.0, ROW * more_rows(sources) as f32)
 }
 
-/// One of the Recorder's cards, `height` tall: its picture, its name and its switch along the
-/// top (and, with `more`, a + beside the switch saying so, to add another), then what's in it
-/// (greyed while it's off). Whether the switch was turned, and whether the + was pressed.
+/// Where the Recorder keeps how much taller than [`CARD`] (and its rows) the tallest card's
+/// contents were last drawn: every card is made that much taller, and the window with them.
+fn card_extra_id() -> egui::Id {
+    egui::Id::new("recorder-card-extra")
+}
+
+fn card_extra(ctx: &egui::Context) -> f32 {
+    let extra = ctx.data(|d| d.get_temp::<f32>(card_extra_id())).unwrap_or(0.0);
+    if extra.is_finite() { extra.clamp(0.0, 1000.0) } else { 0.0 }
+}
+
+/// The window's size as it's drawn: [`size`], taller when what a card says needs more room than
+/// it has (a long note, a warning, the system's font), so nothing runs out of its card.
+pub fn window_size(ctx: &egui::Context, sources: &VideoOptions) -> Vec2 {
+    size(sources) + vec2(0.0, card_extra(ctx))
+}
+
+/// What a card's switch and + did, and how much taller than it was made its contents need it.
+struct CardDone {
+    turned: bool,
+    added: bool,
+    extra: f32,
+}
+
+/// One of the Recorder's cards, `height` tall (and as much taller as the tallest card's
+/// contents needed last time): its picture, its name and its switch along the top (and, with
+/// `more`, a + beside the switch saying so, to add another), then what's in it (greyed while it's
+/// off).
 #[allow(clippy::too_many_arguments)]
 fn card(
     ui: &mut Ui,
@@ -248,9 +273,9 @@ fn card(
     height: f32,
     more: Option<(&str, bool)>,
     add: impl FnOnce(&mut Ui, bool),
-) -> (bool, bool) {
+) -> CardDone {
     let t = Tokens::get(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(vec2(CARD.x, height), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(CARD.x, height + card_extra(ui.ctx())), Sense::hover());
     let lit = *on && enabled;
     let (fill, edge) = if lit { (t.window, Stroke::new(1.5, t.accent)) } else { (t.panel, Stroke::new(1.0, t.border)) };
     ui.painter().rect(rect, 12.0, fill, edge, StrokeKind::Inside);
@@ -281,7 +306,10 @@ fn card(
     ui.add_space(12.0);
     let lit = *on && enabled;
     ui.add_enabled_ui(lit, |ui| add(ui, lit));
-    (changed, added)
+    // As much room below its contents as above them.
+    let bottom = ui.min_rect().max.y + 12.0;
+    let extra = bottom - (rect.min.y + height);
+    CardDone { turned: changed, added, extra: if extra.is_finite() { extra.max(0.0) } else { 0.0 } }
 }
 
 /// A further device's row in its card: which one (from `listed`), and a button to stop recording
@@ -291,7 +319,13 @@ fn more_row(ui: &mut Ui, id: (&str, usize), shown: String, remove: &str, choose:
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let w = (ui.available_width() - 30.0).max(40.0);
-        egui::ComboBox::from_id_salt(id).width(w).truncate().selected_text(shown).show_ui(ui, choose);
+        // A long name is shortened with "…" (all of it is in the tip) to the list's own width: a
+        // list shortens its words to all the room its row has, which put the × past the card's
+        // edge and everything under it wider than the card.
+        ui.scope(|ui| {
+            ui.set_max_width(w);
+            egui::ComboBox::from_id_salt(id).width(w).truncate().selected_text(shown.clone()).show_ui(ui, choose).response.on_hover_text(shown);
+        });
         gone = icons::button_sized(ui, Icon::Close, remove, false, true, 24.0).clicked();
     });
     ui.add_space(4.0);
@@ -438,13 +472,19 @@ fn monitor_choice(ui: &mut Ui, rec: &mut RecorderOptions, devices: &RecorderDevi
     }
     let chosen = chosen_monitor(rec, &devices.monitors);
     let shown = chosen.and_then(|i| devices.monitors.get(i).map(|m| monitor_label(m, i))).unwrap_or_default();
-    egui::ComboBox::from_id_salt("recorder-monitor").width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
-        for (i, m) in devices.monitors.iter().enumerate() {
-            if ui.selectable_label(chosen == Some(i), monitor_label(m, i)).clicked() {
-                rec.monitor = Some(MonitorChoice { name: m.name.clone(), x: m.x, y: m.y });
+    egui::ComboBox::from_id_salt("recorder-monitor")
+        .width(ui.available_width())
+        .truncate()
+        .selected_text(shown.clone())
+        .show_ui(ui, |ui| {
+            for (i, m) in devices.monitors.iter().enumerate() {
+                if ui.selectable_label(chosen == Some(i), monitor_label(m, i)).clicked() {
+                    rec.monitor = Some(MonitorChoice { name: m.name.clone(), x: m.x, y: m.y });
+                }
             }
-        }
-    });
+        })
+        .response
+        .on_hover_text(shown);
 }
 
 /// Whether a frame of this size fits on one of the monitors (on any, when none was found).
@@ -567,7 +607,14 @@ fn camera_card(ui: &mut Ui, on: bool, o: &mut VideoOptions, d: &RecorderDevices,
         }
         (true, CameraPreview::Failed(why)) => {
             p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
-            ui.scope_builder(egui::UiBuilder::new().max_rect(rect.shrink(8.0)), |ui| warning(ui, why.as_str()));
+            // As many lines as the picture's place holds (all of it in its tip), never past it.
+            let inside = rect.shrink(8.0);
+            let font = FontId::proportional(12.0);
+            let row = ui.fonts_mut(|f| f.row_height(&font)).max(1.0);
+            let rows = (inside.height() / row).floor().max(1.0) as usize;
+            ui.scope_builder(egui::UiBuilder::new().max_rect(inside), |ui| {
+                ui.add(widgets::wrapped(why, font, t.danger, rows)).on_hover_text(why.as_str());
+            });
         }
         (true, _) => {
             p.rect(rect, 8.0, t.control, Stroke::new(1.0, t.border), StrokeKind::Inside);
@@ -586,11 +633,17 @@ fn camera_card(ui: &mut Ui, on: bool, o: &mut VideoOptions, d: &RecorderDevices,
         .and_then(|i| list.iter().find(|c| c.0 == i).map(|c| c.1.clone()))
         .or_else(|| list.first().map(|c| c.1.clone()))
         .unwrap_or_else(|| if d.cameras.is_some() { "No camera was found".to_string() } else { "The first camera".to_string() });
-    egui::ComboBox::from_id_salt("recorder-camera").width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
-        for (i, name) in list {
-            ui.selectable_value(&mut o.camera_index, Some(*i), name);
-        }
-    });
+    egui::ComboBox::from_id_salt("recorder-camera")
+        .width(ui.available_width())
+        .truncate()
+        .selected_text(shown.clone())
+        .show_ui(ui, |ui| {
+            for (i, name) in list {
+                ui.selectable_value(&mut o.camera_index, Some(*i), name);
+            }
+        })
+        .response
+        .on_hover_text(shown);
     // How it looks in the video (the video editor can change it after).
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -628,12 +681,18 @@ fn sound_card(
         None => "The system's default".to_string(),
     };
     let shown = chosen.clone().unwrap_or_else(|| label.clone());
-    egui::ComboBox::from_id_salt(id).width(ui.available_width()).truncate().selected_text(shown).show_ui(ui, |ui| {
-        ui.selectable_value(chosen, None, label);
-        for m in devices {
-            ui.selectable_value(chosen, Some(m.clone()), m);
-        }
-    });
+    egui::ComboBox::from_id_salt(id)
+        .width(ui.available_width())
+        .truncate()
+        .selected_text(shown.clone())
+        .show_ui(ui, |ui| {
+            ui.selectable_value(chosen, None, label);
+            for m in devices {
+                ui.selectable_value(chosen, Some(m.clone()), m);
+            }
+        })
+        .response
+        .on_hover_text(shown);
     ui.add_space(14.0);
     if on {
         level_meter(ui, level, meter);
@@ -757,27 +816,33 @@ pub fn recorder_ui(
             .filter(|_| sources.more_microphones.len() + 1 < screengrabcraft_model::settings::MOST_MICROPHONES);
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = CARD_GAP;
+            let mut extra = 0.0_f32;
             let mut screen = rec.screen;
-            if card(ui, Icon::Screen, "Screen", &mut screen, true, height, None, |ui, _| screen_card(ui, view, rec, devices)).0 {
+            let done = card(ui, Icon::Screen, "Screen", &mut screen, true, height, None, |ui, _| screen_card(ui, view, rec, devices));
+            extra = extra.max(done.extra);
+            if done.turned {
                 rec.screen = screen;
             }
             let mut camera_on = sources.camera && devices.camera_supported;
             let shown = camera_on;
             let more = Some(("Record another camera too, on a track of its own", another_camera.is_some()));
-            let (turned, add) = card(ui, Icon::Camera, "Camera", &mut camera_on, devices.camera_supported, height, more, |ui, _| {
+            let done = card(ui, Icon::Camera, "Camera", &mut camera_on, devices.camera_supported, height, more, |ui, _| {
                 camera_card(ui, shown, sources, devices, camera);
                 more_cameras(ui, sources, devices);
             });
-            if turned {
+            extra = extra.max(done.extra);
+            if done.turned {
                 sources.camera = camera_on;
             }
-            if add && let Some(c) = another_camera {
+            if done.added
+                && let Some(c) = another_camera
+            {
                 sources.more_cameras.push(c);
             }
             let mut mic_on = sources.microphone;
             let mic_shown = mic_on;
             let more = Some(("Record another microphone too, on a track of its own", another_mic.is_some()));
-            let (turned, add) = card(ui, Icon::Microphone, "Microphone", &mut mic_on, true, height, more, |ui, _| {
+            let done = card(ui, Icon::Microphone, "Microphone", &mut mic_on, true, height, more, |ui, _| {
                 sound_card(
                     ui,
                     "recorder-mic",
@@ -809,15 +874,18 @@ pub fn recorder_ui(
                     warning(ui, SILENT_MICROPHONE);
                 }
             });
-            if turned {
+            extra = extra.max(done.extra);
+            if done.turned {
                 sources.microphone = mic_on;
             }
-            if add && let Some(m) = another_mic {
+            if done.added
+                && let Some(m) = another_mic
+            {
                 sources.more_microphones.push(m);
             }
             let mut sound_on = sources.system_sound && devices.system_sound;
             let sound_shown = sound_on;
-            if card(ui, Icon::Speaker, "Computer sound", &mut sound_on, devices.system_sound, height, None, |ui, _| {
+            let done = card(ui, Icon::Speaker, "Computer sound", &mut sound_on, devices.system_sound, height, None, |ui, _| {
                 if !devices.system_sound_platform {
                     note(ui, "Only on Windows: this system has no way to record what it plays.");
                 } else if !devices.system_sound {
@@ -835,10 +903,17 @@ pub fn recorder_ui(
                     );
                     note(ui, "What plays through these speakers, like the others in a call.");
                 }
-            })
-            .0
-            {
+            });
+            extra = extra.max(done.extra);
+            if done.turned {
                 sources.system_sound = sound_on;
+            }
+            // Every card as tall as the tallest's contents need, from the next frame on (the
+            // window grows with them: [`window_size`]).
+            let before = card_extra(ui.ctx());
+            if (extra - before).abs() > 0.5 {
+                ui.ctx().data_mut(|d| d.insert_temp(card_extra_id(), extra.ceil()));
+                ui.ctx().request_repaint();
             }
         });
         ui.add_space(10.0);

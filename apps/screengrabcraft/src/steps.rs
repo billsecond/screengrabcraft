@@ -18,6 +18,7 @@ use egui::{RichText, ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_desktop::{launch, paths, store};
 use screengrabcraft_model::guide::{GUIDE_EXT, Guide, GuideStep, default_text};
 use screengrabcraft_model::{IRect, ImageFormat, Raster};
+use screengrabcraft_ui::fit::{self, Fit};
 use screengrabcraft_ui::guide::{GuideAction, GuideFormat, GuideView};
 use screengrabcraft_ui::theme::Tokens;
 use screengrabcraft_ui::widgets;
@@ -28,7 +29,7 @@ use crate::app::{APP_ID, ICON, Service};
 pub const BAR_TITLE: &str = "ScreenGrabCraft steps";
 const WINDOW_TITLE: &str = "How-to Guide";
 /// The bar's size, in points.
-const BAR: egui::Vec2 = egui::Vec2 { x: 330.0, y: 52.0 };
+const BAR: egui::Vec2 = egui::Vec2 { x: 330.0, y: 56.0 };
 /// How often the mouse is looked at.
 const POLL: Duration = Duration::from_millis(12);
 /// A click on the tray's menu to stop is no step: those this soon before it go.
@@ -51,6 +52,10 @@ struct Run {
     folder: PathBuf,
     /// The bar's place in points, and its monitor's scale.
     at: (egui::Pos2, f32),
+    /// Where the bar is on the desktop as made ([`BAR`] big), and where it is now (wider for
+    /// longer words): a click there is no step.
+    bar_desk: Option<IRect>,
+    bar: Arc<Mutex<Option<IRect>>>,
     failed: u32,
 }
 
@@ -116,7 +121,7 @@ pub fn start(svc: &mut Service) {
     let bar = Arc::new(Mutex::new(bar_desk));
     let stop = Arc::new(AtomicBool::new(false));
     let (tx, rx) = channel();
-    let (worker_stop, worker_bar, worker_folder, ctx) = (stop.clone(), bar, folder.clone(), svc.ctx.clone());
+    let (worker_stop, worker_bar, worker_folder, ctx) = (stop.clone(), bar.clone(), folder.clone(), svc.ctx.clone());
     let spawned = std::thread::Builder::new().name("steps".into()).spawn(move || {
         // A press under way as it starts (the button that started it) is no step.
         let mut was_down = true;
@@ -145,7 +150,7 @@ pub fn start(svc: &mut Service) {
     }
     log::info!("step capture started: {}", file.display());
     let title = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    svc.steps.run = Some(Run { stop, rx, guide: Guide { title, steps: Vec::new() }, times: Vec::new(), file, folder, at, failed: 0 });
+    svc.steps.run = Some(Run { stop, rx, guide: Guide { title, steps: Vec::new() }, times: Vec::new(), file, folder, at, bar_desk, bar, failed: 0 });
     svc.sync_steps();
 }
 
@@ -261,7 +266,15 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     let mut stop_now = false;
     if let Some(run) = svc.steps.run.as_mut() {
         collect(run);
-        let (count, failed, at) = (run.guide.steps.len(), run.failed, run.at);
+        let (count, failed, (at, scale)) = (run.guide.steps.len(), run.failed, run.at);
+        let fit = bar_fit();
+        let (shown, size) = (fit.shown(ctx), fit.size(ctx));
+        // Grown for its words: still in the middle, and still no step where it is.
+        let grown = size - BAR;
+        if let (Some(d), Ok(mut bar)) = (run.bar_desk, run.bar.lock()) {
+            let (dw, dh) = ((grown.x * scale).ceil() as i32, (grown.y * scale).ceil() as i32);
+            *bar = Some(IRect::new(d.x.saturating_sub(dw / 2), d.y, d.w.saturating_add(dw.max(0) as u32), d.h.saturating_add(dh.max(0) as u32)));
+        }
         let builder = ViewportBuilder::default()
             .with_title(BAR_TITLE)
             .with_app_id(APP_ID)
@@ -270,12 +283,11 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
             .with_taskbar(false)
             .with_window_level(egui::WindowLevel::AlwaysOnTop)
             .with_active(false)
-            .with_position(at.0)
-            .with_inner_size(BAR);
+            .with_position(pos2(at.x - grown.x / 2.0, at.y))
+            .with_inner_size(size)
+            .with_visible(shown);
         ctx.show_viewport_immediate(ViewportId::from_hash_of("steps-bar"), builder, |ui, _| {
-            egui::CentralPanel::default().frame(widgets::popup_frame(ui.ctx())).show(ui, |ui| {
-                stop_now = bar_ui(ui, count, failed);
-            });
+            stop_now = fit.face(ui, widgets::popup_frame(ui.ctx()), |ui| bar_ui(ui, count, failed));
         });
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -318,23 +330,28 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
     svc.steps.window = Some(w);
 }
 
+/// The bar's window: [`BAR`], or wider when its words need more.
+fn bar_fit() -> Fit {
+    Fit::new("steps-bar", BAR)
+}
+
 /// The bar while steps are taken: a red dot, how many, and Stop. True when Stop was pressed.
 fn bar_ui(ui: &mut egui::Ui, count: usize, failed: u32) -> bool {
     let t = Tokens::get(ui.ctx());
-    let mut stop = false;
-    ui.horizontal_centered(|ui| {
-        let (dot, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
-        ui.painter().circle_filled(dot.center(), 6.0, egui::Color32::from_rgb(220, 40, 40));
-        let words = match (count, failed) {
-            (0, _) => "Click what to show, step by step".to_string(),
-            (n, 0) => format!("{n} step{}", if n == 1 { "" } else { "s" }),
-            (n, f) => format!("{n} step{}, {f} missed", if n == 1 { "" } else { "s" }),
-        };
-        ui.label(RichText::new(words).color(t.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            stop = widgets::button(ui, "Stop").on_hover_text("Stop, and put the steps in order and into words").clicked();
-        });
-    });
+    let words = match (count, failed) {
+        (0, _) => "Click what to show, step by step".to_string(),
+        (n, 0) => format!("{n} step{}", if n == 1 { "" } else { "s" }),
+        (n, f) => format!("{n} step{}, {f} missed", if n == 1 { "" } else { "s" }),
+    };
+    let ((), stop) = fit::ends(
+        ui,
+        |ui| {
+            let (dot, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot.center(), 6.0, egui::Color32::from_rgb(220, 40, 40));
+            ui.label(RichText::new(words).color(t.text));
+        },
+        |ui| widgets::button(ui, "Stop").on_hover_text("Stop, and put the steps in order and into words").clicked(),
+    );
     stop
 }
 
@@ -371,5 +388,22 @@ mod tests {
         h.get_by_label("Stop").click();
         h.run_steps(2);
         assert!(h.state().1);
+    }
+
+    /// The bar's words never run under Stop: with the interface's font, at every display scale,
+    /// the bar grows to them.
+    #[test]
+    fn the_bars_words_stay_clear_of_stop_at_every_scale() {
+        for scale in crate::fit_check::SCALES {
+            for (count, failed) in [(0, 0), (12, 3), (1_234, 567)] {
+                let (mut h, size, found) =
+                    crate::fit_check::fitted(bar_fit(), widgets::popup_frame, scale, screengrabcraft_model::Theme::Light, move |ui| {
+                        let _ = bar_ui(ui, count, failed);
+                    });
+                assert!(found.is_empty(), "{count} steps, {failed} missed, at {scale}: {found:?}");
+                assert!(size.x >= BAR.x && size.y == BAR.y, "{size:?}");
+                crate::fit_check::shot(&mut h, &format!("steps-bar-{count}"), scale);
+            }
+        }
     }
 }
