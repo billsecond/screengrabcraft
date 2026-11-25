@@ -10,4 +10,9 @@ Terminal=false
 StartupNotify=false
 StartupWMClass=io.github.billsecond.screengrabcraft
 Categories=Graphics;Utility;
-Keywords=screenshot;capture;screen;grab;snip;record;gif;
+Keywords=screenshot;capture;screen;grab;snip;record;recorder;recording;gif;video;
+Actions=record;
+
+[Desktop Action record]
+Name=Record
+Exec=screengrabcraft --capture production

@@ -8,9 +8,10 @@
       -d Version=1.2.3 -d BinDir=... -d IconPath=... -d EditorIconPath=... -d LicenseRtf=... -o out.msi
 
   The capture service (screengrabcraft.exe), the editor (screengrabcraft-editor.exe) and the
-  command-line program (screengrabcraft-cli.exe), with Start Menu shortcuts for the first two. The
-  capture service starts at every sign-in (the Run value below). The installer shows the standard
-  WiX look: the license with the choice of who it's for, progress, and a finish page.
+  command-line program (screengrabcraft-cli.exe), with Start Menu shortcuts for the first two
+  (ScreenGrabCraft, ScreenGrabCraft Recorder, ScreenGrabCraft Image Editor, ScreenGrabCraft Video
+  Editor). The capture service starts at every sign-in (the Run value below). The installer shows
+  the standard WiX look: the license with the choice of who it's for, progress, and a finish page.
 
   One package, two ways to install it (a "dual-purpose" package, Windows Installer 5.0):
   - for everyone on this PC (per-machine): Program Files\ScreenGrabCraft, the all-users Start
@@ -221,12 +222,26 @@
   <Fragment>
     <ComponentGroup Id="ScreenGrabCraftFiles" Directory="INSTALLFOLDER">
       <!-- The capture service. Its shortcut starts it, or brings the running one's window
-           forward. -->
+           forward.
+           Start's search finds a shortcut by the words of its name (here "edit" finds both
+           editors' "Editor", "record" the Recorder's "Recorder"); the descriptions of these
+           shortcuts aren't searched, so the names carry the words people type. `cargo xtask
+           shortcuts` checks every one of them. -->
       <Component Id="ScreenGrabCraftApp" Guid="DA075F78-50E8-4549-AD50-85A8FF21FA73">
         <File Id="ScreenGrabCraftExe" Source="$(var.BinDir)\screengrabcraft.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft"
               Description="Capture the screen, a window or a region" WorkingDirectory="INSTALLFOLDER"
               Advertise="yes" Icon="ScreenGrabCraftIcon.ico" IconIndex="0" />
+          <!-- A new recording, as the tray's red-dot item (Video Production…) starts one: it opens
+               the Recorder, in the running service or in one it starts. Its app ID is its own:
+               two shortcuts of one component are otherwise one app to Start, which lists only
+               one of them (as with the two editors). -->
+          <Shortcut Id="RecorderStartMenuShortcut" Directory="ProgramMenuFolder" Name="ScreenGrabCraft Recorder"
+              Description="Record the screen, the sound and the camera" WorkingDirectory="INSTALLFOLDER"
+              Arguments="--capture production"
+              Advertise="yes" Icon="ScreenGrabCraftIcon.ico" IconIndex="0">
+            <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.billsecond.screengrabcraft.recorder" />
+          </Shortcut>
         </File>
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\screengrabcraft.exe" Value="[#ScreenGrabCraftExe]" Type="string" />
       </Component>
