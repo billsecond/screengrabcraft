@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use egui::{Color32, RichText, Ui, ViewportBuilder, ViewportId, pos2, vec2};
 use screengrabcraft_desktop::update::{self, Found, Installer, Installing, Schedule, Scope, Version};
 use screengrabcraft_desktop::{launch, paths};
+use screengrabcraft_ui::fit::Fit;
 use screengrabcraft_ui::theme::Tokens;
 
 use crate::app::{APP_ID, Service};
@@ -424,10 +425,53 @@ fn points(x: f32, y: f32, scale: f32) -> egui::Pos2 {
     if cfg!(target_os = "macos") { pos2(x, y) } else { pos2(x / scale.max(0.5), y / scale.max(0.5)) }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     Install,
     Page,
     Later,
+}
+
+/// What the notice of an update says.
+struct UpdateView {
+    title: String,
+    detail: String,
+    /// Its installer is here: Update now. Else Get it (from the release page).
+    ready: bool,
+}
+
+/// The update notice's size; taller for words that need more lines (`screengrabcraft_ui::fit`).
+const UPDATE_SIZE: egui::Vec2 = vec2(380.0, 112.0);
+
+/// The update notice's face: what's ready, what happens, and its buttons, which wrap to another
+/// line rather than run past its edge.
+fn update_ui(ui: &mut Ui, v: &UpdateView) -> Option<Act> {
+    ui.style_mut().visuals = egui::Visuals::dark();
+    let mut act = None;
+    ui.add(egui::Label::new(RichText::new(&v.title).strong().size(15.0).color(Color32::WHITE)).wrap());
+    ui.add(screengrabcraft_ui::widgets::wrapped(&v.detail, egui::FontId::proportional(12.0), Color32::from_gray(190), 8));
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        if v.ready {
+            if ui.button(RichText::new("Update now").strong()).clicked() {
+                act = Some(Act::Install);
+            }
+        } else if ui.button(RichText::new("Get it").strong()).clicked() {
+            act = Some(Act::Page);
+        }
+        if ui.button("Later").clicked() {
+            act = Some(Act::Later);
+        }
+        if v.ready && ui.link("What's new").clicked() {
+            act = Some(Act::Page);
+        }
+    });
+    act
+}
+
+/// The update notice's frame: dark, whatever the look.
+fn update_frame() -> egui::Frame {
+    egui::Frame::NONE.fill(DARK).inner_margin(egui::Margin::same(12)).corner_radius(10)
 }
 
 /// The notice of an update, in the corner where the capture notices are (above one, if one is
@@ -437,8 +481,20 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
         return;
     }
     let Some(offer) = svc.updates.offer.clone() else { return };
-    let size = vec2(380.0, 112.0);
-    let above = if svc.notice.is_some() { 96.0 + 12.0 } else { 0.0 };
+    let ready = offer.installer.is_some();
+    let title = if ready {
+        format!("ScreenGrabCraft {} is ready to install", offer.version)
+    } else {
+        format!("ScreenGrabCraft {} is available", offer.version)
+    };
+    let detail = match (&offer.problem, ready) {
+        (Some(_), _) => format!("You have {}. The download didn't work, so get it from its release page.", current_text()),
+        (None, true) => format!("You have {}. {}", current_text(), install_note(svc.updates.asks_permission)),
+        (None, false) => format!("You have {}. Get it from its release page.", current_text()),
+    };
+    let fit = Fit::new("update-notice", UPDATE_SIZE);
+    let (shown, size) = (fit.shown_with(ctx, (&title, &detail, ready)), fit.size(ctx));
+    let above = crate::popups::notice_size_now(svc, ctx).map_or(0.0, |s| s.y + 12.0);
     let at = screengrabcraft_capture::monitors()
         .ok()
         .and_then(|ms| ms.into_iter().next())
@@ -453,42 +509,15 @@ pub fn show(svc: &mut Service, ctx: &egui::Context) {
         .with_window_level(egui::WindowLevel::AlwaysOnTop)
         .with_active(false)
         .with_position(at)
-        .with_inner_size(size);
-    let ready = offer.installer.is_some();
-    let title = if ready {
-        format!("ScreenGrabCraft {} is ready to install", offer.version)
-    } else {
-        format!("ScreenGrabCraft {} is available", offer.version)
-    };
-    let detail = match (&offer.problem, ready) {
-        (Some(_), _) => format!("You have {}. The download didn't work, so get it from its release page.", current_text()),
-        (None, true) => format!("You have {}. {}", current_text(), install_note(svc.updates.asks_permission)),
-        (None, false) => format!("You have {}. Get it from its release page.", current_text()),
-    };
+        .with_inner_size(size)
+        .with_visible(shown);
+    let view = UpdateView { title, detail, ready };
     let mut act = None;
     let mut hold = false;
     ctx.show_viewport_immediate(ViewportId::from_hash_of("update-notice"), builder, |ui, _| {
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(DARK).inner_margin(egui::Margin::same(12)).corner_radius(10)).show(ui, |ui| {
-            ui.style_mut().visuals = egui::Visuals::dark();
+        act = fit.face(ui, update_frame(), |ui| {
             hold = ui.ui_contains_pointer();
-            ui.label(RichText::new(&title).strong().size(15.0).color(Color32::WHITE));
-            ui.add(egui::Label::new(RichText::new(&detail).size(12.0).color(Color32::from_gray(190))).wrap());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ready {
-                    if ui.button(RichText::new("Update now").strong()).clicked() {
-                        act = Some(Act::Install);
-                    }
-                } else if ui.button(RichText::new("Get it").strong()).clicked() {
-                    act = Some(Act::Page);
-                }
-                if ui.button("Later").clicked() {
-                    act = Some(Act::Later);
-                }
-                if ready && ui.link("What's new").clicked() {
-                    act = Some(Act::Page);
-                }
-            });
+            update_ui(ui, &view)
         });
     });
     match act {
@@ -606,5 +635,40 @@ mod tests {
     fn only_an_install_for_everyone_mentions_the_permission_prompt() {
         assert!(install_note(Scope::Machine.asks_permission()).contains("permission"));
         assert!(!install_note(Scope::User.asks_permission()).contains("permission"));
+    }
+
+    /// The update's notice keeps its words and buttons inside it at every display scale, taller
+    /// for words that need more lines.
+    #[test]
+    fn the_update_notice_keeps_its_words_inside_at_every_scale() {
+        let cases = [
+            ("update-ready", "ScreenGrabCraft 0.1.64 is ready to install".to_string(), format!("You have 0.1.63. {}", install_note(true)), true),
+            (
+                "update-page",
+                "ScreenGrabCraft 0.1.64 is available".to_string(),
+                "You have 0.1.63. The download didn't work, so get it from its release page.".to_string(),
+                false,
+            ),
+        ];
+        for scale in crate::fit_check::SCALES {
+            for (name, title, detail, ready) in cases.clone() {
+                let view = UpdateView { title, detail: detail.clone(), ready };
+                let fit = Fit::new("update-notice", UPDATE_SIZE);
+                let (mut h, _, found) = crate::fit_check::fitted(
+                    fit,
+                    |_| update_frame(),
+                    scale,
+                    screengrabcraft_model::Theme::Dark,
+                    move |ui| {
+                        let _ = update_ui(ui, &view);
+                    },
+                );
+                assert!(found.is_empty(), "{name} at {scale}: {found:?}");
+                use egui_kittest::kittest::Queryable as _;
+                h.get_by_label(&detail);
+                h.get_by_label(if ready { "Update now" } else { "Get it" });
+                crate::fit_check::shot(&mut h, name, scale);
+            }
+        }
     }
 }

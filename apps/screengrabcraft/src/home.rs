@@ -1223,6 +1223,35 @@ mod tests {
         }
     }
 
+    /// The Capture page's buttons keep their words on them, with the interface's font at every
+    /// display scale and long shortcuts: a description too long for one line wraps, and the
+    /// buttons of its row grow to it.
+    #[test]
+    fn the_capture_buttons_keep_their_words_on_them_at_every_scale() {
+        for scale in crate::fit_check::SCALES {
+            let mut h = Harness::builder().with_size(vec2(590.0, 900.0)).with_pixels_per_point(scale).build_ui_state(
+                |ui, delay: &mut u32| {
+                    screengrabcraft_ui::theme::apply(ui.ctx(), Theme::Light);
+                    let shortcut = |m: CaptureMode| match m {
+                        CaptureMode::Region => "Print Screen".to_string(),
+                        CaptureMode::Production => "Ctrl+Shift+Alt+Print Screen".to_string(),
+                        CaptureMode::Video => "Ctrl+Shift+F12".to_string(),
+                        _ => String::new(),
+                    };
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        let _ = capture_buttons(ui, delay, &shortcut);
+                    });
+                },
+                5,
+            );
+            screengrabcraft_ui::install_fonts(&h.ctx);
+            h.run_steps(3);
+            let found = crate::fit_check::check(&h);
+            assert!(found.is_empty(), "at {scale}: {}", found.join("\n"));
+            crate::fit_check::shot(&mut h, "home-capture-buttons", scale);
+        }
+    }
+
     /// The presets' page: one is added, made a picture of a set size copied straight away, given
     /// a wait, and captured; another is removed.
     #[test]

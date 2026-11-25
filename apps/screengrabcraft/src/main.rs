@@ -27,6 +27,8 @@
 mod app;
 mod captions;
 mod film;
+#[cfg(test)]
+mod fit_check;
 mod home;
 mod hotkeys;
 mod ink;

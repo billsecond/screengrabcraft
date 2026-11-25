@@ -804,8 +804,11 @@ impl Overlay {
             Some(s) if self.purpose == Purpose::Picture && !several => Some(format!("{s}  ·  {MORE_KEY}: several areas")),
             other => other,
         };
-        let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(15.0), Color32::WHITE);
-        let small = shapes.map(|s| painter.layout_no_wrap(s, FontId::proportional(12.5), Color32::from_gray(210)));
+        // Wrapped to the monitor: on a narrow one (or a small one at a large scale) it never runs
+        // off its edges.
+        let room = (screen.width() - 60.0).max(80.0);
+        let galley = painter.layout(text.to_string(), FontId::proportional(15.0), Color32::WHITE, room);
+        let small = shapes.map(|s| painter.layout(s, FontId::proportional(12.5), Color32::from_gray(210), room));
         let extra = small.as_ref().map_or(0.0, |g| g.size().y + 4.0);
         let wide = small.as_ref().map_or(galley.size().x, |g| g.size().x.max(galley.size().x));
         let at = pos2(screen.center().x - wide / 2.0, screen.min.y + 28.0);
@@ -826,7 +829,7 @@ impl Overlay {
         let drag = if grip { "Drag the middle to move the frame" } else { "Drag the frame to move it" };
         let resize = if self.purpose.fixed().is_none() { "  ·  Shift+arrows: resize" } else { "" };
         let text = format!("{drag}  ·  Arrow keys nudge it ({NUDGE_KEYS}: {} pixels){resize}", NUDGE_FAR as u32);
-        let galley = painter.layout_no_wrap(text, FontId::proportional(13.0), Color32::WHITE);
+        let galley = painter.layout(text, FontId::proportional(13.0), Color32::WHITE, (screen.width() - 48.0).max(80.0));
         let size = galley.size() + vec2(24.0, 12.0);
         let left = screen.center().x - size.x / 2.0;
         let top = egui::Rect::from_min_size(pos2(left, screen.min.y + 28.0), size);
@@ -1493,6 +1496,36 @@ mod tests {
                 assert_eq!((*area, *desktop, *action), (IRect::new(220, 160, 300, 200), IRect::new(220, 160, 300, 200), Action::Start));
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    /// On a narrow monitor (one turned on its end, or a small one at a large scale) the hints at
+    /// the top wrap to it rather than run off its edges, at every display scale.
+    #[test]
+    fn the_hints_wrap_on_a_narrow_monitor() {
+        let narrow =
+            || OverlayMonitor { rect: IRect::new(0, 0, 360, 640), picture: Raster::filled(360, 640, Color::WHITE).unwrap(), name: "Narrow".into() };
+        for scale in [1.0, 1.5, 2.0] {
+            let choosing = Overlay::new(vec![narrow()], Vec::new(), Purpose::Picture);
+            let mut moving = Overlay::new(vec![narrow()], Vec::new(), Purpose::Video);
+            moving.preselect(0, IRect::new(60, 300, 240, 120));
+            for (name, o) in [("overlay-narrow-hint", choosing), ("overlay-narrow-move-hint", moving)] {
+                let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(376.0, 656.0)).with_pixels_per_point(scale).build_ui_state(
+                    |ui, o: &mut Overlay| {
+                        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| o.show_monitor(ui, 0));
+                    },
+                    o,
+                );
+                crate::install_fonts(&h.ctx);
+                h.run_steps(3);
+                let found = crate::fit::spills(&h.output().shapes, h.ctx.content_rect());
+                assert!(found.is_empty(), "{name} at {scale}: {}", found.join("\n"));
+                if let Ok(dir) = std::env::var("SGC_SHOTS")
+                    && let Ok(img) = h.render()
+                {
+                    let _ = img.save(format!("{dir}/{name}@{scale}.png"));
+                }
+            }
         }
     }
 
