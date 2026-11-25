@@ -8,6 +8,7 @@ mod ico;
 mod icon;
 mod layers;
 mod names;
+mod shortcuts;
 mod version;
 
 use std::path::{Path, PathBuf};
@@ -21,9 +22,12 @@ commands:
   names [hash <word>]
                   check that no file names the products ScreenGrabCraft is modelled on, or their
                   maker (hash: print the entry for another word)
+  shortcuts       check the installers' Start menu entries: what each starts, and that \"record\" and
+                  \"edit\" typed into the Start menu find theirs
   layers          enforce the crate dependency layering (docs/architecture.md)
   wasm            cargo check --target wasm32-unknown-unknown for the crates the browser build uses
-  ci              fmt --check, clippy -D warnings, test, assets, names, layers, wasm (stops at first failure)
+  ci              fmt --check, clippy -D warnings, test, assets, names, shortcuts, layers, wasm (stops
+                  at first failure)
   icon            draw both app icons (original artwork, in code) into assets/app-icon
   ico <out.ico> <in.png>...
                   pack square PNGs (<= 256 px) into a Windows .ico
@@ -39,6 +43,7 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("assets") => assets::run(&root()),
         Some("names") => names::run(&root(), &rest),
+        Some("shortcuts") => shortcuts::run(&root()),
         Some("layers") => cmd_layers(),
         Some("wasm") => cmd_wasm(),
         Some("ci") => cmd_ci(),
@@ -169,6 +174,7 @@ fn cmd_ci() -> Result<(), String> {
         ),
         ("assets", Box::new(|| assets::run(&root()))),
         ("names", Box::new(|| names::run(&root(), &[]))),
+        ("shortcuts", Box::new(|| shortcuts::run(&root()))),
         ("layers", Box::new(cmd_layers)),
         ("wasm", Box::new(cmd_wasm)),
     ];

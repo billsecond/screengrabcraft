@@ -685,6 +685,24 @@ mod tests {
         let _ = video_icon(egui::IconData { rgba: Vec::new(), width: 0, height: 0 });
     }
 
+    /// The Start menu's ScreenGrabCraft Video Editor (Windows) and the editor's Video Editor action
+    /// (Linux) start the editor with its video switch; the Image Editor starts it with nothing.
+    #[test]
+    fn the_start_menus_editors_start_the_right_editor() {
+        let wxs = include_str!("../../../packaging/windows/screengrabcraft.wxs");
+        let args = |name: &str| {
+            let at = wxs.find(&format!("Name=\"{name}\"")).unwrap();
+            let tag = &wxs[wxs[..at].rfind("<Shortcut").unwrap()..at + wxs[at..].find('>').unwrap()];
+            assert!(tag.contains(r#"Directory="ProgramMenuFolder""#), "{tag}");
+            tag.split(" Arguments=\"").nth(1).and_then(|a| a.split('"').next()).unwrap_or_default().to_string()
+        };
+        assert_eq!(args("ScreenGrabCraft Video Editor"), launch::VIDEO);
+        assert_eq!(args("ScreenGrabCraft Image Editor"), "");
+        let desktop = include_str!("../../../packaging/linux/io.github.billsecond.screengrabcraft.editor.desktop");
+        let video = desktop.lines().skip_while(|l| *l != "[Desktop Action video]").find_map(|l| l.strip_prefix("Exec=")).unwrap();
+        assert_eq!(video, format!("screengrabcraft-editor {}", launch::VIDEO));
+    }
+
     #[test]
     fn a_window_squeezed_to_a_sliver_gets_its_usual_size_back() {
         // As Windows left it: a sliver at the top left.
