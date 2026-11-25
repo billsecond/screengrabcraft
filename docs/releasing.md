@@ -124,8 +124,13 @@ asks the real API as an older version and downloads and checks the x64 MSI, with
   Both properties are needed for a per-user install (the package's own `ALLUSERS` is 1, and
   Windows reads `MSIINSTALLPERUSER` only when `ALLUSERS` is 2). A silent install the other way than
   the installed copy stops with a message instead of installing a second copy beside it; to
-  switch, uninstall first. Start Menu shortcuts "ScreenGrabCraft" (the capture service) and
-  "ScreenGrabCraft Editor"; App Paths entries for both. The capture service starts at every
+  switch, uninstall first. Start Menu shortcuts "ScreenGrabCraft" (the capture service),
+  "ScreenGrabCraft Recorder" (the service with `--capture production`: the Recorder),
+  "ScreenGrabCraft Image Editor" and "ScreenGrabCraft Video Editor" (the editor with `--video`),
+  named so that typing "record" or "edit" in Start finds them (Start searches the words of a
+  shortcut's name, not these shortcuts' descriptions); the Recorder and the Video Editor have app
+  IDs of their own, or Start would list only one shortcut of each program. `cargo xtask
+  shortcuts` (in `cargo xtask ci`) checks all of it. App Paths entries for both programs. The capture service starts at every
   sign-in through the `ScreenGrabCraft` value under `Software\Microsoft\Windows\CurrentVersion\Run`
   (`"…\screengrabcraft.exe" --background`), in HKLM per-machine and HKCU per-user, removed on
   uninstall; each person can turn it off in the app or in Task Manager › Startup apps (the app

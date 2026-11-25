@@ -3,7 +3,9 @@
 //! ```text
 //! screengrabcraft                      start the service (or show the running one's window)
 //! screengrabcraft --capture <mode>     capture now: region, window, screen, all, repeat,
-//!                                      scrolling or gif (the running service does it)
+//!                                      scrolling, gif or video (the running service does it);
+//!                                      production opens the Recorder (the Start menu's
+//!                                      ScreenGrabCraft Recorder)
 //! screengrabcraft --preset <name>      take a capture preset (by its name or its number);
 //!                                      also --capture preset:<name>
 //! screengrabcraft --delay <seconds>    capture an area after a countdown
@@ -41,7 +43,7 @@ use std::process::ExitCode;
 use screengrabcraft_desktop::{graphics, instance, logging, paths, service, store, version};
 
 const USAGE: &str =
-    "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif|preset:<name>] [--delay <s>] [--settings] [--quit]
+    "usage: screengrabcraft [--capture region|window|screen|all|repeat|scrolling|gif|video|production|preset:<name>] [--delay <s>] [--settings] [--quit]
        screengrabcraft --preset <name or number>
        screengrabcraft --check-updates
        screengrabcraft --background | --tray
@@ -255,5 +257,28 @@ mod tests {
         assert!(app::wayland_accepts(&b));
         assert_eq!(b.resizable, Some(false));
         assert!(b.inner_size.is_some_and(|s| s.x >= 2.0 && s.y >= 1.0));
+    }
+
+    /// The Start menu's ScreenGrabCraft Recorder (Windows) and the Record action (Linux) start a
+    /// new recording the way the tray's red-dot item does: they open the Recorder.
+    #[test]
+    fn the_start_menus_recorder_opens_the_recorder() {
+        use screengrabcraft_model::CaptureMode;
+        let wxs = include_str!("../../../packaging/windows/screengrabcraft.wxs");
+        let at = wxs.find(r#"Name="ScreenGrabCraft Recorder""#).unwrap();
+        let tag = &wxs[wxs[..at].rfind("<Shortcut").unwrap()..at + wxs[at..].find('>').unwrap()];
+        assert!(tag.contains(r#"Directory="ProgramMenuFolder""#), "{tag}");
+        let windows = tag.split(" Arguments=\"").nth(1).and_then(|a| a.split('"').next()).unwrap();
+        let desktop = include_str!("../../../packaging/linux/io.github.billsecond.screengrabcraft.desktop");
+        let linux = desktop.lines().skip_while(|l| *l != "[Desktop Action record]").find_map(|l| l.strip_prefix("Exec=screengrabcraft ")).unwrap();
+        for args in [windows, linux] {
+            let words: Vec<&str> = args.split_whitespace().collect();
+            assert_eq!(words.first(), Some(&"--capture"), "{args}");
+            assert_eq!(words.get(1).and_then(|w| CaptureMode::from_arg(w)), Some(CaptureMode::Production), "{args}");
+            assert_eq!(words.len(), 2, "{args}");
+        }
+        // Video Production is the tray's record item, the one with the red dot.
+        let menu = tray::entries(&|_| None, &[], None, tray::Running::default());
+        assert!(menu.iter().any(|e| matches!(e, tray::Entry::Marked(_, tray::Item::Capture(CaptureMode::Production)))));
     }
 }
