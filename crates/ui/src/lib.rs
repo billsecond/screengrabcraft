@@ -27,6 +27,7 @@ pub mod props;
 pub mod qr;
 pub mod quick;
 pub mod recorder;
+pub mod reopen;
 pub mod selection;
 pub mod services;
 pub mod simplify;

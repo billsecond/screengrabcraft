@@ -339,7 +339,7 @@ impl Editor {
             let path = self.services.new_picture_path(&source)?;
             self.name = stem(&path);
             self.picture_path = Some(path.clone());
-            self.settings.remember(&path);
+            self.remember_file(&path);
             self.services.save_settings(&self.settings);
         }
         let Some(picture) = self.picture_path.clone() else {

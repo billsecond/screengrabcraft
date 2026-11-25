@@ -3252,3 +3252,176 @@ fn a_dialogs_batch_command_is_what_its_window_applies() {
         assert_eq!(&command(d), shown, "{}", d.title());
     }
 }
+
+// ---- the last file opened again ----
+
+/// The Image Editor as the program starts it with nothing to open, on a fake disk.
+fn started_with_nothing(disk: &Disk, settings: EditorSettings) -> Harness<'static, Editor> {
+    let mut ed = Editor::new(Box::new(disk.clone()), EditorSettings { show_tray: true, ..settings });
+    ed.offer_welcome();
+    ed.reopen_last();
+    harness(ed)
+}
+
+fn welcome_shown(h: &Harness<'_, Editor>) -> bool {
+    h.query_all_by_label("Nothing open yet").next().is_some()
+}
+
+fn last(path: &str) -> EditorSettings {
+    EditorSettings { last_picture: Some(path.to_string()), ..EditorSettings::default() }
+}
+
+#[test]
+fn the_image_editor_opens_with_the_last_picture_it_had_open_once_the_window_is_up() {
+    let disk =
+        Disk::with(&[("C:/Captures/before.png", png(300, 200, Color::rgb(0, 128, 255))), ("C:/Captures/newest.png", png(500, 400, Color::WHITE))]);
+    // What it had open, not merely the newest capture.
+    let mut ed = Editor::new(Box::new(disk.clone()), EditorSettings { show_tray: true, ..last("C:/Captures/before.png") });
+    ed.offer_welcome();
+    let mut h = harness(ed);
+    // Asked for as the window opens: its first frame (however many passes egui draws it in) is
+    // drawn without it, and with no welcome card meanwhile.
+    h.state_mut().reopen_last();
+    h.step();
+    assert_eq!(h.state().picture_path, None);
+    assert!(!welcome_shown(&h));
+    h.run_steps(3);
+    let ed = h.state();
+    assert_eq!(ed.picture_path.as_deref(), Some("C:/Captures/before.png"));
+    assert_eq!((ed.session.doc.width(), ed.session.doc.height()), (300, 200));
+    assert_eq!(ed.name, "before");
+    assert_eq!(ed.toast_text(), None, "nothing said");
+    assert!(!welcome_shown(&h));
+    if let Ok(dir) = std::env::var("SGC_SHOTS")
+        && let Ok(img) = h.render()
+    {
+        let _ = img.save(format!("{dir}/opened-with-the-last-picture.png"));
+    }
+}
+
+#[test]
+fn a_last_project_opens_again_with_its_annotations() {
+    let mut doc = Document::new(Raster::filled(320, 240, Color::WHITE).unwrap());
+    doc.add(Shape::Rect { rect: screengrabcraft_model::Rect::new(20.0, 20.0, 100.0, 60.0), radius: 0.0 }, Kind::Rect.default_style()).unwrap();
+    let bytes = screengrabcraft_render::project::save(&doc).unwrap();
+    let disk = Disk::with(&[("C:/Work/plan.sgcraft", bytes)]);
+    let mut h = started_with_nothing(&disk, last("C:/Work/plan.sgcraft"));
+    h.run_steps(3);
+    assert_eq!(h.state().project_path.as_deref(), Some("C:/Work/plan.sgcraft"));
+    assert_eq!(h.state().session.doc.objects.len(), 1);
+}
+
+#[test]
+fn a_last_picture_gone_or_unreadable_is_passed_over_quietly_for_the_one_before() {
+    let mut by_another_name = screengrabcraft_media::recording::MAGIC.to_vec();
+    by_another_name.extend(b" a recording, by a picture's name");
+    let disk = Disk::with(&[
+        ("C:/Captures/broken.png", b"not a picture at all".to_vec()),
+        ("C:/Captures/recording.png", by_another_name),
+        ("C:/Captures/good.png", png(240, 160, Color::rgb(30, 160, 60))),
+    ]);
+    let settings = EditorSettings {
+        // Shared with the Video Editor: its recordings and made videos aren't for this one.
+        recent: [
+            "C:/Captures/gone.png",
+            "C:/Captures/broken.png",
+            "C:/Captures/Week.sgvideo",
+            "C:/Captures/Week.mp4",
+            "C:/Captures/recording.png",
+            "C:/Captures/good.png",
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        ..last("C:/Captures/gone.png")
+    };
+    let mut h = started_with_nothing(&disk, settings);
+    h.run_steps(3);
+    let ed = h.state();
+    assert_eq!(ed.picture_path.as_deref(), Some("C:/Captures/good.png"));
+    assert!(ed.video.is_none() && ed.opening_video.is_none());
+    assert_eq!(ed.toast_text(), None, "the ones passed over aren't spoken of");
+    // The one that opened is the last picture now, and first of the recent files.
+    assert_eq!(ed.settings.last_picture.as_deref(), Some("C:/Captures/good.png"));
+    assert_eq!(ed.settings.recent.first().map(String::as_str), Some("C:/Captures/good.png"));
+}
+
+#[test]
+fn a_picture_that_cant_be_opened_isnt_kept_as_one_to_open_again() {
+    let disk = Disk::with(&[("C:/Captures/broken.png", b"not a picture at all".to_vec())]);
+    let mut h = on_disk(&disk, Some("C:/Captures/broken.png"));
+    h.run_steps(1);
+    assert!(h.state().toast_text().is_some(), "opened by the owner, it's said");
+    assert_eq!(h.state().settings.last_picture, None);
+    assert!(h.state().settings.recent.is_empty());
+}
+
+#[test]
+fn with_no_last_picture_the_newest_capture_opens_and_with_none_at_all_the_welcome_card() {
+    let disk = Disk::with(&[("C:/Captures/older.png", png(200, 100, Color::WHITE)), ("C:/Captures/newer.png", png(220, 110, Color::WHITE))]);
+    // Written again since: the newest.
+    disk.put("C:/Captures/newer.png", png(220, 110, Color::WHITE));
+    let mut h = started_with_nothing(&disk, EditorSettings::default());
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/newer.png"));
+
+    // Nothing there to open: the ways to start, as before, and no notice.
+    let mut h = started_with_nothing(&Disk::default(), last("C:/Captures/gone.png"));
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path, None);
+    assert_eq!(h.state().toast_text(), None);
+    assert!(welcome_shown(&h), "the welcome card once there's nothing to open again");
+}
+
+#[test]
+fn a_file_given_at_the_start_or_a_capture_handed_over_wins_over_the_last_picture() {
+    let disk =
+        Disk::with(&[("C:/Captures/last.png", png(300, 200, Color::WHITE)), ("C:/Captures/given.png", png(260, 180, Color::rgb(200, 30, 30)))]);
+    // A file on the command line, opened as the editor is made.
+    let mut ed = Editor::new(Box::new(disk.clone()), last("C:/Captures/last.png"));
+    ed.open_path(&egui::Context::default(), "C:/Captures/given.png");
+    ed.reopen_last();
+    let mut h = harness(ed);
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/given.png"));
+    // A capture handed over between the window being asked for and its first frames.
+    let mut h = started_with_nothing(&disk, last("C:/Captures/last.png"));
+    let ctx = h.ctx.clone();
+    h.state_mut().open_path(&ctx, "C:/Captures/given.png");
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/given.png"), "the capture stays");
+    // A capture with no file (handed over as a picture), the same.
+    let mut h = started_with_nothing(&disk, last("C:/Captures/last.png"));
+    h.state_mut().open_picture(Raster::filled(90, 60, Color::BLACK).unwrap(), Some("Capture".into()));
+    h.run_steps(3);
+    assert_eq!((h.state().picture_path.as_deref(), h.state().session.doc.width()), (None, 90));
+}
+
+#[test]
+fn an_editor_kept_ready_opens_the_last_picture_only_when_brought_to_the_owner() {
+    let disk = Disk::with(&[("C:/Captures/last.png", png(300, 200, Color::WHITE)), ("C:/Captures/capture.png", png(120, 80, Color::BLACK))]);
+    // Started out of sight: nothing asked, nothing opened, whatever frames are drawn.
+    let mut ed = Editor::new(Box::new(disk.clone()), last("C:/Captures/last.png"));
+    ed.offer_welcome();
+    let mut h = harness(ed);
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path, None);
+    // A capture comes to it: the capture, never the old file.
+    let ctx = h.ctx.clone();
+    h.state_mut().open_path(&ctx, "C:/Captures/capture.png");
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/capture.png"));
+    // Its window closed, it's kept ready again with an empty picture; then the owner opens the
+    // editor with nothing: what it last had open, the capture.
+    h.state_mut().start_over();
+    h.run_steps(2);
+    assert_eq!(h.state().picture_path, None);
+    h.state_mut().reopen_last();
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/capture.png"));
+    // Asked again while it has a picture open (the window already on the screen): it keeps it.
+    draw_arrow(&mut h);
+    h.state_mut().reopen_last();
+    h.run_steps(3);
+    assert_eq!(h.state().picture_path.as_deref(), Some("C:/Captures/capture.png"));
+    assert_eq!(h.state().session.doc.objects.len(), 1, "what was drawn stays");
+}

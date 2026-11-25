@@ -1376,6 +1376,13 @@ pub struct EditorSettings {
     /// The words added to the dictionary (Add to Dictionary), as they were typed.
     #[serde(deserialize_with = "readable", skip_serializing_if = "Vec::is_empty")]
     pub own_words: Vec<String>,
+    /// The picture or project the Image Editor last had open: opened again when it starts with
+    /// nothing to open. Each editor has its own, so that neither writes over the other's.
+    #[serde(deserialize_with = "or_none", skip_serializing_if = "Option::is_none")]
+    pub last_picture: Option<String>,
+    /// The recording the Video Editor last had open, as [`EditorSettings::last_picture`].
+    #[serde(deserialize_with = "or_none", skip_serializing_if = "Option::is_none")]
+    pub last_video: Option<String>,
 }
 
 /// The Fill tool's settings.
@@ -1502,6 +1509,8 @@ where
 
 impl EditorSettings {
     pub const MAX_RECENT: usize = 20;
+    /// The longest path kept as the last file open (Windows' longest, in bytes to spare).
+    pub const MAX_PATH: usize = 32_767;
 
     pub fn from_json(text: &str) -> EditorSettings {
         serde_json::from_str::<EditorSettings>(text).unwrap_or_default().clamped()
@@ -1556,6 +1565,10 @@ impl EditorSettings {
             }
         }
         self.own_words = words;
+        // A path no system has (empty, too long, with a nul in it) isn't one to open again.
+        let path = |p: Option<String>| p.filter(|p| !p.trim().is_empty() && p.len() <= EditorSettings::MAX_PATH && !p.contains('\0'));
+        self.last_picture = path(self.last_picture.take());
+        self.last_video = path(self.last_video.take());
         self
     }
 
@@ -2183,6 +2196,24 @@ mod tests {
         e.remember("f25.png");
         assert_eq!(e.recent.len(), EditorSettings::MAX_RECENT);
         assert_eq!(e.recent.first().map(String::as_str), Some("f25.png"));
+    }
+
+    #[test]
+    fn each_editors_last_file_is_kept_and_a_bad_one_is_let_go() {
+        let e =
+            EditorSettings { last_picture: Some("C:/Captures/a.png".into()), last_video: Some("C:/Captures/b.sgvideo".into()), ..Default::default() };
+        let back = EditorSettings::from_json(&serde_json::to_string(&e).unwrap());
+        assert_eq!(back.last_picture.as_deref(), Some("C:/Captures/a.png"));
+        assert_eq!(back.last_video.as_deref(), Some("C:/Captures/b.sgvideo"));
+        // None isn't written at all.
+        assert!(!serde_json::to_string(&EditorSettings::default()).unwrap().contains("last"));
+        // Junk: let go, the rest of the settings kept.
+        let long = "x".repeat(EditorSettings::MAX_PATH + 1);
+        for junk in ["5", "[1,2]", "{\"a\":1}", "\"\"", "\"  \"", "\"a\\u0000b\"", &format!("\"{long}\"")] {
+            let e = EditorSettings::from_json(&format!("{{\"lastPicture\": {junk}, \"lastVideo\": {junk}, \"showTray\": true}}"));
+            assert_eq!((e.last_picture, e.last_video), (None, None), "{}", junk.get(..20).unwrap_or(junk));
+            assert!(e.show_tray, "the rest is kept");
+        }
     }
 
     #[test]
