@@ -556,6 +556,12 @@ msiexec /i screengrabcraft-<version>-windows-x64.msi ALLUSERS=2 MSIINSTALLPERUSE
 
 (add `/passive` or `/qn` to install without the dialogs).
 
+The Start menu has **ScreenGrabCraft** (the capture service), **ScreenGrabCraft Recorder** (opens
+the Recorder for a new recording, as the tray's Video Production does), **ScreenGrabCraft Image
+Editor** and **ScreenGrabCraft Video Editor**: type "record" to start a recording, or "edit" to
+pick either editor. On Linux the same words find ScreenGrabCraft and its editor, with **Record**
+and **Video Editor** among their actions (right-click, or listed in KDE's search).
+
 ## Building
 
 ```

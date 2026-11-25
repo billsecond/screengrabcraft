@@ -10,7 +10,7 @@ Terminal=false
 StartupNotify=true
 StartupWMClass=io.github.billsecond.screengrabcraft.editor
 Categories=Graphics;2DGraphics;RasterGraphics;
-Keywords=screenshot;annotate;markup;arrow;callout;highlight;blur;image;editor;
+Keywords=screenshot;annotate;markup;arrow;callout;highlight;blur;image;picture;edit;editor;
 MimeType=image/png;image/jpeg;image/gif;image/bmp;image/webp;application/x-screengrabcraft-project;
 Actions=video;
 
