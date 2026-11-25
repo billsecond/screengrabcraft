@@ -1,3 +1,9 @@
+## What's new in 0.1.64
+
+### Starting
+
+- **Type "record" or "edit" in the Start menu:** "record" brings up **ScreenGrabCraft Recorder**, which opens the Recorder for a new recording (the same as the tray's Video Production), starting ScreenGrabCraft first if it isn't running. "edit" brings up both **ScreenGrabCraft Image Editor** and **ScreenGrabCraft Video Editor**, so you pick the one you want. It works for "Just for me" and "Everyone on this PC" installs. On Linux, the same words find ScreenGrabCraft and its editor, with **Record** and **Video Editor** in their right-click menus.
+
 ## What's new in 0.1.63
 
 ### Editing
